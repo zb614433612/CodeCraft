@@ -80,14 +80,37 @@ public class GitCommandExecutor {
 
         try {
             Process process = pb.start();
+
+            // 【修复管道死锁】在 waitFor 之前启动异步线程读取 stdout，
+            // 防止输出量过大时管道缓冲区写满导致子进程阻塞（经典 Java 子进程死锁）
+            StringBuilder outputBuilder = new StringBuilder();
+            Thread readerThread = new Thread(() -> {
+                try {
+                    String line;
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                        while ((line = br.readLine()) != null) {
+                            if (outputBuilder.length() > 0) outputBuilder.append("\n");
+                            outputBuilder.append(line);
+                        }
+                    }
+                } catch (IOException e) {
+                    log.warn("读取 git 输出流时异常", e);
+                }
+            });
+            readerThread.setDaemon(true);
+            readerThread.start();
+
             boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            // 等待读取线程消费完剩余数据
+            readerThread.join(5000);
 
             if (!finished) {
                 process.destroyForcibly();
                 return new GitResult(false, "git 命令超时（" + TIMEOUT_SECONDS + " 秒）: git " + String.join(" ", args));
             }
 
-            String output = readOutput(process.getInputStream());
+            String output = outputBuilder.toString();
             int exitCode = process.exitValue();
 
             if (exitCode != 0) {
@@ -126,18 +149,6 @@ public class GitCommandExecutor {
             log.error("创建 GIT_ASKPASS 脚本失败", e);
             return null;
         }
-    }
-
-    private String readOutput(InputStream inputStream) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (sb.length() > 0) sb.append("\n");
-                sb.append(line);
-            }
-        }
-        return sb.toString();
     }
 
     /**
