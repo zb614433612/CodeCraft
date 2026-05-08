@@ -41,7 +41,4 @@ public class ChatRequest {
 
     @Schema(description = "思考模式（可选）：non-thinking / thinking / thinking_max，为空则使用服务端默认配置", example = "non-thinking")
     private String thinkingMode;
-
-    @Schema(description = "Git 提交模式：auto（AI直接提交）/ manual（用户确认后提交），为空则默认 auto", example = "manual")
-    private String gitCommitMode;
 }

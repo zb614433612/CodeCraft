@@ -10,11 +10,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.UUID;
-
 /**
  * Git Commit 工具
- * 创建提交。commit_mode=auto 时直接提交，manual 时返回 __PENDING_COMMIT__ 标记等待用户确认
+ * 创建提交。自动模式下直接提交，手动模式下需要 ask_execution 授权
  */
 @Slf4j
 @Component
@@ -38,8 +36,7 @@ public class GitCommitTool implements Tool {
     @Override
     public String getDescription() {
         return "创建 Git 提交。需要提供提交信息（message）。"
-                + "commit_mode=auto 时直接提交（手动模式下需要 ask_execution 授权），"
-                + "commit_mode=manual 时返回待提交信息由用户在前端确认后执行";
+                + "手动模式下需要 ask_execution 授权";
     }
 
     @Override
@@ -56,7 +53,7 @@ public class GitCommitTool implements Tool {
 
         ObjectNode files = objectMapper.createObjectNode();
         files.put("type", "string");
-        files.put("description", "可选，要提交的文件列表描述，仅用于 manual 模式下展示给用户确认，不影响实际提交内容");
+        files.put("description", "可选，要提交的文件列表描述，不影响实际提交内容");
         properties.set("files", files);
 
         parameters.set("properties", properties);
@@ -72,42 +69,8 @@ public class GitCommitTool implements Tool {
         }
 
         String projectRoot = ProjectRootContext.get();
-        String commitMode = ToolContext.getGitCommitMode();
 
-        // none 模式：直接返回无需提交
-        if ("none".equals(commitMode)) {
-            return "当前 Git 提交模式为「无」，已禁用提交功能，无需执行提交操作";
-        }
-
-        // manual 提交模式：返回待确认标记
-        if ("manual".equals(commitMode)) {
-            String filesInfo = arguments.path("files").asText("");
-
-            // 获取当前暂存的文件列表
-            String stagedFiles = getStagedFiles(projectRoot);
-            String user = getUserName(projectRoot);
-            String email = getUserEmail(projectRoot);
-
-            String uuid = UUID.randomUUID().toString();
-            ObjectNode commitInfo = objectMapper.createObjectNode();
-            commitInfo.put("message", message);
-            commitInfo.put("files", filesInfo);
-            commitInfo.put("staged_files", stagedFiles);
-            commitInfo.put("user_name", user);
-            commitInfo.put("user_email", email);
-
-            String jsonStr;
-            try {
-                jsonStr = objectMapper.writeValueAsString(commitInfo);
-            } catch (Exception e) {
-                jsonStr = "{\"message\":\"" + message + "\"}";
-            }
-
-            log.info("pending_commit: uuid={}, message={}", uuid, message);
-            return "__PENDING_COMMIT__:" + uuid + ":" + jsonStr;
-        }
-
-        // auto 提交模式：检查权限后直接提交
+        // 手动模式检查权限
         if ("manual".equals(ToolContext.getMode())) {
             Long sessionId = ToolContext.getConversationId();
             if (sessionId == null || !executionTokenManager.tryConsume(sessionId)) {
@@ -137,22 +100,4 @@ public class GitCommitTool implements Tool {
         return "提交成功\n" + result.output();
     }
 
-    private String getStagedFiles(String projectRoot) {
-        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot,
-                "diff", "--cached", "--name-only");
-        if (!result.success() || result.output().isBlank()) {
-            return "（暂存区无文件）";
-        }
-        return result.output();
-    }
-
-    private String getUserName(String projectRoot) {
-        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, "config", "user.name");
-        return result.success() ? result.output().trim() : "";
-    }
-
-    private String getUserEmail(String projectRoot) {
-        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, "config", "user.email");
-        return result.success() ? result.output().trim() : "";
-    }
 }

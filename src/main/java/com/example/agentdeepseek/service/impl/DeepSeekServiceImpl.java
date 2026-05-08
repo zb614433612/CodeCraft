@@ -580,28 +580,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             apiRequest.put("_executionMode", executionMode);
         }
 
-        // 保存 Git 提交模式到 API 请求中
-        String gitCommitMode = request.getGitCommitMode();
-        if (gitCommitMode != null && !gitCommitMode.isEmpty()) {
-            apiRequest.put("_gitCommitMode", gitCommitMode);
-            // 注入 Git 提交模式指令到系统提示词
-            String gitInstruction;
-            if ("manual".equals(gitCommitMode)) {
-                gitInstruction = "\n\nGit 提交模式：手动。调用 git_commit 工具时不会直接提交，而是将待提交信息发送到前端由用户确认后执行";
-            } else if ("none".equals(gitCommitMode)) {
-                gitInstruction = "\n\nGit 提交模式：无。当前模式已禁用 Git 提交功能，请勿调用 git_commit 工具";
-            } else {
-                gitInstruction = "\n\nGit 提交模式：自动。调用 git_commit 工具时直接执行提交操作";
-            }
-            for (Map<String, Object> msg : historyMessages) {
-                if ("system".equals(msg.get("role"))) {
-                    String existing = (String) msg.get("content");
-                    msg.put("content", existing + gitInstruction);
-                    break;
-                }
-            }
-        }
-
         // 添加工具定义（如果存在），根据提示词中的工具组过滤
         JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(filteredToolNames);
         if (toolDefinitions != null && toolDefinitions.size() > 0) {
@@ -1039,14 +1017,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     // 执行工具调用（先设置项目根目录和工具执行上下文）
                                     String currentProjectRoot = (String) apiRequest.get("_projectRoot");
                                     String currentExecutionMode = (String) apiRequest.get("_executionMode");
-                                    String currentGitCommitMode = (String) apiRequest.get("_gitCommitMode");
                                     if (currentProjectRoot != null && !currentProjectRoot.isEmpty()) {
                                         ProjectRootContext.set(currentProjectRoot);
                                     }
                                     ToolContext.set(currentExecutionMode, conversationId);
-                                    if (currentGitCommitMode != null && !currentGitCommitMode.isEmpty()) {
-                                        ToolContext.setGitCommitMode(currentGitCommitMode);
-                                    }
                                     List<ToolExecutor.ToolCallResult> toolResults;
                                     try {
                                         toolResults = toolExecutor.executeToolCalls(completeToolCalls);
@@ -1063,16 +1037,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         return handleAskUserFlow(askUserResult, toolResults, completeToolCalls,
                                                 messages, toolCallStartEvent, contentCollector.toString(), reasoning,
                                                 conversationId, storageConversationId, apiRequest, iteration, maxIterations);
-                                    }
-
-                                    // 检查是否有 pending_commit
-                                    ToolExecutor.ToolCallResult pendingCommitResult = findPendingCommitResult(toolResults);
-                                    boolean hasPendingCommit = false;
-                                    String pendingCommitEvent = null;
-                                    if (pendingCommitResult != null) {
-                                        hasPendingCommit = true;
-                                        pendingCommitEvent = createPendingCommitEvent(pendingCommitResult.getContent());
-                                        log.debug("检测到 pending_commit 事件");
                                     }
 
                                     // 将工具调用消息添加到消息列表，包含之前收集的文本内容
@@ -1111,11 +1075,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     Flux<String> toolCallEvents = Flux.just(toolCallStartEvent);
                                     for (String toolResultEvent : toolResultEvents) {
                                         toolCallEvents = toolCallEvents.concatWith(Flux.just(toolResultEvent));
-                                    }
-
-                                    // 如果有 pending_commit 事件，追加到流中
-                                    if (hasPendingCommit && pendingCommitEvent != null) {
-                                        toolCallEvents = toolCallEvents.concatWith(Flux.just(pendingCommitEvent));
                                     }
 
                                     // 继续下一轮迭代（使用非流式）
@@ -1208,43 +1167,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
         return null;
-    }
-
-    /**
-     * 查找 pending_commit 结果
-     */
-    private ToolExecutor.ToolCallResult findPendingCommitResult(List<ToolExecutor.ToolCallResult> toolResults) {
-        for (ToolExecutor.ToolCallResult result : toolResults) {
-            if (result.getContent() != null && result.getContent().startsWith("__PENDING_COMMIT__:")) {
-                return result;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 创建 pending_commit SSE 事件
-     */
-    private String createPendingCommitEvent(String content) {
-        try {
-            // 格式：__PENDING_COMMIT__:uuid:json
-            int uuidStart = "__PENDING_COMMIT__:".length();
-            String uuid = content.substring(uuidStart, uuidStart + 36);
-            String jsonStr = content.substring(uuidStart + 37);
-
-            ObjectNode event = objectMapper.createObjectNode();
-            event.put("event", "pending_commit");
-            event.put("uuid", uuid);
-
-            // 解析 JSON 内容
-            JsonNode data = objectMapper.readTree(jsonStr);
-            event.set("data", data);
-
-            return objectMapper.writeValueAsString(event);
-        } catch (Exception e) {
-            log.error("创建 pending_commit 事件失败", e);
-            return "{\"event\":\"pending_commit\",\"uuid\":\"error\",\"data\":{}}";
-        }
     }
 
     /**

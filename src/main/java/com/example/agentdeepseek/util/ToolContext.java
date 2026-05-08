@@ -10,7 +10,6 @@ public class ToolContext {
 
     private static final ThreadLocal<String> currentExecutionMode = new ThreadLocal<>();
     private static final ThreadLocal<Long> currentConversationId = new ThreadLocal<>();
-    private static final ThreadLocal<String> currentGitCommitMode = new ThreadLocal<>();
 
     public static void set(String mode, Long conversationId) {
         currentExecutionMode.set(mode);
@@ -29,21 +28,8 @@ public class ToolContext {
         return currentConversationId.get();
     }
 
-    public static void setGitCommitMode(String mode) {
-        currentGitCommitMode.set(mode);
-    }
-
-    /**
-     * @return "manual" 或 "auto"，未设置时返回 "auto"
-     */
-    public static String getGitCommitMode() {
-        String mode = currentGitCommitMode.get();
-        return mode != null ? mode : "auto";
-    }
-
     public static void clear() {
         currentExecutionMode.remove();
         currentConversationId.remove();
-        currentGitCommitMode.remove();
     }
 }

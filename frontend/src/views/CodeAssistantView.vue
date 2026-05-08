@@ -164,29 +164,6 @@
         </div>
       </div>
 
-      <!-- pending_commit 确认面板 -->
-      <div v-if="pendingCommit" class="pending-commit-panel">
-        <div class="pending-commit-header">待提交的变更</div>
-        <div class="pending-commit-info">
-          <div class="pending-commit-field">
-            <span class="pcf-label">提交信息</span>
-            <div class="pcf-value">{{ pendingCommit.message }}</div>
-          </div>
-          <div class="pending-commit-field" v-if="pendingCommit.files">
-            <span class="pcf-label">文件</span>
-            <div class="pcf-value">{{ pendingCommit.files }}</div>
-          </div>
-          <div class="pending-commit-field" v-if="pendingCommit.stagedFiles && pendingCommit.stagedFiles !== '（暂存区无文件）'">
-            <span class="pcf-label">已暂存</span>
-            <div class="pcf-value">{{ pendingCommit.stagedFiles }}</div>
-          </div>
-        </div>
-        <div class="pending-commit-actions">
-          <a-button @click="cancelPendingCommit">取消</a-button>
-          <a-button type="primary" @click="confirmPendingCommit">确认提交</a-button>
-        </div>
-      </div>
-
       <!-- 输入区域 -->
       <footer class="chat-input-area">
         <div class="input-wrapper">
@@ -255,21 +232,6 @@
                 <a-select-option value="non-thinking">non-thinking</a-select-option>
                 <a-select-option value="thinking">thinking</a-select-option>
                 <a-select-option value="thinking_max">thinking_max</a-select-option>
-              </a-select>
-            </div>
-            <div class="mode-selector">
-              <SettingOutlined class="mode-icon" />
-              <span class="mode-label">提交</span>
-              <a-select
-                :value="settingsStore.getGitCommitMode('code_assistant')"
-                @change="handleGitCommitModeChange"
-                size="small"
-                class="mode-select"
-                dropdown-class-name="mode-dropdown"
-              >
-                <a-select-option value="manual">手动 - 确认后提交</a-select-option>
-                <a-select-option value="auto">自动 - 直接提交</a-select-option>
-                <a-select-option value="none">无 - 不提交代码</a-select-option>
               </a-select>
             </div>
           </div>
@@ -348,7 +310,6 @@ const stopAbortController = ref<AbortController | null>(null)
 const fileTreeLoadPath = ref('')
 const pendingQuestion = ref<{ uuid: string; question: string } | null>(null)
 const pendingQuestionAnswer = ref('')
-const pendingCommit = ref<{ uuid: string; message: string; files: string; stagedFiles: string; userName: string; userEmail: string } | null>(null)
 const streamStatus = ref('')
 
 const toggleCollapsed = () => { collapsed.value = !collapsed.value }
@@ -466,11 +427,6 @@ const handleThinkingModeChange = (val: string) => {
   settingsStore.setThinkingMode('code_assistant', val as 'non-thinking' | 'thinking' | 'thinking_max')
 }
 
-// Git 提交模式切换
-const handleGitCommitModeChange = (val: string) => {
-  settingsStore.setGitCommitMode('code_assistant', val as 'auto' | 'manual' | 'none')
-}
-
 // 停止流式响应
 const stopStreaming = () => {
   if (stopAbortController.value) {
@@ -484,29 +440,6 @@ const applyProjectRoot = () => {
   if (settingsStore.projectRoot) {
     fileTreeLoadPath.value = settingsStore.projectRoot
   }
-}
-
-// pending_commit 确认/取消
-const confirmPendingCommit = async () => {
-  if (!pendingCommit.value) return
-  const pc = pendingCommit.value
-  try {
-    const { gitCommit } = await import('@/api/git')
-    const result = await gitCommit(settingsStore.projectRoot || '', pc.message)
-    if (result.success) {
-      message.success('提交成功')
-      pendingCommit.value = null
-    } else {
-      message.error('提交失败: ' + (result.error || ''))
-    }
-  } catch (e: any) {
-    message.error('提交失败: ' + (e.message || ''))
-  }
-}
-
-const cancelPendingCommit = () => {
-  pendingCommit.value = null
-  message.info('已取消提交')
 }
 
 // ask_user 回答函数
@@ -586,8 +519,7 @@ const sendMessage = async () => {
       executionMode: settingsStore.getMode('code_assistant'),
       projectRoot: settingsStore.projectRoot || undefined,
       model: settingsStore.getModel('code_assistant'),
-      thinkingMode: settingsStore.getThinkingMode('code_assistant'),
-      gitCommitMode: settingsStore.getGitCommitMode('code_assistant')
+      thinkingMode: settingsStore.getThinkingMode('code_assistant')
     }, abortCtrl)) {
       if (event.type === 'thinking') {
         streamStatus.value = '思考分析中...'
@@ -640,20 +572,6 @@ const sendMessage = async () => {
           pendingQuestionAnswer.value = ''
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
-        }
-      } else if (event.type === 'pending_commit') {
-        try {
-          const commitData = JSON.parse(event.data)
-          pendingCommit.value = {
-            uuid: commitData.uuid,
-            message: commitData.data?.message || '',
-            files: commitData.data?.files || '',
-            stagedFiles: commitData.data?.staged_files || '',
-            userName: commitData.data?.user_name || '',
-            userEmail: commitData.data?.user_email || ''
-          }
-        } catch (e) {
-          console.warn('解析 pending_commit 事件失败:', e)
         }
       }
     }
@@ -1274,50 +1192,6 @@ onMounted(() => {
   flex: 1;
   overflow-y: auto;
   background: #fafbfc;
-}
-
-/* pending_commit 面板 */
-.pending-commit-panel {
-  margin: 0 24px 8px;
-  background: #fff;
-  border: 1px solid #91caff;
-  border-radius: 8px;
-  padding: 16px;
-  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.08);
-}
-.pending-commit-header {
-  font-weight: 600;
-  font-size: 14px;
-  color: #1677ff;
-  margin-bottom: 10px;
-}
-.pending-commit-info {
-  margin-bottom: 12px;
-}
-.pending-commit-field {
-  margin-bottom: 8px;
-}
-.pcf-label {
-  font-size: 11px;
-  color: #8c8c8c;
-  margin-bottom: 2px;
-  display: block;
-}
-.pcf-value {
-  font-size: 13px;
-  color: #333;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: #f8fafc;
-  padding: 6px 8px;
-  border-radius: 4px;
-  border: 1px solid #eef2f7;
-}
-.pending-commit-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
 }
 
 /* ===== 流式加载指示器（消息框左下角） ===== */

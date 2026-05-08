@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class GitCommandExecutor {
 
-    private static final int TIMEOUT_SECONDS = 30;
+    private static final int TIMEOUT_SECONDS = 60;
 
     private final GitAuthStore gitAuthStore;
 
@@ -68,6 +68,9 @@ public class GitCommandExecutor {
         ProcessBuilder pb = new ProcessBuilder(cmdArray);
         pb.directory(workDir.toFile());
         pb.redirectErrorStream(true);
+        // 禁止 git 分页器，防止进程挂起
+        pb.environment().put("GIT_PAGER", "cat");
+        pb.environment().put("PAGER", "cat");
 
         // 如果有 Token，通过 GIT_ASKPASS 注入
         if (token != null && !token.isEmpty()) {

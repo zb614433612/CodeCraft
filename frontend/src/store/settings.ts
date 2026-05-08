@@ -31,15 +31,6 @@ export interface ThinkingModes {
   code_assistant: ThinkingMode
 }
 
-// Git 提交方式
-export type GitCommitMode = 'auto' | 'manual' | 'none'
-
-export interface GitCommitModes {
-  ai_assistant: GitCommitMode
-  chat_assistant: GitCommitMode
-  code_assistant: GitCommitMode
-}
-
 export const useSettingsStore = defineStore('settings', () => {
   // 各助手的执行模式，默认 manual
   const executionModes = ref<ExecutionModes>({
@@ -60,13 +51,6 @@ export const useSettingsStore = defineStore('settings', () => {
     ai_assistant: 'non-thinking',
     chat_assistant: 'non-thinking',
     code_assistant: 'non-thinking'
-  })
-
-  // 各助手的 Git 提交方式，代码助手默认 none（无需提交），其余默认 auto
-  const gitCommitModes = ref<GitCommitModes>({
-    ai_assistant: 'auto',
-    chat_assistant: 'auto',
-    code_assistant: 'none'
   })
 
   // 项目工作目录（持久化，刷新不丢失）
@@ -123,25 +107,10 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  // 获取指定助手的 Git 提交方式
-  function getGitCommitMode(agentType: string): GitCommitMode {
-    const key = agentType as keyof GitCommitModes
-    return gitCommitModes.value[key] || 'auto'
-  }
-
-  // 设置指定助手的 Git 提交方式
-  function setGitCommitMode(agentType: string, mode: GitCommitMode) {
-    const key = agentType as keyof GitCommitModes
-    if (key in gitCommitModes.value) {
-      gitCommitModes.value[key] = mode
-    }
-  }
-
   return {
     executionModes,
     models,
     thinkingModes,
-    gitCommitModes,
     projectRoot,
     getMode,
     setMode,
@@ -149,9 +118,7 @@ export const useSettingsStore = defineStore('settings', () => {
     getModel,
     setModel,
     getThinkingMode,
-    setThinkingMode,
-    getGitCommitMode,
-    setGitCommitMode
+    setThinkingMode
   }
 }, {
   persist: true

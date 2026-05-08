@@ -9,7 +9,6 @@ export interface ChatRequest {
   projectRoot?: string
   model?: string
   thinkingMode?: string
-  gitCommitMode?: string
 }
 
 // 流式聊天的额外选项
@@ -20,7 +19,6 @@ export interface StreamChatOptions {
   projectRoot?: string
   model?: string
   thinkingMode?: string
-  gitCommitMode?: string
 }
 
 // 聊天响应数据（非流式，用于创建会话等）
@@ -32,7 +30,7 @@ export interface ChatResponse {
 
 // 流式聊天响应的事件类型
 export interface StreamChatEvent {
-  type: 'thinking' | 'content' | 'complete' | 'error' | 'ask_user' | 'resume' | 'pending_commit'
+  type: 'thinking' | 'content' | 'complete' | 'error' | 'ask_user' | 'resume'
   data: string
   sessionId?: number
 }
@@ -357,9 +355,6 @@ export async function* streamChat(
   }
   if (options?.thinkingMode) {
     requestBody.thinkingMode = options.thinkingMode
-  }
-  if (options?.gitCommitMode) {
-    requestBody.gitCommitMode = options.gitCommitMode
   }
 
   try {
