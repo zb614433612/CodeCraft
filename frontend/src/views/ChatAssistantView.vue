@@ -692,11 +692,6 @@ const sendMessage = async () => {
 
           let processedData = event.data
 
-          if (processedData.includes('正在调用工具...')) {
-            processedData = processedData.replace(/正在调用工具\.\.\./g, '')
-            toolDataNext = true
-          }
-
           if (toolDataNext) {
             toolDataNext = false
           }

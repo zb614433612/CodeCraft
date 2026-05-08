@@ -889,10 +889,34 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     /**
      * 创建工具调用开始的SSE事件
+     * @param toolNames 工具名称列表
      * @return SSE格式字符串
      */
-    private String createToolCallStartEvent() {
-        return createReasoningSSEEvent("正在调用工具...");
+    private String createToolCallStartEvent(List<String> toolNames) {
+        String msg;
+        if (toolNames.isEmpty()) {
+            msg = "正在调用工具...";
+        } else {
+            msg = "调用 " + String.join(", ", toolNames);
+        }
+        return createReasoningSSEEvent(msg);
+    }
+
+    /**
+     * 从 tool_calls JSON 数组中提取工具名称
+     */
+    private List<String> extractToolNames(JsonNode toolCalls) {
+        List<String> names = new java.util.ArrayList<>();
+        if (toolCalls != null && toolCalls.isArray()) {
+            for (JsonNode call : toolCalls) {
+                JsonNode func = call.path("function");
+                String name = func.path("name").asText("");
+                if (!name.isEmpty()) {
+                    names.add(name);
+                }
+            }
+        }
+        return names;
     }
 
     /**
@@ -1008,8 +1032,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     }
 
                                     // 发送工具调用开始事件
-                                    String toolCallStartEvent = createToolCallStartEvent();
-                                    log.debug("发送工具调用开始事件");
+                                    List<String> invokingToolNames = extractToolNames(completeToolCalls);
+                                    String toolCallStartEvent = createToolCallStartEvent(invokingToolNames);
+                                    log.debug("发送工具调用开始事件: {}", invokingToolNames);
 
                                     // 执行工具调用（先设置项目根目录和工具执行上下文）
                                     String currentProjectRoot = (String) apiRequest.get("_projectRoot");
