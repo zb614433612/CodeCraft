@@ -7,8 +7,10 @@ import com.example.agentdeepseek.model.dto.ChatRequest;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
+import com.example.agentdeepseek.model.entity.Skill;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
+import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.ToolExecutor;
 import com.example.agentdeepseek.util.ProjectRootContext;
@@ -57,6 +59,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final ToolExecutor toolExecutor;
     private final PendingQuestionStore pendingQuestionStore;
     private final ExecutionTokenManager executionTokenManager;
+    private final SkillService skillService;
 
     // 常量定义
     private static final String DATA_PREFIX = "data: ";
@@ -72,7 +75,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                JdbcTemplate jdbcTemplate,
                                ToolExecutor toolExecutor,
                                PendingQuestionStore pendingQuestionStore,
-                               ExecutionTokenManager executionTokenManager) {
+                               ExecutionTokenManager executionTokenManager,
+                               SkillService skillService) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -81,6 +85,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.toolExecutor = toolExecutor;
         this.pendingQuestionStore = pendingQuestionStore;
         this.executionTokenManager = executionTokenManager;
+        this.skillService = skillService;
     }
 
     @Override
@@ -464,7 +469,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     /**
      * 会话上下文，包含会话ID和API请求
      */
-    private record ConversationContext(Long conversationId, Map<String, Object> apiRequest, List<String> toolNames, Long storageConversationId) {}
+    private record ConversationContext(Long conversationId, Map<String, Object> apiRequest, List<String> toolNames, Long storageConversationId, String agentType, Long userId) {}
 
     /**
      * 准备会话上下文和API请求
@@ -488,6 +493,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // 当promptFileName为romantic_chat_agent_prompt.txt且userProfileId不为空时，直接用userProfileId作为conversation_id
         Long userProfileId = request.getUserProfileId();
+        String agentType = resolveAgentType(promptFileName);
         boolean useProfileAsConversation = userProfileId != null && "romantic_chat_agent_prompt.txt".equals(promptFileName);
 
         Long conversationId;
@@ -497,7 +503,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             storageConversationId = userProfileId;
             log.debug("使用userProfileId作为会话ID: {}", conversationId);
         } else {
-            String agentType = resolveAgentType(promptFileName);
             Conversation conversation = getOrCreateConversation(sessionId, userMessage, userId, agentType);
             conversationId = conversation.getId();
             storageConversationId = conversationId;
@@ -557,6 +562,44 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             filteredToolNames.remove("ask_execution");
         }
 
+        // 注入技能：合并技能工具列表，追加技能描述到系统提示词
+        if (userId != null && agentType != null) {
+            try {
+                List<Skill> activeSkills = skillService.listActiveSkills(userId, agentType);
+                if (!activeSkills.isEmpty()) {
+                    StringBuilder skillsSection = new StringBuilder("\n\n---\n你已学会以下技能，当用户需求匹配时优先使用：\n");
+                    for (Skill skill : activeSkills) {
+                        // 合并技能工具
+                        try {
+                            List<String> skillTools = objectMapper.readValue(skill.getToolNames(), List.class);
+                            for (String toolName : skillTools) {
+                                if (!filteredToolNames.contains(toolName)) {
+                                    filteredToolNames.add(toolName);
+                                }
+                            }
+                        } catch (Exception e) {
+                            log.warn("解析技能 {} 的工具列表失败", skill.getId(), e);
+                        }
+                        // 追加技能描述
+                        skillsSection.append("\n【").append(skill.getName()).append("】")
+                                .append(skill.getDescription()).append("\n")
+                                .append("  关联工具：").append(skill.getToolNames()).append("\n")
+                                .append("  使用说明：").append(skill.getInstructions()).append("\n");
+                    }
+                    // 追加到系统提示词
+                    for (Map<String, Object> msg : historyMessages) {
+                        if ("system".equals(msg.get("role"))) {
+                            String existing = (String) msg.get("content");
+                            msg.put("content", existing + skillsSection.toString());
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("加载技能失败", e);
+            }
+        }
+
         // 构建API请求体
         Map<String, Object> apiRequest = new HashMap<>();
         String model = request.getModel();
@@ -579,6 +622,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (executionMode != null && !executionMode.isEmpty()) {
             apiRequest.put("_executionMode", executionMode);
         }
+        // 保存用户 ID 和助手类型到 API 请求中（内部使用，供技能工具获取上下文）
+        if (userId != null) {
+            apiRequest.put("_userId", userId);
+        }
+        if (agentType != null) {
+            apiRequest.put("_agentType", agentType);
+        }
 
         // 添加工具定义（如果存在），根据提示词中的工具组过滤
         JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(filteredToolNames);
@@ -596,7 +646,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         log.debug("调用DeepSeek API{}接口，会话ID: {}, 消息长度: {}, 用户ID: {}",
                 stream ? "流式" : "非流式", conversationId, userMessage.length(), userId);
 
-        return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId);
+        return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId, agentType, userId);
     }
 
     @Override
@@ -1020,7 +1070,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     if (currentProjectRoot != null && !currentProjectRoot.isEmpty()) {
                                         ProjectRootContext.set(currentProjectRoot);
                                     }
-                                    ToolContext.set(currentExecutionMode, conversationId);
+                                    ToolContext.set(currentExecutionMode, conversationId,
+                                            (String) apiRequest.get("_agentType"),
+                                            (Long) apiRequest.get("_userId"));
                                     List<ToolExecutor.ToolCallResult> toolResults;
                                     try {
                                         toolResults = toolExecutor.executeToolCalls(completeToolCalls);

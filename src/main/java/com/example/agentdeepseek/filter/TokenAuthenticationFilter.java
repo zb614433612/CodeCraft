@@ -31,7 +31,8 @@ public class TokenAuthenticationFilter implements Filter {
             "/api-docs",
             "/v3/api-docs",
             "/api/kline-daily",
-            "/api/git"
+            "/api/git",
+            "/api/skills"
     );
 
 

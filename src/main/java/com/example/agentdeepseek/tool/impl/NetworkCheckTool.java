@@ -18,6 +18,7 @@ import java.util.List;
  * 测试目标网站的可达性，辅助判断当前网络环境是否能访问国外网络
  */
 @Slf4j
+@Component
 public class NetworkCheckTool implements Tool {
 
     /** 默认检测的国外站点列表 */

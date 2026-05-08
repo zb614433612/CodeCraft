@@ -9,8 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -187,107 +188,79 @@ public class ReadFileTool implements Tool {
 
     /**
      * 检测文件编码
-     * 优先检测BOM，然后尝试 UTF-8 → GBK → ISO-8859-1
+     * 优先检测BOM，然后用 CharsetDecoder 实际解码样本来判断编码
      */
     private Charset detectCharset(Path filePath) throws IOException {
-        // 读取文件开头几个字节检测编码
+        int sampleSize = Math.min((int) Math.min(Files.size(filePath), 4096), 4096);
+        if (sampleSize <= 0) return StandardCharsets.UTF_8;
+
         try (InputStream is = Files.newInputStream(filePath);
              BufferedInputStream bis = new BufferedInputStream(is)) {
-            bis.mark(4);
-            byte[] bom = new byte[4];
-            int read = bis.read(bom, 0, 4);
 
             // BOM检测
-            if (read >= 2
-                    && (bom[0] & 0xFF) == 0xFE
-                    && (bom[1] & 0xFF) == 0xFF) {
+            byte[] bom = new byte[3];
+            bis.mark(4);
+            int bomRead = bis.read(bom);
+            if (bomRead >= 3 && (bom[0] & 0xFF) == 0xEF && (bom[1] & 0xFF) == 0xBB && (bom[2] & 0xFF) == 0xBF)
+                return StandardCharsets.UTF_8;
+            if (bomRead >= 2 && (bom[0] & 0xFF) == 0xFE && (bom[1] & 0xFF) == 0xFF)
                 return Charset.forName("UTF-16BE");
-            }
-            if (read >= 2
-                    && (bom[0] & 0xFF) == 0xFF
-                    && (bom[1] & 0xFF) == 0xFE) {
+            if (bomRead >= 2 && (bom[0] & 0xFF) == 0xFF && (bom[1] & 0xFF) == 0xFE)
                 return Charset.forName("UTF-16LE");
-            }
-            if (read >= 3
-                    && (bom[0] & 0xFF) == 0xEF
-                    && (bom[1] & 0xFF) == 0xBB
-                    && (bom[2] & 0xFF) == 0xBF) {
-                return StandardCharsets.UTF_8;
-            }
 
-            // 无BOM时，尝试检测编码：读一部分内容试解码
+            // 读取样本
             bis.reset();
-            byte[] sampleBytes = new byte[Math.min((int) Files.size(filePath), 4096)];
+            byte[] sampleBytes = new byte[sampleSize];
             int sampleLen = bis.read(sampleBytes);
+            if (sampleLen <= 0) return StandardCharsets.UTF_8;
 
-            // 尝试 UTF-8
-            if (isValidUtf8(sampleBytes, sampleLen)) {
+            // 用 CharsetDecoder 严格模式实际解码样本来判断
+            if (canDecode(sampleBytes, sampleLen, StandardCharsets.UTF_8))
                 return StandardCharsets.UTF_8;
-            }
-
-            // 尝试 GBK（GBK编码的字节特征）
-            // 这里简单通过检测是否包含特定范围的字节来推断，更准确的方法是用 CharsetDecoder
-            String sampleStr = new String(sampleBytes, 0, sampleLen, Charset.forName("GBK"));
-            String checkRoundtrip = new String(sampleStr.getBytes(Charset.forName("GBK")), 0,
-                    sampleStr.getBytes(Charset.forName("GBK")).length, Charset.forName("GBK"));
-            // 粗略检查：如果GBK解码后重新编码能匹配大部分字节，则可能是GBK
-            byte[] reEncoded = sampleStr.getBytes(Charset.forName("GBK"));
-            int matchCount = 0;
-            for (int i = 0; i < Math.min(reEncoded.length, sampleLen); i++) {
-                if (i < sampleLen && reEncoded[i] == sampleBytes[i]) {
-                    matchCount++;
-                }
-            }
-            if ((double) matchCount / Math.min(reEncoded.length, sampleLen) > 0.8) {
+            if (canDecode(sampleBytes, sampleLen, Charset.forName("GBK")))
                 return Charset.forName("GBK");
-            }
+            if (canDecode(sampleBytes, sampleLen, StandardCharsets.ISO_8859_1))
+                return StandardCharsets.ISO_8859_1;
         }
 
-        // 默认返回 UTF-8
         return StandardCharsets.UTF_8;
     }
 
     /**
-     * 简单检测字节数组是否为合法的UTF-8编码
+     * 判断字节数组能否用指定编码无错误解码
      */
-    private boolean isValidUtf8(byte[] bytes, int length) {
-        int i = 0;
-        while (i < length) {
-            int b = bytes[i] & 0xFF;
-            if (b < 0x80) {
-                i++;
-            } else if (b >= 0xC2 && b <= 0xDF) {
-                // 2字节序列：110xxxxx 10xxxxxx
-                if (i + 1 >= length) return false;
-                if ((bytes[i + 1] & 0xC0) != 0x80) return false;
-                i += 2;
-            } else if (b >= 0xE0 && b <= 0xEF) {
-                // 3字节序列：1110xxxx 10xxxxxx 10xxxxxx
-                if (i + 2 >= length) return false;
-                if ((bytes[i + 1] & 0xC0) != 0x80) return false;
-                if ((bytes[i + 2] & 0xC0) != 0x80) return false;
-                i += 3;
-            } else if (b >= 0xF0 && b <= 0xF4) {
-                // 4字节序列：11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
-                if (i + 3 >= length) return false;
-                if ((bytes[i + 1] & 0xC0) != 0x80) return false;
-                if ((bytes[i + 2] & 0xC0) != 0x80) return false;
-                if ((bytes[i + 3] & 0xC0) != 0x80) return false;
-                i += 4;
-            } else {
-                return false; // 非法字节
-            }
+    private boolean canDecode(byte[] bytes, int length, Charset charset) {
+        try {
+            CharsetDecoder decoder = charset.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT);
+            ByteBuffer bb = ByteBuffer.wrap(bytes, 0, length);
+            CharBuffer cb = CharBuffer.allocate(length);
+            CoderResult result = decoder.decode(bb, cb, true);
+            if (result.isError()) return false;
+            result = decoder.flush(cb);
+            return !result.isError();
+        } catch (Exception e) {
+            return false;
         }
-        return true;
     }
 
     /**
      * 读取文件所有行，限制单行最大长度防止OOM
+     * 遇到 MalformedInputException 时自动降级尝试 GBK
      */
     private List<String> readAllLines(Path filePath, Charset charset) throws IOException {
+        try {
+            return readAllLinesInternal(filePath, charset);
+        } catch (MalformedInputException e) {
+            log.warn("使用 {} 解码失败 ({}), 降级尝试 GBK", charset, e.getMessage());
+            return readAllLinesInternal(filePath, Charset.forName("GBK"));
+        }
+    }
+
+    private List<String> readAllLinesInternal(Path filePath, Charset charset) throws IOException {
         List<String> lines = new ArrayList<>();
         try (BufferedReader reader = Files.newBufferedReader(filePath, charset)) {
-            char[] buf = new char[MAX_LINE_LENGTH];
             StringBuilder sb = new StringBuilder();
             int ch;
             while ((ch = reader.read()) != -1) {
@@ -305,6 +278,8 @@ public class ReadFileTool implements Tool {
             if (sb.length() > 0 || lines.isEmpty()) {
                 lines.add(sb.toString());
             }
+        } catch (MalformedInputException e) {
+            throw e; // 上层 catch 处理降级
         }
         return lines;
     }

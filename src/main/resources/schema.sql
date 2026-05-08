@@ -400,6 +400,27 @@ BEGIN
 END;
 
 -- ============================================================
+-- Skill 技能系统
+-- ============================================================
+CREATE TABLE IF NOT EXISTS skill (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL COMMENT '技能名称',
+  description VARCHAR(500) NOT NULL COMMENT '技能描述',
+  tool_names TEXT NOT NULL COMMENT '工具名称列表，JSON数组格式',
+  instructions TEXT COMMENT '技能指令/提示词',
+  confidence DOUBLE DEFAULT 0.5 COMMENT '置信度 0.0-1.0',
+  usage_count INT DEFAULT 0 COMMENT '使用次数',
+  success_count INT DEFAULT 0 COMMENT '成功次数',
+  fail_count INT DEFAULT 0 COMMENT '失败次数',
+  user_id BIGINT NOT NULL COMMENT '所属用户ID',
+  agent_type VARCHAR(50) NOT NULL COMMENT '所属助手类型 code_assistant/ai_assistant/chat_assistant',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_user_agent (user_id, agent_type),
+  INDEX idx_confidence (confidence)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='技能表';
+
+-- ============================================================
 -- 自选股票模块
 -- ============================================================
 CREATE TABLE IF NOT EXISTS watchlist_group (

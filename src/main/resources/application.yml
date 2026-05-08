@@ -133,6 +133,10 @@ deepseek:
       - "web_search"
       - "web_fetch"
       - "get_weather"
+      - "create_skill"
+      - "list_skills"
+      - "delete_skill"
+      - "report_skill_result"
     "code_agent_prompt.txt":
       - "web_search"
       - "web_fetch"
@@ -166,4 +170,8 @@ deepseek:
       - "git_commit"
       - "git_branch"
       - "git_push"
+      - "create_skill"
+      - "list_skills"
+      - "delete_skill"
+      - "report_skill_result"
     "romantic_chat_agent_prompt.txt":

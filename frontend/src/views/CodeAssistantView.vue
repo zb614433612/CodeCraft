@@ -16,6 +16,10 @@
             :class="['tab-btn', { active: sidebarTab === 'git' }]"
             @click="sidebarTab = 'git'"
           ><span class="tab-full">Git</span><span class="tab-short">Git</span></button>
+          <button
+            :class="['tab-btn', { active: sidebarTab === 'skills' }]"
+            @click="sidebarTab = 'skills'"
+          ><span class="tab-full">技能</span><span class="tab-short">技能</span></button>
         </div>
         <div class="sidebar-collapse-btn" @click="toggleCollapsed">
           <MenuFoldOutlined v-if="!collapsed" />
@@ -61,6 +65,11 @@
       <!-- Git 面板 -->
       <div v-show="sidebarTab === 'git'" class="git-panel">
         <GitSidebar :project-root="settingsStore.projectRoot || ''" />
+      </div>
+
+      <!-- 技能面板 -->
+      <div v-show="sidebarTab === 'skills'" class="skill-panel">
+        <SkillList />
       </div>
 
       <!-- 文件树 -->
@@ -268,6 +277,7 @@ import {
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import GitSidebar from '@/components/GitSidebar.vue'
+import SkillList from '@/components/SkillList.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 
@@ -304,7 +314,7 @@ const isLoadingConversations = ref(false)
 const isLoadingMessages = ref(false)
 const scrollerRef = ref<any>(null)
 const collapsed = ref(false)
-const sidebarTab = ref<'conversation' | 'files' | 'git'>('conversation')
+const sidebarTab = ref<'conversation' | 'files' | 'git' | 'skills'>('conversation')
 const stopAbortController = ref<AbortController | null>(null)
 // 当用户点击「应用」时更新此值，触发文件树加载
 const fileTreeLoadPath = ref('')
