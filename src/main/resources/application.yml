@@ -1,0 +1,169 @@
+# 服务器配置
+server:
+  # 服务器端口
+  port: 8080
+
+# Spring配置
+spring:
+  # 应用名称配置
+  application:
+    # 应用名称
+    name: agent-deepseek
+  # 数据源配置
+  datasource:
+    # MySQL驱动类
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 数据库连接URL
+    url: 'jdbc:mysql://localhost:3306/agent_deepseek?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&verifyServerCertificate=false&nullCatalogMeansCurrent=true&useLegacyDatetimeCode=false'
+    # 数据库用户名
+    username: root
+    # 数据库密码
+    password: CHANGED
+    # Hikari连接池配置
+    hikari:
+      # 最大连接池大小
+      maximum-pool-size: 10
+      # 最小空闲连接数
+      minimum-idle: 5
+      # 连接超时（毫秒）
+      connection-timeout: 30000
+      # 空闲超时（毫秒）
+      idle-timeout: 600000
+      # 最大生命周期（毫秒）
+      max-lifetime: 1800000
+      # 连接测试查询
+      connection-test-query: SELECT 1
+      # 是否自动提交
+      auto-commit: true
+  # SQL初始化配置
+  sql:
+    # 初始化模式配置
+    init:
+      # 初始化模式：always表示启动时执行schema.sql建表
+      mode: always
+      # 建表出错时继续执行（表已存在时不中断）
+      continue-on-error: true
+  # MyBatis配置
+  mybatis:
+    # 类型别名包路径
+    type-aliases-package: com.example.agentdeepseek
+    # MyBatis配置项
+    configuration:
+      # 下划线转驼峰命名映射
+      map-underscore-to-camel-case: true
+  # 数据存储配置（Redis）
+  data:
+    # Redis配置
+    redis:
+      # Redis主机地址
+      host: 43.138.88.248
+      # Redis端口
+      port: 6379
+      # Redis密码
+      password: CHANGED
+      # Redis数据库索引
+      database: 0
+      # 连接超时时间
+      connect-timeout: 2000ms
+      # Lettuce连接池配置
+      lettuce:
+        # 连接池配置
+        pool:
+          # 是否启用连接池
+          enabled: true
+          # 最大连接数
+          max-size: 8
+          # 最小空闲连接数
+          min-idle: 0
+  # 定时任务线程池配置
+  task:
+    scheduling:
+      pool:
+        size: 3
+
+# SpringDoc OpenAPI配置
+springdoc:
+  # API文档路径配置
+  api-docs:
+    # API文档JSON路径
+    path: /api-docs
+  # Swagger UI配置
+  swagger-ui:
+    # Swagger UI访问路径
+    path: /swagger-ui.html
+    # 是否启用Swagger UI
+    enabled: true
+  # 缓存配置
+  cache:
+    # 是否禁用缓存
+    disabled: true
+  # 是否显示Actuator端点
+  show-actuator: false
+
+# Milvus向量数据库配置
+milvus:
+  host: localhost # Milvus服务器主机地址
+  port: 19530 # Milvus服务器端口
+  database: milvusds # Milvus数据库名称
+  token: # Milvus认证token（可选）
+  secure: false # 是否使用TLS安全连接
+  connect-timeout: 10000 # 连接超时时间（毫秒）
+  keep-alive-timeout: 30000 # 连接保活时间（毫秒）
+
+# 网页读取工具配置
+web-fetch:
+  # HTTP代理配置（用于访问国内无法直连的网站，如 huggingface.co）
+  proxy:
+    enabled: false # 是否启用代理
+    host: 127.0.0.1 # 代理主机地址
+    port: 7890 # 代理端口（Clash 默认 7890）
+
+# DeepSeek API配置
+deepseek:
+  # DeepSeek API基础URL
+  base-url: https://api.deepseek.com
+  api-key: CHANGED # 从环境变量DEEPSEEK_API_KEY读取，默认为空
+  # 默认模型
+  default-model: deepseek-v4-pro
+  # 思考模式：non-thinking / thinking / thinking_max
+  thinking-mode: thinking
+  # 提示词文件与工具组映射
+  tool-groups:
+    "system_prompt.txt":
+      - "web_search"
+      - "web_fetch"
+      - "get_weather"
+    "code_agent_prompt.txt":
+      - "web_search"
+      - "web_fetch"
+      - "read_file"
+      - "write_file"
+      - "edit_file"
+      - "glob_files"
+      - "grep_search"
+      - "read_project_tree"
+      - "read_maven_module"
+      - "read_dependencies"
+      - "run_command"
+      - "run_background_command"
+      - "bug_analysis_agent"
+      - "refactor_agent"
+      - "code_review_agent"
+      - "ask_clarification"
+      - "ask_execution"
+      - "task_manager"
+      - "check_network"
+      - "execute_sql"
+      - "delete_file"
+      - "http_request"
+      - "read_process_output"
+      - "kill_process"
+      - "list_processes"
+      - "git_status"
+      - "git_diff"
+      - "git_log"
+      - "git_add"
+      - "git_commit"
+      - "git_branch"
+      - "git_push"
+    "romantic_chat_agent_prompt.txt":

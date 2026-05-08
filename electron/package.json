@@ -1,0 +1,51 @@
+{
+  "name": "zb-agent-desktop",
+  "version": "1.0.0",
+  "description": "zb-agent 桌面应用（Electron）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env DEV_MODE=true electron .",
+    "pack": "npm install electron-builder && electron-builder --dir",
+    "dist": "npm install electron-builder && electron-builder"
+  },
+  "build": {
+    "appId": "com.zb.agent",
+    "productName": "zb-agent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../target/agent-deepseek-0.0.1-SNAPSHOT.jar",
+        "to": "backend/agent-deepseek.jar"
+      },
+      {
+        "from": "jre",
+        "to": "jre",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "cross-env": "^7.0.3"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

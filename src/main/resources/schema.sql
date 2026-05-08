@@ -1,0 +1,426 @@
+-- 创建会话表
+CREATE TABLE IF NOT EXISTS conversation (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL COMMENT '会话名称',
+  user_id BIGINT COMMENT '用户ID，关联sys_user.id',
+  agent_type VARCHAR(50) DEFAULT 'ai_assistant' COMMENT '会话类型：ai_assistant/chat_assistant/code_assistant',
+  created_at DATETIME NOT NULL COMMENT '创建时间',
+  updated_at DATETIME NOT NULL COMMENT '更新时间',
+  INDEX idx_user_id (user_id),
+  INDEX idx_agent_type (agent_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话表';
+
+-- 创建会话消息表
+CREATE TABLE IF NOT EXISTS conversation_message (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id BIGINT NOT NULL COMMENT '会话ID',
+  role VARCHAR(20) NOT NULL COMMENT '消息角色: system, user, assistant, tool',
+  content LONGTEXT COMMENT '消息内容',
+  reasoning LONGTEXT COMMENT '思考过程（仅assistant角色）',
+  tool_calls LONGTEXT COMMENT '工具调用数据块（JSON格式）',
+  created_at DATETIME NOT NULL COMMENT '创建时间',
+  INDEX idx_conversation_id (conversation_id),
+  INDEX idx_created_at (created_at),
+  FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话消息表';
+
+-- 如果表已存在，添加 tool_calls 列（仅当列不存在时）
+ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS tool_calls LONGTEXT COMMENT '工具调用数据块（JSON格式）' AFTER reasoning;
+
+-- 创建用户表（使用sys_user避免关键字冲突）
+CREATE TABLE IF NOT EXISTS sys_user (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(50) NOT NULL UNIQUE COMMENT '用户名',
+  password VARCHAR(32) NOT NULL COMMENT '密码（MD5加密，32位）',
+  nickname VARCHAR(50) COMMENT '用户昵称',
+  create_time DATETIME NOT NULL COMMENT '创建时间',
+  update_time DATETIME NOT NULL COMMENT '更新时间',
+  INDEX idx_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
+
+-- ============================================================
+-- 以下为股票数据表（数据源：东方财富 + 腾讯财经）
+-- ============================================================
+
+-- 1. 股票基础信息表
+CREATE TABLE IF NOT EXISTS stock_info (
+    id          INT UNSIGNED    NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    ts_code     VARCHAR(16)     NOT NULL COMMENT '股票代码+市场，如 000001.SZ / 600519.SH',
+    symbol      VARCHAR(8)      NOT NULL COMMENT '纯数字代码，如 000001',
+    market      CHAR(2)         NOT NULL COMMENT '市场：SH / SZ / HK / US',
+    name        VARCHAR(32)     NOT NULL COMMENT '股票名称',
+    list_date   DATE            DEFAULT NULL COMMENT '上市日期',
+    total_share BIGINT UNSIGNED DEFAULT NULL COMMENT '总股本（股）',
+    status      TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '状态：1=正常, 0=退市/停牌',
+    created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_ts_code (ts_code),
+    KEY idx_symbol_market (symbol, market),
+    KEY idx_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='股票基础信息表';
+
+-- 2. 实时行情快照表（每个股票一条，UPSERT更新）
+CREATE TABLE IF NOT EXISTS stock_realtime (
+    ts_code       VARCHAR(16)     NOT NULL COMMENT '股票代码',
+    name          VARCHAR(32)     NOT NULL COMMENT '股票名称',
+    price         DECIMAL(12,4)   NOT NULL COMMENT '当前价',
+    open          DECIMAL(12,4)   NOT NULL COMMENT '今日开盘',
+    high          DECIMAL(12,4)   NOT NULL COMMENT '今日最高',
+    low           DECIMAL(12,4)   NOT NULL COMMENT '今日最低',
+    pre_close     DECIMAL(12,4)   NOT NULL COMMENT '昨收',
+    change_       DECIMAL(12,4)   NOT NULL COMMENT '涨跌额',
+    pct_change    DECIMAL(8,4)    NOT NULL COMMENT '涨跌幅（%）',
+    volume        BIGINT UNSIGNED NOT NULL COMMENT '成交量（股）',
+    amount        DECIMAL(21,4)   NOT NULL COMMENT '成交额（元）',
+    bid_prices    JSON            DEFAULT NULL COMMENT '买五档价 [p1,p2,p3,p4,p5]',
+    bid_volumes   JSON            DEFAULT NULL COMMENT '买五档量 [v1,v2,v3,v4,v5]',
+    ask_prices    JSON            DEFAULT NULL COMMENT '卖五档价 [p1,p2,p3,p4,p5]',
+    ask_volumes   JSON            DEFAULT NULL COMMENT '卖五档量 [v1,v2,v3,v4,v5]',
+    turnover_rate DECIMAL(8,4)    DEFAULT NULL COMMENT '换手率（%）',
+    pe            DECIMAL(12,4)   DEFAULT NULL COMMENT '市盈率',
+    pb            DECIMAL(12,4)   DEFAULT NULL COMMENT '市净率',
+    total_mv      DECIMAL(21,4)   DEFAULT NULL COMMENT '总市值（元）',
+    circ_mv       DECIMAL(21,4)   DEFAULT NULL COMMENT '流通市值（元）',
+    limit_up      DECIMAL(12,4)   DEFAULT NULL COMMENT '涨停价',
+    limit_down    DECIMAL(12,4)   DEFAULT NULL COMMENT '跌停价',
+    buy_vol       BIGINT UNSIGNED DEFAULT NULL COMMENT '外盘（主动买成交量，股）',
+    sell_vol      BIGINT UNSIGNED DEFAULT NULL COMMENT '内盘（主动卖成交量，股）',
+    amplitude     DECIMAL(8,4)    DEFAULT NULL COMMENT '振幅（%）',
+    order_diff    BIGINT          DEFAULT NULL COMMENT '委差（买五总量-卖五总量）',
+    avg_price     DECIMAL(12,4)   DEFAULT NULL COMMENT '均价（元）',
+    volume_ratio  DECIMAL(12,4)   DEFAULT NULL COMMENT '量比',
+    pe_ttm        DECIMAL(12,4)   DEFAULT NULL COMMENT '市盈率（TTM）',
+    eps           DECIMAL(12,4)   DEFAULT NULL COMMENT '每股收益',
+    bvps          DECIMAL(12,4)   DEFAULT NULL COMMENT '每股净资产',
+    capital_reserve DECIMAL(12,4) DEFAULT NULL COMMENT '每股公积金',
+    net_profit_growth DECIMAL(12,4) DEFAULT NULL COMMENT '净利润同比增长（%）',
+    revenue_growth  DECIMAL(12,4) DEFAULT NULL COMMENT '营业收入同比增长（%）',
+    total_shares  BIGINT UNSIGNED DEFAULT NULL COMMENT '总股本（股）',
+    circ_shares   BIGINT UNSIGNED DEFAULT NULL COMMENT '流通股本（股）',
+    pcf           DECIMAL(12,4)   DEFAULT NULL COMMENT '市现率',
+    raw_data      JSON            DEFAULT NULL COMMENT '腾讯原始返回88字段',
+    update_time   DATETIME(3)     NOT NULL COMMENT '数据时间（毫秒）',
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (ts_code),
+    KEY idx_pct_change (pct_change),
+    KEY idx_volume (volume DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='实时行情快照表（UPSERT，行数=股票数）';
+
+-- 3. 日K线数据表（按年分区）
+CREATE TABLE IF NOT EXISTS stock_kline_daily (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    ts_code     VARCHAR(16)     NOT NULL COMMENT '股票代码',
+    trade_date  DATE            NOT NULL COMMENT '交易日',
+    open        DECIMAL(12,4)   NOT NULL COMMENT '开盘价',
+    high        DECIMAL(12,4)   NOT NULL COMMENT '最高价',
+    low         DECIMAL(12,4)   NOT NULL COMMENT '最低价',
+    close       DECIMAL(12,4)   NOT NULL COMMENT '收盘价',
+    pre_close   DECIMAL(12,4)   DEFAULT NULL COMMENT '昨收价',
+    change_     DECIMAL(12,4)   DEFAULT NULL COMMENT '涨跌额',
+    pct_change  DECIMAL(8,4)    DEFAULT NULL COMMENT '涨跌幅（%）',
+    vol         BIGINT UNSIGNED NOT NULL COMMENT '成交量（股）',
+    amount      DECIMAL(21,4)   NOT NULL COMMENT '成交额（元）',
+    turnover    DECIMAL(8,4)    DEFAULT NULL COMMENT '换手率（%）',
+    created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, trade_date),
+    UNIQUE KEY uk_ts_code_trade_date (ts_code, trade_date),
+    KEY idx_trade_date (trade_date),
+    KEY idx_ts_code (ts_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日K线数据表按年分区'
+PARTITION BY RANGE (YEAR(trade_date)) (
+    PARTITION p1990 VALUES LESS THAN (1991),
+    PARTITION p1991 VALUES LESS THAN (1992),
+    PARTITION p1992 VALUES LESS THAN (1993),
+    PARTITION p1993 VALUES LESS THAN (1994),
+    PARTITION p1994 VALUES LESS THAN (1995),
+    PARTITION p1995 VALUES LESS THAN (1996),
+    PARTITION p1996 VALUES LESS THAN (1997),
+    PARTITION p1997 VALUES LESS THAN (1998),
+    PARTITION p1998 VALUES LESS THAN (1999),
+    PARTITION p1999 VALUES LESS THAN (2000),
+    PARTITION p2000 VALUES LESS THAN (2001),
+    PARTITION p2001 VALUES LESS THAN (2002),
+    PARTITION p2002 VALUES LESS THAN (2003),
+    PARTITION p2003 VALUES LESS THAN (2004),
+    PARTITION p2004 VALUES LESS THAN (2005),
+    PARTITION p2005 VALUES LESS THAN (2006),
+    PARTITION p2006 VALUES LESS THAN (2007),
+    PARTITION p2007 VALUES LESS THAN (2008),
+    PARTITION p2008 VALUES LESS THAN (2009),
+    PARTITION p2009 VALUES LESS THAN (2010),
+    PARTITION p2010 VALUES LESS THAN (2011),
+    PARTITION p2011 VALUES LESS THAN (2012),
+    PARTITION p2012 VALUES LESS THAN (2013),
+    PARTITION p2013 VALUES LESS THAN (2014),
+    PARTITION p2014 VALUES LESS THAN (2015),
+    PARTITION p2015 VALUES LESS THAN (2016),
+    PARTITION p2016 VALUES LESS THAN (2017),
+    PARTITION p2017 VALUES LESS THAN (2018),
+    PARTITION p2018 VALUES LESS THAN (2019),
+    PARTITION p2019 VALUES LESS THAN (2020),
+    PARTITION p2020 VALUES LESS THAN (2021),
+    PARTITION p2021 VALUES LESS THAN (2022),
+    PARTITION p2022 VALUES LESS THAN (2023),
+    PARTITION p2023 VALUES LESS THAN (2024),
+    PARTITION p2024 VALUES LESS THAN (2025),
+    PARTITION p2025 VALUES LESS THAN (2026),
+    PARTITION p2026 VALUES LESS THAN (2027),
+    PARTITION p_future VALUES LESS THAN MAXVALUE
+);
+
+-- 4. 分钟K线数据表（1/5/15/30/60分钟，按周分区）
+--
+-- 已有数据迁移（如果表已存在且是旧的分区方式，需手动执行）：
+-- ALTER TABLE stock_kline_min PARTITION BY RANGE (TO_DAYS(trade_date)) (
+--     ...（同上分区定义）
+--     PARTITION p_future VALUES LESS THAN MAXVALUE
+-- );
+CREATE TABLE IF NOT EXISTS stock_kline_min (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    ts_code     VARCHAR(16)     NOT NULL COMMENT '股票代码',
+    trade_date  DATE            NOT NULL COMMENT '交易日',
+    minute      TIME            NOT NULL COMMENT '分钟时间，如 09:35:00',
+    freq        TINYINT UNSIGNED NOT NULL COMMENT '分钟级别：1/5/15/30/60',
+    open        DECIMAL(12,4)   NOT NULL COMMENT '开盘价',
+    high        DECIMAL(12,4)   NOT NULL COMMENT '最高价',
+    low         DECIMAL(12,4)   NOT NULL COMMENT '最低价',
+    close       DECIMAL(12,4)   NOT NULL COMMENT '收盘价',
+    vol         BIGINT UNSIGNED NOT NULL COMMENT '成交量（股）',
+    amount      DECIMAL(21,4)   NOT NULL COMMENT '成交额（元）',
+    created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, trade_date),
+    UNIQUE KEY uk_date_minute_freq (ts_code, trade_date, minute, freq),
+    KEY idx_trade_date_freq (trade_date, freq),
+    KEY idx_ts_code_trade_date (ts_code, trade_date),
+    KEY idx_ts_code_date_freq_min (ts_code, trade_date, freq, minute)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分钟K线数据表按周分区'
+PARTITION BY RANGE (TO_DAYS(trade_date)) (
+    PARTITION p_2025_w02 VALUES LESS THAN (TO_DAYS("2025-01-13")),
+    PARTITION p_2025_w03 VALUES LESS THAN (TO_DAYS("2025-01-20")),
+    PARTITION p_2025_w04 VALUES LESS THAN (TO_DAYS("2025-01-27")),
+    PARTITION p_2025_w05 VALUES LESS THAN (TO_DAYS("2025-02-03")),
+    PARTITION p_2025_w06 VALUES LESS THAN (TO_DAYS("2025-02-10")),
+    PARTITION p_2025_w07 VALUES LESS THAN (TO_DAYS("2025-02-17")),
+    PARTITION p_2025_w08 VALUES LESS THAN (TO_DAYS("2025-02-24")),
+    PARTITION p_2025_w09 VALUES LESS THAN (TO_DAYS("2025-03-03")),
+    PARTITION p_2025_w10 VALUES LESS THAN (TO_DAYS("2025-03-10")),
+    PARTITION p_2025_w11 VALUES LESS THAN (TO_DAYS("2025-03-17")),
+    PARTITION p_2025_w12 VALUES LESS THAN (TO_DAYS("2025-03-24")),
+    PARTITION p_2025_w13 VALUES LESS THAN (TO_DAYS("2025-03-31")),
+    PARTITION p_2025_w14 VALUES LESS THAN (TO_DAYS("2025-04-07")),
+    PARTITION p_2025_w15 VALUES LESS THAN (TO_DAYS("2025-04-14")),
+    PARTITION p_2025_w16 VALUES LESS THAN (TO_DAYS("2025-04-21")),
+    PARTITION p_2025_w17 VALUES LESS THAN (TO_DAYS("2025-04-28")),
+    PARTITION p_2025_w18 VALUES LESS THAN (TO_DAYS("2025-05-05")),
+    PARTITION p_2025_w19 VALUES LESS THAN (TO_DAYS("2025-05-12")),
+    PARTITION p_2025_w20 VALUES LESS THAN (TO_DAYS("2025-05-19")),
+    PARTITION p_2025_w21 VALUES LESS THAN (TO_DAYS("2025-05-26")),
+    PARTITION p_2025_w22 VALUES LESS THAN (TO_DAYS("2025-06-02")),
+    PARTITION p_2025_w23 VALUES LESS THAN (TO_DAYS("2025-06-09")),
+    PARTITION p_2025_w24 VALUES LESS THAN (TO_DAYS("2025-06-16")),
+    PARTITION p_2025_w25 VALUES LESS THAN (TO_DAYS("2025-06-23")),
+    PARTITION p_2025_w26 VALUES LESS THAN (TO_DAYS("2025-06-30")),
+    PARTITION p_2025_w27 VALUES LESS THAN (TO_DAYS("2025-07-07")),
+    PARTITION p_2025_w28 VALUES LESS THAN (TO_DAYS("2025-07-14")),
+    PARTITION p_2025_w29 VALUES LESS THAN (TO_DAYS("2025-07-21")),
+    PARTITION p_2025_w30 VALUES LESS THAN (TO_DAYS("2025-07-28")),
+    PARTITION p_2025_w31 VALUES LESS THAN (TO_DAYS("2025-08-04")),
+    PARTITION p_2025_w32 VALUES LESS THAN (TO_DAYS("2025-08-11")),
+    PARTITION p_2025_w33 VALUES LESS THAN (TO_DAYS("2025-08-18")),
+    PARTITION p_2025_w34 VALUES LESS THAN (TO_DAYS("2025-08-25")),
+    PARTITION p_2025_w35 VALUES LESS THAN (TO_DAYS("2025-09-01")),
+    PARTITION p_2025_w36 VALUES LESS THAN (TO_DAYS("2025-09-08")),
+    PARTITION p_2025_w37 VALUES LESS THAN (TO_DAYS("2025-09-15")),
+    PARTITION p_2025_w38 VALUES LESS THAN (TO_DAYS("2025-09-22")),
+    PARTITION p_2025_w39 VALUES LESS THAN (TO_DAYS("2025-09-29")),
+    PARTITION p_2025_w40 VALUES LESS THAN (TO_DAYS("2025-10-06")),
+    PARTITION p_2025_w41 VALUES LESS THAN (TO_DAYS("2025-10-13")),
+    PARTITION p_2025_w42 VALUES LESS THAN (TO_DAYS("2025-10-20")),
+    PARTITION p_2025_w43 VALUES LESS THAN (TO_DAYS("2025-10-27")),
+    PARTITION p_2025_w44 VALUES LESS THAN (TO_DAYS("2025-11-03")),
+    PARTITION p_2025_w45 VALUES LESS THAN (TO_DAYS("2025-11-10")),
+    PARTITION p_2025_w46 VALUES LESS THAN (TO_DAYS("2025-11-17")),
+    PARTITION p_2025_w47 VALUES LESS THAN (TO_DAYS("2025-11-24")),
+    PARTITION p_2025_w48 VALUES LESS THAN (TO_DAYS("2025-12-01")),
+    PARTITION p_2025_w49 VALUES LESS THAN (TO_DAYS("2025-12-08")),
+    PARTITION p_2025_w50 VALUES LESS THAN (TO_DAYS("2025-12-15")),
+    PARTITION p_2025_w51 VALUES LESS THAN (TO_DAYS("2025-12-22")),
+    PARTITION p_2025_w52 VALUES LESS THAN (TO_DAYS("2025-12-29")),
+    PARTITION p_2026_w01 VALUES LESS THAN (TO_DAYS("2026-01-05")),
+    PARTITION p_2026_w02 VALUES LESS THAN (TO_DAYS("2026-01-12")),
+    PARTITION p_2026_w03 VALUES LESS THAN (TO_DAYS("2026-01-19")),
+    PARTITION p_2026_w04 VALUES LESS THAN (TO_DAYS("2026-01-26")),
+    PARTITION p_2026_w05 VALUES LESS THAN (TO_DAYS("2026-02-02")),
+    PARTITION p_2026_w06 VALUES LESS THAN (TO_DAYS("2026-02-09")),
+    PARTITION p_2026_w07 VALUES LESS THAN (TO_DAYS("2026-02-16")),
+    PARTITION p_2026_w08 VALUES LESS THAN (TO_DAYS("2026-02-23")),
+    PARTITION p_2026_w09 VALUES LESS THAN (TO_DAYS("2026-03-02")),
+    PARTITION p_2026_w10 VALUES LESS THAN (TO_DAYS("2026-03-09")),
+    PARTITION p_2026_w11 VALUES LESS THAN (TO_DAYS("2026-03-16")),
+    PARTITION p_2026_w12 VALUES LESS THAN (TO_DAYS("2026-03-23")),
+    PARTITION p_2026_w13 VALUES LESS THAN (TO_DAYS("2026-03-30")),
+    PARTITION p_2026_w14 VALUES LESS THAN (TO_DAYS("2026-04-06")),
+    PARTITION p_2026_w15 VALUES LESS THAN (TO_DAYS("2026-04-13")),
+    PARTITION p_2026_w16 VALUES LESS THAN (TO_DAYS("2026-04-20")),
+    PARTITION p_2026_w17 VALUES LESS THAN (TO_DAYS("2026-04-27")),
+    PARTITION p_2026_w18 VALUES LESS THAN (TO_DAYS("2026-05-04")),
+    PARTITION p_2026_w19 VALUES LESS THAN (TO_DAYS("2026-05-11")),
+    PARTITION p_2026_w20 VALUES LESS THAN (TO_DAYS("2026-05-18")),
+    PARTITION p_2026_w21 VALUES LESS THAN (TO_DAYS("2026-05-25")),
+    PARTITION p_2026_w22 VALUES LESS THAN (TO_DAYS("2026-06-01")),
+    PARTITION p_2026_w23 VALUES LESS THAN (TO_DAYS("2026-06-08")),
+    PARTITION p_2026_w24 VALUES LESS THAN (TO_DAYS("2026-06-15")),
+    PARTITION p_2026_w25 VALUES LESS THAN (TO_DAYS("2026-06-22")),
+    PARTITION p_2026_w26 VALUES LESS THAN (TO_DAYS("2026-06-29")),
+    PARTITION p_2026_w27 VALUES LESS THAN (TO_DAYS("2026-07-06")),
+    PARTITION p_2026_w28 VALUES LESS THAN (TO_DAYS("2026-07-13")),
+    PARTITION p_2026_w29 VALUES LESS THAN (TO_DAYS("2026-07-20")),
+    PARTITION p_2026_w30 VALUES LESS THAN (TO_DAYS("2026-07-27")),
+    PARTITION p_2026_w31 VALUES LESS THAN (TO_DAYS("2026-08-03")),
+    PARTITION p_2026_w32 VALUES LESS THAN (TO_DAYS("2026-08-10")),
+    PARTITION p_2026_w33 VALUES LESS THAN (TO_DAYS("2026-08-17")),
+    PARTITION p_2026_w34 VALUES LESS THAN (TO_DAYS("2026-08-24")),
+    PARTITION p_2026_w35 VALUES LESS THAN (TO_DAYS("2026-08-31")),
+    PARTITION p_2026_w36 VALUES LESS THAN (TO_DAYS("2026-09-07")),
+    PARTITION p_2026_w37 VALUES LESS THAN (TO_DAYS("2026-09-14")),
+    PARTITION p_2026_w38 VALUES LESS THAN (TO_DAYS("2026-09-21")),
+    PARTITION p_2026_w39 VALUES LESS THAN (TO_DAYS("2026-09-28")),
+    PARTITION p_2026_w40 VALUES LESS THAN (TO_DAYS("2026-10-05")),
+    PARTITION p_2026_w41 VALUES LESS THAN (TO_DAYS("2026-10-12")),
+    PARTITION p_2026_w42 VALUES LESS THAN (TO_DAYS("2026-10-19")),
+    PARTITION p_2026_w43 VALUES LESS THAN (TO_DAYS("2026-10-26")),
+    PARTITION p_2026_w44 VALUES LESS THAN (TO_DAYS("2026-11-02")),
+    PARTITION p_2026_w45 VALUES LESS THAN (TO_DAYS("2026-11-09")),
+    PARTITION p_2026_w46 VALUES LESS THAN (TO_DAYS("2026-11-16")),
+    PARTITION p_2026_w47 VALUES LESS THAN (TO_DAYS("2026-11-23")),
+    PARTITION p_2026_w48 VALUES LESS THAN (TO_DAYS("2026-11-30")),
+    PARTITION p_2026_w49 VALUES LESS THAN (TO_DAYS("2026-12-07")),
+    PARTITION p_2026_w50 VALUES LESS THAN (TO_DAYS("2026-12-14")),
+    PARTITION p_2026_w51 VALUES LESS THAN (TO_DAYS("2026-12-21")),
+    PARTITION p_2026_w52 VALUES LESS THAN (TO_DAYS("2026-12-28")),
+    PARTITION p_2026_w53 VALUES LESS THAN (TO_DAYS("2027-01-04")),
+    PARTITION p_2027_w01 VALUES LESS THAN (TO_DAYS("2027-01-11")),
+    PARTITION p_2027_w02 VALUES LESS THAN (TO_DAYS("2027-01-18")),
+    PARTITION p_2027_w03 VALUES LESS THAN (TO_DAYS("2027-01-25")),
+    PARTITION p_2027_w04 VALUES LESS THAN (TO_DAYS("2027-02-01")),
+    PARTITION p_2027_w05 VALUES LESS THAN (TO_DAYS("2027-02-08")),
+    PARTITION p_2027_w06 VALUES LESS THAN (TO_DAYS("2027-02-15")),
+    PARTITION p_2027_w07 VALUES LESS THAN (TO_DAYS("2027-02-22")),
+    PARTITION p_2027_w08 VALUES LESS THAN (TO_DAYS("2027-03-01")),
+    PARTITION p_future VALUES LESS THAN MAXVALUE
+);
+
+-- 6. 复权因子表（每只股票仅在分红送股日有记录）
+CREATE TABLE IF NOT EXISTS stock_adj_factor (
+    id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    ts_code           VARCHAR(16)     NOT NULL COMMENT '股票代码',
+    trade_date        DATE            NOT NULL COMMENT '分红送股登记日',
+    adj_factor        DECIMAL(12,6)   NOT NULL COMMENT '复权因子（综合）',
+    fore_adj_factor   DECIMAL(12,6)   DEFAULT NULL COMMENT '前复权因子',
+    back_adj_factor   DECIMAL(12,6)   DEFAULT NULL COMMENT '后复权因子',
+    created_at        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_ts_code_trade_date (ts_code, trade_date),
+    KEY idx_trade_date (trade_date),
+    KEY idx_ts_code (ts_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='复权因子表';
+
+-- ============================================================
+-- 自动分区维护（存储过程 + 定时事件）
+-- 每月1号凌晨3点检查并新增下一个时间段的分区
+-- 前提：SET GLOBAL event_scheduler = ON（或在my.cnf中设置）
+-- ============================================================
+
+-- 日K线表：新增下一年分区
+CREATE PROCEDURE IF NOT EXISTS auto_add_partition_daily()
+BEGIN
+    DECLARE next_year INT;
+    DECLARE partition_name VARCHAR(20);
+    DECLARE existing_count INT;
+    SET next_year = YEAR(CURDATE()) + 1;
+    SET partition_name = CONCAT('p', next_year);
+    SELECT COUNT(*) INTO existing_count
+    FROM information_schema.PARTITIONS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_kline_daily'
+      AND PARTITION_NAME = partition_name;
+    IF existing_count = 0 THEN
+        SET @sql = CONCAT(
+            'ALTER TABLE stock_kline_daily REORGANIZE PARTITION p_future INTO (',
+            'PARTITION ', partition_name, ' VALUES LESS THAN (', next_year + 1, '),',
+            'PARTITION p_future VALUES LESS THAN MAXVALUE)'
+        );
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END;
+
+-- 分钟K线表：新增下周分区（每月自动新增后续5周）
+CREATE PROCEDURE IF NOT EXISTS auto_add_partition_min()
+BEGIN
+    DECLARE next_monday DATE;
+    DECLARE partition_name VARCHAR(20);
+    DECLARE existing_count INT;
+    DECLARE i INT DEFAULT 0;
+
+    SET next_monday = DATE_ADD(CURDATE(), INTERVAL (9 - DAYOFWEEK(CURDATE())) DAY);
+
+    WHILE i < 5 DO
+        SET partition_name = CONCAT('p_', YEAR(next_monday), '_w', LPAD(WEEK(next_monday, 1), 2, '0'));
+        SELECT COUNT(*) INTO existing_count
+        FROM information_schema.PARTITIONS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_kline_min'
+          AND PARTITION_NAME = partition_name;
+        IF existing_count = 0 THEN
+            SET @sql = CONCAT(
+                'ALTER TABLE stock_kline_min REORGANIZE PARTITION p_future INTO (',
+                'PARTITION ', partition_name, ' VALUES LESS THAN (TO_DAYS(''',
+                DATE_ADD(next_monday, INTERVAL 1 WEEK), ''')),',
+                'PARTITION p_future VALUES LESS THAN MAXVALUE)'
+            );
+            PREPARE stmt FROM @sql;
+            EXECUTE stmt;
+            DEALLOCATE PREPARE stmt;
+        END IF;
+        SET next_monday = DATE_ADD(next_monday, INTERVAL 1 WEEK);
+        SET i = i + 1;
+    END WHILE;
+END;
+
+-- 定时事件：每月1号凌晨3点执行
+CREATE EVENT IF NOT EXISTS auto_maintain_partitions
+ON SCHEDULE EVERY 1 MONTH STARTS DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY) + INTERVAL 3 HOUR
+ON COMPLETION PRESERVE ENABLE
+DO
+BEGIN
+    CALL auto_add_partition_daily();
+    CALL auto_add_partition_min();
+END;
+
+-- ============================================================
+-- 自选股票模块
+-- ============================================================
+CREATE TABLE IF NOT EXISTS watchlist_group (
+  id BIGINT UNSIGNED AUTO_INCREMENT,
+  user_id INT UNSIGNED NOT NULL COMMENT '用户ID',
+  name VARCHAR(50) NOT NULL COMMENT '分组名称',
+  sort_order INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '排序',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='自选分组';
+
+CREATE TABLE IF NOT EXISTS watchlist_stock (
+  id BIGINT UNSIGNED AUTO_INCREMENT,
+  group_id BIGINT UNSIGNED NOT NULL COMMENT '分组ID',
+  ts_code VARCHAR(16) NOT NULL COMMENT '股票代码',
+  stock_name VARCHAR(50) DEFAULT NULL COMMENT '股票名称',
+  sort_order INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '排序',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_group_stock (group_id, ts_code),
+  KEY idx_group_id (group_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='自选股票';
