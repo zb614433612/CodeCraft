@@ -278,6 +278,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         List<Map<String, Object>> result = new ArrayList<>();
         // 存储当前assistant消息的tool call IDs，用于后续tool消息的tool_call_id
         List<String> pendingToolCallIds = new ArrayList<>();
+        List<Integer> assistantToolCallIndices = new ArrayList<>();
 
         for (ConversationMessage msg : messages) {
             Map<String, Object> messageMap = new HashMap<>();
@@ -315,6 +316,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     pendingToolCallIds.add(idNode.asText());
                                 }
                             }
+                            assistantToolCallIndices.add(result.size());
                         }
                     } catch (Exception e) {
                         log.warn("解析tool_calls JSON失败: {}", e.getMessage());
@@ -354,6 +356,20 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 } else {
                     // 没有pending tool call IDs，可能是数据不一致，跳过或记录警告
                     log.warn("TOOL消息没有对应的tool call ID，跳过该消息: {}", msg.getId());
+                }
+            }
+        }
+        // 修复：如果还有未消耗的tool call ID，说明对应的TOOL消息缺失
+        // 从assistant消息中移除tool_calls，避免API返回400错误
+        if (!pendingToolCallIds.isEmpty()) {
+            log.warn("检测到{}个未消耗的tool call ID，将从对应的assistant消息中移除tool_calls: {}",
+                    pendingToolCallIds.size(), pendingToolCallIds);
+            for (int i = assistantToolCallIndices.size() - 1; i >= 0 && !pendingToolCallIds.isEmpty(); i--) {
+                int msgIndex = assistantToolCallIndices.get(i);
+                Map<String, Object> msg = result.get(msgIndex);
+                if (msg.containsKey("tool_calls")) {
+                    msg.remove("tool_calls");
+                    log.info("从assistant消息[{}]中移除了孤立的tool_calls", msgIndex);
                 }
             }
         }
