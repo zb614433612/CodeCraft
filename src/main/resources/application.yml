@@ -9,6 +9,10 @@ spring:
   application:
     # 应用名称
     name: agent-deepseek
+  # 激活 local profile，自动加载 application-local.yml（覆盖优先级高于本文件）
+  # 如果没有 application-local.yml，项目会使用下方的默认值启动，但数据库连接会失败
+  profiles:
+    active: local
   # 数据源配置
   datasource:
     # MySQL驱动类
@@ -17,8 +21,9 @@ spring:
     url: 'jdbc:mysql://localhost:3306/agent_deepseek?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&verifyServerCertificate=false&nullCatalogMeansCurrent=true&useLegacyDatetimeCode=false'
     # 数据库用户名
     username: root
-    # 数据库密码（从环境变量 DB_PASSWORD 读取）
-    password: ${DB_PASSWORD}
+    # 数据库密码——由 application-local.yml 覆盖（profile 优先级更高）
+    # 如未配置，请创建 application-local.yml 或在环境变量中设置 DB_PASSWORD
+    password: ${DB_PASSWORD:__MUST_CONFIGURE_DB_PASSWORD__}
     # Hikari连接池配置
     hikari:
       # 最大连接池大小
@@ -55,12 +60,12 @@ spring:
   data:
     # Redis配置
     redis:
-      # Redis主机地址（从环境变量 REDIS_HOST 读取）
-      host: ${REDIS_HOST:localhost}
+      # Redis主机地址——由 application-local.yml 覆盖
+      host: ${REDIS_HOST:__MUST_CONFIGURE_REDIS_HOST__}
       # Redis端口
       port: 6379
-      # Redis密码（从环境变量 REDIS_PASSWORD 读取）
-      password: ${REDIS_PASSWORD}
+      # Redis密码——由 application-local.yml 覆盖
+      password: ${REDIS_PASSWORD:__MUST_CONFIGURE_REDIS_PASSWORD__}
       # Redis数据库索引
       database: 0
       # 连接超时时间
@@ -122,8 +127,8 @@ web-fetch:
 deepseek:
   # DeepSeek API基础URL
   base-url: https://api.deepseek.com
-  # API密钥（从环境变量 DEEPSEEK_API_KEY 读取）
-  api-key: ${DEEPSEEK_API_KEY}
+  # API密钥——由 application-local.yml 覆盖
+  api-key: ${DEEPSEEK_API_KEY:__MUST_CONFIGURE_API_KEY__}
   # 默认模型
   default-model: deepseek-v4-pro
   # 思考模式：non-thinking / thinking / thinking_max
