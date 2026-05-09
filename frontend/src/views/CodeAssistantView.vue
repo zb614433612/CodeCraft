@@ -411,9 +411,9 @@ const fetchConversations = async () => {
   }
 }
 
-const fetchMessages = async (conversationId: string) => {
+const fetchMessages = async (conversationId: string, force = false) => {
   if (!conversationId) return
-  if (messages.value[conversationId]) return // 已缓存
+  if (!force && messages.value[conversationId]) return // 已缓存（首次加载免重复请求）
   isLoadingMessages.value = true
   try {
     const response = await getConversationMessages(parseInt(conversationId))
@@ -785,6 +785,13 @@ const reconnectToTaskStream = async (convId: number) => {
         streamStatus.value = '正在生成回答...'
         reconnectLiveMsg.value.content += event.data
         scheduleRender()
+      } else if (event.type === 'ask_user') {
+        // 手动模式下权限审批弹窗
+        streamStatus.value = '等待用户授权...'
+        pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question }
+        pendingQuestionAnswer.value = ''
+      } else if (event.type === 'resume') {
+        streamStatus.value = '继续执行中...'
       } else if (event.type === 'complete') {
         break
       }
@@ -805,8 +812,8 @@ const reconnectToTaskStream = async (convId: number) => {
     isSending.value = false
     activeTask.value = null
     stopAbortController.value = null
-    // 任务可能已完成或有新消息，从 DB 重新加载最新消息列表
-    await fetchMessages(stringConvId)
+    // 任务可能已完成或有新消息，从 DB 强制刷新最新消息列表（绕过缓存）
+    await fetchMessages(stringConvId, true)
   }
 }
 
