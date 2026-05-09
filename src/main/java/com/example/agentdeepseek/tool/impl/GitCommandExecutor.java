@@ -72,7 +72,7 @@ public class GitCommandExecutor {
         pb.environment().put("GIT_PAGER", "cat");
         pb.environment().put("PAGER", "cat");
 
-        // 如果有 Token，通过 GIT_ASKPASS 注入
+        // 如果有 Token，通过 GIT_ASKPASS 注入（跨平台脚本）
         if (token != null && !token.isEmpty()) {
             pb.environment().put("GIT_ASKPASS", createAskPassScript(token));
             pb.environment().put("GIT_TOKEN", token);
@@ -129,18 +129,26 @@ public class GitCommandExecutor {
 
     /**
      * 创建 GIT_ASKPASS 脚本用于 Token 认证
+     * 自动检测操作系统：Windows 生成 .bat，Unix 生成 .sh
      */
     private String createAskPassScript(String token) {
         try {
-            File tempScript = File.createTempFile("git-askpass-", ".sh");
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            String suffix = isWindows ? ".bat" : ".sh";
+            File tempScript = File.createTempFile("git-askpass-", suffix);
             tempScript.deleteOnExit();
 
             try (Writer w = new OutputStreamWriter(new FileOutputStream(tempScript), "UTF-8")) {
-                w.write("#!/bin/sh\n");
-                w.write("echo \"$GIT_TOKEN\"\n");
+                if (isWindows) {
+                    w.write("@echo off\r\n");
+                    w.write("echo %GIT_TOKEN%\r\n");
+                } else {
+                    w.write("#!/bin/sh\n");
+                    w.write("echo \"$GIT_TOKEN\"\n");
+                }
             }
 
-            if (!tempScript.setExecutable(true)) {
+            if (!isWindows && !tempScript.setExecutable(true)) {
                 log.warn("无法设置 askpass 脚本可执行权限");
             }
 

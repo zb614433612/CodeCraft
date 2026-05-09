@@ -147,5 +147,22 @@ export async function logout(): Promise<ApiResponse<void>> {
   })
 }
 
+/**
+ * 获取认证请求头（从 userStore 读取 token）
+ * 其他 API 模块（如 git.ts）可以直接调用来获取 Authorization header
+ */
+export async function getAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const { useUserStore } = await import('@/store/user')
+    const userStore = useUserStore()
+    if (userStore.token) {
+      return { 'Authorization': 'Bearer ' + userStore.token }
+    }
+  } catch (error) {
+    console.warn('获取用户token失败:', error)
+  }
+  return {}
+}
+
 // 导出 request 函数，以便其他模块使用
 export { request }

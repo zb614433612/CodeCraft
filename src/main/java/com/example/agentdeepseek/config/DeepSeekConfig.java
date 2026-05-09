@@ -52,10 +52,10 @@ public class DeepSeekConfig {
      */
     @Bean
     public WebClient deepSeekWebClient(WebClient.Builder webClientBuilder) {
-        // 配置较小的内存缓冲区以减少缓冲，实现真正的流式传输
-        // 设置为4KB，确保及时刷新数据块
+        // 配置内存缓冲区，256KB 可容纳 tool_calls 等大 JSON 块
+        // 流式实时性由 HTTP chunked 和 SSE 协议决定，不受缓冲区大小影响
         ExchangeStrategies exchangeStrategies = ExchangeStrategies.builder()
-                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(4 * 1024))
+                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(256 * 1024))
                 .build();
 
         return webClientBuilder
