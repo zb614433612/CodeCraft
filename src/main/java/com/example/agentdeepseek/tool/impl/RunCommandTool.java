@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.stream.*;
 
 /**
  * 命令执行工具
@@ -146,6 +147,9 @@ public class RunCommandTool implements Tool {
         sb.append("工作目录：").append(workDir.toAbsolutePath()).append("\n");
         sb.append("────────────────────────────────────────\n");
 
+        // Windows 兼容：如果命令没有扩展名，尝试追加 PATHEXT 中的扩展名
+        cmdAndArgs = resolveWindowsExecutable(cmdAndArgs);
+
         ProcessBuilder pb = new ProcessBuilder(cmdAndArgs);
         pb.directory(workDir.toFile());
         pb.redirectErrorStream(true);
@@ -216,6 +220,53 @@ public class RunCommandTool implements Tool {
      * 将命令字符串解析为可执行文件 + 参数列表
      * 支持单引号和双引号包裹的参数
      */
+    /**
+     * Windows 兼容：解析可执行文件的完整路径
+     * ProcessBuilder 在 Windows 上不会自动查找 PATHEXT（.cmd、.bat 等），
+     * 导致直接使用 "mvn"、"npm" 等命令时找不到文件。
+     * 此方法在 PATH 中搜索带扩展名的可执行文件并返回完整路径。
+     */
+    private List<String> resolveWindowsExecutable(List<String> cmdAndArgs) {
+        if (cmdAndArgs == null || cmdAndArgs.isEmpty()) return cmdAndArgs;
+        if (!System.getProperty("os.name").toLowerCase().contains("win")) return cmdAndArgs;
+
+        String exec = cmdAndArgs.get(0);
+        // 如果已经有扩展名或是绝对路径，不处理
+        if (exec.contains(".") || exec.contains(File.separator)) return cmdAndArgs;
+
+        // 读取 PATHEXT 环境变量
+        String pathext = System.getenv("PATHEXT");
+        if (pathext == null || pathext.isEmpty()) return cmdAndArgs;
+
+        // 拆分 PATH 路径
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null || pathEnv.isEmpty()) return cmdAndArgs;
+
+        List<String> extensions = Arrays.stream(pathext.split(";"))
+                .map(String::toLowerCase)
+                .collect(Collectors.toList());
+
+        String[] pathDirs = pathEnv.split(";");
+
+        // 在 PATH 中搜索可执行文件
+        for (String dir : pathDirs) {
+            if (dir.isEmpty()) continue;
+            Path dirPath = Paths.get(dir);
+            if (!Files.isDirectory(dirPath)) continue;
+            for (String ext : extensions) {
+                Path fullPath = dirPath.resolve(exec + ext);
+                if (Files.exists(fullPath)) {
+                    List<String> result = new ArrayList<>(cmdAndArgs);
+                    result.set(0, fullPath.toString());
+                    log.debug("Windows 可执行文件解析: {} -> {}", exec, fullPath);
+                    return result;
+                }
+            }
+        }
+
+        return cmdAndArgs;
+    }
+
     private List<String> tokenize(String command) {
         List<String> tokens = new ArrayList<>();
         StringBuilder current = new StringBuilder();
