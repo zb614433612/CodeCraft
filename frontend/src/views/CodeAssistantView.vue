@@ -79,15 +79,18 @@
           <div class="project-root-row">
             <a-input
               v-model:value="settingsStore.projectRoot"
-              placeholder="输入项目根目录路径（如 E:/my-project）"
+              placeholder="点击右侧按钮选择目录"
               size="small"
               class="project-root-input"
-              @pressEnter="applyProjectRoot"
+              readonly
             />
-            <a-button size="small" type="primary" @click="applyProjectRoot" :disabled="!settingsStore.projectRoot" class="project-root-btn">应用</a-button>
+            <a-button size="small" type="primary" @click="selectProjectRoot" class="project-root-btn">
+              <FolderOpenOutlined />
+            </a-button>
           </div>
         </div>
         <FileTree :root-path="fileTreeLoadPath" @select="onFileSelect" />
+        <DirectoryBrowser :visible="showDirBrowser" @select="onDirSelected" @close="showDirBrowser = false" />
       </div>
     </aside>
 
@@ -153,10 +156,57 @@
         </DynamicScrollerItem>
       </DynamicScroller>
 
+      <!-- 后台任务进行中指示器 -->
+      <div v-if="activeTask &amp;&amp; !isSending" class="stream-indicator task-reconnect-banner">
+        <span class="stream-pulse-dot"></span>
+        <span class="stream-indicator-text">
+          任务正在后台执行中（第 {{ activeTask.iteration + 1 }} 轮）...
+          <a-button size="small" type="link" @click="reconnectToTaskStream(parseInt(currentConversationId))">重新连接</a-button>
+        </span>
+      </div>
+
       <!-- 流式加载指示器 -->
       <div v-if="isSending &amp;&amp; streamStatus" class="stream-indicator">
         <span class="stream-pulse-dot"></span>
         <span class="stream-indicator-text">{{ streamStatus }}</span>
+      </div>
+
+      <!-- 重连实时流式消息容器（独立消息盒子，溢出滚动） -->
+      <div v-if="reconnectLiveMsg" class="reconnect-container">
+        <div class="reconnect-header">
+          <span class="reconnect-dot"></span>
+          任务恢复中 - 实时输出
+        </div>
+        <div class="reconnect-body">
+          <div class="message-item assistant">
+            <div class="message-avatar">
+              <div class="avatar ai-avatar">
+                <CodeOutlined />
+              </div>
+            </div>
+            <div class="message-content">
+              <div class="message-meta">
+                <span class="message-role">AI</span>
+                <span class="message-time">重连中...</span>
+              </div>
+              <div v-if="reconnectLiveMsg.thinking" class="thinking-section">
+                <div class="thinking-header" @click="toggleThinkingVisibility('reconnect')">
+                  <span class="thinking-title">
+                    <DownOutlined v-if="!getThinkingVisible('reconnect')" />
+                    <UpOutlined v-else />
+                    思考过程
+                  </span>
+                  <span class="thinking-hint">点击{{ getThinkingVisible('reconnect') ? '收起' : '展开' }}</span>
+                </div>
+                <div v-if="getThinkingVisible('reconnect')" class="thinking-content">
+                  <div class="thinking-text" v-html="formatThinking(reconnectLiveMsg.thinking, [])"></div>
+                </div>
+              </div>
+              <div class="message-text code-message" v-html="formatMessage(reconnectLiveMsg.content)" v-if="reconnectLiveMsg.content"></div>
+              <div v-else class="message-text placeholder-text" style="color: #999;">等待模型响应...</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- ask_user 问答面板 -->
@@ -258,7 +308,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi } from '@/api/conversation'
-import { streamChat } from '@/api/chat'
+import { streamChat, checkActiveTask, taskStream, cancelTask } from '@/api/chat'
 import { submitAnswer } from '@/api/askUser'
 import { useSettingsStore } from '@/store/settings'
 import { renderMarkdown } from '@/utils/markdown'
@@ -273,11 +323,13 @@ import {
   MenuUnfoldOutlined,
   PlusOutlined,
   SettingOutlined,
-  CloseOutlined
+  CloseOutlined,
+  FolderOpenOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import GitSidebar from '@/components/GitSidebar.vue'
 import SkillList from '@/components/SkillList.vue'
+import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 
@@ -318,9 +370,11 @@ const sidebarTab = ref<'conversation' | 'files' | 'git' | 'skills'>('conversatio
 const stopAbortController = ref<AbortController | null>(null)
 // 当用户点击「应用」时更新此值，触发文件树加载
 const fileTreeLoadPath = ref('')
+const showDirBrowser = ref(false)
 const pendingQuestion = ref<{ uuid: string; question: string } | null>(null)
 const pendingQuestionAnswer = ref('')
 const streamStatus = ref('')
+const activeTask = ref<{ taskId: number; status: string; iteration: number; eventCount: number; pendingQuestionUuid?: string; pendingQuestionText?: string } | null>(null)
 
 const toggleCollapsed = () => { collapsed.value = !collapsed.value }
 
@@ -384,6 +438,8 @@ watch(isLoadingMessages, (loading) => {
 const selectConversation = (id: string) => {
   currentConversationId.value = id
   fetchMessages(id)
+  // 检查是否有正在运行的后台任务
+  checkAndReconnect(id)
 }
 
 const startNewChat = () => {
@@ -440,16 +496,43 @@ const handleThinkingModeChange = (val: string) => {
 // 停止流式响应
 const stopStreaming = () => {
   if (stopAbortController.value) {
-    stopAbortController.value.abort()
+    const controller = stopAbortController.value
     stopAbortController.value = null
+    controller.abort()
+    // 重连模式下同时取消后端任务
+    if (reconnectLiveMsg.value && currentConversationId.value) {
+      const convId = parseInt(currentConversationId.value)
+      if (!isNaN(convId)) cancelTask(convId)
+    }
   }
 }
 
 // 设置项目工作目录
-const applyProjectRoot = () => {
+const reloadFileTree = () => {
   if (settingsStore.projectRoot) {
     fileTreeLoadPath.value = settingsStore.projectRoot
   }
+}
+
+// 调用原生目录选择对话框（Electron）或目录浏览器（浏览器）
+const selectProjectRoot = async () => {
+  if ((window as any).electronAPI?.selectDirectory) {
+    const dir = await (window as any).electronAPI.selectDirectory()
+    if (dir) {
+      settingsStore.projectRoot = dir
+      reloadFileTree()
+    }
+  } else {
+    // 浏览器环境：弹出目录浏览器弹窗
+    showDirBrowser.value = true
+  }
+}
+
+// 目录浏览器选择完成回调
+const onDirSelected = (path: string) => {
+  settingsStore.projectRoot = path
+  showDirBrowser.value = false
+  reloadFileTree()
 }
 
 // ask_user 回答函数
@@ -465,6 +548,31 @@ const submitPendingAnswer = async () => {
   } catch (e: any) {
     message.error('回答发送失败: ' + (e.message || '未知错误'))
   }
+}
+
+// 节流渲染：将流式更新聚合并限制在每 50ms 一次，避免高频 chunk 导致卡死
+let updateTimer: number | null = null
+
+const scheduleMessageUpdate = (convId: string) => {
+  if (updateTimer !== null) return
+  updateTimer = window.setTimeout(() => {
+    updateTimer = null
+    if (messages.value[convId]) {
+      messages.value[convId] = [...messages.value[convId]]
+    }
+    scrollToBottom()
+  }, 50)
+}
+
+const flushMessageUpdate = (convId: string) => {
+  if (updateTimer !== null) {
+    clearTimeout(updateTimer)
+    updateTimer = null
+  }
+  if (messages.value[convId]) {
+    messages.value[convId] = [...messages.value[convId]]
+  }
+  scrollToBottom()
 }
 
 // 发送消息
@@ -551,13 +659,13 @@ const sendMessage = async () => {
           thinkingContent += event.data
         }
         assistantMsg.thinking = thinkingContent
-        // 强制刷新
-        messages.value[convId] = [...messages.value[convId]]
+        // 节流刷新
+        scheduleMessageUpdate(convId)
       } else if (event.type === 'content') {
         streamStatus.value = '正在生成回答...'
         assistantMsg.content += event.data
         // 实时更新消息内容
-        messages.value[convId] = [...messages.value[convId]]
+        scheduleMessageUpdate(convId)
       } else if (event.type === 'complete' && event.sessionId) {
         // 更新会话ID
         const newId = String(event.sessionId)
@@ -577,8 +685,7 @@ const sendMessage = async () => {
         }
       } else if (event.type === 'ask_user') {
         try {
-          const qData = JSON.parse(event.data)
-          pendingQuestion.value = { uuid: qData.uuid, question: qData.question }
+          pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question }
           pendingQuestionAnswer.value = ''
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
@@ -592,7 +699,7 @@ const sendMessage = async () => {
     assistantMsg.tokenCount = estimateTokenCount(fullContent) + (fullThinking ? estimateTokenCount(fullThinking) : 0)
     assistantMsg.isStreaming = false
     streamStatus.value = ''
-    messages.value[convId] = [...messages.value[convId]]
+    flushMessageUpdate(convId)
 
     // 消息不为空时更新会话标题
     if (conv && !conv.isLocal) {
@@ -604,14 +711,14 @@ const sendMessage = async () => {
       console.log('用户中断流式响应')
       assistantMsg.isStreaming = false
       streamStatus.value = ''
-      messages.value[convId] = [...messages.value[convId]]
+      flushMessageUpdate(convId)
       return
     }
     console.error('发送消息失败:', error)
     assistantMsg.content = error.message || '发送失败，请重试'
     assistantMsg.isStreaming = false
     streamStatus.value = ''
-    messages.value[convId] = [...messages.value[convId]]
+    flushMessageUpdate(convId)
     message.error('发送失败: ' + (error.message || '未知错误'))
   } finally {
     isSending.value = false
@@ -622,6 +729,106 @@ const sendMessage = async () => {
 
 const handleShiftEnter = () => {
   // Shift+Enter 会由 textarea 自动处理为换行
+}
+
+// ===== 后台任务重连 =====
+
+const reconnectLiveMsg = ref<{ content: string; thinking: string } | null>(null)
+// 重连消息的渲染节流
+let reconnectRenderTimer: ReturnType<typeof setTimeout> | null = null
+
+const reconnectToTaskStream = async (convId: number) => {
+  streamStatus.value = '任务恢复中...'
+  isSending.value = true
+  const stringConvId = String(convId)
+
+  // 用单独的重连消息显示实时流式输出，不污染 messages 列表
+  reconnectLiveMsg.value = { content: '', thinking: '' }
+  let thinkingContent = ''
+
+  // 创建 AbortController 用于终止按钮
+  const abortCtrl = new AbortController()
+  stopAbortController.value = abortCtrl
+
+  // 渲染节流：每秒最多更新 8 次 DOM
+  const scheduleRender = () => {
+    if (reconnectRenderTimer) return
+    reconnectRenderTimer = setTimeout(() => {
+      reconnectRenderTimer = null
+      // 触发 Vue 响应式更新（shallowRef 需手动触发）
+      if (reconnectLiveMsg.value) {
+        reconnectLiveMsg.value = { ...reconnectLiveMsg.value }
+      }
+      scrollToBottom()
+    }, 125)
+  }
+
+  try {
+    for await (const event of taskStream(convId, abortCtrl)) {
+      if (event.type === 'thinking') {
+        const markerIdx = typeof event.data === 'string' ? event.data.indexOf('----工具调用:----') : -1
+        if (markerIdx !== -1) {
+          streamStatus.value = '执行工具中...'
+          const contentStart = event.data.indexOf('\n', markerIdx)
+          const toolContent = contentStart !== -1
+            ? event.data.substring(contentStart + 1).trim()
+            : ''
+          if (toolContent) {
+            thinkingContent += '\n' + toolContent
+          }
+        } else if (typeof event.data === 'string') {
+          thinkingContent += event.data
+        }
+        reconnectLiveMsg.value.thinking = thinkingContent
+        scheduleRender()
+      } else if (event.type === 'content') {
+        streamStatus.value = '正在生成回答...'
+        reconnectLiveMsg.value.content += event.data
+        scheduleRender()
+      } else if (event.type === 'complete') {
+        break
+      }
+    }
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      console.log('重连任务流被用户终止')
+    } else {
+      console.warn('重连任务流失败:', error)
+    }
+  } finally {
+    if (reconnectRenderTimer) {
+      clearTimeout(reconnectRenderTimer)
+      reconnectRenderTimer = null
+    }
+    reconnectLiveMsg.value = null
+    streamStatus.value = ''
+    isSending.value = false
+    activeTask.value = null
+    stopAbortController.value = null
+    // 任务可能已完成或有新消息，从 DB 重新加载最新消息列表
+    await fetchMessages(stringConvId)
+  }
+}
+
+const checkAndReconnect = async (convId: string) => {
+  if (convId.startsWith('local-')) return
+  const task = await checkActiveTask(parseInt(convId))
+  if (task.active) {
+    activeTask.value = task as any
+    // 如果有待审批问题，立即展示审批对话框（页面刷新后重连）
+    if (task.pendingQuestionUuid) {
+      pendingQuestion.value = { uuid: task.pendingQuestionUuid, question: task.pendingQuestionText || '请确认是否执行以上操作' }
+      pendingQuestionAnswer.value = ''
+      message.info('检测到有待审批的操作，请确认')
+    }
+    if (task.status === 'running') {
+      // 任务仍在运行，连接事件流追踪进度
+      reconnectToTaskStream(parseInt(convId))
+    } else {
+      // 任务已完成/失败/取消，清除 activeTask（数据已在 DB 中）
+      activeTask.value = null
+    }
+  }
 }
 
 // 思考过程可见性
@@ -712,6 +919,13 @@ onMounted(() => {
   // 如有已保存的工作目录，自动加载文件树
   if (settingsStore.projectRoot) {
     fileTreeLoadPath.value = settingsStore.projectRoot
+  }
+})
+
+// 当首次加载完会话列表且选中了会话后，检查活跃任务
+watch(currentConversationId, (newId) => {
+  if (newId && !newId.startsWith('local-')) {
+    checkAndReconnect(newId)
   }
 })
 </script>
@@ -1232,6 +1446,14 @@ onMounted(() => {
   color: #1677ff;
   font-weight: 500;
 }
+/* 后台任务重连指示器 */
+.task-reconnect-banner {
+  background: #fff7e6;
+  border-bottom: 1px solid #ffd591;
+}
+.task-reconnect-banner .stream-indicator-text {
+  color: #d46b08;
+}
 @keyframes streamPulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.8); }
@@ -1357,6 +1579,45 @@ onMounted(() => {
 }
 .ask-user-input-row .a-input {
   flex: 1;
+}
+
+/* ===== 重连实时消息容器 ===== */
+.reconnect-container {
+  margin: 0 16px 8px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fafafa;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+.reconnect-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #666;
+  background: #f0f5ff;
+  border-bottom: 1px solid #e8e8e8;
+}
+.reconnect-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1677ff;
+  animation: reconnect-pulse 1.2s ease-in-out infinite;
+}
+@keyframes reconnect-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.reconnect-body {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 12px 16px 4px;
+}
+.reconnect-body .message-item {
+  margin-bottom: 0;
 }
 </style>
 

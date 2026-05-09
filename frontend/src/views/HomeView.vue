@@ -832,10 +832,9 @@ const sendMessage = async () => {
         case 'ask_user':
           // 收到 ask_user 问题，显示问答面板
           try {
-            const qData = JSON.parse(event.data)
-            pendingQuestion.value = { uuid: qData.uuid, question: qData.question }
+            pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question }
             pendingQuestionAnswer.value = ''
-            console.log('收到 ask_user 问题:', qData.question)
+            console.log('收到 ask_user 问题:', event.data.question)
           } catch (e) {
             console.warn('解析 ask_user 事件失败:', e)
           }

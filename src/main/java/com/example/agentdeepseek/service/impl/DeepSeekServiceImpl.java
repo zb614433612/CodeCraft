@@ -4,6 +4,7 @@ import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.model.dto.ChatRequest;
+import com.example.agentdeepseek.model.entity.AgentTask;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
@@ -14,6 +15,7 @@ import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.ToolExecutor;
+import com.example.agentdeepseek.tool.impl.DeepSeekAnalyzer;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.example.agentdeepseek.util.OperationDetailGenerator;
 import com.example.agentdeepseek.util.PromptUtil;
@@ -25,13 +27,17 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.BeanFactory;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -42,7 +48,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * DeepSeek API服务实现类
@@ -62,13 +74,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final PendingQuestionStore pendingQuestionStore;
     private final ExecutionTokenManager executionTokenManager;
     private final SkillService skillService;
+    private final DeepSeekAnalyzer deepSeekAnalyzer;
 
     // 常量定义
     private static final String DATA_PREFIX = "data: ";
     private static final String TEMPERATURE_FIELD = "temperature";
     private static final int MAX_TOOL_CALL_ITERATIONS = 50;
+    private static final int MAX_CONTEXT_TOKENS = 800000;
     private static final double DEFAULT_TEMPERATURE = 1.0;
     private static final int SESSION_NAME_TRUNCATE_LENGTH = 6;
+    private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
+
+    // ===== 后台任务相关 =====
+    private final ExecutorService taskExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "bg-task-");
+        t.setDaemon(true);
+        return t;
+    });
+    // 活跃任务的 Sinks 事件总线（conversationId → Sink）
+    private final Map<Long, Sinks.Many<String>> taskEventSinks = new ConcurrentHashMap<>();
+    // 活跃任务的 Flux 订阅引用（conversationId → Disposable，用于取消）
+    private final Map<Long, Disposable> taskSubscriptions = new ConcurrentHashMap<>();
+    // 评委已批准的额外迭代次数（conversationId → totalGranted）
+    private final Map<Long, Integer> judgeGrantedIterations = new ConcurrentHashMap<>();
 
     public DeepSeekServiceImpl(WebClient deepSeekWebClient,
                                DeepSeekConfig deepSeekConfig,
@@ -78,7 +106,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                ToolExecutor toolExecutor,
                                PendingQuestionStore pendingQuestionStore,
                                ExecutionTokenManager executionTokenManager,
-                               SkillService skillService) {
+                               SkillService skillService,
+                               DeepSeekAnalyzer deepSeekAnalyzer) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -88,6 +117,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.pendingQuestionStore = pendingQuestionStore;
         this.executionTokenManager = executionTokenManager;
         this.skillService = skillService;
+        this.deepSeekAnalyzer = deepSeekAnalyzer;
     }
 
     @Override
@@ -159,6 +189,39 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 log.debug("添加user_profile.user_id列成功");
             } catch (Exception e) {
                 log.debug("添加user_profile.user_id列失败，可能已经存在: {}", e.getMessage());
+            }
+
+            // 创建后台任务表（如果不存在）
+            try {
+                jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS agent_task (" +
+                        "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
+                        "conversation_id BIGINT NOT NULL, " +
+                        "status VARCHAR(20) NOT NULL DEFAULT 'running', " +
+                        "iteration INT DEFAULT 0, " +
+                        "max_iterations INT DEFAULT 50, " +
+                        "error_message TEXT, " +
+                        "event_count INT DEFAULT 0, " +
+                        "created_at DATETIME NOT NULL, " +
+                        "updated_at DATETIME NOT NULL, " +
+                        "INDEX idx_conversation_id (conversation_id), " +
+                        "INDEX idx_status (status)" +
+                        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+                log.debug("创建agent_task表成功");
+            } catch (Exception e) {
+                log.debug("创建agent_task表失败，可能已经存在: {}", e.getMessage());
+            }
+            // 添加pending_question列到agent_task表（用于页面刷新后重连展示审批对话框）
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN pending_question_uuid VARCHAR(36) AFTER event_count");
+                log.debug("添加agent_task.pending_question_uuid列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.pending_question_uuid列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN pending_question_text TEXT AFTER pending_question_uuid");
+                log.debug("添加agent_task.pending_question_text列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.pending_question_text列失败，可能已经存在: {}", e.getMessage());
             }
 
             log.debug("数据库表初始化完成");
@@ -375,7 +438,69 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 }
             }
         }
+        // 裁剪过长的历史上下文（token 估算 + 滑动窗口）
+        trimToTokenBudget(result);
         return result;
+    }
+
+
+    /**
+     * 估算消息列表的 token 数（粗略值：中英文混合约 3 字符/token）
+     */
+    private int estimateTokens(List<Map<String, Object>> messages) {
+        int total = 0;
+        for (Map<String, Object> msg : messages) {
+            String content = (String) msg.getOrDefault("content", "");
+            total += content.length() / 3 + 10;
+            String reasoning = (String) msg.getOrDefault("reasoning_content", "");
+            if (reasoning != null && !reasoning.isEmpty()) {
+                total += reasoning.length() / 3;
+            }
+            if (msg.containsKey("tool_calls")) total += 20;
+            if (msg.containsKey("tool_call_id")) total += 5;
+        }
+        return Math.max(total, 1);
+    }
+
+    /**
+     * Token 感知的上下文滑动窗口裁剪
+     * 从最早的历史开始，按完整轮次（user + assistant + tool）裁剪，直到 token 数低于上限
+     */
+    private void trimToTokenBudget(List<Map<String, Object>> messages) {
+        if (messages.isEmpty()) return;
+
+        int estimatedTokens = estimateTokens(messages);
+        if (estimatedTokens <= MAX_CONTEXT_TOKENS) return;
+
+        int beforeSize = messages.size();
+        log.warn("历史上下文超限：估算 {} tokens (上限 {}), 开始裁剪（共 {} 条消息）",
+                estimatedTokens, MAX_CONTEXT_TOKENS, beforeSize);
+
+        // 从索引 1 开始裁剪（保留 system 消息），保留最后一条消息（当前用户消息）
+        int lastIdx = messages.size() - 1;
+        int idx = 1;
+        while (idx < lastIdx) {
+            // 找到当前轮次的结束：[idx, endIdx)，以遇到 user/system 为界
+            int endIdx = idx + 1;
+            while (endIdx < lastIdx) {
+                String role = (String) messages.get(endIdx).get("role");
+                if ("user".equals(role) || "system".equals(role)) break;
+                endIdx++;
+            }
+
+            // 移除这一轮（从后往前删避免索引错乱）
+            for (int i = endIdx - 1; i >= idx; i--) {
+                messages.remove(i);
+            }
+            lastIdx = messages.size() - 1;
+
+            estimatedTokens = estimateTokens(messages);
+            if (estimatedTokens <= MAX_CONTEXT_TOKENS) break;
+        }
+
+        int trimmed = beforeSize - messages.size();
+        log.info("上下文裁剪完成：移除了 {} 条消息，剩余 {} 条，估算 {} tokens",
+                trimmed, messages.size(), estimatedTokens);
     }
 
 
@@ -483,6 +608,31 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         return result;
     }
 
+    /**
+     * 清洗SSE协议框架垃圾（data: 前缀、[DONE]标记等），提取纯文本内容
+     * 当正常解析content失败时作为最后的回退使用
+     */
+    private String cleanSseContent(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        // 去除 data: 前缀、[DONE] 标记、换行符
+        String cleaned = raw.replaceAll("^data:\\s*", "")
+                .replaceAll("\\n\\ndata:\\s*\\[DONE\\]\\s*", "")
+                .replaceAll("\\[DONE\\]", "")
+                .trim();
+        // 如果清洗后仍为JSON格式（data: {"choices":...}），尝试提取content字段
+        if (cleaned.startsWith("{")) {
+            try {
+                JsonNode json = objectMapper.readTree(cleaned);
+                JsonNode choices = json.path("choices");
+                if (choices.isArray() && choices.size() > 0) {
+                    JsonNode delta = choices.get(0).path("delta");
+                    String deltaContent = delta.path("content").asText("");
+                    if (!deltaContent.isEmpty()) return deltaContent;
+                }
+            } catch (Exception ignored) {}
+        }
+        return cleaned;
+    }
 
     /**
      * 会话上下文，包含会话ID和API请求
@@ -682,8 +832,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         boolean hasTools = toolDefinitions != null && toolDefinitions.size() > 0;
 
         if (hasTools) {
-            // 有工具定义，执行半流式工具调用循环
-            return executeSemiStreamingToolCycle(conversationId, storageConversationId, apiRequest);
+            // 取消同一会话中正在运行的后台任务
+            cancelRunningTask(conversationId);
+            // 在后台启动工具循环（断开不销毁），返回事件流
+            return startBackgroundTask(conversationId, storageConversationId, apiRequest);
         } else {
             // 没有工具定义，使用原有流式逻辑
             // 收集响应内容，用于保存助手消息
@@ -728,12 +880,169 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         String content = extracted.get("content");
                         String reasoning = extracted.get("reasoning");
                         if (content == null || content.isEmpty()) {
-                            content = fullResponse;
+                            content = cleanSseContent(fullResponse);
+                            log.warn("未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
                         }
                         saveAssistantMessage(storageConversationId, content, reasoning);
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);
                     });
+        }
+    }
+
+    // ===== 后台任务管理 =====
+
+    private void cancelRunningTask(Long conversationId) {
+        Disposable sub = taskSubscriptions.remove(conversationId);
+        if (sub != null && !sub.isDisposed()) {
+            sub.dispose();
+            log.info("取消会话 {} 的正在运行的后台任务", conversationId);
+        }
+        taskEventSinks.remove(conversationId);
+        judgeGrantedIterations.remove(conversationId);
+        try {
+            jdbcTemplate.update("UPDATE agent_task SET status = 'cancelled', updated_at = NOW() WHERE conversation_id = ? AND status = 'running'", conversationId);
+        } catch (Exception e) {
+            log.debug("取消任务记录失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 在后台启动工具循环，事件通过 Sinks 转发
+     * SSE 断开后工具循环继续执行，不销毁
+     */
+    private Flux<String> startBackgroundTask(Long conversationId, Long storageConversationId, Map<String, Object> apiRequest) {
+        // 创建任务记录
+        AgentTask task = new AgentTask(conversationId, MAX_TOOL_CALL_ITERATIONS);
+        try {
+            jdbcTemplate.update("INSERT INTO agent_task (conversation_id, status, iteration, max_iterations, event_count, created_at, updated_at) VALUES (?, 'running', 0, ?, 0, NOW(), NOW())",
+                    conversationId, MAX_TOOL_CALL_ITERATIONS);
+            Long taskId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
+            if (taskId != null) task.setId(taskId);
+        } catch (Exception e) {
+            log.warn("创建任务记录失败: {}", e.getMessage());
+        }
+
+        // 创建事件 Sink（replay 模式，新订阅者可获取历史事件，确保页面刷新重连后不丢事件）
+        Sinks.Many<String> sink = Sinks.unsafe().many().replay().limit(100000);
+        taskEventSinks.put(conversationId, sink);
+
+        // 在后台线程订阅工具循环 Flux
+        AtomicInteger eventCounter = new AtomicInteger(0);
+        Disposable sub = executeSemiStreamingToolCycle(conversationId, storageConversationId, apiRequest)
+                .subscribe(
+                        event -> {
+                            Sinks.EmitResult result = sink.tryEmitNext(event);
+                            if (result != Sinks.EmitResult.OK) {
+                                log.trace("事件发送结果: {} (SSE 断开时正常)", result);
+                            }
+                            // 每 50 个事件更新一次任务状态（准确计数而非概率采样）
+                            int count = eventCounter.incrementAndGet();
+                            if (task.getId() != null && count % 50 == 0) {
+                                try {
+                                    jdbcTemplate.update("UPDATE agent_task SET event_count = ?, updated_at = NOW() WHERE id = ?", count, task.getId());
+                                } catch (Exception ignored) {}
+                            }
+                        },
+                        error -> {
+                            log.error("后台任务失败: {}", error.getMessage());
+                            sink.tryEmitError(error);
+                            if (task.getId() != null) {
+                                try {
+                                    jdbcTemplate.update("UPDATE agent_task SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?",
+                                            error.getMessage() != null ? error.getMessage().substring(0, Math.min(500, error.getMessage().length())) : "未知错误", task.getId());
+                                } catch (Exception ignored) {}
+                            }
+                            taskEventSinks.remove(conversationId);
+                            taskSubscriptions.remove(conversationId);
+                        },
+                        () -> {
+                            log.info("后台任务完成: conversationId={}", conversationId);
+                            sink.tryEmitComplete();
+                            if (task.getId() != null) {
+                                try {
+                                    int finalCount = eventCounter.get();
+                                    jdbcTemplate.update("UPDATE agent_task SET event_count = ?, status = 'completed', updated_at = NOW() WHERE id = ?", finalCount, task.getId());
+                                } catch (Exception ignored) {}
+                            }
+                            taskEventSinks.remove(conversationId);
+                            taskSubscriptions.remove(conversationId);
+                        }
+                );
+        taskSubscriptions.put(conversationId, sub);
+
+        // 返回 Sink 的 Flux（SSE 客户端订阅此 Flux）
+        return sink.asFlux()
+                .doOnCancel(() -> log.info("SSE 客户端断开，任务 {} 在后台继续执行", conversationId))
+                .doOnError(e -> log.error("SSE 错误: {}", e.getMessage()));
+    }
+
+    /**
+     * 获取会话的活跃任务状态
+     */
+    public AgentTask getActiveTask(Long conversationId) {
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                    "SELECT * FROM agent_task WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1", conversationId);
+            if (!rows.isEmpty()) {
+                Map<String, Object> row = rows.get(0);
+                AgentTask task = new AgentTask();
+                task.setId(((Number) row.get("id")).longValue());
+                task.setConversationId(((Number) row.get("conversation_id")).longValue());
+                task.setStatus((String) row.get("status"));
+                task.setIteration(row.get("iteration") != null ? ((Number) row.get("iteration")).intValue() : 0);
+                task.setMaxIterations(row.get("max_iterations") != null ? ((Number) row.get("max_iterations")).intValue() : MAX_TOOL_CALL_ITERATIONS);
+                task.setErrorMessage((String) row.get("error_message"));
+                task.setEventCount(row.get("event_count") != null ? ((Number) row.get("event_count")).intValue() : 0);
+                task.setPendingQuestionUuid((String) row.get("pending_question_uuid"));
+                task.setPendingQuestionText((String) row.get("pending_question_text"));
+                return task;
+            }
+        } catch (Exception e) {
+            log.debug("查询任务状态失败: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * 订阅活跃任务的事件流（用于重连）
+     */
+    public Flux<String> subscribeToTask(Long conversationId) {
+        Sinks.Many<String> sink = taskEventSinks.get(conversationId);
+        if (sink != null) {
+            return sink.asFlux()
+                    .doOnCancel(() -> log.info("重连客户端断开"));
+        }
+        // 任务在运行但 Sink 已不存在（如服务重启），返回状态事件
+        AgentTask task = getActiveTask(conversationId);
+        if (task != null) {
+            return Flux.just("{\"event\":\"task_status\",\"status\":\"running\",\"taskId\":" + task.getId() + "}");
+        }
+        return Flux.empty();
+    }
+
+    @Override
+    public void cancelTask(Long conversationId) {
+        cancelRunningTask(conversationId);
+    }
+
+    /**
+     * 持久化/清除待审批问题到任务记录（支持页面刷新后重连展示审批对话框）
+     * @param conversationId 会话ID
+     * @param uuid 待审批问题UUID，为null时清除
+     * @param text 待审批问题文本，为null时清除
+     */
+    private void updatePendingQuestion(Long conversationId, String uuid, String text) {
+        try {
+            if (uuid != null) {
+                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = ?, pending_question_text = ?, updated_at = NOW() WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+                        uuid, text, conversationId);
+            } else {
+                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = NULL, pending_question_text = NULL, updated_at = NOW() WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+                        conversationId);
+            }
+        } catch (Exception e) {
+            log.debug("更新待审批问题失败: {}", e.getMessage());
         }
     }
 
@@ -757,6 +1066,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             messages.add(mutableMsg);
         }
 
+        // 初始化评委扩展计数器
+        judgeGrantedIterations.put(conversationId, 0);
+
         // 使用递归函数处理工具调用循环
         return handleToolCallIteration(conversationId, storageConversationId, initialApiRequest, messages, 0, MAX_TOOL_CALL_ITERATIONS);
     }
@@ -774,8 +1086,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private Flux<String> handleToolCallIteration(Long conversationId, Long storageConversationId, Map<String, Object> initialApiRequest,
                                                  List<Map<String, Object>> messages, int iteration, int maxIterations) {
         if (iteration >= maxIterations) {
-            log.warn("达到最大工具调用迭代次数 {}", maxIterations);
-            return Flux.error(new RuntimeException("工具调用达到最大迭代次数限制，请简化请求或分批执行"));
+            int totalGranted = judgeGrantedIterations.getOrDefault(conversationId, 0);
+            if (totalGranted >= MAX_JUDGE_GRANTED_ITERATIONS) {
+                log.warn("评委已累计增加 {} 次迭代，达到上限，强制结束", totalGranted);
+                return Flux.just(createReasoningSSEEvent(
+                        "任务迭代次数已超出评委允许的最大扩展额度（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次），自动终止。"));
+            }
+            log.warn("达到最大工具调用迭代次数 {}，调用评委评估", maxIterations);
+            return evaluateWithJudge(conversationId, storageConversationId, initialApiRequest,
+                    messages, iteration, maxIterations);
         }
 
         log.debug("半流式工具调用循环迭代 {}，消息数量: {}", iteration + 1, messages.size());
@@ -788,6 +1107,268 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         return handleStreamingPhase(conversationId, storageConversationId, apiRequest, messages, iteration, maxIterations);
     }
 
+    // ===== 循环检测（防原地打转） =====
+
+    /**
+     * 检测最近连续的工具调用是否重复（相同工具+相同关键参数）
+     */
+    private boolean hasRepeatedCalls(List<Map<String, Object>> messages, int threshold) {
+        int repeatCount = 0;
+        String lastPattern = null;
+
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Map<String, Object> msg = messages.get(i);
+            if (!"assistant".equals(msg.get("role")) || !msg.containsKey("tool_calls")) {
+                continue;
+            }
+
+            JsonNode toolCalls = (JsonNode) msg.get("tool_calls");
+            String pattern = buildToolCallPattern(toolCalls);
+            if (pattern == null || pattern.isEmpty()) continue;
+
+            if (lastPattern == null) {
+                lastPattern = pattern;
+                repeatCount = 1;
+            } else if (pattern.equals(lastPattern)) {
+                repeatCount++;
+                if (repeatCount >= threshold) return true;
+            } else {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 构建工具调用的特征签名，用于比较是否重复
+     */
+    private String buildToolCallPattern(JsonNode toolCalls) {
+        if (toolCalls == null || !toolCalls.isArray() || toolCalls.isEmpty()) return "";
+        List<String> signatures = new ArrayList<>();
+        for (JsonNode call : toolCalls) {
+            String name = call.path("function").path("name").asText("");
+            String args = call.path("function").path("arguments").asText("");
+            signatures.add(extractToolKey(name, args));
+        }
+        Collections.sort(signatures);
+        return String.join("|", signatures);
+    }
+
+    /**
+     * 提取工具调用的关键参数标识，忽略不影响结果的参数差异
+     */
+    private String extractToolKey(String toolName, String argsJson) {
+        if (argsJson == null || argsJson.isEmpty() || "null".equals(argsJson)) {
+            return toolName;
+        }
+        try {
+            JsonNode args = objectMapper.readTree(argsJson);
+            return switch (toolName) {
+                case "read_file", "write_file", "edit_file", "delete_file" -> {
+                    String path = args.path("file_path").asText("");
+                    if (path.isEmpty()) path = args.path("path").asText("");
+                    yield toolName + ":" + (path.isEmpty() ? "*" : path);
+                }
+                case "run_command", "run_background_command" -> {
+                    String cmd = args.path("command").asText("");
+                    yield toolName + ":" + (cmd.isEmpty() ? "*" : cmd);
+                }
+                case "execute_sql" -> {
+                    String sql = args.path("sql").asText("");
+                    yield toolName + ":" + (sql.isEmpty() ? "*" : sql);
+                }
+                case "git_add" -> {
+                    String files = args.path("files").asText("");
+                    yield toolName + ":" + (files.isEmpty() ? "*" : files);
+                }
+                case "git_commit" -> {
+                    String msg = args.path("message").asText("");
+                    yield toolName + ":" + (msg.isEmpty() ? "*" : msg);
+                }
+                case "git_push", "kill_process" -> toolName;
+                default -> toolName;
+            };
+        } catch (Exception e) {
+            return toolName;
+        }
+    }
+
+    // ===== 评委评估（迭代超限处理） =====
+
+    /**
+     * 评委判断结果
+     */
+    private static class JudgeResult {
+        String judgment; // "extend" or "reject"
+        String reason;
+        int additionalIterations;
+        String summary;
+    }
+
+    /**
+     * 解析评委 JSON 响应
+     * 支持处理被 ```json 代码块包裹的情况
+     */
+    private JudgeResult parseJudgeResult(String response) {
+        try {
+            String jsonStr = response;
+            // 提取 ```json ... ``` 包裹的内容
+            if (jsonStr.contains("```json")) {
+                jsonStr = jsonStr.substring(jsonStr.indexOf("```json") + 7);
+                jsonStr = jsonStr.substring(0, jsonStr.indexOf("```"));
+            } else if (jsonStr.contains("```")) {
+                jsonStr = jsonStr.substring(jsonStr.indexOf("```") + 3);
+                jsonStr = jsonStr.substring(0, jsonStr.indexOf("```"));
+            }
+            jsonStr = jsonStr.trim();
+
+            JsonNode root = objectMapper.readTree(jsonStr);
+            JudgeResult result = new JudgeResult();
+            result.judgment = root.path("judgment").asText("");
+            result.reason = root.path("reason").asText("");
+            result.additionalIterations = root.path("additional_iterations").asInt(10);
+            result.summary = root.path("summary").asText("");
+
+            if (!"extend".equals(result.judgment) && !"reject".equals(result.judgment)) {
+                log.warn("评委返回未知判断: {}", result.judgment);
+                return null;
+            }
+            if (result.judgment.isEmpty()) return null;
+
+            return result;
+        } catch (Exception e) {
+            log.warn("解析评委响应失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 构建评委评估上下文
+     * 从消息列表中提取：原始用户请求 + 工具调用摘要 + 最近工具结果
+     */
+    private String buildJudgeContext(List<Map<String, Object>> messages) {
+        StringBuilder sb = new StringBuilder();
+
+        // 提取原始用户请求
+        sb.append("## 原始任务\n");
+        for (Map<String, Object> msg : messages) {
+            if ("user".equals(msg.get("role"))) {
+                String content = (String) msg.get("content");
+                if (content != null && !content.isEmpty()) {
+                    sb.append(content).append("\n");
+                    break;
+                }
+            }
+        }
+
+        // 提取工具调用历史摘要
+        sb.append("\n## 工具调用历史\n");
+        int iter = 0;
+        for (Map<String, Object> msg : messages) {
+            if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
+                JsonNode toolCalls = (JsonNode) msg.get("tool_calls");
+                if (toolCalls != null && toolCalls.isArray()) {
+                    for (JsonNode tc : toolCalls) {
+                        String name = tc.path("function").path("name").asText("");
+                        String args = tc.path("function").path("arguments").asText("");
+                        if (args.length() > 200) args = args.substring(0, 200) + "...";
+                        sb.append("  [Iter ").append(iter).append("] ")
+                                .append(name).append("(").append(args).append(")\n");
+                    }
+                }
+                iter++;
+            }
+        }
+
+        // 重复检测信息
+        boolean hasRepeat = hasRepeatedCalls(messages, 3);
+        sb.append("\n## 重复检测\n");
+        sb.append("连续重复调用: ").append(hasRepeat ? "是（可能存在死循环）" : "否（调用模式正常）").append("\n");
+        sb.append("总迭代次数: ").append(iter).append("\n");
+
+        // 最近 3 次工具结果（截取末尾部分）
+        sb.append("\n## 最近工具结果\n");
+        int resultCount = 0;
+        for (int i = messages.size() - 1; i >= 0 && resultCount < 3; i--) {
+            Map<String, Object> msg = messages.get(i);
+            if ("tool".equals(msg.get("role"))) {
+                String content = (String) msg.get("content");
+                if (content != null && !content.isEmpty()) {
+                    String truncated = content.length() > 500 ? content.substring(0, 500) + "..." : content;
+                    sb.append(truncated).append("\n---\n");
+                    resultCount++;
+                }
+            }
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * 调用子 agent 评委评估任务进展
+     * 迭代超限时，不直接报错退出，而是让评委分析是否应该继续
+     */
+    private Flux<String> evaluateWithJudge(Long conversationId, Long storageConversationId,
+                                           Map<String, Object> initialApiRequest,
+                                           List<Map<String, Object>> messages, int iteration, int maxIterations) {
+        // 1. 构建评委上下文
+        String judgeContext = buildJudgeContext(messages);
+
+        // 2. 加载评委提示词
+        String judgePrompt = PromptUtil.getPrompt("judge_prompt.txt");
+        if (judgePrompt == null || judgePrompt.isEmpty()) {
+            log.warn("评委提示词加载失败，使用默认拒绝策略");
+            return Flux.just(createReasoningSSEEvent("评委提示词加载失败，任务自动终止。"));
+        }
+
+        // 3. 调用评委 API（非流式，超时 30s）
+        return Mono.fromCallable(() -> deepSeekAnalyzer.analyze(judgePrompt, judgeContext, 30))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(response -> {
+                    // 4. 解析 JSON 响应
+                    JudgeResult result = parseJudgeResult(response);
+                    if (result == null) {
+                        log.warn("评委响应解析失败，使用默认拒绝策略: {}", response);
+                        return Flux.just(createReasoningSSEEvent(
+                                "评委评估解析失败，任务自动终止。"));
+                    }
+
+                    if ("extend".equals(result.judgment)) {
+                        int additional = Math.min(result.additionalIterations, 30); // 单次最多 30
+                        int newMaxIterations = maxIterations + additional;
+                        // 累计已批准的扩展次数
+                        int newTotalGranted = judgeGrantedIterations.merge(conversationId, additional, Integer::sum);
+
+                        log.info("评委评估：extend +{}，当前累计扩展 {}，新上限 {}",
+                                additional, newTotalGranted, newMaxIterations);
+
+                        String extendEvent = createReasoningSSEEvent(
+                                "**🤖 评委评估：任务进展正常，继续执行**\n\n" +
+                                        "**理由：** " + result.reason + "\n\n" +
+                                        "**当前进度：** " + result.summary + "\n\n" +
+                                        "**增加 " + additional + " 次迭代**（已累计扩展 " + newTotalGranted + "/" + MAX_JUDGE_GRANTED_ITERATIONS + " 次）");
+
+                        return Flux.just(extendEvent)
+                                .concatWith(handleToolCallIteration(
+                                        conversationId, storageConversationId, initialApiRequest,
+                                        messages, iteration, newMaxIterations));
+                    } else {
+                        log.info("评委评估：reject，任务终止");
+
+                        String rejectEvent = createReasoningSSEEvent(
+                                "**🤖 评委评估：任务已终止**\n\n" +
+                                        "**原因：** " + result.reason + "\n\n" +
+                                        "**经验总结：** " + result.summary);
+
+                        return Flux.just(rejectEvent);
+                    }
+                })
+                .onErrorResume(e -> {
+                    log.error("评委评估调用失败", e);
+                    return Flux.just(createReasoningSSEEvent(
+                            "评委评估调用失败，任务自动终止。错误: " + e.getMessage()));
+                });
+    }
 
     /**
      * 合并工具调用delta数据
@@ -1153,12 +1734,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         com.example.agentdeepseek.model.dto.PendingQuestion pq =
                                                 new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
                                         pendingQuestionStore.put(uuid, pq);
+                                        // 持久化待审批问题到任务记录（支持页面刷新后重连展示）
+                                        updatePendingQuestion(conversationId, uuid, question);
                                         approvalEvents.add(createAskUserEvent(uuid, question));
 
                                         return Flux.fromIterable(approvalEvents)
                                                 .concatWith(Mono.fromFuture(pq.getFuture())
                                                         .flatMapMany(answer -> {
                                                             pendingQuestionStore.remove(uuid);
+                                                            updatePendingQuestion(conversationId, null, null);
                                                             boolean approved = "批准".equals(answer.trim()) || "同意".equals(answer.trim());
                                                             log.info("用户授权结果: approved={}, answer={}", approved, answer);
 
@@ -1217,6 +1801,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                         .timeout(java.time.Duration.ofMinutes(5))
                                                         .onErrorResume(e -> {
                                                             pendingQuestionStore.remove(uuid);
+                                                            updatePendingQuestion(conversationId, null, null);
                                                             if (e instanceof java.util.concurrent.TimeoutException) {
                                                                 log.warn("等待用户授权超时: uuid={}", uuid);
                                                                 return Flux.just(createReasoningSSEEvent("等待用户授权超时，请重新发送消息。"));
@@ -1344,7 +1929,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         if (content == null || content.isEmpty()) {
                             content = contentCollector.toString();
                             if (content.isEmpty()) {
-                                content = fullResponse;
+                                content = cleanSseContent(fullResponse);
+                                log.warn("工具循环中未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
                             }
                         }
                         saveAssistantMessage(storageConversationId, content, reasoning);
@@ -1438,6 +2024,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         com.example.agentdeepseek.model.dto.PendingQuestion pq =
                 new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
         pendingQuestionStore.put(uuid, pq);
+        // 持久化待审批问题到任务记录（支持页面刷新后重连展示）
+        updatePendingQuestion(conversationId, uuid, question);
 
         log.info("ask_user 等待回答: uuid={}, question={}", uuid, question);
 
@@ -1500,6 +2088,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         .timeout(java.time.Duration.ofMinutes(5))
                         .onErrorResume(e -> {
                             pendingQuestionStore.remove(uuid);
+                            updatePendingQuestion(conversationId, null, null);
                             if (e instanceof java.util.concurrent.TimeoutException) {
                                 log.warn("等待用户回答超时: uuid={}", uuid);
                                 String errorMsg = "等待用户回答超时，请重新发送消息。";

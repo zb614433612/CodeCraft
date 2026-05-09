@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.service;
 
 import com.example.agentdeepseek.model.dto.ChatRequest;
+import com.example.agentdeepseek.model.entity.AgentTask;
 import reactor.core.publisher.Flux;
 
 /**
@@ -17,4 +18,18 @@ public interface DeepSeekService {
      */
     Flux<String> streamChat(ChatRequest request);
 
+    /**
+     * 获取会话的活跃任务状态
+     */
+    AgentTask getActiveTask(Long conversationId);
+
+    /**
+     * 订阅活跃任务的事件流（用于页面刷新后重连）
+     */
+    Flux<String> subscribeToTask(Long conversationId);
+
+    /**
+     * 取消正在运行的后台任务
+     */
+    void cancelTask(Long conversationId);
 }

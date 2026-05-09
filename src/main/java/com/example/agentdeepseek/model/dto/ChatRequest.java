@@ -41,4 +41,7 @@ public class ChatRequest {
 
     @Schema(description = "思考模式（可选）：non-thinking / thinking / thinking_max，为空则使用服务端默认配置", example = "non-thinking")
     private String thinkingMode;
+
+    @Schema(description = "是否重连到正在执行的后台任务（为true时忽略message等字段）", example = "false")
+    private boolean reconnect;
 }

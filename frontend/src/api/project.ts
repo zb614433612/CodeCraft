@@ -7,6 +7,11 @@ export interface ProjectTreeNode {
   children?: ProjectTreeNode[]
 }
 
+export interface DirectoryEntry {
+  name: string
+  path: string
+}
+
 async function request<T>(url: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
   let authHeader = {}
   try {
@@ -29,4 +34,14 @@ export async function getProjectTree(root = '', depth = 4): Promise<ApiResponse<
   if (root) params.set('root', root)
   params.set('depth', String(depth))
   return request<ProjectTreeNode>(`/project/tree?${params}`)
+}
+
+export async function getDrives(): Promise<ApiResponse<DirectoryEntry[]>> {
+  return request<DirectoryEntry[]>('/project/drives')
+}
+
+export async function getDirChildren(path: string): Promise<ApiResponse<DirectoryEntry[]>> {
+  const params = new URLSearchParams()
+  params.set('path', path)
+  return request<DirectoryEntry[]>(`/project/children?${params}`)
 }

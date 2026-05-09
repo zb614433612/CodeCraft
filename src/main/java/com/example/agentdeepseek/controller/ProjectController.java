@@ -1,8 +1,11 @@
 package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
+import com.example.agentdeepseek.model.vo.DirectoryEntry;
 import com.example.agentdeepseek.model.vo.ProjectTreeNode;
 import com.example.agentdeepseek.service.ProjectService;
+
+import java.util.List;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -38,5 +41,21 @@ public class ProjectController {
         log.debug("获取项目文件树，根目录: {}, 深度: {}", root.isEmpty() ? "当前项目" : root, depth);
         ProjectTreeNode tree = projectService.getProjectTree(root, depth);
         return ApiResponse.success(tree);
+    }
+
+    @GetMapping("/drives")
+    @Operation(summary = "获取系统盘符/根目录列表", description = "Windows 返回 C:/, D:/ 等；Linux/Mac 返回 /")
+    public ApiResponse<List<DirectoryEntry>> listDrives() {
+        List<DirectoryEntry> drives = projectService.listDrives();
+        return ApiResponse.success(drives);
+    }
+
+    @GetMapping("/children")
+    @Operation(summary = "获取指定目录下的子目录列表", description = "返回指定路径下的目录列表（不含文件），用于目录浏览器逐层导航")
+    public ApiResponse<List<DirectoryEntry>> listChildren(
+            @Parameter(description = "父目录路径")
+            @RequestParam String path) {
+        List<DirectoryEntry> children = projectService.listChildren(path);
+        return ApiResponse.success(children);
     }
 }

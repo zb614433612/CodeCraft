@@ -28,9 +28,17 @@ export interface ChatResponse {
   thinking?: string
 }
 
-// 流式聊天响应的事件类型
-export interface StreamChatEvent {
-  type: 'thinking' | 'content' | 'complete' | 'error' | 'ask_user' | 'resume'
+// 流式聊天响应的事件类型（受歧视联合，可根据 type 自动推断 data 类型）
+export type StreamChatEvent = {
+  type: 'thinking' | 'content' | 'complete' | 'resume'
+  data: string
+  sessionId?: number
+} | {
+  type: 'ask_user'
+  data: { uuid: string; question: string }
+  sessionId?: number
+} | {
+  type: 'error'
   data: string
   sessionId?: number
 }
@@ -99,24 +107,18 @@ class StreamChatParser {
     return null
   }
 
-  // 提取一行中所有data:前缀的数据块
+  // 提取一行中data:前缀后的数据块
+  // 标准 SSE 格式: "data: {json}"，一行只有一个 data: 前缀
   extractDataChunks(line: string): string[] {
-    const chunks: string[] = []
-    // 正则匹配 data: 前缀（可选空格），并分割字符串
-    // 使用负向前瞻确保不会错误匹配内容中的"data:"
-    // 简单的实现：按 data: 分割，但需要处理可能没有空格的情况
-    const parts = line.split(/(?=data:\s?)/)
-    for (const part of parts) {
-      const match = part.match(/^data:\s?(.*)/)
-      if (match) {
-        chunks.push(match[1])
-      }
+    const match = line.match(/^data:\s?(.*)/)
+    if (match) {
+      return [match[1]]
     }
-    // 如果没有找到data:前缀，返回原行
-    if (chunks.length === 0) {
+    // 非 data: 行（如 [DONE]），按原行返回由 processDataChunk 处理
+    if (line.trim()) {
       return [line]
     }
-    return chunks
+    return []
   }
 
   // 解析原始文本流中的<think>标签
@@ -181,7 +183,7 @@ class StreamChatParser {
       }
       // 处理 ask_user 事件
       if (parsed.event === 'ask_user') {
-        return { type: 'ask_user', data: JSON.stringify({ uuid: parsed.uuid, question: parsed.question }), sessionId: this.sessionId }
+        return { type: 'ask_user', data: { uuid: parsed.uuid, question: parsed.question }, sessionId: this.sessionId }
       }
       // 处理 resume 事件
       if (parsed.event === 'resume') {
@@ -213,6 +215,11 @@ class StreamChatParser {
       }
     } catch (e) {
       // 不是JSON，继续处理
+    }
+
+    // 处理 [DONE] 标记
+    if (dataChunk.trim() === '[DONE]') {
+      return { type: 'complete', data: '', sessionId: this.sessionId }
     }
 
     // 处理普通文本，可能包含<think>标签
@@ -475,6 +482,114 @@ export async function* streamChat(
 
     // 传递其他错误
     throw error
+  }
+}
+
+// ===== 后台任务重连 =====
+
+/**
+ * 检查会话是否有正在运行的后台任务
+ */
+export async function checkActiveTask(conversationId: number): Promise<{
+  active: boolean
+  taskId?: number
+  status?: string
+  iteration?: number
+  eventCount?: number
+  pendingQuestionUuid?: string
+  pendingQuestionText?: string
+}> {
+  try {
+    let authHeader = {}
+    try {
+      const { useUserStore } = await import('@/store/user')
+      const userStore = useUserStore()
+      if (userStore.token) {
+        authHeader = { Authorization: `Bearer ${userStore.token}` }
+      }
+    } catch {}
+    const response = await fetch(`/api/deepseek/task/${conversationId}`, {
+      headers: { ...authHeader }
+    })
+    return await response.json()
+  } catch (e) {
+    console.warn('检查活跃任务失败:', e)
+    return { active: false }
+  }
+}
+
+/**
+ * 订阅后台任务的事件流（用于页面刷新后重连）
+ * 返回 SSE 事件流，格式与 streamChat 一致
+ */
+export async function* taskStream(
+  conversationId: number,
+  abortController?: AbortController
+): AsyncGenerator<StreamChatEvent, void, unknown> {
+  let authHeader = {}
+  try {
+    const { useUserStore } = await import('@/store/user')
+    const userStore = useUserStore()
+    if (userStore.token) {
+      authHeader = { 'Authorization': `Bearer ${userStore.token}` }
+    }
+  } catch (error) {
+    console.warn('获取用户token失败:', error)
+  }
+
+  const controller = abortController ?? new AbortController()
+  const response = await fetch(`/api/deepseek/task/${conversationId}/stream`, {
+    headers: { 'Accept': 'text/event-stream', ...authHeader },
+    signal: controller.signal
+  })
+  if (!response.ok) return
+
+  const reader = response.body?.getReader()
+  if (!reader) return
+
+  const decoder = new TextDecoder()
+  const parser = new StreamChatParser()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      if (line.trim() === '') continue
+      const dataChunks = parser.extractDataChunks(line)
+      for (const dataChunk of dataChunks) {
+        const event = parser.processDataChunk(dataChunk)
+        if (event) yield event
+      }
+    }
+  }
+}
+
+/**
+ * 取消正在运行的后台任务
+ */
+export async function cancelTask(conversationId: number): Promise<boolean> {
+  try {
+    const { useUserStore } = await import('@/store/user')
+    const userStore = useUserStore()
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (userStore.token) {
+      headers['Authorization'] = `Bearer ${userStore.token}`
+    }
+    const res = await fetch(`/api/deepseek/task/${conversationId}/cancel`, {
+      method: 'POST',
+      headers
+    })
+    return res.ok
+  } catch (e) {
+    console.warn('取消任务失败:', e)
+    return false
   }
 }
 

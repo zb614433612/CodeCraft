@@ -2,6 +2,7 @@ package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.model.dto.ChatRequest;
 import com.example.agentdeepseek.model.dto.PendingQuestion;
+import com.example.agentdeepseek.model.entity.AgentTask;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import io.swagger.v3.oas.annotations.Operation;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 import jakarta.servlet.http.HttpServletRequest;
 import reactor.core.publisher.Flux;
 
+import java.util.HashMap;
 import java.util.Map;
 
 
@@ -95,5 +97,51 @@ public class DeepSeekController {
         return Map.of("success", true);
     }
 
+    // ===== 后台任务管理 =====
+
+    /**
+     * 检查会话是否有正在运行的后台任务
+     */
+    @Operation(summary = "检查活跃任务", description = "查询指定会话是否有正在执行的后台任务，包含待审批问题信息（用于页面刷新后重连展示审批对话框）")
+    @GetMapping("/task/{conversationId}")
+    public Map<String, Object> getActiveTask(@PathVariable Long conversationId) {
+        AgentTask task = deepSeekService.getActiveTask(conversationId);
+        if (task != null) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("active", true);
+            result.put("taskId", task.getId());
+            result.put("status", task.getStatus());
+            result.put("iteration", task.getIteration());
+            result.put("eventCount", task.getEventCount());
+            if (task.getPendingQuestionUuid() != null) {
+                result.put("pendingQuestionUuid", task.getPendingQuestionUuid());
+                result.put("pendingQuestionText", task.getPendingQuestionText());
+            }
+            return result;
+        }
+        return Map.of("active", false);
+    }
+
+    /**
+     * 订阅后台任务的事件流（用于页面刷新后重连）
+     * 返回 SSE 流，与 /chat/stream 格式一致
+     */
+    @Operation(summary = "订阅任务事件流", description = "重连到正在执行的后台任务，接收实时事件")
+    @GetMapping(value = "/task/{conversationId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> subscribeTask(@PathVariable Long conversationId) {
+        return deepSeekService.subscribeToTask(conversationId)
+                .map(chunk -> ServerSentEvent.builder(chunk).build())
+                .doOnCancel(() -> log.info("任务事件流客户端断开: conversationId={}", conversationId));
+    }
+
+    /**
+     * 取消正在运行的后台任务
+     */
+    @Operation(summary = "取消后台任务")
+    @PostMapping("/task/{conversationId}/cancel")
+    public Map<String, Object> cancelTask(@PathVariable Long conversationId) {
+        deepSeekService.cancelTask(conversationId);
+        return Map.of("success", true, "message", "任务已取消");
+    }
 
 }

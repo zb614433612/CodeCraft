@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
@@ -111,7 +111,8 @@ function createWindow() {
     minHeight: 700,
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     },
     title: 'zb-agent',
     icon: path.join(__dirname, '..', 'frontend', 'public', 'favicon.svg'),
@@ -133,6 +134,19 @@ function createWindow() {
     mainWindow = null
   })
 }
+/**
+ * IPC handler：打开原生目录选择对话框
+ */
+ipcMain.handle('dialog:selectDirectory', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: '选择工作目录'
+  })
+  if (result.canceled || result.filePaths.length === 0) {
+    return null
+  }
+  return result.filePaths[0]
+})
 
 /**
  * 应用启动流程
