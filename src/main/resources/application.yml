@@ -17,8 +17,8 @@ spring:
     url: 'jdbc:mysql://localhost:3306/agent_deepseek?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&verifyServerCertificate=false&nullCatalogMeansCurrent=true&useLegacyDatetimeCode=false'
     # 数据库用户名
     username: root
-    # 数据库密码
-    password: CHANGED
+    # 数据库密码（从环境变量 DB_PASSWORD 读取）
+    password: ${DB_PASSWORD}
     # Hikari连接池配置
     hikari:
       # 最大连接池大小
@@ -55,12 +55,12 @@ spring:
   data:
     # Redis配置
     redis:
-      # Redis主机地址
-      host: 43.138.88.248
+      # Redis主机地址（从环境变量 REDIS_HOST 读取）
+      host: ${REDIS_HOST:localhost}
       # Redis端口
       port: 6379
-      # Redis密码
-      password: CHANGED
+      # Redis密码（从环境变量 REDIS_PASSWORD 读取）
+      password: ${REDIS_PASSWORD}
       # Redis数据库索引
       database: 0
       # 连接超时时间
@@ -122,7 +122,8 @@ web-fetch:
 deepseek:
   # DeepSeek API基础URL
   base-url: https://api.deepseek.com
-  api-key: CHANGED # 从环境变量DEEPSEEK_API_KEY读取，默认为空
+  # API密钥（从环境变量 DEEPSEEK_API_KEY 读取）
+  api-key: ${DEEPSEEK_API_KEY}
   # 默认模型
   default-model: deepseek-v4-pro
   # 思考模式：non-thinking / thinking / thinking_max
