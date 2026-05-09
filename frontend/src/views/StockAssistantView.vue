@@ -503,24 +503,18 @@ const checkHoliday = async () => {
   try {
     const year = new Date().getFullYear()
     const res = await fetch(`https://cdn.jsdelivr.net/npm/chinese-days/dist/years/${year}.json`)
-    const data = await res.json() as { holidays: Record<string, string>; workdays: Record<string, string> }
+    const data = await res.json() as { holidays: string[]; workdays: string[] }
     const today = formatDate(new Date())
 
-    if (data.workdays?.[today]) {
-      // 调休工作日（周末上班）→ 交易
-      isTradingDay.value = true
-    } else if (data.holidays?.[today]) {
+    if (data.holidays?.includes(today)) {
       // 法定节假日 → 不交易
       isTradingDay.value = false
     } else {
-      // 普通日：按周末判断
+      // 非节假日 → 按周六周日判断（补班对股票市场无意义）
       const day = new Date().getDay()
       isTradingDay.value = day >= 1 && day <= 5
     }
-    console.log('节假日判断:', today,
-      data.workdays?.[today] ? '调休工作日' :
-      data.holidays?.[today] ? '法定节假日' : '普通日',
-      '交易日:', isTradingDay.value)
+    console.log('交易日判断:', today, isTradingDay.value)
   } catch (e) {
     console.warn('节假日数据获取失败，使用周判断:', e)
     const day = new Date().getDay()
@@ -1075,6 +1069,7 @@ const fetchStockList = async (page: number = 1) => {
 }
 
 const doSearch = async (page: number = 1) => {
+  await checkHoliday()
   await fetchStockList(page)
   // 渲染后测量实际 item 高度，校准 pageSize
   await nextTick()

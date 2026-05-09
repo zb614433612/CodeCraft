@@ -1098,13 +1098,26 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     }
                                     log.debug("工具调用执行完成，结果数量: {}", toolResults.size());
 
+                                    // 生成操作摘要 thinking 事件
+                                    List<String> operationSummaryEvents = new ArrayList<>();
+                                    for (ToolExecutor.ToolCallResult tr : toolResults) {
+                                        if (tr.getOperationSummary() != null && !tr.getOperationSummary().isEmpty()) {
+                                            operationSummaryEvents.add(createReasoningSSEEvent(tr.getOperationSummary()));
+                                        }
+                                    }
+
                                     // 检查是否有 ask_user 问题
                                     ToolExecutor.ToolCallResult askUserResult = findAskUserResult(toolResults);
                                     if (askUserResult != null) {
-                                        // 处理 ask_user 流程：暂停等待用户回答
-                                        return handleAskUserFlow(askUserResult, toolResults, completeToolCalls,
-                                                messages, toolCallStartEvent, contentCollector.toString(), reasoning,
-                                                conversationId, storageConversationId, apiRequest, iteration, maxIterations);
+                                        // 先发送操作摘要事件，再处理 ask_user
+                                        Flux<String> summaryFlux = Flux.just(toolCallStartEvent);
+                                        for (String se : operationSummaryEvents) {
+                                            summaryFlux = summaryFlux.concatWith(Flux.just(se));
+                                        }
+                                        return summaryFlux.concatWith(
+                                                handleAskUserFlow(askUserResult, toolResults, completeToolCalls,
+                                                        messages, toolCallStartEvent, contentCollector.toString(), reasoning,
+                                                        conversationId, storageConversationId, apiRequest, iteration, maxIterations));
                                     }
 
                                     // 将工具调用消息添加到消息列表，包含之前收集的文本内容
@@ -1139,8 +1152,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         saveToolMessage(storageConversationId, formattedToolContent);
                                     }
 
-                                    // 创建事件流：工具调用开始事件 + 所有工具结果事件 + 下一轮迭代
+                                    // 创建事件流：工具调用开始事件 + 操作摘要 + 工具结果事件 + 下一轮迭代
                                     Flux<String> toolCallEvents = Flux.just(toolCallStartEvent);
+                                    for (String summaryEvent : operationSummaryEvents) {
+                                        toolCallEvents = toolCallEvents.concatWith(Flux.just(summaryEvent));
+                                    }
                                     for (String toolResultEvent : toolResultEvents) {
                                         toolCallEvents = toolCallEvents.concatWith(Flux.just(toolResultEvent));
                                     }

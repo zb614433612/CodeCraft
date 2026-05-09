@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.tool;
 
+import com.example.agentdeepseek.util.OperationDetailGenerator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,11 +36,20 @@ public class ToolExecutor {
         private final String toolCallId;
         private final String toolName;
         private final String content;
+        private final boolean restricted;
+        private final String operationSummary;
 
         public ToolCallResult(String toolCallId, String toolName, String content) {
+            this(toolCallId, toolName, content, false, null);
+        }
+
+        public ToolCallResult(String toolCallId, String toolName, String content,
+                              boolean restricted, String operationSummary) {
             this.toolCallId = toolCallId;
             this.toolName = toolName;
             this.content = content;
+            this.restricted = restricted;
+            this.operationSummary = operationSummary;
         }
 
         public String getToolCallId() {
@@ -52,6 +62,14 @@ public class ToolExecutor {
 
         public String getContent() {
             return content;
+        }
+
+        public boolean isRestricted() {
+            return restricted;
+        }
+
+        public String getOperationSummary() {
+            return operationSummary;
         }
     }
 
@@ -149,7 +167,19 @@ public class ToolExecutor {
             }
 
             String result = tool.execute(parsedArguments);
-            return new ToolCallResult(toolCallId, toolName, result);
+
+            // 生成本地操作摘要（用于展示在 thinking 流中）
+            boolean isRestricted = OperationDetailGenerator.isRestricted(toolName);
+            String operationSummary = null;
+            if (isRestricted && parsedArguments != null) {
+                try {
+                    operationSummary = OperationDetailGenerator.generate(toolName, parsedArguments);
+                } catch (Exception e) {
+                    log.debug("生成操作摘要失败: {}", e.getMessage());
+                }
+            }
+
+            return new ToolCallResult(toolCallId, toolName, result, isRestricted, operationSummary);
         } catch (Exception e) {
             log.error("工具执行异常: tool={}, arguments={}", toolName, arguments, e);
             String briefMsg = e.getMessage();

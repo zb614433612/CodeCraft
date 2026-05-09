@@ -1424,6 +1424,24 @@ onMounted(() => {
 .code-message .hljs-attribute,
 .thinking-text .hljs-attribute { color: #0550ae; }
 
+/* ===== Diff 高亮 ===== */
+.code-message .hljs-addition,
+.thinking-text .hljs-addition {
+  background: #e6ffed;
+  color: #1a7f37;
+  display: inline-block;
+  width: 100%;
+}
+.code-message .hljs-deletion,
+.thinking-text .hljs-deletion {
+  background: #ffebe9;
+  color: #cf222e;
+  display: inline-block;
+  width: 100%;
+}
+.code-message .hljs-section,
+.thinking-text .hljs-section { color: #1677ff; font-weight: 600; }
+
 /* ===== 列表排版 ===== */
 .code-message ol,
 .code-message ul,
