@@ -1,4 +1,5 @@
 package com.example.agentdeepseek.tool.impl;
+import com.example.agentdeepseek.util.CommandUtils;
 import com.example.agentdeepseek.util.ProjectRootContext;
 
 import com.example.agentdeepseek.tool.PermissionContext;
@@ -126,6 +127,9 @@ public class RunBackgroundCommandTool implements Tool {
      * 启动后台进程
      */
     private String startBackgroundProcess(List<String> cmdAndArgs, Path workDir, String originalCommand) {
+        // Windows 兼容：如果命令没有扩展名，尝试追加 PATHEXT 中的扩展名
+        cmdAndArgs = CommandUtils.resolveWindowsExecutable(cmdAndArgs);
+
         ProcessBuilder pb = new ProcessBuilder(cmdAndArgs);
         pb.directory(workDir.toFile());
         pb.redirectErrorStream(true);
