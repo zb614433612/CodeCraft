@@ -1,6 +1,6 @@
 package com.example.agentdeepseek.tool.impl;
 
-import com.example.agentdeepseek.tool.ExecutionTokenManager;
+import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,12 +26,10 @@ public class ExecuteSqlTool implements Tool {
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
-    private final ExecutionTokenManager executionTokenManager;
 
-    public ExecuteSqlTool(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, ExecutionTokenManager executionTokenManager) {
+    public ExecuteSqlTool(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
-        this.executionTokenManager = executionTokenManager;
     }
 
     @Override
@@ -75,10 +73,8 @@ public class ExecuteSqlTool implements Tool {
         // 写操作在手动模式下需要权限锁
         if (!"SELECT".equals(sqlType)) {
             if ("manual".equals(ToolContext.getMode())) {
-                Long sessionId = ToolContext.getConversationId();
-                if (sessionId == null || !executionTokenManager.tryConsume(sessionId)) {
-                    return "错误：增删改操作需要先通过 ask_execution 工具获得您的执行许可";
-                }
+                String response = PermissionContext.requestPermission(getName(), arguments, ToolContext.getConversationId());
+                if (response != null) return response;
             }
         }
 

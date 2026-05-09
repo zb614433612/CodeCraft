@@ -12,8 +12,10 @@ import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
+import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.ToolExecutor;
 import com.example.agentdeepseek.util.ProjectRootContext;
+import com.example.agentdeepseek.util.OperationDetailGenerator;
 import com.example.agentdeepseek.util.PromptUtil;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.core.JsonParser;
@@ -558,9 +560,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (executionMode != null && !executionMode.isEmpty()) {
             String modeInstruction;
             if ("manual".equals(executionMode)) {
-                modeInstruction = "\n\n当前模式：手动。写入文件、修改文件或执行系统命令前，必须调用 ask_execution 工具询问用户，获得确认后才能执行。注意：每次 ask_execution 只授予一次执行权限，用完一个受限工具后需要再次调用 ask_execution 才能执行下一个。不要描述你要调用 ask_execution 的意图——直接调用它。当需求模糊或需要用户决策时，调用 ask_clarification 工具询问用户。";
+                modeInstruction = "\n\n当前模式：手动。写入文件、修改文件、执行命令等受限操作会自动向用户请求授权，无需手动调用 ask_execution。当需求模糊或需要用户决策时，调用 ask_clarification 工具询问用户。";
             } else {
-                modeInstruction = "\n\n当前模式：自动。直接执行所有任务，无需征求用户同意。注意：ask_execution 工具在当前模式下不可用，请自行做出决策并直接执行。行为约束中要求「询问用户」的条款在当前模式下均不适用。";
+                modeInstruction = "\n\n当前模式：自动。直接执行所有任务，无需征求用户同意。行为约束中要求「询问用户」的条款在当前模式下均不适用。";
             }
             // 追加模式指令到已有的系统提示词
             for (Map<String, Object> msg : historyMessages) {
@@ -572,11 +574,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        // 根据执行模式过滤工具列表：auto 模式移除 ask_execution（ask_clarification 始终可用）
+        // ask_execution 已废弃（工具内部自动处理权限），从工具列表中移除
         List<String> filteredToolNames = new ArrayList<>(toolNames);
-        if ("auto".equals(executionMode) || executionMode == null || executionMode.isEmpty()) {
-            filteredToolNames.remove("ask_execution");
-        }
+        filteredToolNames.remove("ask_execution");
 
         // 注入技能：合并技能工具列表，追加技能描述到系统提示词
         if (userId != null && agentType != null) {
@@ -1080,55 +1080,156 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     String toolCallStartEvent = createToolCallStartEvent(invokingToolNames);
                                     log.debug("发送工具调用开始事件: {}", invokingToolNames);
 
-                                    // 执行工具调用（先设置项目根目录和工具执行上下文）
+                                    // 提取执行上下文
                                     String currentProjectRoot = (String) apiRequest.get("_projectRoot");
                                     String currentExecutionMode = (String) apiRequest.get("_executionMode");
+                                    String agentType = (String) apiRequest.get("_agentType");
+                                    Long userId = (Long) apiRequest.get("_userId");
+                                    String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
+
+                                    // 从工具调用参数生成操作摘要（在所有模式下都注入 thinking 流）
+                                    List<String> operationSummaryEvents = new ArrayList<>();
+                                    for (int i = 0; i < completeToolCalls.size(); i++) {
+                                        JsonNode tc = completeToolCalls.get(i);
+                                        String tcToolName = tc.path("function").path("name").asText();
+                                        String argsStr = tc.path("function").path("arguments").asText();
+                                        if (!argsStr.isEmpty() && !"null".equals(argsStr)) {
+                                            try {
+                                                JsonNode args = objectMapper.readTree(argsStr);
+                                                String summary = OperationDetailGenerator.generate(tcToolName, args);
+                                                if (summary != null) {
+                                                    operationSummaryEvents.add(createReasoningSSEEvent(summary));
+                                                }
+                                            } catch (Exception e) {
+                                                log.debug("生成操作摘要失败: {}", e.getMessage());
+                                            }
+                                        }
+                                    }
+
+                                    // ---- 手动模式：先请求用户授权，再执行工具 ----
+                                    if ("manual".equals(currentExecutionMode)) {
+                                        // 构建授权审批事件流
+                                        List<String> approvalEvents = new ArrayList<>();
+                                        approvalEvents.add(toolCallStartEvent);
+                                        approvalEvents.addAll(operationSummaryEvents);
+
+                                        String uuid = UUID.randomUUID().toString();
+                                        String question = "以上操作需要您的批准，回复「批准」继续或输入其他内容拒绝";
+                                        com.example.agentdeepseek.model.dto.PendingQuestion pq =
+                                                new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
+                                        pendingQuestionStore.put(uuid, pq);
+                                        approvalEvents.add(createAskUserEvent(uuid, question));
+
+                                        return Flux.fromIterable(approvalEvents)
+                                                .concatWith(Mono.fromFuture(pq.getFuture())
+                                                        .flatMapMany(answer -> {
+                                                            pendingQuestionStore.remove(uuid);
+                                                            boolean approved = "批准".equals(answer.trim()) || "同意".equals(answer.trim());
+                                                            log.info("用户授权结果: approved={}, answer={}", approved, answer);
+
+                                                            // 设置工具执行上下文
+                                                            if (currentProjectRoot != null && !currentProjectRoot.isEmpty()) {
+                                                                ProjectRootContext.set(currentProjectRoot);
+                                                            }
+                                                            ToolContext.set(currentExecutionMode, conversationId,
+                                                                    agentType, userId);
+                                                            PermissionContext.set(pendingQuestionStore, objectMapper);
+                                                            if (approved) {
+                                                                PermissionContext.setApproved();
+                                                            }
+
+                                                            List<ToolExecutor.ToolCallResult> innerResults;
+                                                            try {
+                                                                innerResults = toolExecutor.executeToolCalls(completeToolCalls);
+                                                            } finally {
+                                                                PermissionContext.clear();
+                                                                ProjectRootContext.clear();
+                                                                ToolContext.clear();
+                                                            }
+
+                                                            // 将工具调用消息添加到消息列表
+                                                            Map<String, Object> tcMsg = new HashMap<>();
+                                                            tcMsg.put("role", "assistant");
+                                                            if (!collectedContentStr.isEmpty()) {
+                                                                tcMsg.put("content", collectedContentStr);
+                                                            }
+                                                            tcMsg.put("tool_calls", completeToolCalls);
+                                                            if (reasoning != null && !reasoning.isEmpty()) {
+                                                                tcMsg.put("reasoning_content", reasoning);
+                                                            }
+                                                            messages.add(tcMsg);
+
+                                                            // 构建工具结果消息并保存到数据库
+                                                            List<ObjectNode> tcMessages = toolExecutor.buildToolMessages(innerResults);
+                                                            for (ObjectNode tcMessage : tcMessages) {
+                                                                messages.add(objectMapper.convertValue(tcMessage, Map.class));
+                                                                saveToolMessage(storageConversationId,
+                                                                        formatToolResult(tcMessage.path("content").asText("")));
+                                                            }
+
+                                                            // 创建工具结果事件流（先发 resume 恢复前端流）
+                                                            List<String> resultEvents = new ArrayList<>();
+                                                            resultEvents.add(createResumeEvent());
+                                                            for (ToolExecutor.ToolCallResult tr : innerResults) {
+                                                                resultEvents.add(createToolResultEvent(tr.getContent()));
+                                                            }
+
+                                                            return Flux.fromIterable(resultEvents)
+                                                                    .concatWith(handleToolCallIteration(
+                                                                            conversationId, storageConversationId, apiRequest,
+                                                                            messages, iteration + 1, maxIterations));
+                                                        })
+                                                        .timeout(java.time.Duration.ofMinutes(5))
+                                                        .onErrorResume(e -> {
+                                                            pendingQuestionStore.remove(uuid);
+                                                            if (e instanceof java.util.concurrent.TimeoutException) {
+                                                                log.warn("等待用户授权超时: uuid={}", uuid);
+                                                                return Flux.just(createReasoningSSEEvent("等待用户授权超时，请重新发送消息。"));
+                                                            }
+                                                            log.error("用户授权处理失败: uuid={}", uuid, e);
+                                                            return Flux.just(createReasoningSSEEvent("处理用户授权时出错，请重新发送消息。"));
+                                                        })
+                                                );
+                                    }
+
+                                    // ---- 自动模式：直接执行工具 ----
                                     if (currentProjectRoot != null && !currentProjectRoot.isEmpty()) {
                                         ProjectRootContext.set(currentProjectRoot);
                                     }
                                     ToolContext.set(currentExecutionMode, conversationId,
-                                            (String) apiRequest.get("_agentType"),
-                                            (Long) apiRequest.get("_userId"));
+                                            agentType, userId);
+                                    PermissionContext.set(pendingQuestionStore, objectMapper);
+
                                     List<ToolExecutor.ToolCallResult> toolResults;
                                     try {
                                         toolResults = toolExecutor.executeToolCalls(completeToolCalls);
                                     } finally {
+                                        PermissionContext.clear();
                                         ProjectRootContext.clear();
                                         ToolContext.clear();
                                     }
                                     log.debug("工具调用执行完成，结果数量: {}", toolResults.size());
 
-                                    // 生成操作摘要 thinking 事件
-                                    List<String> operationSummaryEvents = new ArrayList<>();
-                                    for (ToolExecutor.ToolCallResult tr : toolResults) {
-                                        if (tr.getOperationSummary() != null && !tr.getOperationSummary().isEmpty()) {
-                                            operationSummaryEvents.add(createReasoningSSEEvent(tr.getOperationSummary()));
-                                        }
-                                    }
-
                                     // 检查是否有 ask_user 问题
                                     ToolExecutor.ToolCallResult askUserResult = findAskUserResult(toolResults);
                                     if (askUserResult != null) {
-                                        // 先发送操作摘要事件，再处理 ask_user
                                         Flux<String> summaryFlux = Flux.just(toolCallStartEvent);
                                         for (String se : operationSummaryEvents) {
                                             summaryFlux = summaryFlux.concatWith(Flux.just(se));
                                         }
                                         return summaryFlux.concatWith(
                                                 handleAskUserFlow(askUserResult, toolResults, completeToolCalls,
-                                                        messages, toolCallStartEvent, contentCollector.toString(), reasoning,
+                                                        messages, toolCallStartEvent, collectedContentStr, reasoning,
                                                         conversationId, storageConversationId, apiRequest, iteration, maxIterations));
                                     }
 
                                     // 将工具调用消息添加到消息列表，包含之前收集的文本内容
                                     Map<String, Object> toolCallMessage = new HashMap<>();
                                     toolCallMessage.put("role", "assistant");
-                                    // 只有当有文本内容时才添加content字段
-                                    if (collectedContent != null && !collectedContent.isEmpty()) {
-                                        toolCallMessage.put("content", collectedContent);
+                                    if (!collectedContentStr.isEmpty()) {
+                                        toolCallMessage.put("content", collectedContentStr);
                                     }
                                     toolCallMessage.put("tool_calls", completeToolCalls);
-                                    // DeepSeek 思考模式要求将 reasoning_content 传回
                                     if (reasoning != null && !reasoning.isEmpty()) {
                                         toolCallMessage.put("reasoning_content", reasoning);
                                     }
@@ -1146,7 +1247,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(toolResults);
                                     for (ObjectNode toolMessage : toolMessages) {
                                         messages.add(objectMapper.convertValue(toolMessage, Map.class));
-                                        // 保存工具消息到数据库，格式化工具调用结果
                                         String toolContent = toolMessage.path("content").asText("");
                                         String formattedToolContent = formatToolResult(toolContent);
                                         saveToolMessage(storageConversationId, formattedToolContent);
@@ -1355,9 +1455,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 String formattedToolContent = formatToolResult(toolContent);
                                 saveToolMessage(storageConversationId, formattedToolContent);
                             }
-
-                            // 授予执行令牌（manual模式下，用户同意后受限工具获得一次执行权限）
-                            executionTokenManager.grant(conversationId);
 
                             // 发送恢复事件，然后继续工具循环
                             return Flux.just(createResumeEvent())

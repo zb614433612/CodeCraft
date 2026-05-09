@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 [强制] 请用中文思考所有问题。在输出任何代码或回答之前，先用中文在内心进行推理和分析。这适用于所有任务，无论用户使用什么语言提问。
 
 ---

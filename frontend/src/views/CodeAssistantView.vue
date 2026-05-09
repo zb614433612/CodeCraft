@@ -1204,6 +1204,13 @@ onMounted(() => {
   background: #fafbfc;
 }
 
+/* 技能面板 */
+.skill-panel {
+  flex: 1;
+  overflow-y: auto;
+  background: #fafbfc;
+}
+
 /* ===== 流式加载指示器（消息框左下角） ===== */
 .stream-indicator {
   display: flex;

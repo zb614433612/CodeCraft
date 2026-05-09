@@ -1,6 +1,6 @@
 package com.example.agentdeepseek.tool.impl;
 
-import com.example.agentdeepseek.tool.ExecutionTokenManager;
+import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -25,11 +25,9 @@ import java.util.List;
 public class DeleteFileTool implements Tool {
 
     private final ObjectMapper objectMapper;
-    private final ExecutionTokenManager executionTokenManager;
 
-    public DeleteFileTool(ObjectMapper objectMapper, ExecutionTokenManager executionTokenManager) {
+    public DeleteFileTool(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-        this.executionTokenManager = executionTokenManager;
     }
 
     @Override
@@ -63,12 +61,10 @@ public class DeleteFileTool implements Tool {
 
     @Override
     public String execute(JsonNode arguments) {
-        // manual 模式下检查执行权限
+        // manual 模式下请求用户授权
         if ("manual".equals(ToolContext.getMode())) {
-            Long sessionId = ToolContext.getConversationId();
-            if (sessionId == null || !executionTokenManager.tryConsume(sessionId)) {
-                return "需要先通过 ask_execution 工具获得您的执行许可";
-            }
+            String response = PermissionContext.requestPermission(getName(), arguments, ToolContext.getConversationId());
+            if (response != null) return response;
         }
 
         String targetPath = arguments.path("path").asText();

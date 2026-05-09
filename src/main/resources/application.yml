@@ -154,7 +154,6 @@ deepseek:
       - "refactor_agent"
       - "code_review_agent"
       - "ask_clarification"
-      - "ask_execution"
       - "task_manager"
       - "check_network"
       - "execute_sql"
