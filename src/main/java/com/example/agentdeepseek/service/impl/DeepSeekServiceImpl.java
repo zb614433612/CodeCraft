@@ -1106,15 +1106,50 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         }
                                     }
 
-                                    // ---- 手动模式：先请求用户授权，再执行工具 ----
-                                    if ("manual".equals(currentExecutionMode)) {
+                                    // 检查本次调用中是否包含受限工具
+                                    boolean hasRestrictedTools = false;
+                                    for (int i = 0; i < completeToolCalls.size(); i++) {
+                                        String tcName = completeToolCalls.get(i).path("function").path("name").asText();
+                                        if (OperationDetailGenerator.isRestricted(tcName)) {
+                                            hasRestrictedTools = true;
+                                            break;
+                                        }
+                                    }
+
+                                    // ---- 手动模式且包含受限工具：先请求用户授权，再执行工具 ----
+                                    if ("manual".equals(currentExecutionMode) && hasRestrictedTools) {
                                         // 构建授权审批事件流
                                         List<String> approvalEvents = new ArrayList<>();
                                         approvalEvents.add(toolCallStartEvent);
                                         approvalEvents.addAll(operationSummaryEvents);
 
+                                        // 从工具调用参数生成审批摘要文本
+                                        StringBuilder summarySb = new StringBuilder();
+                                        for (int i = 0; i < completeToolCalls.size(); i++) {
+                                            JsonNode tc = completeToolCalls.get(i);
+                                            String tcToolName = tc.path("function").path("name").asText();
+                                            if (!OperationDetailGenerator.isRestricted(tcToolName)) continue;
+                                            String argsStr = tc.path("function").path("arguments").asText();
+                                            if (argsStr.isEmpty() || "null".equals(argsStr)) continue;
+                                            try {
+                                                JsonNode args = objectMapper.readTree(argsStr);
+                                                String detail = OperationDetailGenerator.generate(tcToolName, args);
+                                                if (detail != null) {
+                                                    // 取第一行实质内容（去掉 markdown 区块引用标记和首尾空白）
+                                                    String firstLine = detail.lines()
+                                                            .map(String::trim)
+                                                            .filter(l -> !l.isEmpty() && !l.equals(">"))
+                                                            .findFirst().orElse("");
+                                                    String plain = firstLine.replaceAll("^>\\s*", "").replaceAll("[*`]", "");
+                                                    summarySb.append("• ").append(plain).append("\n");
+                                                }
+                                            } catch (Exception e) {
+                                                // ignore
+                                            }
+                                        }
+
                                         String uuid = UUID.randomUUID().toString();
-                                        String question = "以上操作需要您的批准，回复「批准」继续或输入其他内容拒绝";
+                                        String question = summarySb.toString() + "需要您的批准，回复「批准」继续或输入其他内容拒绝";
                                         com.example.agentdeepseek.model.dto.PendingQuestion pq =
                                                 new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
                                         pendingQuestionStore.put(uuid, pq);
