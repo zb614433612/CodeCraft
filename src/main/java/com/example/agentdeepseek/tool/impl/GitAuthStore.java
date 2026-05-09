@@ -22,13 +22,16 @@ import java.util.Base64;
  * Git Token 持久化存储
  * AES/GCM 加密后写入 {projectRoot}/.git/git-auth.json
  * 加密密钥优先从环境变量 ZB_AGENT_GIT_AUTH_SECRET 读取，无环境变量时使用内置默认密钥（向后兼容）
+ *
+ * 兼容说明：旧版使用 AES/ECB/PKCS5Padding 加密，读取时会自动检测并迁移到 GCM 格式
  */
 @Slf4j
 @Component
 public class GitAuthStore {
 
     private static final String FILE_NAME = "git-auth.json";
-    private static final String ALGORITHM = "AES/GCM/NoPadding";
+    private static final String ALGORITHM_GCM = "AES/GCM/NoPadding";
+    private static final String ALGORITHM_ECB = "AES/ECB/PKCS5Padding";
     private static final int GCM_IV_LENGTH = 12;
     private static final int GCM_TAG_LENGTH = 128;
     private static final String ENV_KEY_NAME = "ZB_AGENT_GIT_AUTH_SECRET";
@@ -62,6 +65,7 @@ public class GitAuthStore {
 
     /**
      * 读取 Token
+     * 优先 GCM 解密，失败时自动回退 ECB 并迁移到 GCM 格式
      */
     public String getToken(String projectRoot) {
         try {
@@ -73,7 +77,27 @@ public class GitAuthStore {
             String encrypted = node.path("token").asText();
             if (encrypted.isEmpty()) return null;
 
-            return decrypt(encrypted);
+            // 优先尝试 GCM 解密
+            try {
+                return decrypt(encrypted);
+            } catch (Exception e) {
+                log.debug("GCM 解密失败，尝试 ECB 回退: {}", e.getMessage());
+            }
+
+            // ECB 回退解密（兼容旧版数据）
+            String plainText = decryptLegacy(encrypted);
+            if (plainText != null) {
+                // 迁移：用 GCM 重新加密并保存
+                try {
+                    String newEncrypted = encrypt(plainText);
+                    node.put("token", newEncrypted);
+                    objectMapper.writerWithDefaultPrettyPrinter().writeValue(file, node);
+                    log.info("Git Token 已从 ECB 迁移到 GCM 加密格式");
+                } catch (Exception ex) {
+                    log.warn("迁移 Token 加密格式失败: {}", ex.getMessage());
+                }
+            }
+            return plainText;
         } catch (Exception e) {
             log.error("读取 Git Token 失败", e);
             return null;
@@ -104,12 +128,14 @@ public class GitAuthStore {
         return Paths.get(projectRoot, ".git", FILE_NAME);
     }
 
+    // ===== AES/GCM 加密解密（新格式） =====
+
     /**
      * AES/GCM 加密（IV 随机生成，附在密文前）
      */
     private String encrypt(String plainText) throws Exception {
         SecretKeySpec keySpec = deriveKey();
-        Cipher cipher = Cipher.getInstance(ALGORITHM);
+        Cipher cipher = Cipher.getInstance(ALGORITHM_GCM);
 
         byte[] iv = new byte[GCM_IV_LENGTH];
         SecureRandom secureRandom = new SecureRandom();
@@ -142,12 +168,32 @@ public class GitAuthStore {
         System.arraycopy(combined, GCM_IV_LENGTH, ciphertext, 0, combined.length - GCM_IV_LENGTH);
 
         SecretKeySpec keySpec = deriveKey();
-        Cipher cipher = Cipher.getInstance(ALGORITHM);
+        Cipher cipher = Cipher.getInstance(ALGORITHM_GCM);
         GCMParameterSpec gcmSpec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
         cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec);
 
         return new String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8);
     }
+
+    // ===== AES/ECB 加密解密（旧格式，仅用于向后兼容读取） =====
+
+    /**
+     * ECB 解密（旧版格式兼容）
+     */
+    private String decryptLegacy(String encryptedText) {
+        try {
+            SecretKeySpec keySpec = new SecretKeySpec(padKey(FALLBACK_KEY_BYTES), "AES");
+            Cipher cipher = Cipher.getInstance(ALGORITHM_ECB);
+            cipher.init(Cipher.DECRYPT_MODE, keySpec);
+            byte[] decoded = Base64.getDecoder().decode(encryptedText);
+            return new String(cipher.doFinal(decoded), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            log.warn("ECB 回退解密也失败，Token 可能已损坏: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    // ===== 密钥派生 =====
 
     /**
      * 派生 AES 密钥：
@@ -171,5 +217,12 @@ public class GitAuthStore {
             keyBytes = FALLBACK_KEY_BYTES;
         }
         return new SecretKeySpec(keyBytes, "AES");
+    }
+
+    private byte[] padKey(byte[] key) {
+        if (key.length == 16) return key;
+        byte[] padded = new byte[16];
+        System.arraycopy(key, 0, padded, 0, Math.min(key.length, 16));
+        return padded;
     }
 }
