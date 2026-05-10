@@ -329,6 +329,7 @@ const handleSave = async () => {
   color: #858585;
   min-height: 18px;
   font-family: inherit;
+  direction: ltr;
 }
 
 /* 叠加层编辑器 */
@@ -355,6 +356,7 @@ const handleSave = async () => {
   overflow: auto;
   pointer-events: none;
   border: none;
+  text-align: left;
 }
 .fe-highlight-layer code {
   font-family: inherit;
@@ -381,6 +383,7 @@ const handleSave = async () => {
   color: transparent;
   caret-color: #aeafad;
   -webkit-text-fill-color: transparent;
+  text-align: left;
 }
 .fe-textarea::selection {
   background: #264f78;
