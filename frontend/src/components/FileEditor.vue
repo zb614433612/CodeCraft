@@ -366,17 +366,31 @@ const handleSave = async () => {
   white-space: pre;
   tab-size: 2;
   background: #1e1e1e;
-  color: #d4d4d4;
   overflow: scroll;
   pointer-events: none;
   border: none;
   text-align: left;
+  box-sizing: border-box;
+  letter-spacing: normal;
+  word-spacing: normal;
+  font-variant-ligatures: none;
+  font-kerning: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeSpeed;
 }
 .fe-highlight-layer code {
+  display: block;
+  padding: 0;
+  margin: 0;
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
   background: transparent !important;
+  letter-spacing: normal;
+  word-spacing: normal;
+  font-variant-ligatures: none;
+  font-kerning: none;
 }
 .fe-textarea {
   position: absolute;
@@ -398,12 +412,18 @@ const handleSave = async () => {
   background: transparent;
   color: transparent;
   caret-color: #aeafad;
-  -webkit-text-fill-color: transparent;
   text-align: left;
+  box-sizing: border-box;
+  letter-spacing: normal;
+  word-spacing: normal;
+  font-variant-ligatures: none;
+  font-kerning: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeSpeed;
 }
 .fe-textarea::selection {
   background: #264f78;
-  -webkit-text-fill-color: transparent;
 }
 .fe-textarea::-moz-selection {
   background: #264f78;
