@@ -7,6 +7,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -147,6 +151,47 @@ public class ProjectServiceImpl implements ProjectService {
         result.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         log.debug("列出目录子项 {}: {}", parentPath, result.size());
         return result;
+    }
+
+    @Override
+    public String readFile(String filePath) {
+        if (filePath == null || filePath.trim().isEmpty()) {
+            throw new IllegalArgumentException("文件路径不能为空");
+        }
+        try {
+            // 如果是绝对路径，直接读取
+            Path path = Paths.get(filePath);
+            if (!path.isAbsolute()) {
+                // 相对路径，基于项目根目录
+                path = Paths.get(currentRootPath, filePath);
+            }
+            log.debug("读取文件: {}", path);
+            byte[] bytes = Files.readAllBytes(path);
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            log.error("读取文件失败: {}", filePath, e);
+            throw new RuntimeException("读取文件失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public void writeFile(String filePath, String content) {
+        if (filePath == null || filePath.trim().isEmpty()) {
+            throw new IllegalArgumentException("文件路径不能为空");
+        }
+        try {
+            Path path = Paths.get(filePath);
+            if (!path.isAbsolute()) {
+                path = Paths.get(currentRootPath, filePath);
+            }
+            log.debug("写入文件: {}", path);
+            // 确保父目录存在
+            Files.createDirectories(path.getParent());
+            Files.write(path, content.getBytes(StandardCharsets.UTF_8));
+        } catch (java.io.IOException e) {
+            log.error("写入文件失败: {}", filePath, e);
+            throw new RuntimeException("写入文件失败: " + e.getMessage());
+        }
     }
 
     /**

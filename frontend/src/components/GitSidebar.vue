@@ -1,39 +1,5 @@
 <template>
   <div class="git-sidebar">
-    <!-- Git 配置区 -->
-    <div class="git-config">
-      <div class="config-title">Git 配置</div>
-      <div class="config-row">
-        <input
-          v-model="remoteUrl"
-          placeholder="Remote URL（可选）"
-          class="config-input"
-        />
-      </div>
-      <div class="config-row">
-        <div class="token-row">
-          <input
-            v-model="tokenInput"
-            :type="showToken ? 'text' : 'password'"
-            :placeholder="hasToken ? 'Token 已设置，输入新值覆盖' : 'Token（可选）'"
-            class="config-input"
-          />
-          <button class="config-btn" @click="showToken = !showToken">
-            {{ showToken ? '隐藏' : '显示' }}
-          </button>
-        </div>
-      </div>
-      <div class="config-row config-actions">
-        <template v-if="isRepo">
-          <button class="config-btn primary" @click="saveAuth" :disabled="!tokenInput">保存 Token</button>
-          <button v-if="hasToken" class="config-btn danger" @click="clearAuth">清除</button>
-        </template>
-        <template v-else>
-          <button class="config-btn primary" @click="initModalVisible = true">初始化 Git 仓库</button>
-        </template>
-      </div>
-    </div>
-
     <!-- 仓库状态 -->
     <div class="git-status-header">
       <span class="branch-label" v-if="isRepo">
@@ -67,7 +33,7 @@
             />
           </label>
           <span :class="['change-status', change.status]">{{ statusLabel(change) }}</span>
-          <span class="change-file" @click="showDiff(change.file)">{{ change.file }}</span>
+          <span class="change-file" @click="showDiff(change.file)" @dblclick="handleDblClick(change)">{{ change.file }}</span>
         </div>
       </div>
 
@@ -75,7 +41,12 @@
       <div v-if="diffContent !== null" class="diff-preview">
         <div class="diff-header">
           <span>Diff: {{ diffFile }}</span>
-          <button class="diff-close" @click="diffContent = null">✕</button>
+          <div class="diff-header-actions">
+            <button class="diff-revert-btn" @click="handleRestoreFile(diffFile)" title="撤销此文件的改动">
+              <UndoOutlined /> 撤销
+            </button>
+            <button class="diff-close" @click="diffContent = null">✕</button>
+          </div>
         </div>
         <pre class="diff-text">{{ diffContent }}</pre>
       </div>
@@ -100,42 +71,24 @@
     </div>
   </div>
 
-  <!-- 初始化 Git 仓库 Modal -->
-  <a-modal
-    v-model:visible="initModalVisible"
-    title="初始化 Git 仓库"
-    @ok="handleInitRepo"
-    :confirm-loading="initLoading"
-    ok-text="确认初始化"
-    cancel-text="取消"
-  >
-    <div class="init-form">
-      <div class="init-form-row">
-        <label class="init-form-label">Remote URL（可选）</label>
-        <input v-model="initRemoteUrl" placeholder="https://github.com/user/repo.git" class="init-form-input" />
-      </div>
-      <div class="init-form-row">
-        <label class="init-form-label">Token（可选）</label>
-        <input v-model="initToken" type="password" placeholder="Git 个人访问令牌" class="init-form-input" />
-      </div>
-    </div>
-  </a-modal>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { BranchesOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { BranchesOutlined, ReloadOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import {
   getGitStatus,
   getGitDiff,
   gitAdd,
   gitCommit,
-  saveGitToken,
-  clearGitToken,
-  gitInit,
+  gitRestore,
   type GitChange
 } from '@/api/git'
+
+const emit = defineEmits<{
+  fileDblclick: [filePath: string, projectRoot: string]
+}>()
 
 const props = defineProps<{ projectRoot: string }>()
 
@@ -143,19 +96,11 @@ const isRepo = ref(false)
 const branch = ref('')
 const changes = ref<GitChange[]>([])
 const loading = ref(false)
-const remoteUrl = ref('')
-const hasToken = ref(false)
-const showToken = ref(false)
-const tokenInput = ref('')
 const selectedFile = ref<string | null>(null)
 const diffContent = ref<string | null>(null)
 const diffFile = ref('')
 const commitMessage = ref('')
 const stagedFiles = ref<Set<string>>(new Set())
-const initModalVisible = ref(false)
-const initLoading = ref(false)
-const initRemoteUrl = ref('')
-const initToken = ref('')
 
 const stagedCount = computed(() => {
   let count = stagedFiles.value.size
@@ -179,13 +124,15 @@ const refreshStatus = async () => {
     isRepo.value = status.isRepo
     branch.value = status.branch || ''
     changes.value = status.changes || []
-    remoteUrl.value = status.remoteUrl || ''
-    hasToken.value = status.hasToken || false
   } catch (e: any) {
     console.error('获取 git 状态失败:', e)
   } finally {
     loading.value = false
   }
+}
+
+const handleDblClick = (change: GitChange) => {
+  emit('fileDblclick', change.file, props.projectRoot)
 }
 
 const showDiff = async (file: string) => {
@@ -266,6 +213,21 @@ const unstageSelected = async () => {
   }
 }
 
+const handleRestoreFile = async (file: string) => {
+  try {
+    const result = await gitRestore(props.projectRoot, file)
+    if (result.success) {
+      message.success('已撤销: ' + file)
+      diffContent.value = null
+      await refreshStatus()
+    } else {
+      message.error('撤销失败: ' + (result.error || ''))
+    }
+  } catch (e: any) {
+    message.error('撤销失败: ' + (e.message || ''))
+  }
+}
+
 const handleCommit = async () => {
   const msg = commitMessage.value.trim()
   if (!msg) return
@@ -293,53 +255,6 @@ const handleCommit = async () => {
   }
 }
 
-const saveAuth = async () => {
-  if (!tokenInput.value) return
-  try {
-    const result = await saveGitToken(props.projectRoot, tokenInput.value)
-    if (result.success) {
-      message.success('Token 已保存')
-      hasToken.value = true
-      tokenInput.value = ''
-    } else {
-      message.error('保存失败: ' + (result.error || ''))
-    }
-  } catch (e: any) {
-    message.error('保存失败: ' + (e.message || ''))
-  }
-}
-
-const clearAuth = async () => {
-  try {
-    await clearGitToken(props.projectRoot)
-    hasToken.value = false
-    tokenInput.value = ''
-    message.success('Token 已清除')
-  } catch (e: any) {
-    message.error('清除失败')
-  }
-}
-
-const handleInitRepo = async () => {
-  initLoading.value = true
-  try {
-    const result = await gitInit(props.projectRoot, initRemoteUrl.value || undefined, initToken.value || undefined)
-    if (result.success) {
-      message.success('Git 仓库初始化成功')
-      initModalVisible.value = false
-      initRemoteUrl.value = ''
-      initToken.value = ''
-      await refreshStatus()
-    } else {
-      message.error('初始化失败: ' + (result.error || ''))
-    }
-  } catch (e: any) {
-    message.error('初始化失败: ' + (e.message || ''))
-  } finally {
-    initLoading.value = false
-  }
-}
-
 onMounted(() => {
   if (props.projectRoot) {
     refreshStatus()
@@ -347,7 +262,6 @@ onMounted(() => {
 })
 
 // 监听 projectRoot 变化
-import { watch } from 'vue'
 watch(() => props.projectRoot, (val) => {
   if (val) {
     refreshStatus()
@@ -362,73 +276,6 @@ watch(() => props.projectRoot, (val) => {
   flex-direction: column;
   font-size: 12px;
   background: #fafbfc;
-}
-
-/* 配置区 */
-.git-config {
-  padding: 8px 10px;
-  border-bottom: 1px solid #eef2f7;
-  background: #f8fafc;
-  flex-shrink: 0;
-}
-
-.config-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: #666;
-  margin-bottom: 6px;
-}
-
-.config-row {
-  margin-bottom: 4px;
-}
-
-.config-input {
-  width: 100%;
-  padding: 4px 6px;
-  border: 1px solid #d9d9d9;
-  border-radius: 4px;
-  font-size: 11px;
-  outline: none;
-  box-sizing: border-box;
-  font-family: inherit;
-}
-.config-input:focus {
-  border-color: #1677ff;
-}
-.config-input:disabled {
-  background: #f5f5f5;
-  color: #999;
-}
-
-.token-row {
-  display: flex;
-  gap: 4px;
-}
-.token-row .config-input {
-  flex: 1;
-}
-.config-btn {
-  padding: 2px 8px;
-  border: 1px solid #d9d9d9;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  background: white;
-  white-space: nowrap;
-  font-family: inherit;
-}
-.config-btn:hover:not(:disabled) { border-color: #1677ff; color: #1677ff; }
-.config-btn.primary { background: #1677ff; color: white; border-color: #1677ff; }
-.config-btn.primary:hover:not(:disabled) { background: #4096ff; }
-.config-btn.danger { color: #ff4d4f; border-color: #ff4d4f; }
-.config-btn.danger:hover:not(:disabled) { background: #fff2f0; }
-.config-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.config-actions {
-  display: flex;
-  gap: 4px;
-  margin-top: 4px;
 }
 
 /* 仓库状态头 */
@@ -560,6 +407,29 @@ watch(() => props.projectRoot, (val) => {
   color: #666;
   flex-shrink: 0;
 }
+.diff-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.diff-revert-btn {
+  border: 1px solid #ff4d4f;
+  background: white;
+  color: #ff4d4f;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.diff-revert-btn:hover {
+  background: #ff4d4f;
+  color: white;
+}
 
 .diff-close {
   border: none;
@@ -630,19 +500,4 @@ watch(() => props.projectRoot, (val) => {
 .commit-btn:hover:not(:disabled) { background: #4096ff; }
 .commit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* 初始化 Modal 表单 */
-.init-form { padding: 8px 0; }
-.init-form-row { margin-bottom: 12px; }
-.init-form-label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; font-weight: 500; }
-.init-form-input {
-  width: 100%;
-  padding: 6px 10px;
-  border: 1px solid #d9d9d9;
-  border-radius: 4px;
-  font-size: 13px;
-  outline: none;
-  box-sizing: border-box;
-  font-family: inherit;
-}
-.init-form-input:focus { border-color: #1677ff; }
 </style>

@@ -45,3 +45,16 @@ export async function getDirChildren(path: string): Promise<ApiResponse<Director
   params.set('path', path)
   return request<DirectoryEntry[]>(`/project/children?${params}`)
 }
+
+export async function readProjectFile(path: string): Promise<ApiResponse<string>> {
+  const params = new URLSearchParams()
+  params.set('path', path)
+  return request<string>(`/project/read?${params}`)
+}
+
+export async function writeProjectFile(path: string, content: string): Promise<ApiResponse<null>> {
+  return request<null>('/project/write', {
+    method: 'POST',
+    body: JSON.stringify({ path, content })
+  })
+}

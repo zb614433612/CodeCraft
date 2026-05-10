@@ -6,11 +6,14 @@ import com.example.agentdeepseek.model.vo.ProjectTreeNode;
 import com.example.agentdeepseek.service.ProjectService;
 
 import java.util.List;
+import java.util.Map;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -57,5 +60,25 @@ public class ProjectController {
             @RequestParam String path) {
         List<DirectoryEntry> children = projectService.listChildren(path);
         return ApiResponse.success(children);
+    }
+
+    @GetMapping("/read")
+    @Operation(summary = "读取文件内容", description = "读取指定文件的内容，返回文件文本")
+    public ApiResponse<String> readFile(
+            @Parameter(description = "文件路径（相对或绝对路径）")
+            @RequestParam String path) {
+        log.debug("读取文件: {}", path);
+        String content = projectService.readFile(path);
+        return ApiResponse.success(content);
+    }
+
+    @PostMapping("/write")
+    @Operation(summary = "写入文件内容", description = "将内容写入指定文件")
+    public ApiResponse<Void> writeFile(@RequestBody Map<String, String> body) {
+        String path = body.get("path");
+        String content = body.get("content");
+        log.debug("写入文件: {}", path);
+        projectService.writeFile(path, content);
+        return ApiResponse.success(null);
     }
 }

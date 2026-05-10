@@ -3,6 +3,7 @@
     <div
       :class="['tn-row', { active: selectedPath === node.path }]"
       @click="handleClick"
+      @dblclick="handleDblClick"
     >
       <span class="tn-arrow" v-if="node.directory">
         <span v-if="expanded">▼</span>
@@ -21,6 +22,7 @@
         :node="child"
         :selected-path="selectedPath"
         @select="(p, d) => $emit('select', p, d)"
+          @dblclick="(p, d) => $emit('dblclick', p, d)"
       />
     </div>
     <div v-else-if="node.directory && expanded" class="tn-empty">(空目录)</div>
@@ -39,6 +41,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [path: string, isDirectory: boolean]
+  dblclick: [path: string, isDirectory: boolean]
 }>()
 
 const expanded = ref(false)
@@ -48,6 +51,12 @@ const handleClick = () => {
     expanded.value = !expanded.value
   }
   emit('select', props.node.path, props.node.directory)
+}
+
+const handleDblClick = () => {
+  if (!props.node.directory) {
+    emit('dblclick', props.node.path, props.node.directory)
+  }
 }
 </script>
 

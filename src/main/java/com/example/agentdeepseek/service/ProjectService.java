@@ -29,4 +29,18 @@ public interface ProjectService {
      * @param parentPath 父目录路径
      */
     List<DirectoryEntry> listChildren(String parentPath);
+
+    /**
+     * 读取文件内容
+     * @param filePath 文件路径（相对于项目根目录或绝对路径）
+     * @return 文件内容
+     */
+    String readFile(String filePath);
+
+    /**
+     * 写入文件内容
+     * @param filePath 文件路径（相对于项目根目录或绝对路径）
+     * @param content 文件内容
+     */
+    void writeFile(String filePath, String content);
 }

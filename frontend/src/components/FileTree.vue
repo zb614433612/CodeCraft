@@ -22,6 +22,7 @@
         :node="node"
         :selected-path="selectedPath"
         @select="onSelect"
+        @dblclick="onDblClick"
       />
     </div>
   </div>
@@ -35,6 +36,7 @@ import TreeNode from './TreeNode.vue'
 
 const emit = defineEmits<{
   select: [path: string, isDirectory: boolean]
+  dblclick: [path: string, isDirectory: boolean]
 }>()
 
 const props = defineProps<{
@@ -89,6 +91,10 @@ defineExpose({ fetchTree })
 const onSelect = (path: string, isDirectory: boolean) => {
   selectedPath.value = path
   emit('select', path, isDirectory)
+}
+
+const onDblClick = (path: string, isDirectory: boolean) => {
+  emit('dblclick', path, isDirectory)
 }
 </script>
 

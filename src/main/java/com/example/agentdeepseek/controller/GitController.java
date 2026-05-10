@@ -239,6 +239,31 @@ public class GitController {
         return Map.of("success", true);
     }
 
+    @Operation(summary = "还原/撤销文件改动", description = "还原指定文件的未暂存修改 (git checkout -- file)")
+    @PostMapping("/restore")
+    public Map<String, Object> restoreFile(@RequestBody Map<String, String> body) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        String projectRoot = body.get("projectRoot");
+        String file = body.get("file");
+
+        if (projectRoot == null || file == null || file.isEmpty()) {
+            result.put("success", false);
+            result.put("error", "缺少必要参数 projectRoot 或 file");
+            return result;
+        }
+
+        GitCommandExecutor.GitResult restoreResult = gitExecutor.execute(projectRoot,
+                "checkout", "--", file);
+
+        result.put("success", restoreResult.success());
+        if (!restoreResult.success()) {
+            result.put("error", restoreResult.output());
+        } else {
+            result.put("output", "已还原: " + file);
+        }
+        return result;
+    }
+
     @Operation(summary = "初始化 Git 仓库")
     @PostMapping("/init")
     public Map<String, Object> initRepo(@RequestBody Map<String, Object> body) {

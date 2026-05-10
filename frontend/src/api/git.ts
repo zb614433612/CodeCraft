@@ -158,6 +158,16 @@ export async function clearGitToken(projectRoot: string): Promise<GitAuthResult>
 /**
  * 初始化 Git 仓库
  */
+export async function gitRestore(projectRoot: string, file: string): Promise<{ success: boolean; error?: string; output?: string }> {
+  const headers = await getAuthHeaders()
+  const res = await fetch('/api/git/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify({ projectRoot, file })
+  })
+  return res.json()
+}
+
 export async function gitInit(projectRoot: string, remoteUrl?: string, token?: string): Promise<{ success: boolean; error?: string }> {
   const headers = await getAuthHeaders()
   const res = await fetch('/api/git/init', {

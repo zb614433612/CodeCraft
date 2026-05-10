@@ -64,7 +64,7 @@
 
       <!-- Git 面板 -->
       <div v-show="sidebarTab === 'git'" class="git-panel">
-        <GitSidebar :project-root="settingsStore.projectRoot || ''" />
+        <GitSidebar :project-root="settingsStore.projectRoot || ''" @file-dblclick="onGitFileDblClick" />
       </div>
 
       <!-- 技能面板 -->
@@ -89,14 +89,34 @@
             </a-button>
           </div>
         </div>
-        <FileTree :root-path="fileTreeLoadPath" @select="onFileSelect" />
+        <FileTree :root-path="fileTreeLoadPath" @select="onFileSelect" @dblclick="onFileDblClick" />
         <DirectoryBrowser :visible="showDirBrowser" @select="onDirSelected" @close="showDirBrowser = false" />
       </div>
     </aside>
 
-    <!-- 主聊天区域 -->
+    <!-- 主聊天区域（标签页系统） -->
     <main class="chat-main">
-      <!-- 无消息时的占位区（撑满弹性空间，使输入框始终在底部） -->
+      <!-- 标签栏 -->
+      <div class="tab-bar" v-if="tabs.length > 0">
+        <div
+          v-for="tab in tabs"
+          :key="tab.id"
+          :class="['tab-item', { active: activeTabId === tab.id, dirty: tab.isDirty }]"
+          @click="activeTabId = tab.id"
+          @mousedown.middle.prevent="closeTab(tab.id)"
+        >
+          <span class="tab-title">{{ tab.title }}</span>
+          <span v-if="tab.isDirty" class="tab-dirty-dot">●</span>
+          <span v-if="tab.type !== 'chat'" class="tab-close" @click.stop="closeTab(tab.id)">×</span>
+        </div>
+      </div>
+
+      <!-- 标签内容区 -->
+      <div class="tab-content">
+        <!-- ===== 聊天标签 ===== -->
+        <template v-if="activeTab?.type === 'chat'">
+          <div class="chat-messages-area">
+            <!-- 无消息时的占位区（撑满弹性空间，使输入框始终在底部） -->
       <div v-if="currentMessages.length === 0" class="message-list-empty">
         <div v-if="isLoadingMessages" class="loading-messages">
           <a-spin size="small" />
@@ -114,7 +134,7 @@
         key-field="id"
         v-slot="{ item: msg, active }"
       >
-        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="[msg.content?.length || 0, msg.thinking?.length || 0]">
+        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [] : [msg.content?.length || 0, msg.thinking?.length || 0]">
         <div :class="['message-item', msg.role]">
           <div class="message-avatar">
             <div v-if="msg.role === 'user'" class="avatar user-avatar">
@@ -160,7 +180,7 @@
       <div v-if="activeTask &amp;&amp; !isSending" class="stream-indicator task-reconnect-banner">
         <span class="stream-pulse-dot"></span>
         <span class="stream-indicator-text">
-          任务正在后台执行中（第 {{ activeTask.iteration + 1 }} 轮）...
+          任务正在后台执行中（第 {{ activeTask.iteration + 1 }} 轮）... <span class="stream-elapsed">{{ formatElapsed(elapsedTime) }}</span>
           <a-button size="small" type="link" @click="reconnectToTaskStream(parseInt(currentConversationId))">重新连接</a-button>
         </span>
       </div>
@@ -169,6 +189,7 @@
       <div v-if="isSending &amp;&amp; streamStatus" class="stream-indicator">
         <span class="stream-pulse-dot"></span>
         <span class="stream-indicator-text">{{ streamStatus }}</span>
+        <span class="stream-elapsed" v-if="elapsedTime > 0">{{ formatElapsed(elapsedTime) }}</span>
       </div>
 
       <!-- 重连实时流式消息容器（独立消息盒子，溢出滚动） -->
@@ -293,12 +314,76 @@
                 <a-select-option value="thinking_max">thinking_max</a-select-option>
               </a-select>
             </div>
+            <!-- 任务进度触发器 -->
+            <div class="mode-selector task-trigger" @click="toggleTaskDropdown" :class="{ active: showTaskDropdown, loading: isSending }">
+              <span class="mode-icon task-trigger-icon">
+                <LoadingOutlined v-if="isSending" spin />
+                <span v-else>📋</span>
+              </span>
+              <span class="task-trigger-text" v-if="taskItems.length === 0">任务</span>
+              <span class="task-trigger-text" v-else>{{ completedTaskCount }}/{{ taskItems.length }}</span>
+            </div>
           </div>
           <div class="footer-right" v-if="currentMessages.length > 0">
             <span class="context-tokens">上下文 Token: {{ formatTokenCount(totalContextTokens) }}</span>
           </div>
         </div>
-      </footer>
+        <!-- 任务清单下拉面板 -->
+        <div v-if="showTaskDropdown && taskItems.length > 0" class="task-dropdown">
+          <div class="task-dropdown-header">
+            <span>📋 任务清单</span>
+            <span class="task-dropdown-progress">{{ completedTaskCount }}/{{ taskItems.length }}</span>
+          </div>
+          <div class="task-dropdown-body">
+            <div
+              v-for="item in taskItems"
+              :key="item.id"
+              :class="['task-dropdown-item', {
+                'task-dropdown-item--completed': item.status === 'completed',
+                'task-dropdown-item--executing': item.id === executingTaskId
+              }]"
+            >
+              <span class="task-dropdown-icon">
+                {{ item.status === 'completed' ? '✅' : item.id === executingTaskId ? '🔄' : '⏳' }}
+              </span>
+              <span class="task-dropdown-id">{{ item.id }}</span>
+              <span class="task-dropdown-desc">{{ item.description }}</span>
+              <span v-if="item.priority === 'HIGH'" class="task-dropdown-priority-high">HIGH</span>
+              <span v-if="item.depends_on && item.depends_on.length > 0" class="task-dropdown-deps">← {{ item.depends_on.join(', ') }}</span>
+            </div>
+          </div>      </div>
+        </footer>
+        </div>
+        </template>
+        <!-- ===== 文件编辑标签 ===== -->
+        <template v-else-if="activeTab?.type === 'file'">
+          <FileEditor
+            :key="activeTab.id"
+            :file-path="activeTab.filePath || ''"
+            :content="activeTab.content || ''"
+            :original-content="activeTab.originalContent"
+            @save="onFileSaved"
+            @content-change="onFileContentChange"
+          />
+        </template>
+        <!-- ===== 差异对比标签 ===== -->
+        <template v-else-if="activeTab?.type === 'diff'">
+          <div class="diff-tab-content">
+            <div class="diff-tab-header">
+              <span class="diff-tab-title">差异对比: {{ activeTab.filePath }}</span>
+              <div class="diff-tab-actions">
+                <a-button size="small" danger @click="handleRevertFile(activeTab.filePath || '')">
+                  <UndoOutlined />
+                  撤销此文件改动
+                </a-button>
+              </div>
+            </div>
+            <div class="diff-tab-body">
+              <DiffView :content="activeTab.diffContent || ''" :title="'Diff: ' + (activeTab.filePath || '')" />
+            </div>
+          </div>
+        </template>
+      </div>
     </main>
   </div>
 </template>
@@ -320,18 +405,24 @@ import {
   DownOutlined,
   UpOutlined,
   MenuFoldOutlined,
+  LoadingOutlined,
   MenuUnfoldOutlined,
   PlusOutlined,
   SettingOutlined,
   CloseOutlined,
-  FolderOpenOutlined
+  FolderOpenOutlined,
+  UndoOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
+import FileEditor from '@/components/FileEditor.vue'
 import GitSidebar from '@/components/GitSidebar.vue'
+import DiffView from '@/components/DiffView.vue'
 import SkillList from '@/components/SkillList.vue'
 import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
+import { readProjectFile } from '@/api/project'
+import { getGitDiff, gitRestore } from '@/api/git'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
 
@@ -357,6 +448,137 @@ interface ChatMessage {
   tokenCount?: number
 }
 
+// ===== 标签页系统（Tab 管理） =====
+interface EditorTab {
+  id: string
+  type: 'chat' | 'file' | 'diff'
+  title: string
+  filePath?: string
+  content?: string
+  originalContent?: string
+  isDirty?: boolean
+  diffContent?: string
+  language?: string
+}
+
+const tabs = ref<EditorTab[]>([
+  { id: 'chat', type: 'chat', title: '💬 对话' }
+])
+const activeTabId = ref('chat')
+
+const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value) || tabs.value[0])
+
+// 双击文件树中的文件，打开文件编辑标签
+const onFileDblClick = async (path: string, isDirectory: boolean) => {
+  if (isDirectory) return
+  const existing = tabs.value.find(t => t.type === 'file' && t.filePath === path)
+  if (existing) {
+    activeTabId.value = existing.id
+    return
+  }
+  try {
+    const res = await readProjectFile(path)
+    if (res.code === 200 && res.data !== null) {
+      const fileName = path.split('/').pop() || path.split('\\').pop() || path
+      const tabId = `file-${path}`
+      tabs.value.push({
+        id: tabId,
+        type: 'file',
+        title: fileName,
+        filePath: path,
+        content: res.data,
+        originalContent: res.data,
+        isDirty: false
+      })
+      activeTabId.value = tabId
+    }
+  } catch (e: any) {
+    console.error('打开文件失败:', e)
+  }
+}
+
+// 关闭标签
+const closeTab = (tabId: string) => {
+  const idx = tabs.value.findIndex(t => t.id === tabId)
+  if (idx === -1 || tabs.value[idx].type === 'chat') return
+  tabs.value.splice(idx, 1)
+  if (activeTabId.value === tabId) {
+    const newIdx = Math.min(idx, tabs.value.length - 1)
+    activeTabId.value = tabs.value[newIdx]?.id || 'chat'
+  }
+}
+
+// 文件保存后回调
+const onFileSaved = (path: string, content: string) => {
+  const tab = tabs.value.find(t => t.type === 'file' && t.filePath === path)
+  if (tab) {
+    tab.originalContent = content
+    tab.content = content
+    tab.isDirty = false
+  }
+}
+
+// 文件内容变更回调
+const onFileContentChange = (path: string, content: string) => {
+  const tab = tabs.value.find(t => t.type === 'file' && t.filePath === path)
+  if (tab) {
+    tab.content = content
+    tab.isDirty = content !== tab.originalContent
+  }
+}
+
+// Git 文件双击回调
+const onGitFileDblClick = (filePath: string, projectRoot: string) => {
+  openDiffTab(filePath, projectRoot)
+}
+
+// 撤销文件改动
+const handleRevertFile = async (filePath: string) => {
+  const projectRoot = settingsStore.projectRoot
+  if (!projectRoot) return
+  try {
+    const result = await gitRestore(projectRoot, filePath)
+    if (result.success) {
+      // 关闭当前的 diff 标签
+      const tabId = `diff-${filePath}`
+      closeTab(tabId)
+      // 如果有对应的文件编辑标签，也关闭（内容已变化）
+      const fileTabId = `file-${filePath}`
+      const fileTab = tabs.value.find(t => t.id === fileTabId)
+      if (fileTab) closeTab(fileTabId)
+    } else {
+      console.error('撤销失败:', result.error)
+    }
+  } catch (e: any) {
+    console.error('撤销文件失败:', e)
+  }
+}
+
+// 打开差异对比标签（Git 双击）
+const openDiffTab = async (filePath: string, projectRoot: string) => {
+  const tabId = `diff-${filePath}`
+  const existing = tabs.value.find(t => t.id === tabId)
+  if (existing) {
+    activeTabId.value = tabId
+    return
+  }
+  try {
+    const result = await getGitDiff(projectRoot, filePath)
+    if (result.success) {
+      tabs.value.push({
+        id: tabId,
+        type: 'diff',
+        title: filePath,
+        filePath: filePath,
+        diffContent: result.diff
+      })
+      activeTabId.value = tabId
+    }
+  } catch (e: any) {
+    console.error('获取 diff 失败:', e)
+  }
+}
+
 const conversations = ref<Conversation[]>([])
 const messages = ref<Record<string, ChatMessage[]>>({})
 const currentConversationId = ref<string>('')
@@ -374,7 +596,71 @@ const showDirBrowser = ref(false)
 const pendingQuestion = ref<{ uuid: string; question: string } | null>(null)
 const pendingQuestionAnswer = ref('')
 const streamStatus = ref('')
+const taskStartTime = ref<number | null>(null)
+const elapsedTime = ref(0)
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+
+const startElapsedTimer = () => {
+  stopElapsedTimer()
+  taskStartTime.value = Date.now()
+  elapsedTime.value = 0
+  elapsedTimer = setInterval(() => {
+    if (taskStartTime.value) {
+      elapsedTime.value = Date.now() - taskStartTime.value
+    }
+  }, 1000)
+}
+
+const stopElapsedTimer = () => {
+  if (elapsedTimer !== null) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+  }
+  taskStartTime.value = null
+}
+
+const formatElapsed = (ms: number): string => {
+  const totalSec = Math.floor(ms / 1000)
+  const hours = Math.floor(totalSec / 3600)
+  const minutes = Math.floor((totalSec % 3600) / 60)
+  const secs = totalSec % 60
+  if (hours > 0) return `${hours}h ${minutes}m ${secs}s`
+  if (minutes > 0) return `${minutes}m ${secs}s`
+  return `${secs}s`
+}
+
+
+// 任务清单状态（从 task_manager 工具调用结果中解析）
+interface TaskItem {
+  id: string
+  description: string
+  status: 'pending' | 'completed' | 'executing'
+  priority?: 'HIGH' | 'MEDIUM' | 'LOW'
+  depends_on?: string[]
+}
+const taskItems = ref<TaskItem[]>([])
+const completedTaskCount = computed(() => taskItems.value.filter(t => t.status === 'completed').length)
+const showTaskDropdown = ref(false)
+// 「执行中」的任务：当 isSending 或 activeTask 时，第一个 pending 任务视为 executing
+const executingTaskId = computed(() => {
+  if (!isSending.value && !activeTask.value) return null
+  const first = taskItems.value.find(t => t.status === 'pending')
+  return first?.id ?? null
+})
+// 切换任务下拉
+const toggleTaskDropdown = () => {
+  if (taskItems.value.length > 0) {
+    showTaskDropdown.value = !showTaskDropdown.value
+  }
+}
+// 清除任务清单（新消息或刷新页面时调用）
+const clearTaskList = () => { taskItems.value = [] }
 const activeTask = ref<{ taskId: number; status: string; iteration: number; eventCount: number; pendingQuestionUuid?: string; pendingQuestionText?: string } | null>(null)
+
+// Markdown 渲染缓存（避免历史消息重复解析 markdown，性能优化）
+// key=content原文, value=渲染后的HTML，最大缓存200条
+const markdownCache = new Map<string, string>()
+const thinkingCache = new Map<string, string>()
 
 const toggleCollapsed = () => { collapsed.value = !collapsed.value }
 
@@ -550,7 +836,7 @@ const submitPendingAnswer = async () => {
   }
 }
 
-// 节流渲染：将流式更新聚合并限制在每 50ms 一次，避免高频 chunk 导致卡死
+// 节流渲染：将流式更新聚合并限制在每 150ms 一次，避免高频 chunk 导致卡死
 let updateTimer: number | null = null
 
 const scheduleMessageUpdate = (convId: string) => {
@@ -558,10 +844,11 @@ const scheduleMessageUpdate = (convId: string) => {
   updateTimer = window.setTimeout(() => {
     updateTimer = null
     if (messages.value[convId]) {
+      // 只替换数组引用触发 DynamicScroller 更新，不替换消息对象（避免切断响应式连接导致流式内容不更新）
       messages.value[convId] = [...messages.value[convId]]
     }
     scrollToBottom()
-  }, 50)
+  }, 150)
 }
 
 const flushMessageUpdate = (convId: string) => {
@@ -579,6 +866,8 @@ const flushMessageUpdate = (convId: string) => {
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
   if (!text || isSending.value) return
+  // 发送新消息时清除旧的任务清单
+  clearTaskList()
 
   let convId = currentConversationId.value
   // 如果是新会话，需要找到或创建真实的会话ID
@@ -602,6 +891,7 @@ const sendMessage = async () => {
   messages.value[convId].push(userMsg)
   inputMessage.value = ''
   isSending.value = true
+  startElapsedTimer()
   streamStatus.value = '正在连接...'
 
   // 添加占位的助手消息
@@ -654,6 +944,9 @@ const sendMessage = async () => {
               at: thinkingContent.length,
               content: toolContent
             })
+            // 解析 task_manager 工具的任务清单
+            console.log('[TaskList] toolContent:', toolContent.substring(0, 200))
+            parseTaskManagerResult(toolContent)
           }
         } else {
           thinkingContent += event.data
@@ -696,7 +989,8 @@ const sendMessage = async () => {
     // 计算token
     const fullContent = assistantMsg.content
     const fullThinking = assistantMsg.thinking
-    assistantMsg.tokenCount = estimateTokenCount(fullContent) + (fullThinking ? estimateTokenCount(fullThinking) : 0)
+    const toolResultsText = (assistantMsg.toolResults || []).map(r => r.content).join('')
+    assistantMsg.tokenCount = estimateTokenCount(fullContent) + (fullThinking ? estimateTokenCount(fullThinking) : 0) + estimateTokenCount(toolResultsText)
     assistantMsg.isStreaming = false
     streamStatus.value = ''
     flushMessageUpdate(convId)
@@ -722,6 +1016,7 @@ const sendMessage = async () => {
     message.error('发送失败: ' + (error.message || '未知错误'))
   } finally {
     isSending.value = false
+    stopElapsedTimer()
     streamStatus.value = ''
     scrollToBottom()
   }
@@ -740,6 +1035,7 @@ let reconnectRenderTimer: ReturnType<typeof setTimeout> | null = null
 const reconnectToTaskStream = async (convId: number) => {
   streamStatus.value = '任务恢复中...'
   isSending.value = true
+  startElapsedTimer()
   const stringConvId = String(convId)
 
   // 用单独的重连消息显示实时流式输出，不污染 messages 列表
@@ -775,6 +1071,7 @@ const reconnectToTaskStream = async (convId: number) => {
             : ''
           if (toolContent) {
             thinkingContent += '\n' + toolContent
+            parseTaskManagerResult(toolContent)
           }
         } else if (typeof event.data === 'string') {
           thinkingContent += event.data
@@ -810,6 +1107,7 @@ const reconnectToTaskStream = async (convId: number) => {
     reconnectLiveMsg.value = null
     streamStatus.value = ''
     isSending.value = false
+    stopElapsedTimer()
     activeTask.value = null
     stopAbortController.value = null
     // 任务可能已完成或有新消息，从 DB 强制刷新最新消息列表（绕过缓存）
@@ -869,7 +1167,11 @@ const formatMessageTime = (timestamp: number) => {
 const formatThinking = (thinking: string | undefined, toolResults?: { at: number; content: string }[]) => {
   if (!thinking && (!toolResults || toolResults.length === 0)) return ''
   thinking = thinking || ''
-
+  // 缓存 key 包含 thinking 全文和 toolResults 摘要，不同 toolResults 产生不同 HTML
+  const cacheKey = thinking + '|' + JSON.stringify(toolResults?.map(t => ({ at: t.at, len: t.content.length })))
+  const cached = thinkingCache.get(cacheKey)
+  if (cached !== undefined) return cached
+  const renderResult = (() => {
   // 工具调用结果按位置注入
   if (toolResults && toolResults.length > 0) {
     const sorted = [...toolResults].sort((a, b) => a.at - b.at)
@@ -890,10 +1192,29 @@ const formatThinking = (thinking: string | undefined, toolResults?: { at: number
   }
 
   return renderMarkdown(thinking)
+})()
+  // 缓存渲染结果
+  if (thinkingCache.size >= 200) {
+    const firstKey = thinkingCache.keys().next().value
+    if (firstKey) thinkingCache.delete(firstKey)
+  }
+  thinkingCache.set(cacheKey, renderResult)
+  return renderResult
 }
 
 const formatMessage = (content: string) => {
-  return renderMarkdown(content)
+  if (!content) return ''
+  // 缓存命中直接返回，避免重复解析 markdown（核心性能优化）
+  const cached = markdownCache.get(content)
+  if (cached !== undefined) return cached
+  const html = renderMarkdown(content)
+  // LRU 淘汰：缓存超过上限时删除最早条目
+  if (markdownCache.size >= 200) {
+    const firstKey = markdownCache.keys().next().value
+    if (firstKey) markdownCache.delete(firstKey)
+  }
+  markdownCache.set(content, html)
+  return html
 }
 
 // 滚动（双重保障：nextTick + rAF + 延时兜底，适配 DynamicScroller 渲染时机）
@@ -915,10 +1236,10 @@ const scrollToBottom = () => {
   })
 }
 
-// 监听消息变化自动滚动
-watch(currentMessages, () => {
+// 监听消息数量变化自动滚动（替代 deep:true 深度监听，避免每次渲染触发全量比较）
+watch(() => currentMessages.value.length + '|' + (currentMessages.value[currentMessages.value.length - 1]?.content?.length || 0), () => {
   scrollToBottom()
-}, { deep: true })
+})
 
 onMounted(() => {
   fetchConversations()
@@ -927,9 +1248,125 @@ onMounted(() => {
   if (settingsStore.projectRoot) {
     fileTreeLoadPath.value = settingsStore.projectRoot
   }
+  // 点击外部关闭任务下拉
+  document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+    if (!target.closest('.task-trigger') && !target.closest('.task-dropdown')) {
+      showTaskDropdown.value = false
+    }
+  })
 })
 
 // 当首次加载完会话列表且选中了会话后，检查活跃任务
+// ===== 任务清单解析 =====
+const parseTaskManagerResult = (content: string) => {
+  // 优先解析结构化 JSON（---TASK_JSON--- 分隔）
+  const jsonMarkerIdx = content.indexOf('---TASK_JSON---')
+  if (jsonMarkerIdx !== -1) {
+    const jsonStr = content.substring(jsonMarkerIdx + '---TASK_JSON---'.length).trim()
+    try {
+      const parsed = JSON.parse(jsonStr)
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const existing = taskItems.value
+        for (const item of parsed) {
+          const idx = existing.findIndex(t => t.id === item.id)
+          const st = item.status === 'completed' ? 'completed' as const : 'pending' as const
+          if (idx !== -1) {
+            existing[idx].status = st
+            if (item.priority) existing[idx].priority = item.priority
+            if (item.depends_on) existing[idx].depends_on = item.depends_on
+          } else {
+            existing.push({
+              id: item.id,
+              description: item.description,
+              status: st,
+              priority: item.priority,
+              depends_on: item.depends_on
+            })
+          }
+        }
+        taskItems.value = [...existing]
+        return
+      }
+    } catch (e) {
+      // JSON 解析失败，回退到文本解析
+    }
+  }
+
+  // 兼容旧格式：处理 complete 操作: "✅ 任务 T1 已完成！"
+  const completeMatch = content.match(/✅\s*任务\s+(T\d+)\s*已完成/)
+  if (completeMatch) {
+    const tid = completeMatch[1]
+    const existing = taskItems.value
+    const found = existing.find(t => t.id === tid)
+    if (found) { found.status = 'completed'; taskItems.value = [...existing] }
+    return
+  }
+  // 处理 reopen 操作: "🔄 任务 T1 已重新打开"
+  const reopenMatch = content.match(/🔄\s*任务\s+(T\d+)\s*已重新打开/)
+  if (reopenMatch) {
+    const tid = reopenMatch[1]
+    const existing = taskItems.value
+    const found = existing.find(t => t.id === tid)
+    if (found) { found.status = 'pending'; taskItems.value = [...existing] }
+    return
+  }
+  // 处理批量操作结果（兼容）
+  const batchMatch = content.match(/✅\s*批量完成任务：(.+)/)
+  if (batchMatch) {
+    const ids = batchMatch[1].split(',').map(s => s.trim())
+    const existing = taskItems.value
+    for (const tid of ids) {
+      const found = existing.find(t => t.id === tid)
+      if (found) found.status = 'completed'
+    }
+    taskItems.value = [...existing]
+    return
+  }
+  const batchReopenMatch = content.match(/🔄\s*批量重开任务：(.+)/)
+  if (batchReopenMatch) {
+    const ids = batchReopenMatch[1].split(',').map(s => s.trim())
+    const existing = taskItems.value
+    for (const tid of ids) {
+      const found = existing.find(t => t.id === tid)
+      if (found) found.status = 'pending'
+    }
+    taskItems.value = [...existing]
+    return
+  }
+  if (!content.includes('任务清单') && !content.includes('任务 ')) return
+  const lines = content.split('\n')
+  const parsedTasks: TaskItem[] = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const parts = trimmed.split('-')
+    if (parts.length < 2) continue
+    const firstPart = parts[0].trim()
+    const idMatch = firstPart.match(/(T\d+)/)
+    if (!idMatch) continue
+    const id = idMatch[1]
+    const desc = parts.slice(1).join('-').trim()
+    const cleaned = desc.replace(/[[✅⏳].*?]/g, '').trim()
+    if (!cleaned) continue
+    const isCompleted = trimmed.includes('✅')
+    parsedTasks.push({ id, description: cleaned, status: isCompleted ? 'completed' : 'pending' })
+  }
+  if (parsedTasks.length > 0) {
+    const existing = taskItems.value
+    if (existing.length > 0) {
+      for (const newTask of parsedTasks) {
+        const idx = existing.findIndex(t => t.id === newTask.id)
+        if (idx !== -1) existing[idx].status = newTask.status
+        else existing.push(newTask)
+      }
+      taskItems.value = [...existing]
+    } else {
+      taskItems.value = parsedTasks
+    }
+  }
+}
+
 watch(currentConversationId, (newId) => {
   if (newId && !newId.startsWith('local-')) {
     checkAndReconnect(newId)
@@ -1137,6 +1574,123 @@ watch(currentConversationId, (newId) => {
   background: #f7f9fc;
 }
 
+/* ===== 标签栏 ===== */
+.tab-bar {
+  display: flex;
+  background: #f0f0f0;
+  border-bottom: 1px solid #d9d9d9;
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 32px;
+  align-items: stretch;
+}
+.tab-bar::-webkit-scrollbar { height: 2px; }
+.tab-bar::-webkit-scrollbar-thumb { background: #ccc; border-radius: 1px; }
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: #666;
+  cursor: pointer;
+  border-right: 1px solid #d9d9d9;
+  background: #f0f0f0;
+  white-space: nowrap;
+  user-select: none;
+  transition: all 0.15s;
+  min-width: 0;
+  position: relative;
+}
+.tab-item:hover {
+  background: #e6e6e6;
+  color: #333;
+}
+.tab-item.active {
+  background: white;
+  color: #1a202c;
+  font-weight: 600;
+  border-bottom: 2px solid #1677ff;
+  margin-bottom: -1px;
+}
+.tab-item.dirty {
+  color: #faad14;
+}
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+.tab-dirty-dot {
+  font-size: 10px;
+  color: #faad14;
+}
+.tab-close {
+  font-size: 14px;
+  line-height: 1;
+  color: #999;
+  padding: 0 2px;
+  border-radius: 3px;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+.tab-close:hover {
+  background: #ff4d4f;
+  color: white;
+}
+
+/* ===== 标签内容区 ===== */
+.tab-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.tab-content > .chat-messages-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ===== 差异对比标签 ===== */
+.diff-tab-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f7f9fc;
+}
+.diff-tab-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #fff;
+  border-bottom: 1px solid #e8e8e8;
+  flex-shrink: 0;
+}
+.diff-tab-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #262626;
+}
+.diff-tab-actions {
+  display: flex;
+  gap: 8px;
+}
+.diff-tab-body {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;
@@ -1312,6 +1866,7 @@ watch(currentConversationId, (newId) => {
   padding: 12px 24px 16px;
   background: white;
   border-top: 1px solid #e8e8e8;
+  position: relative;
 }
 
 .input-wrapper {
@@ -1361,7 +1916,124 @@ watch(currentConversationId, (newId) => {
   justify-content: space-between;
   align-items: center;
   margin-top: 8px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 任务进度触发器（与 mode-selector 风格一致） */
+.task-trigger {
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s;
+}
+.task-trigger:hover {
+  background: #e6f7ff;
+  border-color: #91d5ff;
+}
+.task-trigger.active {
+  background: #e6f7ff;
+  border-color: #1890ff;
+}
+.task-trigger.loading .task-trigger-icon {
+  color: #1890ff;
+}
+.task-trigger-icon {
+  font-size: 14px;
+}
+.task-trigger-text {
   font-size: 12px;
+  font-weight: 500;
+  color: #595959;
+  white-space: nowrap;
+}
+
+/* 任务下拉面板 */
+.task-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 12px;
+  right: 12px;
+  margin-bottom: 8px;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+  z-index: 100;
+  max-height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+.task-dropdown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f0f5ff;
+  border-bottom: 1px solid #e8e8e8;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a202c;
+  flex-shrink: 0;
+}
+.task-dropdown-progress {
+  font-size: 12px;
+  color: #667eea;
+  font-weight: 500;
+}
+.task-dropdown-body {
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.task-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  transition: background 0.15s;
+}
+.task-dropdown-item--completed {
+  opacity: 0.55;
+}
+.task-dropdown-item--executing {
+  background: #e6f7ff;
+}
+.task-dropdown-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+.task-dropdown-id {
+  flex-shrink: 0;
+  font-family: 'SF Mono', 'Monaco', monospace;
+  font-size: 11px;
+  color: #667eea;
+  font-weight: 600;
+  min-width: 22px;
+}
+.task-dropdown-desc {
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-dropdown-priority-high {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: #fff2f0;
+  color: #ff4d4f;
+  font-weight: 600;
+  line-height: 16px;
+}
+.task-dropdown-deps {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #8c8c8c;
+  font-family: 'SF Mono', 'Monaco', monospace;
 }
 
 .footer-left {
@@ -1626,6 +2298,18 @@ watch(currentConversationId, (newId) => {
 .reconnect-body .message-item {
   margin-bottom: 0;
 }
+
+.stream-elapsed {
+  font-size: 13px;
+  color: #1677ff;
+  font-weight: 600;
+  margin-left: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.task-reconnect-banner .stream-elapsed {
+  color: #d46b08;
+}
 </style>
 
 <!-- 非 scoped 样式：markdown 内容排版（v-html 内元素不受 scoped 影响） -->
@@ -1782,4 +2466,5 @@ watch(currentConversationId, (newId) => {
   background: #f6f8fa;
   font-weight: 600;
 }
+
 </style>
