@@ -119,6 +119,11 @@ const statusLabel = (change: GitChange) => {
 const refreshStatus = async () => {
   if (!props.projectRoot) return
   loading.value = true
+  // 先清空旧状态，防止 API 失败时残留上一次的数据
+  isRepo.value = false
+  branch.value = ''
+  changes.value = []
+  diffContent.value = null
   try {
     const status = await getGitStatus(props.projectRoot)
     isRepo.value = status.isRepo
@@ -126,6 +131,7 @@ const refreshStatus = async () => {
     changes.value = status.changes || []
   } catch (e: any) {
     console.error('获取 git 状态失败:', e)
+    // catch 中已重置为默认值，无需额外操作
   } finally {
     loading.value = false
   }
