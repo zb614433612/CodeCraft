@@ -28,6 +28,8 @@ public class ReadFileTool implements Tool {
 
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_LINE_LENGTH = 100000; // 单行最大字符数，防止超大行内存溢出
+    private static final long MAX_FILE_SIZE = 100 * 1024 * 1024; // 最大读取文件大小 100MB
+    private static final double BINARY_NULL_THRESHOLD = 0.05; // 空字节比例超过此阈值视为二进制文件
 
     private final ObjectMapper objectMapper;
 
@@ -90,7 +92,12 @@ public class ReadFileTool implements Tool {
             return "错误：缺少必要参数 file_path";
         }
 
-        Path filePath = resolvePath(filePathStr);
+        Path filePath;
+        try {
+            filePath = resolvePath(filePathStr);
+        } catch (SecurityException e) {
+            return "错误：" + e.getMessage();
+        }
         if (!Files.exists(filePath)) {
             return "错误：文件不存在 - " + filePath.toAbsolutePath();
         }
@@ -102,6 +109,17 @@ public class ReadFileTool implements Tool {
         }
 
         try {
+            // 检查文件大小
+            long fileSize = Files.size(filePath);
+            if (fileSize > MAX_FILE_SIZE) {
+                return "错误：文件太大（" + fileSize + " 字节），超过最大限制 " + MAX_FILE_SIZE + " 字节";
+            }
+
+            // 检测是否为二进制文件
+            if (isBinaryFile(filePath)) {
+                return "错误：文件包含大量二进制数据，不是文本文件 - " + filePath.toAbsolutePath();
+            }
+
             // 检测编码
             Charset charset = detectCharset(filePath);
             if (charset == null) {
@@ -115,6 +133,11 @@ public class ReadFileTool implements Tool {
             boolean hasStartLine = arguments.has("start_line") && !arguments.path("start_line").isNull();
             boolean hasEndLine = arguments.has("end_line") && !arguments.path("end_line").isNull();
             boolean hasPage = arguments.has("page") && !arguments.path("page").isNull();
+
+            // 参数冲突提示：行范围和分页参数不能同时使用
+            if ((hasStartLine || hasEndLine) && hasPage) {
+                log.warn("同时指定了行范围参数(start_line/end_line)和分页参数(page)，优先使用行范围模式");
+            }
 
             int startIdx, endIdx;
 
@@ -180,10 +203,18 @@ public class ReadFileTool implements Tool {
      */
     private Path resolvePath(String pathStr) {
         Path path = Paths.get(pathStr);
+        Path projectRoot = Paths.get(ProjectRootContext.get()).normalize();
+        Path resolved;
         if (path.isAbsolute()) {
-            return path.normalize();
+            resolved = path.normalize();
+        } else {
+            resolved = Paths.get(ProjectRootContext.get(), pathStr).normalize();
         }
-        return Paths.get(ProjectRootContext.get(), pathStr).normalize();
+        // 路径穿越防护：确保解析后的路径在项目目录范围内
+        if (!resolved.startsWith(projectRoot)) {
+            throw new SecurityException("访问被拒绝：路径不在项目目录范围内 - " + resolved);
+        }
+        return resolved;
     }
 
     /**
@@ -191,7 +222,7 @@ public class ReadFileTool implements Tool {
      * 优先检测BOM，然后用 CharsetDecoder 实际解码样本来判断编码
      */
     private Charset detectCharset(Path filePath) throws IOException {
-        int sampleSize = Math.min((int) Math.min(Files.size(filePath), 4096), 4096);
+        int sampleSize = (int) Math.min(Files.size(filePath), 4096);
         if (sampleSize <= 0) return StandardCharsets.UTF_8;
 
         try (InputStream is = Files.newInputStream(filePath);
@@ -246,6 +277,26 @@ public class ReadFileTool implements Tool {
     }
 
     /**
+     * 检测文件是否为二进制文件（通过检查空字节比例）
+     */
+    private boolean isBinaryFile(Path filePath) throws IOException {
+        int sampleSize = (int) Math.min(Files.size(filePath), 4096);
+        if (sampleSize <= 0) return false;
+
+        byte[] sample = new byte[sampleSize];
+        try (InputStream is = Files.newInputStream(filePath)) {
+            int bytesRead = is.read(sample);
+            if (bytesRead <= 0) return false;
+
+            int nullCount = 0;
+            for (int i = 0; i < bytesRead; i++) {
+                if (sample[i] == 0) nullCount++;
+            }
+            return (double) nullCount / bytesRead > BINARY_NULL_THRESHOLD;
+        }
+    }
+
+    /**
      * 读取文件所有行，限制单行最大长度防止OOM
      * 遇到 MalformedInputException 时自动降级尝试 GBK
      */
@@ -268,7 +319,15 @@ public class ReadFileTool implements Tool {
                     lines.add(sb.toString());
                     sb = new StringBuilder();
                 } else if (ch == '\r') {
-                    // skip CR, handle CRLF
+                    // 处理 CR（单独换行或 CRLF）
+                    lines.add(sb.toString());
+                    sb = new StringBuilder();
+                    // 如果是 CRLF，吞掉紧随其后的 \n
+                    reader.mark(1);
+                    int next = reader.read();
+                    if (next != '\n') {
+                        reader.reset();
+                    }
                 } else {
                     if (sb.length() < MAX_LINE_LENGTH) {
                         sb.append((char) ch);

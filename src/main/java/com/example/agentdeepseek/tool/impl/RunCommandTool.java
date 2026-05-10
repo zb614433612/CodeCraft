@@ -16,7 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.*;
 
 /**
  * 命令执行工具
@@ -46,7 +45,7 @@ public class RunCommandTool implements Tool {
     @Override
     public String getDescription() {
         return "执行 shell 命令（如 mvn compile、npm build、git status、python script.py 等），返回标准输出和错误输出。"
-                + "支持两种模式：① command 字符串模式（如 \"mvn clean compile\"）② executable + args 结构化模式。"
+                + "支持两种模式：\u2460 command 字符串模式（如 \"mvn clean compile\"）\u2461 executable + args 结构化模式。"
                 + "可设置 timeout（默认 60s，最大 300s）。"
                 + "注意：对于需要长时间运行的命令（如 dev server），请使用 run_background_command 工具";
     }
@@ -114,8 +113,6 @@ public class RunCommandTool implements Tool {
 
         // 解析命令
         List<String> cmdAndArgs;
-        String execName;
-
         if (!executable.isEmpty()) {
             // 模式二：结构化参数
             cmdAndArgs = new ArrayList<>();
@@ -127,7 +124,7 @@ public class RunCommandTool implements Tool {
             }
         } else if (!commandStr.isEmpty()) {
             // 模式一：字符串命令
-            cmdAndArgs = tokenize(commandStr);
+            cmdAndArgs = CommandUtils.tokenize(commandStr);
             if (cmdAndArgs.isEmpty()) {
                 return "错误：命令为空";
             }
@@ -178,7 +175,8 @@ public class RunCommandTool implements Tool {
                         totalRead += n;
                     }
                 } catch (IOException e) {
-                    // 进程结束后流关闭是正常情况
+                    // 进程结束后流关闭是正常情况，记录 debug 日志便于排查
+                    log.debug("命令输出流读取结束: {}", e.getMessage());
                 }
             });
             readerThread.setDaemon(true);
@@ -190,6 +188,10 @@ public class RunCommandTool implements Tool {
 
             if (!finished) {
                 process.destroyForcibly();
+                // 等待进程实际终止，避免 exitValue() 抛出 IllegalThreadStateException
+                if (!process.waitFor(3, TimeUnit.SECONDS)) {
+                    log.warn("强制终止进程后仍未退出: {}", String.join(" ", cmdAndArgs));
+                }
                 sb.append("！命令超时（").append(timeout).append(" 秒），已强制终止\n");
             }
 
@@ -215,84 +217,6 @@ public class RunCommandTool implements Tool {
             Thread.currentThread().interrupt();
             return sb.append("错误：命令执行被中断").toString();
         }
-    }
-
-    /**
-     * 将命令字符串解析为可执行文件 + 参数列表
-     * 支持单引号和双引号包裹的参数
-     */
-    /**
-     * Windows 兼容：解析可执行文件的完整路径
-     * ProcessBuilder 在 Windows 上不会自动查找 PATHEXT（.cmd、.bat 等），
-     * 导致直接使用 "mvn"、"npm" 等命令时找不到文件。
-     * 此方法在 PATH 中搜索带扩展名的可执行文件并返回完整路径。
-     */
-    private List<String> resolveWindowsExecutable(List<String> cmdAndArgs) {
-        if (cmdAndArgs == null || cmdAndArgs.isEmpty()) return cmdAndArgs;
-        if (!System.getProperty("os.name").toLowerCase().contains("win")) return cmdAndArgs;
-
-        String exec = cmdAndArgs.get(0);
-        // 如果已经有扩展名或是绝对路径，不处理
-        if (exec.contains(".") || exec.contains(File.separator)) return cmdAndArgs;
-
-        // 读取 PATHEXT 环境变量
-        String pathext = System.getenv("PATHEXT");
-        if (pathext == null || pathext.isEmpty()) return cmdAndArgs;
-
-        // 拆分 PATH 路径
-        String pathEnv = System.getenv("PATH");
-        if (pathEnv == null || pathEnv.isEmpty()) return cmdAndArgs;
-
-        List<String> extensions = Arrays.stream(pathext.split(";"))
-                .map(String::toLowerCase)
-                .collect(Collectors.toList());
-
-        String[] pathDirs = pathEnv.split(";");
-
-        // 在 PATH 中搜索可执行文件
-        for (String dir : pathDirs) {
-            if (dir.isEmpty()) continue;
-            Path dirPath = Paths.get(dir);
-            if (!Files.isDirectory(dirPath)) continue;
-            for (String ext : extensions) {
-                Path fullPath = dirPath.resolve(exec + ext);
-                if (Files.exists(fullPath)) {
-                    List<String> result = new ArrayList<>(cmdAndArgs);
-                    result.set(0, fullPath.toString());
-                    log.debug("Windows 可执行文件解析: {} -> {}", exec, fullPath);
-                    return result;
-                }
-            }
-        }
-
-        return cmdAndArgs;
-    }
-
-    private List<String> tokenize(String command) {
-        List<String> tokens = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        boolean inSingleQuote = false;
-        boolean inDoubleQuote = false;
-
-        for (int i = 0; i < command.length(); i++) {
-            char c = command.charAt(i);
-            if (c == '\'' && !inDoubleQuote) {
-                inSingleQuote = !inSingleQuote;
-            } else if (c == '"' && !inSingleQuote) {
-                inDoubleQuote = !inDoubleQuote;
-            } else if (Character.isWhitespace(c) && !inSingleQuote && !inDoubleQuote) {
-                if (current.length() > 0) {
-                    tokens.add(current.toString());
-                    current.setLength(0);
-                }
-            } else {
-                current.append(c);
-            }
-        }
-        if (current.length() > 0) {
-            tokens.add(current.toString());
-        }
-        return tokens;
     }
 
     /**

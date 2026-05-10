@@ -13,7 +13,9 @@ import org.springframework.stereotype.Component;
  * 读取目标文件 + 调用 DeepSeek 分析代码结构并给出重构方案
  */
 @Slf4j
-@Component
+/**
+ * @deprecated 请使用 CodeAnalysisTool（code_analysis）代替，通过 mode=refactor 参数实现相同功能
+ */
 public class RefactorAgentTool implements Tool {
 
     private static final int ANALYSIS_TIMEOUT = 120;

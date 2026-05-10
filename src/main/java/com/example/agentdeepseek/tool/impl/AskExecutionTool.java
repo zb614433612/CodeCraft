@@ -18,6 +18,11 @@ import java.util.UUID;
 @Component
 public class AskExecutionTool implements Tool {
 
+    /** 返回格式前缀，区别于 ask_clarification 的 __ASK_CLARIFICATION__ */
+    static final String RESULT_PREFIX = "__ASK_EXECUTION__:";
+    /** question 最大长度，防止 LLM 传入异常超长内容 */
+    private static final int MAX_QUESTION_LENGTH = 2000;
+
     private final ObjectMapper objectMapper;
 
     public AskExecutionTool(ObjectMapper objectMapper) {
@@ -54,14 +59,27 @@ public class AskExecutionTool implements Tool {
 
     @Override
     public String execute(JsonNode arguments) {
+        // 防御：上游可能传入 null
+        if (arguments == null) {
+            log.warn("ask_execution: arguments 为 null");
+            return RESULT_PREFIX + "error:arguments 为 null，无法提取 question";
+        }
+
         String question = arguments.path("question").asText();
         if (question.isEmpty()) {
-            return "错误：缺少必要参数 question";
+            log.warn("ask_execution: question 缺失或为空");
+            return RESULT_PREFIX + "error:缺少必要参数 question";
+        }
+
+        // 长度限制：截断过长内容，防止 SSE 传输和存储问题
+        if (question.length() > MAX_QUESTION_LENGTH) {
+            log.warn("ask_execution: question 超长({}), 已截断至 {}", question.length(), MAX_QUESTION_LENGTH);
+            question = question.substring(0, MAX_QUESTION_LENGTH) + "...";
         }
 
         String uuid = UUID.randomUUID().toString();
         log.info("ask_execution: uuid={}, question={}", uuid, question);
 
-        return "__QUESTION__:" + uuid + ":" + question;
+        return RESULT_PREFIX + uuid + ":" + question;
     }
 }

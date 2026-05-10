@@ -44,7 +44,7 @@ public class ReadProcessOutputTool implements Tool {
 
         ObjectNode tail = objectMapper.createObjectNode();
         tail.put("type", "integer");
-        tail.put("description", "可选，只显示最后 N 行。不指定则显示全部输出");
+        tail.put("description", "可选，只显示最后 N 行。不指定则显示全部输出。必须 >= 0");
         properties.set("tail", tail);
 
         parameters.set("properties", properties);
@@ -58,7 +58,17 @@ public class ReadProcessOutputTool implements Tool {
             return "错误：缺少必要参数 pid";
         }
         int pid = arguments.get("pid").asInt();
-        int tail = arguments.has("tail") ? arguments.get("tail").asInt(0) : 0;
+        if (pid <= 0) {
+            return "错误：无效的进程 ID: " + pid + "，pid 必须为正整数";
+        }
+
+        int tail = 0;
+        if (arguments.has("tail")) {
+            tail = arguments.get("tail").asInt(0);
+            if (tail < 0) {
+                return "错误：tail 参数不能为负数，请指定 >= 0 的值";
+            }
+        }
 
         String output = RunBackgroundCommandTool.readProcessOutput(pid, tail);
         if (output == null) {

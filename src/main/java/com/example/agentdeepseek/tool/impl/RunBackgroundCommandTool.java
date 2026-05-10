@@ -12,10 +12,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -28,6 +28,12 @@ public class RunBackgroundCommandTool implements Tool {
 
     /** 最大并发后台进程数 */
     private static final int MAX_CONCURRENT = 3;
+
+    /** 单个进程输出缓冲区最大行数 */
+    private static final int MAX_OUTPUT_LINES = 5000;
+
+    /** 单个进程输出缓冲区最大字节数（5MB） */
+    private static final int MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 
     /** 后台进程存储 */
     private static final ConcurrentHashMap<Integer, ProcessInfo> PROCESSES = new ConcurrentHashMap<>();
@@ -94,14 +100,14 @@ public class RunBackgroundCommandTool implements Tool {
         cleanupFinishedProcesses();
 
         // 检查并发限制
-        long runningCount = PROCESSES.values().stream().filter(p -> p.isAlive()).count();
+        long runningCount = getRunningCount();
         if (runningCount >= MAX_CONCURRENT) {
             return "错误：后台进程已达上限（" + MAX_CONCURRENT + " 个），请等待已有进程结束或手动停止。"
-                    + "\n当前进程列表：\n" + listProcesses();
+                    + "\n当前进程列表：\n" + buildProcessList();
         }
 
         // 解析命令
-        List<String> tokens = tokenize(commandStr);
+        List<String> tokens = CommandUtils.tokenize(commandStr);
         if (tokens.isEmpty()) {
             return "错误：命令为空";
         }
@@ -151,11 +157,11 @@ public class RunBackgroundCommandTool implements Tool {
                     + "命令：" + originalCommand + "\n"
                     + "工作目录：" + workDir.toAbsolutePath() + "\n"
                     + "系统 PID：" + process.pid() + "\n"
-                    + "当前后台进程数：" + PROCESSES.size() + "（运行中: " + runningCount() + "）\n"
+                    + "当前后台进程数：" + PROCESSES.size() + "（运行中: " + getRunningCount() + "）\n"
                     + "────────────────────────────────────────\n"
                     + "提示：进程会持续运行直到完成或被终止。\n"
                     + "提示：使用 read_process_output 工具查看进程输出。\n"
-                    + "当前所有后台进程：\n" + listProcesses();
+                    + "当前所有后台进程：\n" + buildProcessList();
 
         } catch (IOException e) {
             log.error("启动后台进程失败", e);
@@ -168,7 +174,8 @@ public class RunBackgroundCommandTool implements Tool {
      */
     private void startOutputReader(int pid, Process process) {
         Thread reader = new Thread(() -> {
-            try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = br.readLine()) != null) {
                     ProcessInfo info = PROCESSES.get(pid);
@@ -186,11 +193,12 @@ public class RunBackgroundCommandTool implements Tool {
 
     /**
      * 清理已结束的进程
+     * 使用 entrySet().removeIf() 保证线程安全（ConcurrentHashMap 的 entrySet 视图的 removeIf 是线程安全的）
      */
     private void cleanupFinishedProcesses() {
-        PROCESSES.values().removeIf(info -> {
-            if (!info.isAlive()) {
-                log.debug("清理已结束的进程 #{}: {}", info.id, info.command);
+        PROCESSES.entrySet().removeIf(entry -> {
+            if (!entry.getValue().isAlive()) {
+                log.debug("清理已结束的进程 #{}: {}", entry.getValue().id, entry.getValue().command);
                 return true;
             }
             return false;
@@ -200,14 +208,14 @@ public class RunBackgroundCommandTool implements Tool {
     /**
      * 统计正在运行的进程数
      */
-    private long runningCount() {
+    private long getRunningCount() {
         return PROCESSES.values().stream().filter(p -> p.isAlive()).count();
     }
 
     /**
      * 列出所有后台进程
      */
-    private String listProcesses() {
+    private String buildProcessList() {
         if (PROCESSES.isEmpty()) {
             return "  （无后台进程）";
         }
@@ -230,36 +238,6 @@ public class RunBackgroundCommandTool implements Tool {
     }
 
     /**
-     * 分割命令字符串（同 RunCommandTool 的 tokenize）
-     */
-    private List<String> tokenize(String command) {
-        List<String> tokens = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        boolean inSingleQuote = false;
-        boolean inDoubleQuote = false;
-
-        for (int i = 0; i < command.length(); i++) {
-            char c = command.charAt(i);
-            if (c == '\'' && !inDoubleQuote) {
-                inSingleQuote = !inSingleQuote;
-            } else if (c == '"' && !inSingleQuote) {
-                inDoubleQuote = !inDoubleQuote;
-            } else if (Character.isWhitespace(c) && !inSingleQuote && !inDoubleQuote) {
-                if (current.length() > 0) {
-                    tokens.add(current.toString());
-                    current.setLength(0);
-                }
-            } else {
-                current.append(c);
-            }
-        }
-        if (current.length() > 0) {
-            tokens.add(current.toString());
-        }
-        return tokens;
-    }
-
-    /**
      * 后台进程信息
      */
     static class ProcessInfo {
@@ -268,7 +246,11 @@ public class RunBackgroundCommandTool implements Tool {
         final Path workDir;
         final Process process;
         final long startTime;
-        final List<String> outputLines = new CopyOnWriteArrayList<>();
+
+        /** 线程安全的输出行缓冲区，使用 LinkedList 避免 CopyOnWriteArrayList.remove(0) 的 O(n) 问题 */
+        private final List<String> outputLines = new LinkedList<>();
+        /** 已缓存的总字节数 */
+        private int totalBytes;
 
         ProcessInfo(int id, String command, Path workDir, Process process, long startTime) {
             this.id = id;
@@ -278,12 +260,29 @@ public class RunBackgroundCommandTool implements Tool {
             this.startTime = startTime;
         }
 
-        void addOutputLine(String line) {
-            outputLines.add(line);
-            // 最多保留 5000 行
-            if (outputLines.size() > 5000) {
-                outputLines.remove(0);
+        synchronized void addOutputLine(String line) {
+            // 先计算此行占用的字节数（按 UTF-8 估算）
+            int lineBytes = line.getBytes(StandardCharsets.UTF_8).length + 1; // +1 for newline
+
+            // 如果总字节数已达上限，丢弃此行
+            if (totalBytes + lineBytes > MAX_OUTPUT_BYTES) {
+                return;
             }
+
+            outputLines.add(line);
+            totalBytes += lineBytes;
+
+            // 超出最大行数时，从头部移除（LinkedList.remove(0) 是 O(1) 操作）
+            if (outputLines.size() > MAX_OUTPUT_LINES) {
+                String removed = outputLines.remove(0);
+                // 同步减少字节计数
+                totalBytes -= removed.getBytes(StandardCharsets.UTF_8).length + 1;
+                if (totalBytes < 0) totalBytes = 0;
+            }
+        }
+
+        synchronized List<String> getOutputLines() {
+            return new ArrayList<>(outputLines);
         }
 
         boolean isAlive() {
@@ -335,8 +334,8 @@ public class RunBackgroundCommandTool implements Tool {
         ProcessInfo info = PROCESSES.get(processId);
         if (info == null) return null;
 
-        List<String> lines = info.outputLines;
-        if (lines.isEmpty()) {
+        List<String> allLines = info.getOutputLines();
+        if (allLines.isEmpty()) {
             if (info.isAlive()) {
                 return "（进程运行中，暂无输出）";
             } else {
@@ -345,7 +344,7 @@ public class RunBackgroundCommandTool implements Tool {
         }
 
         StringBuilder sb = new StringBuilder();
-        int totalLines = lines.size();
+        int totalLines = allLines.size();
         sb.append("进程 #").append(processId).append(" 输出（共 ").append(totalLines).append(" 行）");
         if (tailLines > 0 && tailLines < totalLines) {
             sb.append("，显示最后 ").append(tailLines).append(" 行");
@@ -354,11 +353,10 @@ public class RunBackgroundCommandTool implements Tool {
         sb.append("────────────────────────────────────────\n");
 
         int start = tailLines > 0 ? Math.max(0, totalLines - tailLines) : 0;
-        boolean alive = info.isAlive();
         for (int i = start; i < totalLines; i++) {
-            sb.append(lines.get(i)).append("\n");
+            sb.append(allLines.get(i)).append("\n");
         }
-        if (alive) {
+        if (info.isAlive()) {
             sb.append("（进程仍在运行，使用 read_process_output 可继续读取）");
         } else {
             sb.append("（进程已结束，退出码: ").append(info.exitValue()).append("）");

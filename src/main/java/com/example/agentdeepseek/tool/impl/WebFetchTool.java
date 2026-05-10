@@ -1,64 +1,57 @@
 package com.example.agentdeepseek.tool.impl;
 
-import com.example.agentdeepseek.config.WebFetchConfig;
+import com.example.agentdeepseek.config.NetworkToolConfig;
 import com.example.agentdeepseek.tool.Tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import java.net.InetSocketAddress;
-import java.net.Socket;
+import java.net.Proxy;
 import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * 网页内容获取工具（合并网络连通性检测 + 网页内容读取）
- * 先检测目标网页的可达性，不可达则返回错误信息，可达则读取网页内容
+ * 网页内容获取工具（连通性检测 + 网页内容读取）
+ * 先通过 ConnectivityChecker 检测目标网页可达性，再抓取网页内容
+ * 使用 Jsoup 解析 HTML，比正则更准确
  */
 @Slf4j
 @Component
 public class WebFetchTool implements Tool {
 
-    private static final int CONNECT_TIMEOUT = 5000;
-    private static final int FETCH_TIMEOUT = 15_000;
-    private static final int MAX_CONTENT_LENGTH = 100_000;
-
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
+    private final ConnectivityChecker connectivityChecker;
+    private final NetworkToolConfig config;
 
-    public WebFetchTool(ObjectMapper objectMapper, WebFetchConfig webFetchConfig) {
+    public WebFetchTool(ObjectMapper objectMapper, ConnectivityChecker connectivityChecker, NetworkToolConfig config) {
         this.objectMapper = objectMapper;
-        this.restTemplate = new RestTemplate();
+        this.connectivityChecker = connectivityChecker;
+        this.config = config;
 
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(FETCH_TIMEOUT);
-        factory.setReadTimeout(FETCH_TIMEOUT);
+        factory.setConnectTimeout(config.getFetchConnectTimeout());
+        factory.setReadTimeout(config.getFetchReadTimeout());
 
-        if (webFetchConfig.getProxy().isEnabled()) {
-            java.net.Proxy proxy = new java.net.Proxy(
-                    java.net.Proxy.Type.HTTP,
-                    new java.net.InetSocketAddress(
-                            webFetchConfig.getProxy().getHost(),
-                            webFetchConfig.getProxy().getPort()
-                    )
-            );
-            factory.setProxy(proxy);
-            log.info("网页读取工具已配置代理: {}:{}",
-                    webFetchConfig.getProxy().getHost(),
-                    webFetchConfig.getProxy().getPort());
+        if (config.getProxy() != null && config.getProxy().isEnabled()) {
+            factory.setProxy(new Proxy(
+                    Proxy.Type.HTTP,
+                    new InetSocketAddress(config.getProxy().getHost(), config.getProxy().getPort())
+            ));
+            log.info("网页读取工具已配置代理: {}:{}", config.getProxy().getHost(), config.getProxy().getPort());
         }
 
-        restTemplate.setRequestFactory(factory);
+        this.restTemplate = new RestTemplate(factory);
     }
 
     @Override
@@ -96,15 +89,15 @@ public class WebFetchTool implements Tool {
             return "错误：URL 不能为空";
         }
 
-        // ========== 阶段一：网络连通性检测 ==========
+        // 阶段一：连通性检测（使用公共 ConnectivityChecker，走代理配置）
         log.info("检测网页连通性: {}", url);
-        String reachableError = checkConnectivity(url);
-        if (reachableError != null) {
-            log.warn("网页不可达: {} - {}", url, reachableError);
-            return "网页不可达：" + url + "\n原因：" + reachableError;
+        ConnectivityChecker.CheckResult checkResult = connectivityChecker.check(url);
+        if (!checkResult.reachable) {
+            log.warn("网页不可达: {} - {}", url, checkResult.error);
+            return "网页不可达：" + url + "\n原因：" + (checkResult.error != null ? checkResult.error : "连接失败");
         }
 
-        // ========== 阶段二：读取网页内容 ==========
+        // 阶段二：读取网页内容
         log.info("网页可达，开始读取内容: {}", url);
         try {
             URI uri = new URI(url);
@@ -115,8 +108,9 @@ public class WebFetchTool implements Tool {
                 return "错误：网页内容为空";
             }
 
+            // 优先使用 HTTP Header 中的 Content-Type charset
             String charset = null;
-            MediaType contentType = response.getHeaders().getContentType();
+            org.springframework.http.MediaType contentType = response.getHeaders().getContentType();
             if (contentType != null) {
                 Charset cs = contentType.getCharset();
                 if (cs != null) {
@@ -124,26 +118,31 @@ public class WebFetchTool implements Tool {
                 }
             }
 
+            // 其次从 HTML meta 标签检测
             if (charset == null) {
-                charset = detectCharsetFromHtml(body);
+                charset = Jsoup.parse(new String(body, StandardCharsets.ISO_8859_1))
+                        .charset().name();
             }
 
-            String html;
-            if (charset != null) {
-                html = new String(body, charset);
-            } else {
-                html = new String(body, StandardCharsets.UTF_8);
-            }
+            String html = new String(body, charset != null ? charset : StandardCharsets.UTF_8.name());
 
-            String text = htmlToText(html);
+            // 使用 Jsoup 解析 HTML 并提取文本
+            Document doc = Jsoup.parse(html);
+            doc.select("script, style, noscript, nav, footer, header, aside, iframe").remove();
+            String text = doc.body() != null ? doc.body().wholeText() : "";
 
-            if (text.isEmpty()) {
+            if (text.isBlank()) {
                 return "错误：该页面没有可读的文本内容";
             }
 
-            if (text.length() > MAX_CONTENT_LENGTH) {
-                text = text.substring(0, MAX_CONTENT_LENGTH)
-                        + "\n\n...（内容过长，仅显示前 " + MAX_CONTENT_LENGTH + " 字符）";
+            // 排版整理：合并连续空白，去除多余空行
+            text = text.replaceAll("\\n{3,}", "\n\n");
+            text = text.replaceAll("(?m)^[ \t]+|[ \t]+$", "");
+
+            int maxLen = config.getFetchMaxContentLength();
+            if (text.length() > maxLen) {
+                text = text.substring(0, maxLen)
+                        + "\n\n...（内容过长，仅显示前 " + maxLen + " 字符）";
             }
 
             StringBuilder sb = new StringBuilder();
@@ -155,85 +154,12 @@ public class WebFetchTool implements Tool {
             log.error("读取网页失败: {} - HTTP {}", url, e.getStatusCode());
             return "错误：读取网页失败 - HTTP " + e.getStatusCode().value() + " " + e.getStatusText()
                     + "（目标网站拒绝访问或需要验证）";
+        } catch (org.springframework.web.client.ResourceAccessException e) {
+            log.error("读取网页连接失败: {} - {}", url, e.getMessage());
+            return "错误：读取网页失败 - 连接超时或网络不通，请用 check_network 检测目标网站可达性";
         } catch (Exception e) {
             log.error("读取网页失败: {}", url, e);
-            return "错误：读取网页失败 - " + e.getClass().getSimpleName();
+            return "错误：读取网页失败 - " + e.getClass().getSimpleName() + ": " + e.getMessage();
         }
-    }
-
-    /**
-     * 检测目标网页的 TCP 连通性
-     *
-     * @param url 目标 URL
-     * @return 不可达时返回错误描述，可达时返回 null
-     */
-    private String checkConnectivity(String url) {
-        try {
-            URI uri = new URI(url);
-            String host = uri.getHost();
-            int port = uri.getPort() > 0 ? uri.getPort() : (url.startsWith("https") ? 443 : 80);
-
-            long start = System.currentTimeMillis();
-            try (Socket socket = new Socket()) {
-                socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT);
-            }
-            long elapsed = System.currentTimeMillis() - start;
-            log.debug("网页连通性检测通过: {} ({}ms)", url, elapsed);
-            return null; // 可达
-        } catch (Exception e) {
-            return "连接失败: " + e.getMessage();
-        }
-    }
-
-    private String htmlToText(String html) {
-        if (html == null || html.isEmpty()) {
-            return "";
-        }
-
-        String text = html;
-
-        text = text.replaceAll("(?si)<script[^>]*>.*?</script>", "");
-        text = text.replaceAll("(?si)<style[^>]*>.*?</style>", "");
-        text = text.replaceAll("(?si)<noscript[^>]*>.*?</noscript>", "");
-
-        text = text.replaceAll("(?si)</?(?:div|p|br|li|ol|ul|h[1-6]|blockquote|pre|tr|td|th|section|article|nav|header|footer|aside)[^>]*>", "\n");
-
-        text = text.replaceAll("<[^>]+>", "");
-
-        text = text.replace("&amp;", "&");
-        text = text.replace("&lt;", "<");
-        text = text.replace("&gt;", ">");
-        text = text.replace("&quot;", "\"");
-        text = text.replace("&nbsp;", " ");
-        text = text.replace("&apos;", "'");
-        text = text.replaceAll("&[a-zA-Z]+;", " ");
-
-        text = text.replaceAll("\\s+", " ");
-        text = text.replaceAll("\\n\\s*\\n", "\n\n");
-        text = text.replaceAll("^\\s+|\\s+$", "");
-
-        return text.trim();
-    }
-
-    private String detectCharsetFromHtml(byte[] body) {
-        String head = new String(body, 0, Math.min(body.length, 4096), StandardCharsets.ISO_8859_1);
-
-        Matcher matcher = Pattern.compile(
-                "(?i)<meta[^>]*charset\\s*=\\s*[\"']?\\s*([a-zA-Z0-9\\-_]+)",
-                Pattern.CASE_INSENSITIVE
-        ).matcher(head);
-        if (matcher.find()) {
-            return matcher.group(1);
-        }
-
-        matcher = Pattern.compile(
-                "(?i)<meta[^>]*http-equiv\\s*=\\s*[\"']?Content-Type[\"']?[^>]*charset\\s*=\\s*([a-zA-Z0-9\\-_]+)",
-                Pattern.CASE_INSENSITIVE
-        ).matcher(head);
-        if (matcher.find()) {
-            return matcher.group(1);
-        }
-
-        return null;
     }
 }

@@ -8,9 +8,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Git 状态查询工具
- * 显示当前分支和变更文件列表
+ * 显示当前分支和文件变更列表（修改/新增/删除/未跟踪）
  */
 @Slf4j
 @Component
@@ -68,70 +71,74 @@ public class GitStatusTool implements Tool {
         }
 
         // 解析 --porcelain --branch 输出
-        // 前两行是分支信息 (# branch... / # ahead/behind...)
+        // 格式：XY filename，X=暂存区状态，Y=工作区状态，??=未跟踪
+        // 前1-2行是分支信息 (# branch... / # ahead/behind...)
         String[] lines = raw.split("\n");
-        int changedCount = 0;
-        int untrackedCount = 0;
+
+        // 单次遍历：解析所有行的状态并分类存储
+        List<String> stagedFiles = new ArrayList<>();
+        List<String> unstagedFiles = new ArrayList<>();
+        List<String> untrackedFiles = new ArrayList<>();
         int stagedCount = 0;
+        int unstagedCount = 0;
 
         for (String line : lines) {
-            if (line.startsWith("#")) continue;
+            if (line.startsWith("#") || line.length() < 3) continue;
+
             if (line.startsWith("??")) {
-                untrackedCount++;
-            } else {
-                changedCount++;
-                if (!line.substring(0, 2).trim().isEmpty()) {
-                    stagedCount++;
-                }
+                untrackedFiles.add(line.substring(3));
+                continue;
+            }
+
+            char indexStatus = line.charAt(0);   // 暂存区状态
+            char workStatus = line.charAt(1);    // 工作区状态
+            String fileName = line.substring(3);
+
+            if (indexStatus != ' ') {
+                stagedFiles.add("  " + indexStatus + "  " + fileName);
+                stagedCount++;
+            }
+            if (workStatus != ' ') {
+                unstagedFiles.add("  " + workStatus + "  " + fileName);
+                unstagedCount++;
             }
         }
 
-        sb.append("变更统计：").append(changedCount).append(" 个已跟踪文件变更")
-                .append("，").append(untrackedCount).append(" 个未跟踪文件");
-        if (stagedCount > 0) {
-            sb.append("（").append(stagedCount).append(" 个已暂存）");
-        }
-        sb.append("\n\n");
+        // 输出统计
+        sb.append("变更统计：").append(stagedCount + unstagedCount).append(" 处变更")
+                .append("（").append(stagedCount).append(" 个已暂存，").append(unstagedCount).append(" 个未暂存）")
+                .append("，").append(untrackedFiles.size()).append(" 个未跟踪文件")
+                .append("\n\n");
 
-        // 按区域分组显示
+        // 输出已暂存
         sb.append("已暂存（Staged）：\n");
-        boolean hasStaged = false;
-        for (String line : lines) {
-            if (line.startsWith("#")) continue;
-            if (line.length() < 3) continue;
-            String status = line.substring(0, 2);
-            if (!status.trim().isEmpty() && !line.startsWith("??")) {
-                String file = line.substring(3);
-                sb.append("  ").append(status.trim()).append("  ").append(file).append("\n");
-                hasStaged = true;
+        if (!stagedFiles.isEmpty()) {
+            for (String file : stagedFiles) {
+                sb.append(file).append("\n");
             }
+        } else {
+            sb.append("  （无）\n");
         }
-        if (!hasStaged) sb.append("  （无）\n");
 
+        // 输出工作区变更
         sb.append("\n工作区变更（Unstaged）：\n");
-        boolean hasUnstaged = false;
-        for (String line : lines) {
-            if (line.startsWith("#")) continue;
-            if (line.length() < 3) continue;
-            String staged = line.substring(0, 1);
-            String working = line.substring(1, 2);
-            if (!working.trim().isEmpty() && !line.startsWith("??")) {
-                String file = line.substring(3);
-                sb.append("  ").append(working.trim()).append("  ").append(file).append("\n");
-                hasUnstaged = true;
+        if (!unstagedFiles.isEmpty()) {
+            for (String file : unstagedFiles) {
+                sb.append(file).append("\n");
             }
+        } else {
+            sb.append("  （无）\n");
         }
-        if (!hasUnstaged) sb.append("  （无）\n");
 
+        // 输出未跟踪文件
         sb.append("\n未跟踪文件（Untracked）：\n");
-        boolean hasUntracked = false;
-        for (String line : lines) {
-            if (line.startsWith("??")) {
-                sb.append("  ?  ").append(line.substring(3)).append("\n");
-                hasUntracked = true;
+        if (!untrackedFiles.isEmpty()) {
+            for (String file : untrackedFiles) {
+                sb.append("  ?  ").append(file).append("\n");
             }
+        } else {
+            sb.append("  （无）\n");
         }
-        if (!hasUntracked) sb.append("  （无）\n");
 
         return sb.toString();
     }

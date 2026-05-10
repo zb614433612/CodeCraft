@@ -10,6 +10,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Git Add 工具
  * 暂存文件变更
@@ -76,18 +79,31 @@ public class GitAddTool implements Tool {
             return "已暂存全部变更";
         }
 
-        // 暂存一个或多个文件
+        // 暂存一个或多个文件（一次性 add，避免逐个启动子进程）
         String[] files = path.split(",");
+        List<String> fileList = new ArrayList<>();
         for (String file : files) {
-            file = file.trim();
-            if (file.isEmpty()) continue;
-
-            GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, "add", file);
-            if (!result.success()) {
-                return "错误：暂存文件失败 '" + file + "' - " + result.output();
+            String trimmed = file.trim();
+            if (!trimmed.isEmpty()) {
+                fileList.add(trimmed);
             }
         }
 
-        return "已暂存 " + files.length + " 个文件：" + path;
+        if (fileList.isEmpty()) {
+            return "错误：未指定有效的文件路径";
+        }
+
+        // 将所有文件一次性传给 git add
+        String[] addArgs = new String[fileList.size() + 1];
+        addArgs[0] = "add";
+        for (int i = 0; i < fileList.size(); i++) {
+            addArgs[i + 1] = fileList.get(i);
+        }
+        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, addArgs);
+        if (!result.success()) {
+            return "错误：暂存文件失败 - " + result.output();
+        }
+
+        return "已暂存 " + fileList.size() + " 个文件：" + path;
     }
 }

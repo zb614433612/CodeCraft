@@ -87,11 +87,17 @@ public class GlobFilesTool implements Tool {
             return "错误：缺少必要参数 pattern";
         }
 
+        Path projectRoot = Paths.get(ProjectRootContext.get()).normalize().toAbsolutePath();
         Path rootPath;
         if (!rootStr.isEmpty()) {
             rootPath = resolvePath(rootStr);
+            // 路径遍历防护：校验搜索结果必须在项目目录范围内
+            if (!rootPath.startsWith(projectRoot)) {
+                return "错误：搜索路径超出项目目录范围 - " + rootPath.toAbsolutePath()
+                        + "\n项目根目录：" + projectRoot;
+            }
         } else {
-            rootPath = Paths.get(ProjectRootContext.get());
+            rootPath = projectRoot;
         }
 
         if (!Files.exists(rootPath)) {
@@ -125,7 +131,12 @@ public class GlobFilesTool implements Tool {
         }
 
         // 递归搜索
-        List<FileResult> results = walkFiles(rootPath, matcher, excludeMatcher);
+        List<FileResult> results;
+        try {
+            results = walkFiles(rootPath, matcher, excludeMatcher);
+        } catch (IOException e) {
+            return "错误：搜索文件时发生异常 - " + e.getMessage();
+        }
 
         // 构建结果
         StringBuilder sb = new StringBuilder();
@@ -162,18 +173,27 @@ public class GlobFilesTool implements Tool {
     /**
      * 递归遍历目录，收集匹配的文件
      */
-    private List<FileResult> walkFiles(Path rootPath, PathMatcher matcher, PathMatcher excludeMatcher) {
+    private List<FileResult> walkFiles(Path rootPath, PathMatcher matcher, PathMatcher excludeMatcher) throws IOException {
         List<FileResult> results = new ArrayList<>();
-        try {
-            Files.walkFileTree(rootPath, new SimpleFileVisitor<>() {
+        Files.walkFileTree(rootPath, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                     String dirName = dir.getFileName().toString();
                     if (DEFAULT_EXCLUDED_DIRS.contains(dirName)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
-                    if (excludeMatcher != null && excludeMatcher.matches(rootPath.relativize(dir))) {
-                        return FileVisitResult.SKIP_SUBTREE;
+                    if (excludeMatcher != null) {
+                        Path relDir = rootPath.relativize(dir);
+                        // 目录本身匹配排除模式
+                        if (excludeMatcher.matches(relDir)) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
+                        // 目录下的内容是否匹配排除模式（如排除模式 **/test/**，遍历到 src/test 时，
+                        // src/test 本身不匹配，但 src/test/_ 匹配，应跳过整个子树）
+                        // 使用虚拟文件名 _ 避免 Windows 下 * 非法字符问题
+                        if (excludeMatcher.matches(relDir.resolve("_"))) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
                     }
                     return FileVisitResult.CONTINUE;
                 }
@@ -194,22 +214,21 @@ public class GlobFilesTool implements Tool {
 
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    log.warn("访问文件失败，已跳过: {} - {}", file, exc.getMessage() != null ? exc.getMessage() : exc.getClass().getSimpleName());
                     return FileVisitResult.CONTINUE;
                 }
-            });
-        } catch (IOException e) {
-            log.error("搜索文件失败", e);
-        }
+        });
         results.sort(Comparator.comparing(r -> r.path));
         return results;
     }
 
     private Path resolvePath(String pathStr) {
+        Path projectRoot = Paths.get(ProjectRootContext.get()).normalize().toAbsolutePath();
         Path path = Paths.get(pathStr);
         if (path.isAbsolute()) {
             return path.normalize();
         }
-        return Paths.get(ProjectRootContext.get(), pathStr).normalize();
+        return projectRoot.resolve(pathStr).normalize();
     }
 
     private String formatSize(long bytes) {

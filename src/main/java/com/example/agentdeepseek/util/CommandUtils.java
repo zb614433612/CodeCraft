@@ -76,4 +76,52 @@ public class CommandUtils {
     public static boolean isWindows() {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }
+
+    /**
+     * 将命令字符串解析为可执行文件 + 参数列表
+     * 支持单引号、双引号包裹的参数，以及反斜杠转义
+     *
+     * @param command 原始命令字符串
+     * @return 解析后的 token 列表
+     */
+    public static List<String> tokenize(String command) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+
+        for (int i = 0; i < command.length(); i++) {
+            char c = command.charAt(i);
+
+            // 处理转义字符（不在单引号内时有效）
+            if (c == '\\' && !inSingleQuote) {
+                // 转义模式：下一个字符作为字面量加入
+                if (i + 1 < command.length()) {
+                    i++;
+                    current.append(command.charAt(i));
+                } else {
+                    // 末尾反斜杠，按字面保留
+                    current.append('\\');
+                }
+                continue;
+            }
+
+            if (c == '\'' && !inDoubleQuote) {
+                inSingleQuote = !inSingleQuote;
+            } else if (c == '"' && !inSingleQuote) {
+                inDoubleQuote = !inDoubleQuote;
+            } else if (Character.isWhitespace(c) && !inSingleQuote && !inDoubleQuote) {
+                if (current.length() > 0) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
+            }
+        }
+        if (current.length() > 0) {
+            tokens.add(current.toString());
+        }
+        return tokens;
+    }
 }

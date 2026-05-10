@@ -718,7 +718,8 @@ const sendMessage = async () => {
 
           if (currentAiMessage.value && currentAiMessage.value.id === aiMsgId) {
             currentAiMessage.value.isStreaming = false
-            currentAiMessage.value.tokenCount = estimateTokenCount(responseContent)
+            const toolResultsText = (currentAiMessage.value.toolResults || []).map(r => r.content).join('')
+            currentAiMessage.value.tokenCount = estimateTokenCount(responseContent + toolResultsText)
             messages.value[conversationId] = [...messages.value[conversationId]]
           }
           break

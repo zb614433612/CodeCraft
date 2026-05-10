@@ -1,40 +1,48 @@
 package com.example.agentdeepseek.tool.impl;
 
+import com.example.agentdeepseek.config.NetworkToolConfig;
 import com.example.agentdeepseek.tool.Tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.BodyInserters;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
+import org.springframework.web.client.RestTemplate;
 
-import java.time.Duration;
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * HTTP 请求工具
- * 发送 HTTP 请求，用于测试 API 或获取数据
+ * 发送 HTTP 请求（GET/POST/PUT/DELETE），用于测试 API 或获取数据
  */
 @Slf4j
 @Component
 public class HttpRequestTool implements Tool {
 
-    private static final int REQUEST_TIMEOUT_SECONDS = 30;
-    private static final int MAX_RESPONSE_BYTES = 50 * 1024;
-
     private final ObjectMapper objectMapper;
-    private final WebClient webClient;
+    private final RestTemplate restTemplate;
+    private final NetworkToolConfig config;
+    private final Set<String> allowedMethods;
 
-    public HttpRequestTool(ObjectMapper objectMapper) {
+    public HttpRequestTool(ObjectMapper objectMapper, NetworkToolConfig config) {
         this.objectMapper = objectMapper;
-        this.webClient = WebClient.builder()
-                .codecs(config -> config.defaultCodecs().maxInMemorySize(MAX_RESPONSE_BYTES))
-                .build();
+        this.config = config;
+
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(config.getHttpRequestConnectTimeout());
+        factory.setReadTimeout(config.getHttpRequestReadTimeout());
+        this.restTemplate = new RestTemplate(factory);
+
+        this.allowedMethods = Set.copyOf(config.getHttpRequestAllowedMethods());
     }
 
     @Override
@@ -46,7 +54,8 @@ public class HttpRequestTool implements Tool {
     public String getDescription() {
         return "发送 HTTP 请求，支持 GET/POST/PUT/DELETE。"
                 + "支持自定义 Headers 和 JSON Request Body。"
-                + "超时 " + REQUEST_TIMEOUT_SECONDS + " 秒，响应体上限 50KB。"
+                + "超时 " + (config.getHttpRequestReadTimeout() / 1000) + " 秒，响应体上限 "
+                + (config.getHttpRequestMaxResponseBytes() / 1024) + "KB。"
                 + "适用于测试 API 接口或获取远程数据";
     }
 
@@ -84,7 +93,6 @@ public class HttpRequestTool implements Tool {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public String execute(JsonNode arguments) {
         String url = arguments.path("url").asText();
         if (url.isEmpty()) {
@@ -93,64 +101,63 @@ public class HttpRequestTool implements Tool {
 
         String methodStr = arguments.path("method").asText("GET").toUpperCase();
 
+        // 校验 HTTP 方法
+        if (!allowedMethods.contains(methodStr)) {
+            return "错误：不支持的 HTTP 方法 " + methodStr + "，仅支持 " + String.join(", ", allowedMethods);
+        }
+
         // 解析 headers
-        Map<String, String> headers = new HashMap<>();
+        Map<String, String> headerMap = new HashMap<>();
         JsonNode headersNode = arguments.path("headers");
         if (headersNode.isObject()) {
             headersNode.fields().forEachRemaining(entry ->
-                    headers.put(entry.getKey(), entry.getValue().asText()));
+                    headerMap.put(entry.getKey(), entry.getValue().asText()));
         }
 
         // 解析 body
         JsonNode bodyNode = arguments.path("body");
+        String bodyStr = (bodyNode.isObject() && !bodyNode.isEmpty()) ? bodyNode.toString() : null;
 
         try {
-            return executeRequest(url, methodStr, headers, bodyNode.isObject() ? bodyNode : null);
+            return executeRequest(url, methodStr, headerMap, bodyStr);
+        } catch (org.springframework.web.client.HttpStatusCodeException e) {
+            log.warn("HTTP 请求返回错误状态: {} {} -> {}", methodStr, url, e.getStatusCode());
+            return "HTTP " + e.getStatusCode() + "\n" + e.getResponseBodyAsString();
+        } catch (org.springframework.web.client.ResourceAccessException e) {
+            log.error("HTTP 请求连接失败: {} {}", methodStr, url, e);
+            return "错误：请求连接失败 - 网络不通或目标服务器无响应（" + e.getMessage() + "）";
         } catch (Exception e) {
             log.error("HTTP 请求失败: {} {}", methodStr, url, e);
-            return "错误：请求失败 - " + e.getMessage();
+            return "错误：请求失败 - " + e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }
 
-    private String executeRequest(String url, String method, Map<String, String> headers, JsonNode body) {
-        WebClient.RequestBodySpec requestSpec = webClient
-                .method(HttpMethod.valueOf(method))
-                .uri(url);
-
-        // 设置 headers
-        for (Map.Entry<String, String> header : headers.entrySet()) {
-            requestSpec = requestSpec.header(header.getKey(), header.getValue());
+    private String executeRequest(String url, String method, Map<String, String> headerMap, String bodyStr) {
+        // 构建 Headers
+        HttpHeaders httpHeaders = new HttpHeaders();
+        boolean hasContentType = false;
+        for (Map.Entry<String, String> entry : headerMap.entrySet()) {
+            httpHeaders.set(entry.getKey(), entry.getValue());
+            if ("Content-Type".equalsIgnoreCase(entry.getKey())) {
+                hasContentType = true;
+            }
         }
 
-        // 设置 body
-        WebClient.ResponseSpec responseSpec;
-        if (body != null && !body.isEmpty()) {
-            responseSpec = requestSpec
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(BodyInserters.fromValue(body))
-                    .retrieve();
-        } else {
-            responseSpec = requestSpec.retrieve();
+        // 有 body 且未指定 Content-Type 时，默认 application/json
+        if (bodyStr != null && !hasContentType) {
+            httpHeaders.setContentType(MediaType.APPLICATION_JSON);
         }
 
-        // 执行请求（同步阻塞）
-        String responseBody = responseSpec
-                .bodyToMono(String.class)
-                .timeout(Duration.ofSeconds(REQUEST_TIMEOUT_SECONDS))
-                .onErrorResume(e -> {
-                    if (e instanceof org.springframework.web.reactive.function.client.WebClientResponseException wcre) {
-                        String errorBody = wcre.getResponseBodyAsString();
-                        return Mono.just("HTTP " + wcre.getStatusCode() + "\n" +
-                                (errorBody != null ? errorBody : wcre.getMessage()));
-                    }
-                    return Mono.just("请求异常: " + e.getMessage());
-                })
-                .block();
+        HttpEntity<String> entity = new HttpEntity<>(bodyStr, httpHeaders);
+        URI uri = URI.create(url);
 
-        // 截断过长响应
-        if (responseBody != null && responseBody.length() > MAX_RESPONSE_BYTES) {
-            responseBody = responseBody.substring(0, MAX_RESPONSE_BYTES)
-                    + "\n\n...（响应体已截断，上限 " + (MAX_RESPONSE_BYTES / 1024) + "KB）";
+        ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.valueOf(method), entity, String.class);
+
+        String responseBody = response.getBody();
+        int maxBytes = config.getHttpRequestMaxResponseBytes();
+        if (responseBody != null && responseBody.length() > maxBytes) {
+            responseBody = responseBody.substring(0, maxBytes)
+                    + "\n\n...（响应体已截断，上限 " + (maxBytes / 1024) + "KB）";
         }
 
         return responseBody != null ? responseBody : "（无响应体）";

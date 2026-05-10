@@ -76,13 +76,13 @@ public class GitLogTool implements Tool {
         List<String> args = new ArrayList<>();
         args.add("log");
         if (showGraph) {
+            // --graph 与 --oneline 兼容，共同使用保持简约
+            args.add("--oneline");
             args.add("--graph");
-            args.add("--pretty=format:%h %s (%an, %ar)");
         } else {
             args.add("--oneline");
         }
-        args.add("-n");
-        args.add(String.valueOf(maxCount));
+        args.add("-" + maxCount);
 
         if (!filePath.isEmpty()) {
             args.add("--");
@@ -101,7 +101,6 @@ public class GitLogTool implements Tool {
             return "暂无提交记录";
         }
 
-        int count = output.split("\n").length;
-        return "最近 " + count + " 条提交记录：\n" + output;
+        return "最近 " + maxCount + " 条提交记录：\n" + output;
     }
 }

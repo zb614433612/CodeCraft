@@ -1,4 +1,4 @@
-import MarkdownIt from 'markdown-it'
+﻿import MarkdownIt from 'markdown-it'
 import markdownItHighlightjs from 'markdown-it-highlightjs'
 import markdownItKatex from 'markdown-it-katex'
 // import markdownItMermaid from 'markdown-it-mermaid'
@@ -14,7 +14,7 @@ const md = new MarkdownIt({
 // 添加代码高亮支持
 md.use(markdownItHighlightjs, {
   // 可选配置，使用默认的highlight.js自动检测语言
-  auto: true,
+  auto: false,
   code: true,
 })
 

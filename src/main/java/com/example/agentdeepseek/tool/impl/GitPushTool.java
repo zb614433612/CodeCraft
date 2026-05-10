@@ -86,6 +86,11 @@ public class GitPushTool implements Tool {
             branch = currentBranch.output().trim();
         }
 
+        // 强制推送的安全警告
+        if (force) {
+            log.warn("执行强制推送（--force），目标: {}/{}，将覆盖远程历史", remote, branch);
+        }
+
         // manual 模式下请求用户授权
         if ("manual".equals(ToolContext.getMode())) {
             String response = PermissionContext.requestPermission(getName(), arguments, ToolContext.getConversationId());
@@ -111,7 +116,8 @@ public class GitPushTool implements Tool {
             return "错误：推送失败 - " + result.output();
         }
 
-        log.info("Git 推送成功: {} -> {}/{}", branch, remote, branch);
-        return "推送成功\n" + result.output();
+        String flags = (force ? " --force" : "") + (setUpstream ? " -u" : "");
+        log.info("Git 推送成功: {} -> {}/{}{}", branch, remote, branch, flags);
+        return "推送成功" + (force ? "（强制推送，远程历史已被覆盖）" : "") + "\n" + result.output();
     }
 }

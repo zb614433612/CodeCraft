@@ -25,6 +25,8 @@ import java.nio.file.StandardOpenOption;
 @Component
 public class WriteFileTool implements Tool {
 
+    private static final long MAX_CONTENT_SIZE = 50 * 1024 * 1024; // 最大写入内容大小 50MB
+
     private final ObjectMapper objectMapper;
 
     public WriteFileTool(ObjectMapper objectMapper) {
@@ -84,11 +86,21 @@ public class WriteFileTool implements Tool {
         if (filePathStr.isEmpty()) {
             return "错误：缺少必要参数 file_path";
         }
-        if (content.isEmpty()) {
+        if (!arguments.has("content") || arguments.path("content").isNull()) {
             return "错误：缺少必要参数 content";
         }
 
-        Path filePath = resolvePath(filePathStr);
+        // 检查写入内容大小
+        if (content.length() > MAX_CONTENT_SIZE) {
+            return "错误：内容太大（" + content.length() + " 字符），超过最大限制 " + MAX_CONTENT_SIZE + " 字符";
+        }
+
+        Path filePath;
+        try {
+            filePath = resolvePath(filePathStr);
+        } catch (SecurityException e) {
+            return "错误：" + e.getMessage();
+        }
 
         // 安全模式检查
         if (Files.exists(filePath)) {
@@ -102,9 +114,14 @@ public class WriteFileTool implements Tool {
             log.debug("强制覆盖文件: {}", filePath.toAbsolutePath());
         }
 
+        // 文件不存在时检查父目录是否可写
+        Path parent = filePath.getParent();
+        if (parent != null && Files.exists(parent) && !Files.isWritable(parent)) {
+            return "错误：目录不可写 - " + parent.toAbsolutePath();
+        }
+
         try {
-            // 自动创建父目录
-            Path parent = filePath.getParent();
+            // 自动创建父目录（parent 已在外部声明）
             if (parent != null && !Files.exists(parent)) {
                 Files.createDirectories(parent);
                 log.debug("已创建目录: {}", parent);
@@ -133,15 +150,24 @@ public class WriteFileTool implements Tool {
      */
     private Path resolvePath(String pathStr) {
         Path path = Paths.get(pathStr);
+        Path projectRoot = Paths.get(ProjectRootContext.get()).normalize();
+        Path resolved;
         if (path.isAbsolute()) {
-            return path.normalize();
+            resolved = path.normalize();
+        } else {
+            resolved = Paths.get(ProjectRootContext.get(), pathStr).normalize();
         }
-        return Paths.get(ProjectRootContext.get(), pathStr).normalize();
+        // 路径穿越防护：确保解析后的路径在项目目录范围内
+        if (!resolved.startsWith(projectRoot)) {
+            throw new SecurityException("访问被拒绝：路径不在项目目录范围内 - " + resolved);
+        }
+        return resolved;
     }
 
     private String formatSize(long bytes) {
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        return String.format("%.1f MB", bytes / (1024.0 * 1024));
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
+        return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
     }
 }

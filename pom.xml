@@ -85,6 +85,12 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-pool2</artifactId>
         </dependency>
+        <!-- Jsoup HTML解析库（web_fetch 用） -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.18.1</version>
+        </dependency>
         <!-- Apache Commons Codec for MD5 -->
         <dependency>
             <groupId>commons-codec</groupId>

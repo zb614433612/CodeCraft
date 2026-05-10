@@ -421,21 +421,21 @@ export async function* streamChat(
         if (done) break
 
         const chunk = decoder.decode(value, { stream: true })
-        console.log('Received chunk:', chunk.length, 'bytes, content:', chunk)
+        if (import.meta.env.DEV) console.log('Received chunk:', chunk.length, 'bytes, content:', chunk)
         buffer += chunk
 
         // 按行分割处理SSE格式
         const lines = buffer.split('\n')
         buffer = lines.pop() || '' // 最后一行可能不完整，保留在buffer中
 
-        console.log('Processing lines:', lines.length, 'lines:', lines)
+        if (import.meta.env.DEV) console.log('Processing lines:', lines.length, 'lines:', lines)
         for (const line of lines) {
           if (line.trim() === '') continue // 空行分隔事件
-          console.log('Processing line:', line)
+          if (import.meta.env.DEV) console.log('Processing line:', line)
 
           // 提取一行中所有的 data: 数据块
           const dataChunks = parser.extractDataChunks(line)
-          console.log('Extracted data chunks:', dataChunks)
+          if (import.meta.env.DEV) console.log('Extracted data chunks:', dataChunks)
 
           for (const dataChunk of dataChunks) {
             const event = parser.processDataChunk(dataChunk)

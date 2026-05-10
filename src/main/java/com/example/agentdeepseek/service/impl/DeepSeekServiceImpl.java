@@ -1244,27 +1244,52 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     /**
      * 构建评委评估上下文
-     * 从消息列表中提取：原始用户请求 + 工具调用摘要 + 最近工具结果
+     * 将消息按轮次拆分（每轮以 user/system 消息开始），
+     * 前序轮次仅作简要摘要，当前轮次的工具调用和结果详细展示，
+     * 确保评委聚焦于当前伦次的对话和任务。
      */
     private String buildJudgeContext(List<Map<String, Object>> messages) {
         StringBuilder sb = new StringBuilder();
 
-        // 提取原始用户请求
-        sb.append("## 原始任务\n");
+        // ===== 1. 提取多轮对话历史（所有用户消息，标注轮次） =====
+        sb.append("## 对话历史（多轮）\n");
+        int round = 0;
         for (Map<String, Object> msg : messages) {
             if ("user".equals(msg.get("role"))) {
-                String content = (String) msg.get("content");
-                if (content != null && !content.isEmpty()) {
-                    sb.append(content).append("\n");
-                    break;
+                round++;
+                String uc = (String) msg.get("content");
+                if (uc != null && !uc.isEmpty()) {
+                    String truncated = uc.length() > 300 ? uc.substring(0, 300) + "..." : uc;
+                    sb.append("[轮次 ").append(round).append("] ").append(truncated).append("\n");
                 }
             }
         }
+        if (round == 0) {
+            sb.append("(无用户消息)\n");
+        }
 
-        // 提取工具调用历史摘要
+        // ===== 2. 提取工具调用历史摘要（含轮次标记） =====
         sb.append("\n## 工具调用历史\n");
         int iter = 0;
-        for (Map<String, Object> msg : messages) {
+        int currentRound = 0;
+
+        // 先找到所有用户消息的位置，用于标记轮次边界
+        java.util.List<Integer> userMsgPositions = new java.util.ArrayList<>();
+        for (int i = 0; i < messages.size(); i++) {
+            if ("user".equals(messages.get(i).get("role"))) {
+                userMsgPositions.add(i);
+            }
+        }
+
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> msg = messages.get(i);
+            // 检查是否跨越了用户消息边界（进入新轮次）
+            for (int pos : userMsgPositions) {
+                if (i == pos) {
+                    currentRound++;
+                    break;
+                }
+            }
             if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
                 JsonNode toolCalls = (JsonNode) msg.get("tool_calls");
                 if (toolCalls != null && toolCalls.isArray()) {
@@ -1272,7 +1297,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         String name = tc.path("function").path("name").asText("");
                         String args = tc.path("function").path("arguments").asText("");
                         if (args.length() > 200) args = args.substring(0, 200) + "...";
-                        sb.append("  [Iter ").append(iter).append("] ")
+                        sb.append("  [R").append(currentRound).append("][I").append(iter).append("] ")
                                 .append(name).append("(").append(args).append(")\n");
                     }
                 }
@@ -1280,11 +1305,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        // 重复检测信息
+        // ===== 3. 重复检测信息 =====
         boolean hasRepeat = hasRepeatedCalls(messages, 3);
         sb.append("\n## 重复检测\n");
         sb.append("连续重复调用: ").append(hasRepeat ? "是（可能存在死循环）" : "否（调用模式正常）").append("\n");
         sb.append("总迭代次数: ").append(iter).append("\n");
+        sb.append("对话轮次: ").append(round).append("\n");
 
         // 最近 3 次工具结果（截取末尾部分）
         sb.append("\n## 最近工具结果\n");
@@ -1960,6 +1986,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 });
     }
 
+
+    private String[] parseAskResult(String content) {
+        if (content == null) {
+            return null;
+        }
+        String prefix;
+        if (content.startsWith("__ASK_CLARIFICATION__:")) {
+            prefix = "__ASK_CLARIFICATION__:";
+        } else if (content.startsWith("__ASK_EXECUTION__:")) {
+            prefix = "__ASK_EXECUTION__:";
+        } else {
+            return null;
+        }
+        int uuidStart = prefix.length();
+        int uuidEnd = uuidStart + 36;
+        if (content.length() < uuidEnd + 1) {
+            log.warn("ask 宸ュ叿杩斿洖鏍煎紡涓嶅畬鏁? {}", content);
+            return null;
+        }
+        String uuid = content.substring(uuidStart, uuidEnd);
+        String question = content.substring(uuidEnd + 1);
+        return new String[] { uuid, question };
+    }
     // ===== ask_user 相关方法 =====
 
     /**
@@ -1967,7 +2016,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      */
     private ToolExecutor.ToolCallResult findAskUserResult(List<ToolExecutor.ToolCallResult> toolResults) {
         for (ToolExecutor.ToolCallResult result : toolResults) {
-            if (result.getContent() != null && result.getContent().startsWith("__QUESTION__:")) {
+            if (parseAskResult(result.getContent()) != null) {
                 return result;
             }
         }
@@ -2014,17 +2063,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             int iteration,
             int maxIterations) {
 
-        // 解析 ask_user 标记：__QUESTION__:uuid:question
+        // 瑙ｆ瀽 ask_user 鏍囪锛屽吋瀹?ask_clarification 鍜?ask_execution
         String content = askUserResult.getContent();
-        int uuidStart = "__QUESTION__:".length();
-        String uuid = content.substring(uuidStart, uuidStart + 36);
-        String question = content.substring(uuidStart + 37);
+        String[] parsed = parseAskResult(content);
+        if (parsed == null) {
+            log.error("鏃犳硶瑙ｆ瀽 ask 宸ュ叿杩斿洖缁撴灉: {}", content);
+            return Flux.just("{\"event\":\"error\",\"message\":\"瑙ｆ瀽 ask 缁撴灉澶辫触\"}");
+        }
+        String uuid = parsed[0];
+        String question = parsed[1];
 
-        // 保存待处理问题
+        // 淇濆瓨寰呭鐞嗛棶棰?
         com.example.agentdeepseek.model.dto.PendingQuestion pq =
                 new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
         pendingQuestionStore.put(uuid, pq);
-        // 持久化待审批问题到任务记录（支持页面刷新后重连展示）
+        // 鎸佷箙鍖栧緟瀹℃壒闂鍒颁换鍔¤褰曪紙鏀寔椤甸潰鍒锋柊鍚庨噸杩炲睍绀猴級
         updatePendingQuestion(conversationId, uuid, question);
 
         log.info("ask_user 等待回答: uuid={}, question={}", uuid, question);

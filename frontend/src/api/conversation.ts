@@ -103,6 +103,14 @@ export function processMessageGroups(messages: MessageResponse[]): any[] {
 
     currentAssistantMsg.thinking = cleanThinking
     currentAssistantMsg.toolResults = toolResults
+
+    // 加上 toolResults 中工具返回数据的 token 数
+    if (toolResults) {
+      for (const tr of toolResults) {
+        currentAssistantMsg.tokenCount += estimateTokenCount(tr.content)
+      }
+    }
+
     delete currentAssistantMsg.segments
 
     result.push(currentAssistantMsg)

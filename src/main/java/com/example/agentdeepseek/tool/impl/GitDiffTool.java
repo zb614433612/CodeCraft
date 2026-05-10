@@ -19,6 +19,9 @@ import java.util.List;
 @Component
 public class GitDiffTool implements Tool {
 
+    /** Diff 输出最大字符数，超过则截断 */
+    private static final int MAX_OUTPUT_LENGTH = 10000;
+
     private final GitCommandExecutor gitExecutor;
     private final ObjectMapper objectMapper;
 
@@ -84,12 +87,12 @@ public class GitDiffTool implements Tool {
 
         String output = result.output();
         if (output.isBlank()) {
-            return "无变更内容" + (filePath.isEmpty() ? "" : "（文件: " + filePath + "）");
+            return "无变更内容" + (filePath.isEmpty() ? "" : "（文件 " + filePath + "）");
         }
 
         // 限制输出大小
-        if (output.length() > 10000) {
-            output = output.substring(0, 10000) + "\n\n...（diff 过长已截断，建议指定具体文件查看）";
+        if (output.length() > MAX_OUTPUT_LENGTH) {
+            output = output.substring(0, MAX_OUTPUT_LENGTH) + "\n\n...（diff 过长已截断，建议指定具体文件查看）";
         }
 
         return output;

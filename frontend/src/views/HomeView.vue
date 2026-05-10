@@ -793,7 +793,8 @@ const sendMessage = async () => {
           if (currentAiMessage.value && currentAiMessage.value.id === aiMsgId) {
             console.log('Stream complete, setting isStreaming=false')
             currentAiMessage.value.isStreaming = false
-            currentAiMessage.value.tokenCount = estimateTokenCount(responseContent)
+            const toolResultsText = (currentAiMessage.value.toolResults || []).map(r => r.content).join('')
+            currentAiMessage.value.tokenCount = estimateTokenCount(responseContent + toolResultsText)
             currentAiMessage.value.content = responseContent
             // 触发响应式更新
             messages.value[conversationId] = [...messages.value[conversationId]]
@@ -818,7 +819,8 @@ const sendMessage = async () => {
             console.log('Marking AI message as complete:', 'role:', currentAiMessage.value.role)
             currentAiMessage.value.isStreaming = false
             // 计算AI消息内容的Token数量（不包含思考过程）
-            currentAiMessage.value.tokenCount = estimateTokenCount(responseContent)
+            const toolResultsText = (currentAiMessage.value.toolResults || []).map(r => r.content).join('')
+            currentAiMessage.value.tokenCount = estimateTokenCount(responseContent + toolResultsText)
             // 触发响应式更新
             messages.value[conversationId] = [...messages.value[conversationId]]
           } else {

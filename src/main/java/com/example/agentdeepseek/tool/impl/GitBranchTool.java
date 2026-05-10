@@ -111,7 +111,7 @@ public class GitBranchTool implements Tool {
             return "错误：缺少必要参数 name（分支名称）";
         }
 
-        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, "checkout", name);
+        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, "switch", name);
         if (!result.success()) {
             return "错误：切换分支失败 - " + result.output();
         }

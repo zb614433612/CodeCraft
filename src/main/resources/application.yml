@@ -115,6 +115,45 @@ milvus:
   connect-timeout: 10000 # 连接超时时间（毫秒）
   keep-alive-timeout: 30000 # 连接保活时间（毫秒）
 
+# 文件删除工具配置
+delete-file:
+  # 受保护目录列表（相对项目根目录），删除操作会拒绝删除这些目录及其子文件
+  protected-directories:
+    - .git
+    - node_modules
+    - target
+    - build
+    - .idea
+  # 目录删除前警告阈值，超过此文件数会要求用户二次确认
+  delete-warning-threshold: 50
+
+# 网络工具统一配置（web_search / web_fetch / http_request / check_network）
+network-tool:
+  searxng-url: http://localhost:8888/search  # SearXNG 搜索引擎地址
+  search-max-results: 8                       # 搜索结果最大条数
+  fetch-connect-timeout: 5000                 # 网页抓取连接超时（ms）
+  fetch-read-timeout: 15000                   # 网页抓取读取超时（ms）
+  fetch-max-content-length: 100000            # 网页内容最大长度（字符）
+  fetch-user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  http-request-connect-timeout: 10000         # HTTP 请求连接超时（ms）
+  http-request-read-timeout: 30000            # HTTP 请求读取超时（ms）
+  http-request-max-response-bytes: 51200      # HTTP 请求响应体上限（字节）
+  http-request-allowed-methods:               # HTTP 请求允许的方法白名单
+    - GET
+    - POST
+    - PUT
+    - DELETE
+  network-check-sites:                        # check_network 默认检测站点列表
+    - https://www.google.com
+    - https://github.com
+    - https://huggingface.co
+    - https://api.deepseek.com
+  connectivity-check-timeout: 5000            # 连通性检测超时（ms）
+  proxy:
+    enabled: false                            # 是否启用代理
+    host: 127.0.0.1                           # 代理主机地址
+    port: 7890                                # 代理端口（Clash 默认 7890）
+
 # 网页读取工具配置
 web-fetch:
   # HTTP代理配置（用于访问国内无法直连的网站，如 huggingface.co）
@@ -152,13 +191,10 @@ deepseek:
       - "glob_files"
       - "grep_search"
       - "read_project_tree"
-      - "read_maven_module"
-      - "read_dependencies"
+      - "project_info"
       - "run_command"
       - "run_background_command"
-      - "bug_analysis_agent"
-      - "refactor_agent"
-      - "code_review_agent"
+      - "code_analysis"
       - "ask_clarification"
       - "task_manager"
       - "check_network"
@@ -179,4 +215,4 @@ deepseek:
       - "list_skills"
       - "delete_skill"
       - "report_skill_result"
-    "romantic_chat_agent_prompt.txt":
+    "romantic_chat_agent_prompt.txt": []
