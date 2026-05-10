@@ -16,8 +16,10 @@
       </div>
     </div>
     <div class="fe-body">
-      <div class="fe-gutter">
-        <div v-for="n in lineCount" :key="n" class="fe-line-num">{{ n }}</div>
+      <div class="fe-gutter" ref="gutterRef">
+        <div class="fe-gutter-inner">
+          <div v-for="n in lineCount" :key="n" class="fe-line-num">{{ n }}</div>
+        </div>
       </div>
       <div class="fe-editor-wrapper">
         <pre class="fe-highlight-layer" ref="highlightRef"><code class="hljs" v-html="highlightedCode"></code></pre>
@@ -64,6 +66,7 @@ const emit = defineEmits<{
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const highlightRef = ref<HTMLElement | null>(null)
+const gutterRef = ref<HTMLElement | null>(null)
 const isSaving = ref(false)
 const saveMessage = ref('')
 const saveMsgType = ref<'success' | 'error'>('success')
@@ -167,13 +170,18 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
 }
 
-// 滚动同步：textarea 和 highlight 层保持同步
+// 滚动同步：textarea、highlight 层、行号区保持同步
 const syncScroll = () => {
   const textarea = textareaRef.value
-  const highlight = highlightRef.value?.parentElement
-  if (textarea && highlight) {
+  const highlight = highlightRef.value
+  const gutter = gutterRef.value
+  if (!textarea) return
+  if (highlight) {
     highlight.scrollTop = textarea.scrollTop
     highlight.scrollLeft = textarea.scrollLeft
+  }
+  if (gutter) {
+    gutter.scrollTop = textarea.scrollTop
   }
 }
 
@@ -310,6 +318,7 @@ const handleSave = async () => {
   display: flex;
   overflow: hidden;
   position: relative;
+  min-height: 0;
 }
 .fe-gutter {
   width: 50px;
@@ -319,24 +328,29 @@ const handleSave = async () => {
   padding: 0;
   user-select: none;
   overflow: hidden;
+  position: relative;
+}
+.fe-gutter-inner {
   padding-top: 8px;
+  min-height: 100%;
 }
 .fe-line-num {
   text-align: right;
   padding: 0 10px 0 0;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 19.5px;
   color: #858585;
-  min-height: 18px;
+  min-height: 19.5px;
   font-family: inherit;
   direction: ltr;
 }
 
-/* 叠加层编辑器 */
+/* 叠加层编辑器 - 双绝对定位同步滚动 */
 .fe-editor-wrapper {
   flex: 1;
   position: relative;
-  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
 }
 .fe-highlight-layer {
   position: absolute;
@@ -353,7 +367,7 @@ const handleSave = async () => {
   tab-size: 2;
   background: #1e1e1e;
   color: #d4d4d4;
-  overflow: auto;
+  overflow: scroll;
   pointer-events: none;
   border: none;
   text-align: left;
@@ -365,10 +379,12 @@ const handleSave = async () => {
   background: transparent !important;
 }
 .fe-textarea {
-  position: relative;
+  position: absolute;
   z-index: 1;
-  width: 100%;
-  height: 100%;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   border: none;
   outline: none;
   resize: none;
@@ -378,7 +394,7 @@ const handleSave = async () => {
   font-family: inherit;
   tab-size: 2;
   white-space: pre;
-  overflow: auto;
+  overflow: scroll;
   background: transparent;
   color: transparent;
   caret-color: #aeafad;
