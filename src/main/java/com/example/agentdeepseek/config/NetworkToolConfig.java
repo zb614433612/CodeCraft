@@ -10,14 +10,13 @@ import java.util.List;
 /**
  * 网络工具统一配置
  * 涵盖 web_search / web_fetch / http_request / check_network 四个网络工具
+ * web_search 使用 Bing RSS 搜索（无需 API Key）
  */
 @Configuration
 @ConfigurationProperties(prefix = "network-tool")
 @Data
 public class NetworkToolConfig {
 
-    /** SearXNG 搜索引擎地址 */
-    private String searxngUrl = "http://localhost:8888/search";
 
     /** 搜索结果最大条数 */
     private int searchMaxResults = 8;

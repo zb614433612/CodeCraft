@@ -129,8 +129,7 @@ delete-file:
 
 # 网络工具统一配置（web_search / web_fetch / http_request / check_network）
 network-tool:
-  searxng-url: http://localhost:8888/search  # SearXNG 搜索引擎地址
-  search-max-results: 8                       # 搜索结果最大条数
+  search-max-results: 8                       # 搜索结果最大条数（Bing RSS 搜索）
   fetch-connect-timeout: 5000                 # 网页抓取连接超时（ms）
   fetch-read-timeout: 15000                   # 网页抓取读取超时（ms）
   fetch-max-content-length: 100000            # 网页内容最大长度（字符）

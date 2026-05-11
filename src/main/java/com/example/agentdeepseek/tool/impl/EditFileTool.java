@@ -109,6 +109,12 @@ public class EditFileTool implements Tool {
         endLine.put("description", "line 模式下：结束行号（从1开始），可选。不传则只替换 start_line 那一行（包含两端）");
         properties.set("end_line", endLine);
 
+        ObjectNode searchText = objectMapper.createObjectNode();
+        searchText.put("type", "string");
+        searchText.put("description", "line mode: optional search text to locate line by content (solves line number drift)."
+                + " Tool searches file for this text, uses the matching line as start_line."
+                + " Only works if exactly one line matches; multiple matches return error listing all matches.");
+
         parameters.set("properties", properties);
         parameters.putArray("required").add("file_path").add("replacement");
         return parameters;
@@ -170,15 +176,36 @@ public class EditFileTool implements Tool {
      * 按行号替换模式：根据 start_line/end_line 定位，将指定行范围替换为 replacement
      */
     private String executeLineMode(Path filePath, String replacement, JsonNode arguments) {
+        String searchText = arguments.path("search_text").asText("");
         int startLine = arguments.path("start_line").asInt(0);
         int endLine = arguments.path("end_line").asInt(0);
 
-        if (startLine <= 0) {
-            return "错误：line 模式下缺少必要参数 start_line（从1开始）";
+        if (startLine <= 0 && searchText.isEmpty()) {
+            return "错误：line 模式下需要提供 start_line 或 search_text";
         }
 
         try {
             List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
+
+            // 如果提供了 search_text，优先用它定位行号（解决行号漂移问题）
+            if (!searchText.isEmpty()) {
+                List<Integer> matchedLines = new ArrayList<>();
+                for (int i = 0; i < lines.size(); i++) {
+                    if (lines.get(i).contains(searchText)) {
+                        matchedLines.add(i + 1);
+                    }
+                }
+                if (matchedLines.isEmpty()) {
+                    return "错误：未找到包含「" + searchText + "」的行";
+                }
+                if (matchedLines.size() > 1) {
+                    return "错误：搜索「" + searchText + "」匹配到多行（第 "
+                        + matchedLines.toString().replaceAll("[\\[\\]]", "") + " 行），"
+                        + "请使用更精确的 search_text 或改用 start_line 指定行号";
+                }
+                startLine = matchedLines.get(0);
+                log.info("search_text 定位到第 {} 行: {}", startLine, searchText);
+            }
 
             if (startLine > lines.size()) {
                 return "错误：start_line (" + startLine + ") 超出文件行数 (" + lines.size() + ")";
@@ -237,6 +264,7 @@ public class EditFileTool implements Tool {
             }
             int newLineCount = replacement.isEmpty() ? 0 : replacement.split("\n", -1).length;
             sb.append("行数变化：").append(replacedLines).append(" 行 → ").append(newLineCount).append(" 行\n");
+            sb.append("文件现总行数：").append(newLines.size()).append(" 行\n");
 
             sb.append("\n被替换内容（第 ").append(startLine).append("~").append(endLine).append(" 行）：\n");
             sb.append(oldPreview).append("\n");

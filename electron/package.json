@@ -27,7 +27,9 @@
       {
         "from": "jre",
         "to": "jre",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

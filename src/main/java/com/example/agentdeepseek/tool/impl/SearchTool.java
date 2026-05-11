@@ -6,14 +6,21 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.parser.Parser;
+import org.jsoup.select.Elements;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.web.util.UriComponentsBuilder;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 互联网搜索工具
- * 调用本地 SearXNG 搜索引擎获取实时信息
+ * 调用 Bing 搜索引擎（通过 RSS 格式，无需 API Key）获取实时搜索结果
  */
 @Slf4j
 @Component
@@ -21,6 +28,7 @@ public class SearchTool implements Tool {
 
     private static final int MAX_RESULT_TITLE_LENGTH = 150;
     private static final int MAX_RESULT_CONTENT_LENGTH = 300;
+    private static final String BING_SEARCH_URL = "https://cn.bing.com/search";
 
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
@@ -43,7 +51,7 @@ public class SearchTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "搜索互联网获取实时信息（通过本地 SearXNG 搜索引擎），返回标题、摘要片段和来源链接。适用于获取最新新闻、百科知识、实时数据等。"
+        return "搜索互联网获取实时信息（通过 Bing 搜索引擎），返回标题、摘要片段和来源链接。适用于获取最新新闻、百科知识、实时数据等。"
                 + "当需要获取某条搜索结果的完整页面内容时，请使用 web_fetch 工具读取具体网页";
     }
 
@@ -71,24 +79,22 @@ public class SearchTool implements Tool {
             return "错误：搜索关键词不能为空";
         }
 
-        String url = UriComponentsBuilder.fromHttpUrl(config.getSearxngUrl())
-                .queryParam("q", query)
-                .queryParam("format", "json")
-                .build()
-                .toUriString();
-
-        log.info("SearXNG 搜索: {}", query);
-
         try {
+            String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
+            String url = BING_SEARCH_URL + "?q=" + encodedQuery + "&format=rss";
+
+            log.info("Bing 搜索: {}", query);
+
             String response = restTemplate.getForObject(url, String.class);
-            if (response == null) {
-                return "错误：搜索引擎返回空响应，请确认 SearXNG 服务是否在 " + config.getSearxngUrl() + " 正常运行";
+            if (response == null || response.isBlank()) {
+                return "错误：搜索引擎返回空响应";
             }
 
-            JsonNode root = objectMapper.readTree(response);
-            JsonNode results = root.path("results");
+            // 解析 RSS XML
+            Document doc = Jsoup.parse(response, "", Parser.xmlParser());
+            Elements items = doc.select("item");
 
-            if (results.isMissingNode() || !results.isArray() || results.size() == 0) {
+            if (items.isEmpty()) {
                 return "未找到与「" + query + "」相关的搜索结果，请尝试使用不同的关键词";
             }
 
@@ -96,16 +102,16 @@ public class SearchTool implements Tool {
             sb.append("--- 搜索结果 ---\n\n");
 
             int maxResults = config.getSearchMaxResults();
-            int count = Math.min(results.size(), maxResults);
+            int count = Math.min(items.size(), maxResults);
             for (int i = 0; i < count; i++) {
-                JsonNode result = results.get(i);
-                String title = truncate(result.path("title").asText(""), MAX_RESULT_TITLE_LENGTH);
-                String content = truncate(result.path("content").asText(""), MAX_RESULT_CONTENT_LENGTH);
-                String resultUrl = result.path("url").asText("");
+                Element item = items.get(i);
+                String title = truncate(item.select("title").text(), MAX_RESULT_TITLE_LENGTH);
+                String description = truncate(item.select("description").text(), MAX_RESULT_CONTENT_LENGTH);
+                String resultUrl = item.select("link").text();
 
                 sb.append(i + 1).append(". ").append(title).append("\n");
-                if (!content.isEmpty()) {
-                    sb.append(content).append("\n");
+                if (!description.isEmpty()) {
+                    sb.append(description).append("\n");
                 }
                 if (!resultUrl.isEmpty()) {
                     sb.append("   源: ").append(resultUrl).append("\n");
@@ -113,22 +119,21 @@ public class SearchTool implements Tool {
                 sb.append("\n");
             }
 
-            if (results.size() > maxResults) {
-                sb.append("... 共 ").append(results.size()).append(" 条结果，显示前 ")
+            if (items.size() > maxResults) {
+                sb.append("... 共 ").append(items.size()).append(" 条结果，显示前 ")
                   .append(maxResults).append(" 条\n");
             }
 
             return sb.toString();
 
         } catch (org.springframework.web.client.ResourceAccessException e) {
-            log.error("SearXNG 连接失败: {}", e.getMessage());
-            return "错误：无法连接搜索引擎 " + config.getSearxngUrl()
-                    + "，请确认 SearXNG 服务是否已启动（默认端口 8888）";
+            log.error("Bing 搜索连接失败: {}", e.getMessage());
+            return "错误：无法连接搜索引擎，请检查网络连接是否正常（Bing 搜索需要联网）";
         } catch (org.springframework.web.client.HttpStatusCodeException e) {
-            log.error("SearXNG 搜索失败: {} - HTTP {}", query, e.getStatusCode());
+            log.error("Bing 搜索失败: {} - HTTP {}", query, e.getStatusCode());
             return "错误：搜索失败 - 搜索引擎返回 HTTP " + e.getStatusCode().value();
         } catch (Exception e) {
-            log.error("SearXNG 搜索失败", e);
+            log.error("Bing 搜索失败", e);
             return "错误：搜索失败 - " + e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }
