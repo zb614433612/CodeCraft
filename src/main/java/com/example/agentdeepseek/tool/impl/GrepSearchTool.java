@@ -226,13 +226,53 @@ public class GrepSearchTool implements Tool {
         }
 
         if (allResults.isEmpty()) {
-            sb.append("  （无匹配结果）\n");
-            sb.append("\n搜索提示：\n");
-            sb.append("  - 使用 include 过滤文件类型，如 *.java\n");
-            sb.append("  - 使用 path 指定搜索目录\n");
-            sb.append("  - 使用 ignore_case=true 忽略大小写\n");
-            sb.append("  - 使用 regex=false 进行纯文本搜索\n");
-            sb.append("  - 使用 context_lines=N 显示上下文行\n");
+            // èªå¨éçº§ï¼æ­£åæ¨¡å¼æ å¹éæ¶ï¼ç¨çº¯ææ¬åæä¸æ¬¡
+            if (isRegex) {
+                Pattern textPattern;
+                try {
+                    int textFlags = 0;
+                    if (ignoreCase) textFlags |= Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE;
+                    textPattern = Pattern.compile(Pattern.quote(patternStr), textFlags);
+                } catch (PatternSyntaxException e) {
+                    textPattern = null;
+                }
+                if (textPattern != null) {
+                    List<SearchResult> textResults = searchFiles(searchRoot, textPattern, includeMatcher, maxResults, contextLines);
+                    if (!textResults.isEmpty()) {
+                        sb.append("ï¼æ­£åæ¨¡å¼æªå¹éï¼èªå¨éçº§ä¸ºçº¯ææ¬æç´¢ï¼æ¾å° ").append(textResults.size()).append(" ä¸ªç»æï¼\n");
+                        allResults = textResults;
+                        // éæ°è¾åºç»æ
+                        currentFile = null;
+                        fileMatchCount = 0;
+                        for (SearchResult r : allResults) {
+                            if (!r.filePath.equals(currentFile)) {
+                                if (currentFile != null) {
+                                    sb.append("    ... ").append(fileMatchCount).append(" å¤å¹é\n");
+                                }
+                                sb.append(r.filePath).append("\n");
+                                currentFile = r.filePath;
+                                fileMatchCount = 0;
+                            }
+                            fileMatchCount++;
+                            sb.append("  ").append(String.format("%5d", r.lineNum)).append(" > ").append(escapeLine(r.lineContent)).append("\n");
+                        }
+                        if (currentFile != null && fileMatchCount > 0) {
+                            sb.append("    ... ").append(fileMatchCount).append(" å¤å¹é\n");
+                        }
+                    }
+                }
+            }
+
+            // ä»æ ç»æï¼åæ¬éçº§åä»æ ï¼ï¼è¾åºæç¤º
+            if (allResults.isEmpty()) {
+                sb.append("  ï¼æ å¹éç»æï¼\n");
+                sb.append("\næç´¢æç¤ºï¼\n");
+                sb.append("  - ä½¿ç¨ include è¿æ»¤æä»¶ç±»åï¼å¦ *.java\n");
+                sb.append("  - ä½¿ç¨ path æå®æç´¢ç®å½\n");
+                sb.append("  - ä½¿ç¨ ignore_case=true å¿½ç¥å¤§å°å\n");
+                sb.append("  - ä½¿ç¨ regex=false è¿è¡çº¯ææ¬æç´¢\n");
+                sb.append("  - ä½¿ç¨ context_lines=N æ¾ç¤ºä¸ä¸æè¡\n");
+            }
         }
 
         return sb.toString();

@@ -6,6 +6,7 @@ import com.example.agentdeepseek.util.ProjectRootContext;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,10 +18,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.PatternSyntaxException;
-
 /**
  * 编辑文件工具
  * 支持两种模式：
@@ -93,27 +94,45 @@ public class EditFileTool implements Tool {
         replacement.put("type", "string");
         replacement.put("description", "替换内容（$ 和 \\ 按字面处理，不支持反向引用）。line 模式下替换整个行范围，为空则删除对应行");
         properties.set("replacement", replacement);
+        properties.set("replacement", replacement);
 
         ObjectNode multiline = objectMapper.createObjectNode();
         multiline.put("type", "boolean");
-        multiline.put("description", "regex 模式下：是否启用多行模式（让 . 匹配换行符），默认 false。line 模式下忽略此参数");
+        multiline.put("description", "regex æ¨¡å¼ä¸ï¼æ¯å¦å¯ç¨å¤è¡æ¨¡å¼ï¼è®© . å¹éæ¢è¡ç¬¦ï¼ï¼é»è®¤ falseãline æ¨¡å¼ä¸å¿½ç¥æ­¤åæ°");
         properties.set("multiline", multiline);
 
         ObjectNode startLine = objectMapper.createObjectNode();
         startLine.put("type", "integer");
-        startLine.put("description", "line 模式下：起始行号（从1开始），必填。指定要替换的起始行");
+        startLine.put("description", "line æ¨¡å¼ä¸ï¼èµ·å§è¡å·ï¼ä»1å¼å§ï¼ï¼å¿å¡«ãæå®è¦æ¿æ¢çèµ·å§è¡ãå½ä½¿ç¨ search_after æ¶ï¼æ­¤å¼ä½ä¸ºç¸å¯¹åç§»é");
         properties.set("start_line", startLine);
 
         ObjectNode endLine = objectMapper.createObjectNode();
         endLine.put("type", "integer");
-        endLine.put("description", "line 模式下：结束行号（从1开始），可选。不传则只替换 start_line 那一行（包含两端）");
-        properties.set("end_line", endLine);
+        endLine.put("description", "line æ¨¡å¼ä¸ï¼ç»æè¡å·ï¼ä»1å¼å§ï¼ï¼å¯éãä¸ä¼ ååªæ¿æ¢ start_line é£ä¸è¡ï¼åå«ä¸¤ç«¯ï¼");
 
         ObjectNode searchText = objectMapper.createObjectNode();
         searchText.put("type", "string");
         searchText.put("description", "line mode: optional search text to locate line by content (solves line number drift)."
                 + " Tool searches file for this text, uses the matching line as start_line."
                 + " Only works if exactly one line matches; multiple matches return error listing all matches.");
+        properties.set("search_text", searchText);
+
+        ObjectNode searchAfter = objectMapper.createObjectNode();
+        searchAfter.put("type", "string");
+        searchAfter.put("description", "line æ¨¡å¼ï¼å®ä½éç¹ææ¬ãå·¥å·åæ¾å°åå«æ­¤ææ¬çæåä¸è¡ï¼ç¶åä»è¯¥è¡ä¹åæ start_line/end_line çç¸å¯¹åç§»å®ä½ã"
+                + " éç¨äºè§£å³è¡å·æ¼ç§»ââç¨ä¸åçä»£ç ç¹å¾è¡åéç¹ãä¾å¦ search_after=\"/* ===== æ ç­¾æ  ===== */\", start_line=1\n"
+                + " è¡¨ç¤ºå¨éç¹è¡ä¹åçç¬¬1è¡å¼å§æä½ãä¸ search_text äºæ¥ï¼ä¼åçº§ä½äº search_textã");
+        properties.set("search_after", searchAfter);
+
+        ObjectNode insertMode = objectMapper.createObjectNode();
+        insertMode.put("type", "string");
+        insertMode.put("description", "æå¥æ¨¡å¼ï¼ä» regex æ¨¡å¼ææï¼ï¼replaceï¼é»è®¤ï¼- å¹éå¹¶æ¿æ¢ï¼after - å¨å¹éåå®¹ä¹åè¿½å  replacementï¼before - å¨å¹éåå®¹ä¹åæå¥ replacement");
+        ArrayNode insertModeEnum = objectMapper.createArrayNode();
+        insertModeEnum.add("replace");
+        insertModeEnum.add("after");
+        insertModeEnum.add("before");
+        insertMode.set("enum", insertModeEnum);
+        properties.set("insert_mode", insertMode);
 
         parameters.set("properties", properties);
         parameters.putArray("required").add("file_path").add("replacement");
@@ -177,11 +196,12 @@ public class EditFileTool implements Tool {
      */
     private String executeLineMode(Path filePath, String replacement, JsonNode arguments) {
         String searchText = arguments.path("search_text").asText("");
+        String searchAfter = arguments.path("search_after").asText("");
         int startLine = arguments.path("start_line").asInt(0);
         int endLine = arguments.path("end_line").asInt(0);
 
-        if (startLine <= 0 && searchText.isEmpty()) {
-            return "错误：line 模式下需要提供 start_line 或 search_text";
+        if (startLine <= 0 && searchText.isEmpty() && searchAfter.isEmpty()) {
+            return "éè¯¯ï¼line æ¨¡å¼ä¸éè¦æä¾ start_lineãsearch_text æ search_after";
         }
 
         try {
@@ -205,6 +225,26 @@ public class EditFileTool implements Tool {
                 }
                 startLine = matchedLines.get(0);
                 log.info("search_text 定位到第 {} 行: {}", startLine, searchText);
+                log.info("search_text å®ä½å°ç¬¬ {} è¡: {}", startLine, searchText);
+            }
+
+            // å¦ææä¾äº search_afterï¼åæ¾å°éç¹è¡ï¼åå ä¸ç¸å¯¹åç§»
+            if (!searchAfter.isEmpty() && searchText.isEmpty()) {
+                int anchorLine = -1;
+                for (int i = 0; i < lines.size(); i++) {
+                    if (lines.get(i).contains(searchAfter)) {
+                        anchorLine = i + 1;
+                    }
+                }
+                if (anchorLine == -1) {
+                    return "éè¯¯ï¼æªæ¾å°åå«ã" + searchAfter + "ãçéç¹è¡";
+                }
+                int offset = startLine;
+                startLine = anchorLine + offset;
+                if (endLine > 0) {
+                    endLine = anchorLine + endLine;
+                }
+                log.info("search_after éç¹å¨ç¬¬ {} è¡ï¼åç§» {} è¡å start_line={}", anchorLine, offset, startLine);
             }
 
             if (startLine > lines.size()) {
@@ -285,18 +325,59 @@ public class EditFileTool implements Tool {
     private String executeRegexMode(Path filePath, String replacement, JsonNode arguments) {
         String patternStr = arguments.path("pattern").asText();
         boolean multiline = arguments.path("multiline").asBoolean(false);
+        String insertMode = arguments.path("insert_mode").asText("replace");
 
         if (patternStr == null || patternStr.isEmpty()) {
-            return "错误：regex 模式下缺少必要参数 pattern";
+            return "éè¯¯ï¼regex æ¨¡å¼ä¸ç¼ºå°å¿è¦åæ° pattern";
+        }
+
+        if (!"replace".equals(insertMode) && !"after".equals(insertMode) && !"before".equals(insertMode)) {
+            return "éè¯¯ï¼æ æç insert_mode - " + insertMode + "ï¼æ¯æ replace / after / before";
         }
 
         try {
-            // 读取文件内容
+            // è¯»åæä»¶åå®¹
             String content = Files.readString(filePath, StandardCharsets.UTF_8);
             String escapedReplacement = java.util.regex.Matcher.quoteReplacement(replacement);
 
-            int flags = multiline ? java.util.regex.Pattern.DOTALL : 0;
+            // insert_mode ä¸º after/before æ¶ï¼ä½¿ç¨ç²¾ç¡®ææ¬å¹éï¼é¿åæ­£åå¹éç ´åç»æ
+            if ("after".equals(insertMode) || "before".equals(insertMode)) {
+                String quoted = java.util.regex.Pattern.quote(patternStr);
+                int idx;
+                if ("after".equals(insertMode)) {
+                    // å¨å¹éåå®¹ä¹åè¿½å 
+                    idx = content.indexOf(patternStr);
+                    if (idx == -1) {
+                        return "æç¤ºï¼æªæ¾å°å¹éçåå®¹ã\\nå¹éæ¨¡å¼: " + patternStr;
+                    }
+                    String newContent = content.substring(0, idx + patternStr.length())
+                            + "\n" + replacement
+                            + content.substring(idx + patternStr.length());
+                    Files.writeString(filePath, newContent, StandardCharsets.UTF_8,
+                            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+                    log.info("ç¼è¾æä»¶æå: {} (insert_mode=after)", filePath.toAbsolutePath());
+                    return "ç¼è¾æåï¼" + filePath.toAbsolutePath() + "\\n"
+                            + "æ¨¡ããå¼ï¼regexï¼insert_mode=afterï¼\\n"
+                            + "å¨ã" + patternStr + "ãä¹åè¿½å åå®¹";
+                } else {
+                    // å¨å¹éåå®¹ä¹åæå¥
+                    idx = content.indexOf(patternStr);
+                    if (idx == -1) {
+                        return "æç¤ºï¼æªæ¾å°å¹éçåå®¹ã\\nå¹éæ¨¡å¼: " + patternStr;
+                    }
+                    String newContent = content.substring(0, idx)
+                            + replacement + "\n"
+                            + content.substring(idx);
+                    Files.writeString(filePath, newContent, StandardCharsets.UTF_8,
+                            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+                    log.info("ç¼è¾æä»¶æå: {} (insert_mode=before)", filePath.toAbsolutePath());
+                    return "ç¼è¾æåï¼" + filePath.toAbsolutePath() + "\\n"
+                            + "æ¨¡ããå¼ï¼regexï¼insert_mode=beforeï¼\\n"
+                            + "å¨ã" + patternStr + "ãä¹åæå¥åå®¹";
+                }
+            }
 
+            int flags = multiline ? java.util.regex.Pattern.DOTALL : 0;
             // 将正则匹配+替换+计数封装为 Callable，支持超时控制（防止 ReDoS）
             class RegexResult {
                 final String newContent;

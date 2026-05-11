@@ -108,10 +108,19 @@ public class WriteFileTool implements Tool {
                 return "错误：文件不可写 - " + filePath.toAbsolutePath();
             }
             if (!force) {
-                return "错误：文件已存在 - " + filePath.toAbsolutePath()
-                        + "\n如需覆盖请设置 force=true，或使用 edit_file 工具进行精准替换";
+                long fileSize = 0;
+                long lineCount = 0;
+                try {
+                    fileSize = Files.size(filePath);
+                    lineCount = Files.readAllLines(filePath, StandardCharsets.UTF_8).size();
+                } catch (IOException ignored) {
+                }
+                return "éè¯¯ï¼æä»¶å·²å­å¨ - " + filePath.toAbsolutePath()
+                        + "ï¼å¤§å° " + fileSize + " å­èï¼" + lineCount + " è¡ï¼\n"
+                        + "å»ºè®®åä½¿ç¨ read_file æ¥çæä»¶åå®¹ï¼ç¡®è®¤ååå³å®æ¯å¦è¦çãæè®¾ç½® force=true å¼ºå¶è¦çï¼\n"
+                        + "æä½¿ç¨ edit_file å·¥å·è¿è¡ç²¾åæ¿æ¢";
             }
-            log.debug("强制覆盖文件: {}", filePath.toAbsolutePath());
+            log.debug("å¼ºå¶è¦çæä»¶: {}", filePath.toAbsolutePath());
         }
 
         // 文件不存在时检查父目录是否可写

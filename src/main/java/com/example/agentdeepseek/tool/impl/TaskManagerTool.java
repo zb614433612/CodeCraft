@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -117,6 +118,13 @@ public class TaskManagerTool implements Tool {
         dependsItems.put("type", "string");
         dependsOnField.set("items", dependsItems);
         taskItemProps.set("depends_on", dependsOnField);
+
+        ObjectNode groupField = objectMapper.createObjectNode();
+        groupField.put("type", "string");
+        groupField.put("description", "分组名（可选），同一组的任务可以并行执行。不同组的任务按组顺序串行。例如：group=\"backend\" 和 group=\"frontend\" 可并行执行");
+        taskItemProps.set("group", groupField);
+
+        taskItem.set("properties", taskItemProps);
         taskItem.set("properties", taskItemProps);
         ArrayNode requiredFields = objectMapper.createArrayNode();
         requiredFields.add("id");
@@ -226,9 +234,11 @@ public class TaskManagerTool implements Tool {
             if (dependsNode.isArray()) {
                 for (JsonNode dep : dependsNode) {
                     dependsOn.add(dep.asText());
+                    dependsOn.add(dep.asText());
                 }
             }
-            tasks.add(new TaskItem(id, description, priority, dependsOn));
+            String group = item.path("group").asText("");
+            tasks.add(new TaskItem(id, description, priority, dependsOn, group));
         }
 
         lock.writeLock().lock();
@@ -239,24 +249,42 @@ public class TaskManagerTool implements Tool {
             lock.writeLock().unlock();
         }
 
-        log.info("会话 {} 创建了 {} 个任务", sessionId, tasks.size());
+        log.info("ä¼è¯ {} åå»ºäº {} ä¸ªä»»å¡", sessionId, tasks.size());
 
-        // 按优先级排序输出
-        List<TaskItem> sorted = sortByPriority(tasks);
+        // æç»åç»è¾åºï¼åç»å¯å¹¶è¡
+        Map<String, List<TaskItem>> grouped = tasks.stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                    t -> t.group.isEmpty() ? "_default" : t.group,
+                    java.util.stream.Collectors.toList()
+                ));
 
         StringBuilder sb = new StringBuilder();
-        sb.append("✅ 任务清单已创建（共 ").append(tasks.size()).append(" 项）：\n");
-        for (TaskItem task : sorted) {
-            String prioLabel = task.priority != TaskPriority.MEDIUM ? " [" + task.priority + "]" : "";
-            String depLabel = task.dependsOn.isEmpty() ? "" : " ← 依赖: " + String.join(", ", task.dependsOn);
-            sb.append("  ").append(task.id).append(" - ").append(task.description)
-              .append(prioLabel).append(" [⏳ 待完成]").append(depLabel).append("\n");
-        }
-        sb.append("\n请按顺序执行各项任务，每完成一项后调用 complete 操作标记。");
-        if (sorted.stream().anyMatch(t -> !t.dependsOn.isEmpty())) {
-            sb.append("\n注意：部分任务有依赖关系，请确保依赖任务完成后再开始。");
+        sb.append("â ä»»å¡æ¸åå·²åå»ºï¼å± ").append(tasks.size()).append(" é¡¹ï¼ï¼\n\n");
+
+        // åè¾åºæåç»ç
+        for (var entry : grouped.entrySet()) {
+            String groupName = entry.getKey();
+            List<TaskItem> groupTasks = entry.getValue();
+            if ("_default".equals(groupName)) {
+                for (TaskItem task : groupTasks) {
+                    appendTaskItem(sb, task);
+                }
+            } else {
+                boolean hasDeps = groupTasks.stream().anyMatch(t -> !t.dependsOn.isEmpty());
+                sb.append("  ââ ç»: ").append(groupName)
+                  .append("ï¼").append(groupTasks.size()).append(" é¡¹")
+                  .append(hasDeps ? "ï¼æé¡ºåºæ§è¡" : "ï¼å¯å¹¶è¡æ§è¡")
+                  .append("ï¼ââ\n");
+                for (TaskItem task : groupTasks) {
+                    appendTaskItem(sb, task);
+                }
+            }
         }
 
+        sb.append("\nè¯·æé¡ºåºæ§è¡åé¡¹ä»»å¡ï¼æ¯å®æä¸é¡¹åè°ç¨ complete æä½æ è®°ã");
+        if (tasks.stream().anyMatch(t -> !t.dependsOn.isEmpty())) {
+            sb.append("\næ³¨æï¼é¨åä»»å¡æä¾èµå³ç³»ï¼è¯·ç¡®ä¿ä¾èµä»»å¡å®æååå¼å§ã");
+        }
         // 附加结构化 JSON
         sb.append("\n\n---TASK_JSON---\n");
         sb.append(toTaskListJson(tasks));
@@ -436,7 +464,7 @@ public class TaskManagerTool implements Tool {
             }
 
             lastAccessTime.put(sessionId, System.currentTimeMillis());
-            List<TaskItem> sorted = sortByPriority(tasks);
+            lastAccessTime.put(sessionId, System.currentTimeMillis());
 
             long completed = tasks.stream().filter(t -> t.status == TaskStatus.COMPLETED).count();
             long total = tasks.size();
@@ -444,23 +472,27 @@ public class TaskManagerTool implements Tool {
 
             StringBuilder sb = new StringBuilder();
             if (allDone) {
-                sb.append("✅ 全部任务已完成（").append(total).append("/").append(total).append("）\n\n");
+                sb.append("â å¨é¨ä»»å¡å·²å®æï¼").append(total).append("/").append(total).append("ï¼\n\n");
             } else {
-                sb.append("⏳ 任务进度：").append(completed).append("/").append(total).append(" 已完成\n\n");
+                sb.append("â³ ä»»å¡è¿åº¦ï¼").append(completed).append("/").append(total).append(" å·²å®æ\n\n");
             }
 
-            for (TaskItem task : sorted) {
-                String statusIcon = task.status == TaskStatus.COMPLETED ? "✅" : "⏳";
-                sb.append("  ").append(statusIcon).append(" ").append(task.id).append(" - ").append(task.description);
-                if (task.priority == TaskPriority.HIGH) {
-                    sb.append(" [HIGH]");
+            // æç»åç»è¾åº
+            Map<String, List<TaskItem>> grouped = tasks.stream()
+                    .collect(java.util.stream.Collectors.groupingBy(
+                        t -> t.group.isEmpty() ? "_default" : t.group,
+                        java.util.stream.Collectors.toList()
+                    ));
+            for (var entry : grouped.entrySet()) {
+                String groupName = entry.getKey();
+                List<TaskItem> groupTasks = entry.getValue();
+                if (!"_default".equals(groupName)) {
+                    sb.append("  ââ ç»: ").append(groupName).append(" ââ\n");
                 }
-                if (!task.dependsOn.isEmpty()) {
-                    sb.append(" ← 依赖: ").append(String.join(", ", task.dependsOn));
+                for (TaskItem task : groupTasks) {
+                    appendTaskItem(sb, task);
                 }
-                sb.append("\n");
             }
-
             if (!allDone) {
                 sb.append("\n⚠️ 还有 ").append(total - completed).append(" 个任务未完成，请继续处理。");
             }
@@ -507,6 +539,9 @@ public class TaskManagerTool implements Tool {
                 node.put("description", t.description);
                 node.put("status", t.status.name().toLowerCase());
                 node.put("priority", t.priority.name());
+                if (!t.group.isEmpty()) {
+                    node.put("group", t.group);
+                }
                 if (!t.dependsOn.isEmpty()) {
                     ArrayNode deps = objectMapper.createArrayNode();
                     for (String dep : t.dependsOn) deps.add(dep);
@@ -570,14 +605,31 @@ public class TaskManagerTool implements Tool {
         final String description;
         final TaskPriority priority;
         final List<String> dependsOn;
+        final String group;
         TaskStatus status;
 
-        TaskItem(String id, String description, TaskPriority priority, List<String> dependsOn) {
+        TaskItem(String id, String description, TaskPriority priority, List<String> dependsOn, String group) {
             this.id = id;
             this.description = description;
             this.priority = priority != null ? priority : TaskPriority.MEDIUM;
             this.dependsOn = dependsOn != null ? dependsOn : new ArrayList<>();
+            this.group = group != null ? group : "";
             this.status = TaskStatus.PENDING;
         }
+    }
+
+    /**
+     * æ·»å ä»»å¡é¡¹å° StringBuilderï¼å«ç¶æãä¼åçº§ãä¾èµä¿¡æ¯ï¼
+     */
+    private void appendTaskItem(StringBuilder sb, TaskItem task) {
+        String statusIcon = task.status == TaskStatus.COMPLETED ? "â" : "â³";
+        sb.append("  ").append(statusIcon).append(" ").append(task.id).append(" - ").append(task.description);
+        if (task.priority == TaskPriority.HIGH) {
+            sb.append(" [HIGH]");
+        }
+        if (!task.dependsOn.isEmpty()) {
+            sb.append(" â ä¾èµ: ").append(String.join(", ", task.dependsOn));
+        }
+        sb.append("\n");
     }
 }

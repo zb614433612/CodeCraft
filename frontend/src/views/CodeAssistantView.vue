@@ -98,19 +98,49 @@
     <main class="chat-main">
       <!-- 标签栏 -->
       <div class="tab-bar" v-if="tabs.length > 0">
-        <div
-          v-for="tab in tabs"
-          :key="tab.id"
-          :class="['tab-item', { active: activeTabId === tab.id, dirty: tab.isDirty }]"
-          @click="activeTabId = tab.id"
-          @mousedown.middle.prevent="closeTab(tab.id)"
-        >
-          <span class="tab-title">{{ tab.title }}</span>
-          <span v-if="tab.isDirty" class="tab-dirty-dot">●</span>
-          <span v-if="tab.type !== 'chat'" class="tab-close" @click.stop="closeTab(tab.id)">×</span>
+        <div class="tab-items">
+          <div
+            v-for="tab in tabs"
+            :key="tab.id"
+            :class="['tab-item', { active: activeTabId === tab.id, dirty: tab.isDirty }]"
+            @click="activeTabId = tab.id"
+            @mousedown.middle.prevent="closeTab(tab.id)"
+          >
+            <span class="tab-title">{{ tab.title }}</span>
+            <span v-if="tab.isDirty" class="tab-dirty-dot">●</span>
+            <span v-if="tab.type !== 'chat'" class="tab-close" @click.stop="closeTab(tab.id)">×</span>
+          </div>
+        </div>
+        <!-- 文件标签操作按钮 -->
+        <div v-if="activeTab?.type === 'file'" class="tab-actions">
+          <a-button
+            size="small"
+            class="tb-btn"
+            @click="handleBuild"
+            :loading="isBuilding"
+          >
+            <PlaySquareOutlined /> 编译
+          </a-button>
+          <a-button
+            size="small"
+            type="primary"
+            class="tb-btn"
+            @click="handleRun"
+            :disabled="isServiceRunning"
+          >
+            <CaretRightOutlined /> 运行
+          </a-button>
+          <a-button
+            size="small"
+            danger
+            class="tb-btn"
+            @click="handleStop"
+            :disabled="!isServiceRunning"
+          >
+            <PoweroffOutlined /> 停止
+          </a-button>
         </div>
       </div>
-
       <!-- 标签内容区 -->
       <div class="tab-content">
         <!-- ===== 聊天标签 ===== -->
@@ -390,14 +420,61 @@
         </template>
         <!-- ===== 文件编辑标签 ===== -->
         <template v-else-if="activeTab?.type === 'file'">
-          <FileEditor
-            :key="activeTab.id"
-            :file-path="activeTab.filePath || ''"
-            :content="activeTab.content || ''"
-            :original-content="activeTab.originalContent"
-            @save="onFileSaved"
-            @content-change="onFileContentChange"
-          />
+          <div class="file-tab-layout">
+            <div class="file-tab-editor" :class="{ 'has-console': showConsole }">
+              <FileEditor
+                :key="activeTab.id"
+                :file-path="activeTab.filePath || ''"
+                :content="activeTab.content || ''"
+                :original-content="activeTab.originalContent"
+                @save="onFileSaved"
+                @content-change="onFileContentChange"
+              />
+            </div>
+            <!-- 控制台面板 -->
+            <div v-if="showConsole" class="file-tab-console">
+              <div class="console-header">
+                <span class="console-title">
+                  <span class="console-dot" :class="{ running: isServiceRunning }"></span>
+                  控制台
+                </span>
+                <div class="console-actions">
+                  <span class="console-status">
+                    {{ isServiceRunning ? '运行中' : '已停止' }}
+                    <template v-if="isServiceRunning">
+                      · {{ formatElapsed(runElapsed) }}
+                    </template>
+                  </span>
+                  <a-button size="small" type="text" class="console-btn" @click="clearConsole">
+                    <ClearOutlined /> 清屏
+                  </a-button>
+                  <a-button size="small" type="text" class="console-btn" @click="showConsole = false">
+                    <CloseOutlined />
+                  </a-button>
+                </div>
+              </div>
+              <div class="console-body">
+                <div
+                  v-for="(line, i) in consoleLines"
+                  :key="i"
+                  :class="['console-line', {
+                    'console-error': line.includes('[ERROR]') || line.includes('ERROR'),
+                    'console-warn': line.includes('[WARNING]') || line.includes('WARN'),
+                    'console-success': line.includes('BUILD SUCCESS') || line.includes('SUCCESS')
+                  }]"
+                >{{ line }}</div>
+                <div v-if="isBuilding" class="console-loading">
+                  <LoadingOutlined spin /> 编译中...
+                </div>
+              </div>
+            </div>
+            <!-- 控制台底部快捷展开条 -->
+            <div v-else class="console-trigger" @click="showConsole = true">
+              <span class="console-trigger-dot" :class="{ active: isServiceRunning }"></span>
+              控制台
+              <template v-if="isServiceRunning"> · {{ formatElapsed(runElapsed) }}</template>
+            </div>
+          </div>
         </template>
         <!-- ===== 差异对比标签 ===== -->
         <template v-else-if="activeTab?.type === 'diff'">
@@ -445,7 +522,11 @@ import {
   CloseOutlined,
   FolderOpenOutlined,
   UndoOutlined,
-  PaperClipOutlined
+  PaperClipOutlined,
+  PlaySquareOutlined,
+  CaretRightOutlined,
+  PoweroffOutlined,
+  ClearOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import FileEditor from '@/components/FileEditor.vue'
@@ -455,7 +536,7 @@ import SkillList from '@/components/SkillList.vue'
 import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
-import { readProjectFile } from '@/api/project'
+import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput } from '@/api/project'
 import { getGitDiff, gitRestore } from '@/api/git'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
@@ -556,6 +637,140 @@ const formatFileSize = (bytes: number): string => {
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   return (bytes / 1024 / 1024).toFixed(1) + ' MB'
 }
+
+// ===== 编译/运行/控制台 =====
+const isBuilding = ref(false)
+const isServiceRunning = ref(false)
+const showConsole = ref(false)
+const consoleLines = ref<string[]>([])
+const runElapsed = ref(0)
+let consolePollTimer: ReturnType<typeof setInterval> | null = null
+let runElapsedTimer: ReturnType<typeof setInterval> | null = null
+
+const handleBuild = async () => {
+  const projectRoot = settingsStore.projectRoot
+  if (!projectRoot) {
+    message.warning('请先设置工作目录')
+    return
+  }
+  isBuilding.value = true
+  showConsole.value = true
+  consoleLines.value = []
+  try {
+    const result = await buildProject(projectRoot)
+    const lines = result.output.split('\n')
+    consoleLines.value = lines
+    if (result.success) {
+      message.success(`编译成功 (耗时 ${(result.duration / 1000).toFixed(1)}s)`)
+    } else {
+      message.error(`编译失败 (exitCode=${result.exitCode})`)
+    }
+  } catch (e: any) {
+    consoleLines.value = [`[ERROR] 编译请求失败: ${e.message}`]
+    message.error('编译请求失败')
+  } finally {
+    isBuilding.value = false
+  }
+}
+
+const handleRun = async () => {
+  const projectRoot = settingsStore.projectRoot
+  if (!projectRoot) {
+    message.warning('请先设置工作目录')
+    return
+  }
+  showConsole.value = true
+  consoleLines.value = ['正在启动服务...']
+  try {
+    const result = await runProject(projectRoot)
+    consoleLines.value = [result.message]
+    if (result.success) {
+      isServiceRunning.value = true
+      message.success(result.message)
+      startConsolePolling()
+    } else {
+      message.error(result.message)
+      // 尝试获取更多输出
+      const output = await getRunOutput(20)
+      if (output.success && output.lines.length > 0) {
+        consoleLines.value = output.lines
+      }
+    }
+  } catch (e: any) {
+    consoleLines.value = [`[ERROR] 启动失败: ${e.message}`]
+    message.error('启动请求失败')
+  }
+}
+
+const handleStop = async () => {
+  try {
+    const result = await stopProject()
+    consoleLines.value.push('--- ' + result.message + ' ---')
+    isServiceRunning.value = false
+    stopConsolePolling()
+    runElapsed.value = 0
+    message.success(result.message)
+  } catch (e: any) {
+    message.error('停止请求失败: ' + e.message)
+  }
+}
+
+const startConsolePolling = () => {
+  stopConsolePolling()
+  // 轮询输出
+  consolePollTimer = setInterval(async () => {
+    try {
+      const output = await getRunOutput(200)
+      if (output.success) {
+        consoleLines.value = output.lines
+        isServiceRunning.value = output.running
+        if (!output.running) {
+          stopConsolePolling()
+          runElapsed.value = 0
+        }
+      }
+    } catch { /* ignore polling errors */ }
+  }, 2000)
+  // 计时器
+  runElapsed.value = 0
+  runElapsedTimer = setInterval(() => {
+    if (isServiceRunning.value) {
+      runElapsed.value += 1000
+    }
+  }, 1000)
+}
+
+const stopConsolePolling = () => {
+  if (consolePollTimer) {
+    clearInterval(consolePollTimer)
+    consolePollTimer = null
+  }
+  if (runElapsedTimer) {
+    clearInterval(runElapsedTimer)
+    runElapsedTimer = null
+  }
+}
+
+const clearConsole = () => {
+  consoleLines.value = []
+}
+
+// 页面离开时停止轮询
+onMounted(() => {
+  // 检查当前是否有运行中的服务
+  getRunStatus().then(status => {
+    isServiceRunning.value = status.running
+    if (status.running) {
+      startConsolePolling()
+      // 获取已有输出
+      getRunOutput(200).then(output => {
+        if (output.success) consoleLines.value = output.lines
+      })
+    }
+  })
+})
+
+// ===== 标签页系统（Tab 管理） =====
 
 // ===== 标签页系统（Tab 管理） =====
 
@@ -1788,6 +2003,166 @@ watch(currentConversationId, (newId) => {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  min-height: 0;
+}
+
+/* ===== 文件标签布局（编辑器+控制台分栏） ===== */
+.file-tab-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.file-tab-editor {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.file-tab-editor.has-console {
+  flex: 1 1 55%;
+  min-height: 40%;
+}
+.file-tab-console {
+  flex: 1 1 45%;
+  min-height: 30%;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e1e;
+  border-top: 2px solid #3c3c3c;
+}
+.console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+.console-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cccccc;
+  font-weight: 500;
+}
+.console-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6a9955;
+  display: inline-block;
+}
+.console-dot.running {
+  background: #4ec9b0;
+  animation: consolePulse 1.5s ease-in-out infinite;
+}
+@keyframes consolePulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px #4ec9b0; }
+  50% { opacity: 0.5; box-shadow: 0 0 8px #4ec9b0; }
+}
+.console-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.console-status {
+  font-size: 11px;
+  color: #858585;
+}
+.console-btn {
+  font-size: 11px !important;
+  color: #858585 !important;
+  height: 22px !important;
+  padding: 0 6px !important;
+}
+.console-btn:hover {
+  color: #cccccc !important;
+}
+.console-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.console-line {
+  min-height: 18px;
+  padding: 0;
+}
+.console-line.console-error {
+  color: #f48771;
+}
+.console-line.console-warn {
+  color: #dcdcaa;
+}
+.console-line.console-success {
+  color: #4ec9b0;
+}
+.console-loading {
+  color: #858585;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.console-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  background: #252526;
+  border-top: 1px solid #3c3c3c;
+  font-size: 11px;
+  color: #858585;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  user-select: none;
+}
+.console-trigger:hover {
+  background: #333;
+  color: #cccccc;
+}
+.console-trigger-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6a9955;
+  display: inline-block;
+}
+.console-trigger-dot.active {
+  background: #4ec9b0;
+  animation: consolePulse 1.5s ease-in-out infinite;
+}
+/* 标签操作按钮组 */
+.tab-items {
+  display: flex;
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: stretch;
+}
+.tab-items::-webkit-scrollbar { height: 2px; }
+.tab-items::-webkit-scrollbar-thumb { background: #ccc; border-radius: 1px; }
+.tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  background: #f0f0f0;
+  border-left: 1px solid #d9d9d9;
+}
+.tb-btn {
+  font-size: 11px !important;
+  height: 24px !important;
+  padding: 0 8px !important;
+  border-radius: 4px !important;
 }
 
 /* ===== 差异对比标签 ===== */

@@ -57,4 +57,90 @@ export async function writeProjectFile(path: string, content: string): Promise<A
     method: 'POST',
     body: JSON.stringify({ path, content })
   })
+  return request<null>('/project/write', {
+    method: 'POST',
+    body: JSON.stringify({ path, content })
+  })
+}
+
+// ===== 编译/运行/停止 =====
+
+async function authFetch(url: string, options: RequestInit = {}): Promise<any> {
+  let authHeader: Record<string, string> = {}
+  try {
+    const { useUserStore } = await import('@/store/user')
+    const userStore = useUserStore()
+    if (userStore.token) {
+      authHeader = { 'Authorization': `Bearer ${userStore.token}` }
+    }
+  } catch { /* ignore */ }
+  const response = await fetch(`/api${url}`, {
+    headers: { 'Content-Type': 'application/json', ...authHeader, ...options.headers },
+    ...options
+  })
+  return response.json()
+}
+
+export interface BuildResult {
+  success: boolean
+  output: string
+  exitCode: number
+  duration: number
+}
+
+export interface RunResult {
+  success: boolean
+  message: string
+  pid?: number
+}
+
+export interface StopResult {
+  success: boolean
+  message: string
+}
+
+export interface StatusResult {
+  running: boolean
+  pid?: number
+  elapsed: number
+}
+
+export interface OutputResult {
+  success: boolean
+  lines: string[]
+  running: boolean
+}
+
+/** 编译项目 */
+export async function buildProject(projectRoot: string): Promise<BuildResult> {
+  return authFetch('/project/build', {
+    method: 'POST',
+    body: JSON.stringify({ projectRoot })
+  })
+}
+
+/** 运行项目（后台进程） */
+export async function runProject(projectRoot: string): Promise<RunResult> {
+  return authFetch('/project/run', {
+    method: 'POST',
+    body: JSON.stringify({ projectRoot })
+  })
+}
+
+/** 停止运行中的项目 */
+export async function stopProject(): Promise<StopResult> {
+  return authFetch('/project/stop', {
+    method: 'POST'
+  })
+}
+
+/** 获取运行状态 */
+export async function getRunStatus(): Promise<StatusResult> {
+  return authFetch('/project/run/status')
+}
+
+/** 获取控制台输出 */
+export async function getRunOutput(tail?: number): Promise<OutputResult> {
+  const params = tail !== undefined ? `?tail=${tail}` : ''
+  return authFetch(`/project/run/output${params}`)
 }
