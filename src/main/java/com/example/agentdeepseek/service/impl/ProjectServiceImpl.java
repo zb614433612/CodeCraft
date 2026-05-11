@@ -93,11 +93,7 @@ public class ProjectServiceImpl implements ProjectService {
      */
     private boolean shouldInclude(File file) {
         String name = file.getName();
-        // 排除隐藏文件（以.开头）
-        if (name.startsWith(".")) {
-            return false;
-        }
-        // 排除黑名单名称
+        // 排除黑名单名称（如 .git、node_modules 等）
         if (EXCLUDED_NAMES.contains(name)) {
             return false;
         }

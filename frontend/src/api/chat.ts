@@ -212,6 +212,9 @@ class StreamChatParser {
         return { type: 'content', data: parsed.content, sessionId: this.sessionId }
       } else if (typeof parsed === 'string') {
         return { type: 'content', data: parsed, sessionId: this.sessionId }
+      } else {
+        // JSON解析成功但无法识别的事件类型（例如仅含sessionId的初始化事件），静默消费
+        return null
       }
     } catch (e) {
       // 不是JSON，继续处理

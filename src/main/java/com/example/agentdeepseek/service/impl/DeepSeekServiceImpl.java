@@ -831,18 +831,22 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(context.toolNames());
         boolean hasTools = toolDefinitions != null && toolDefinitions.size() > 0;
 
+        // send sessionId event so frontend gets the real conversation ID
+        String sessionEventStr = "{\"sessionId\":" + conversationId + "}";
+        Flux<String> sessionEvent = Flux.just(sessionEventStr);
+
         if (hasTools) {
             // 取消同一会话中正在运行的后台任务
             cancelRunningTask(conversationId);
             // 在后台启动工具循环（断开不销毁），返回事件流
-            return startBackgroundTask(conversationId, storageConversationId, apiRequest);
+            return Flux.concat(sessionEvent, startBackgroundTask(conversationId, storageConversationId, apiRequest));
         } else {
             // 没有工具定义，使用原有流式逻辑
             // 收集响应内容，用于保存助手消息
             StringBuilder responseBuilder = new StringBuilder();
 
             // 创建主Flux处理API响应
-            return webClient.post()
+            return Flux.concat(sessionEvent, webClient.post()
                     .uri("/v1/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(apiRequest)
@@ -856,7 +860,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     .filter(chunk -> {
                         // 过滤掉空行和[DONE]事件
                         String trimmed = chunk.trim();
-                        return !trimmed.isEmpty() && !trimmed.equals("[DONE]");
+                        return !trimmed.isEmpty();
                     })
                     .map(chunk -> {
                         // 直接返回原始JSON数据，去掉"data: "前缀
@@ -886,7 +890,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         saveAssistantMessage(storageConversationId, content, reasoning);
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);
-                    });
+                    }));
         }
     }
 
@@ -958,6 +962,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         },
                         () -> {
                             log.info("后台任务完成: conversationId={}", conversationId);
+                            // emit [DONE] so frontend gets complete event with sessionId
+                            sink.tryEmitNext("[DONE]");
                             sink.tryEmitComplete();
                             if (task.getId() != null) {
                                 try {
@@ -1626,7 +1632,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 .filter(chunk -> {
                     // 过滤掉空行和[DONE]事件
                     String trimmed = chunk.trim();
-                    return !trimmed.isEmpty() && !trimmed.equals("[DONE]");
+                    return !trimmed.isEmpty();
                 })
                 .takeWhile(chunk -> shouldContinue.get())  // 检测到工具调用后停止处理后续事件
                 .flatMap(chunk -> {
