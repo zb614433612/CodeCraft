@@ -100,20 +100,37 @@ public class OperationDetailGenerator {
     private static String generateEditFile(JsonNode args) {
         String filePath = args.path("file_path").asText("");
         String pattern = args.path("pattern").asText("");
+        String mode = args.path("mode").asText("regex");
         String replacement = args.path("replacement").asText("");
         if (filePath.isEmpty()) return null;
 
         StringBuilder sb = new StringBuilder();
         sb.append("> **📄 编辑文件:** `").append(filePath).append("`\n\n");
 
-        boolean multiline = args.path("multiline").asBoolean(false);
-        if (multiline) {
-            sb.append("> 多行模式 | ");
-        }
+        if ("line".equals(mode)) {
+            int startLine = args.path("start_line").asInt(0);
+            int endLine = args.path("end_line").asInt(0);
+            sb.append("> **模式:** line");
+            if (startLine > 0) {
+                sb.append(" | 行 ");
+                if (endLine > 0 && endLine != startLine) {
+                    sb.append(startLine).append("~").append(endLine);
+                } else {
+                    sb.append(startLine);
+                }
+            }
+            sb.append("\n\n");
+            sb.append("**替换为:**\n\n```\n").append(truncateContent(replacement)).append("\n```\n\n");
+        } else {
+            boolean multiline = args.path("multiline").asBoolean(false);
+            if (multiline) {
+                sb.append("> 多行模式 | ");
+            }
 
-        // 显示 pattern 和 replacement 的对比
-        sb.append("**匹配模式:**\n\n```\n").append(truncateContent(pattern)).append("\n```\n\n");
-        sb.append("**替换为:**\n\n```\n").append(truncateContent(replacement)).append("\n```\n\n");
+            // 显示 pattern 和 replacement 的对比
+            sb.append("**匹配模式:**\n\n```\n").append(truncateContent(pattern)).append("\n```\n\n");
+            sb.append("**替换为:**\n\n```\n").append(truncateContent(replacement)).append("\n```\n\n");
+        }
 
         return sb.toString();
     }
