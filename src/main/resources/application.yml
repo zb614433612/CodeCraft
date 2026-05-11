@@ -171,6 +171,11 @@ deepseek:
   default-model: deepseek-v4-pro
   # 思考模式：non-thinking / thinking / thinking_max
   thinking-mode: thinking
+  # 附件上传配置
+  upload:
+    max-size: 5242880                              # 最大文件大小（5MB）
+    allowed-extensions: .txt,.md,.json,.yml,.yaml,.xml,.java,.py,.ts,.vue,.js,.css,.sql,.sh,.bat,.csv,.properties,.go,.kt,.rs,.c,.cpp,.h,.html,.htm,.svg,.log,.ini,.cfg,.gradle,.proto,.graphql
+    image-extensions: .png,.jpg,.jpeg,.gif,.bmp,.webp,.ico
   # 提示词文件与工具组映射
   tool-groups:
     "system_prompt.txt":

@@ -592,8 +592,47 @@ export async function cancelTask(conversationId: number): Promise<boolean> {
     return res.ok
   } catch (e) {
     console.warn('取消任务失败:', e)
+    console.warn('取消任务失败:', e)
     return false
   }
+}
+
+// ===== 附件上传 =====
+
+export interface FileUploadResult {
+  success: boolean
+  fileName: string
+  extension: string
+  size: number
+  content: string
+  image: boolean
+  language: string
+  error?: string
+}
+
+/**
+ * 上传附件文件，后端读取文本内容后返回
+ * @param file 要上传的文件
+ */
+export async function uploadAttachment(file: File): Promise<FileUploadResult> {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  let authHeader: Record<string, string> = {}
+  try {
+    const { useUserStore } = await import('@/store/user')
+    const userStore = useUserStore()
+    if (userStore.token) {
+      authHeader = { 'Authorization': `Bearer ${userStore.token}` }
+    }
+  } catch { /* ignore */ }
+
+  const response = await fetch('/api/deepseek/upload', {
+    method: 'POST',
+    headers: authHeader,
+    body: formData
+  })
+  return response.json()
 }
 
 // 非流式聊天请求（备用）

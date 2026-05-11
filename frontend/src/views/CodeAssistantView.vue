@@ -245,8 +245,41 @@
       </div>
 
       <!-- 输入区域 -->
+      <!-- 输入区域 -->
       <footer class="chat-input-area">
+        <!-- 隐藏的文件选择器 -->
+        <input
+          ref="fileInputRef"
+          type="file"
+          style="display: none"
+          @change="handleFileSelected"
+        />
+        <!-- 附件标签区 -->
+        <div v-if="attachedFiles.length > 0" class="attachment-tags">
+          <div
+            v-for="att in attachedFiles"
+            :key="att.id"
+            :class="['attachment-tag', { 'attachment-error': att.error }]"
+          >
+            <span class="attachment-icon">{{ att.image ? '🖼️' : '📄' }}</span>
+            <span class="attachment-name" :title="att.fileName">{{ att.fileName }}</span>
+            <span class="attachment-size">{{ formatFileSize(att.size) }}</span>
+            <span v-if="att.uploading" class="attachment-uploading">
+              <LoadingOutlined spin />
+            </span>
+            <span v-else-if="att.error" class="attachment-error-msg" :title="att.error">上传失败</span>
+            <span v-else class="attachment-remove" @click="removeAttachment(att.id)">×</span>
+          </div>
+        </div>
         <div class="input-wrapper">
+          <a-button
+            class="attach-btn"
+            @click="triggerFileUpload"
+            :disabled="isSending"
+            title="上传附件"
+          >
+            <PaperClipOutlined />
+          </a-button>
           <a-textarea
             v-model:value="inputMessage"
             placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送）"
@@ -266,7 +299,7 @@
             type="primary"
             class="send-btn"
             @click="sendMessage"
-            :disabled="!inputMessage.trim()"
+            :disabled="!inputMessage.trim() && attachedFiles.length === 0"
           >
             <SendOutlined />
           </a-button>
@@ -393,7 +426,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi } from '@/api/conversation'
-import { streamChat, checkActiveTask, taskStream, cancelTask } from '@/api/chat'
+import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment } from '@/api/chat'
 import { submitAnswer } from '@/api/askUser'
 import { useSettingsStore } from '@/store/settings'
 import { renderMarkdown } from '@/utils/markdown'
@@ -411,7 +444,8 @@ import {
   SettingOutlined,
   CloseOutlined,
   FolderOpenOutlined,
-  UndoOutlined
+  UndoOutlined,
+  PaperClipOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import FileEditor from '@/components/FileEditor.vue'
@@ -447,6 +481,83 @@ interface ChatMessage {
   isStreaming?: boolean
   tokenCount?: number
 }
+
+// ===== 附件系统 =====
+interface AttachedFile {
+  id: string
+  fileName: string
+  content: string
+  size: number
+  image: boolean
+  language: string
+  uploading: boolean
+  error?: string
+}
+
+const attachedFiles = ref<AttachedFile[]>([])
+const fileInputRef = ref<HTMLInputElement | null>(null)
+
+const triggerFileUpload = () => {
+  fileInputRef.value?.click()
+}
+
+const handleFileSelected = async (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+
+  const attId = `att-${Date.now()}`
+  const attFile: AttachedFile = {
+    id: attId,
+    fileName: file.name,
+    content: '',
+    size: file.size,
+    image: false,
+    language: '',
+    uploading: true
+  }
+  attachedFiles.value.push(attFile)
+
+  try {
+    const result = await uploadAttachment(file)
+    if (result.success) {
+      const found = attachedFiles.value.find(a => a.id === attId)
+      if (found) {
+        found.content = result.content
+        found.image = result.image
+        found.language = result.language
+        found.uploading = false
+      }
+    } else {
+      const found = attachedFiles.value.find(a => a.id === attId)
+      if (found) {
+        found.error = result.error || '上传失败'
+        found.uploading = false
+      }
+    }
+  } catch (e: any) {
+    const found = attachedFiles.value.find(a => a.id === attId)
+    if (found) {
+      found.error = e.message || '上传失败'
+      found.uploading = false
+    }
+  }
+
+  // 清空 input 以便重复选择同一个文件
+  target.value = ''
+}
+
+const removeAttachment = (id: string) => {
+  attachedFiles.value = attachedFiles.value.filter(a => a.id !== id)
+}
+
+const formatFileSize = (bytes: number): string => {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+// ===== 标签页系统（Tab 管理） =====
 
 // ===== 标签页系统（Tab 管理） =====
 interface EditorTab {
@@ -863,11 +974,28 @@ const flushMessageUpdate = (convId: string) => {
 }
 
 // 发送消息
+// 发送消息
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
   if (!text || isSending.value) return
   // 发送新消息时清除旧的任务清单
   clearTaskList()
+
+  // 构建最终消息：将附件内容拼接到用户消息前
+  let finalMessage = text
+  if (attachedFiles.value.length > 0) {
+    const attachmentBlocks: string[] = []
+    for (const att of attachedFiles.value) {
+      if (att.content) {
+        attachmentBlocks.push(`--- 附件: ${att.fileName} ---\n${att.content}\n--- 附件结束 ---`)
+      } else if (att.image) {
+        attachmentBlocks.push(`[用户上传了图片: ${att.fileName}（${formatFileSize(att.size)}）]`)
+      }
+    }
+    if (attachmentBlocks.length > 0) {
+      finalMessage = attachmentBlocks.join('\n\n') + '\n\n' + text
+    }
+  }
 
   let convId = currentConversationId.value
   // 如果是新会话，需要找到或创建真实的会话ID
@@ -880,10 +1008,13 @@ const sendMessage = async () => {
   const userMsg: ChatMessage = {
     id: `user-${Date.now()}`,
     role: 'user',
-    content: text,
+    content: finalMessage,
     timestamp: Date.now(),
-    tokenCount: estimateTokenCount(text)
+    tokenCount: estimateTokenCount(finalMessage)
   }
+
+  // 清空附件列表
+  attachedFiles.value = []
 
   if (!messages.value[convId]) {
     messages.value[convId] = []
@@ -922,7 +1053,7 @@ const sendMessage = async () => {
     // 构建thinking内容
     let thinkingContent = ''
 
-    for await (const event of streamChat(text, sessionId, {
+    for await (const event of streamChat(finalMessage, sessionId, {
       promptFileName: PROMPT_FILE,
       executionMode: settingsStore.getMode('code_assistant'),
       projectRoot: settingsStore.projectRoot || undefined,
@@ -1868,6 +1999,94 @@ watch(currentConversationId, (newId) => {
   border-top: 1px solid #e8e8e8;
   position: relative;
 }
+/* ===== 附件上传 ===== */
+.attachment-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+.attachment-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #f0f5ff;
+  border: 1px solid #d6e4ff;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 22px;
+  transition: all 0.15s;
+}
+.attachment-tag:hover {
+  background: #e6f0ff;
+}
+.attachment-tag.attachment-error {
+  background: #fff2f0;
+  border-color: #ffccc7;
+}
+.attachment-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.attachment-name {
+  color: #262626;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-size {
+  color: #8c8c8c;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.attachment-uploading {
+  color: #1677ff;
+  font-size: 12px;
+}
+.attachment-error-msg {
+  color: #ff4d4f;
+  font-size: 11px;
+  cursor: help;
+}
+.attachment-remove {
+  cursor: pointer;
+  color: #8c8c8c;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.attachment-remove:hover {
+  color: #ff4d4f;
+}
+/* 附件上传按钮 */
+.attach-btn {
+  height: 40px;
+  width: 40px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  border: 1px dashed #d9d9d9;
+  color: #8c8c8c;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.attach-btn:hover {
+  color: #1677ff;
+  border-color: #1677ff;
+  background: #f0f5ff;
+}
+.attach-btn:disabled {
+  color: #d9d9d9;
+  border-color: #d9d9d9;
+  background: transparent;
+}
+
 
 .input-wrapper {
   display: flex;

@@ -3,6 +3,7 @@ package com.example.agentdeepseek.controller;
 import com.example.agentdeepseek.model.dto.ChatRequest;
 import com.example.agentdeepseek.model.dto.PendingQuestion;
 import com.example.agentdeepseek.model.entity.AgentTask;
+import com.example.agentdeepseek.service.AttachmentReaderService;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import io.swagger.v3.oas.annotations.Operation;
@@ -12,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import jakarta.servlet.http.HttpServletRequest;
 import reactor.core.publisher.Flux;
 
@@ -31,10 +33,14 @@ public class DeepSeekController {
 
     private final DeepSeekService deepSeekService;
     private final PendingQuestionStore pendingQuestionStore;
+    private final AttachmentReaderService attachmentReaderService;
 
-    public DeepSeekController(DeepSeekService deepSeekService, PendingQuestionStore pendingQuestionStore) {
+    public DeepSeekController(DeepSeekService deepSeekService,
+                              PendingQuestionStore pendingQuestionStore,
+                              AttachmentReaderService attachmentReaderService) {
         this.deepSeekService = deepSeekService;
         this.pendingQuestionStore = pendingQuestionStore;
+        this.attachmentReaderService = attachmentReaderService;
     }
 
     /**
@@ -144,4 +150,32 @@ public class DeepSeekController {
         return Map.of("success", true, "message", "任务已取消");
     }
 
+
+    // ===== 附件上传 =====
+
+    /**
+     * 上传附件文件
+     * 接收文件并读取文本内容，返回给前端用于拼接到用户消息中
+     */
+    @Operation(summary = "上传附件", description = "上传文件并读取文本内容，支持文本/代码/图片文件")
+    @PostMapping("/upload")
+    public Map<String, Object> uploadAttachment(@RequestParam("file") MultipartFile file) {
+        log.info("收到附件上传: fileName={}, size={}", file.getOriginalFilename(), file.getSize());
+
+        AttachmentReaderService.AttachmentResult result = attachmentReaderService.read(file);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", result.isSuccess());
+        response.put("fileName", result.getFileName());
+        response.put("extension", result.getExtension());
+        response.put("size", result.getSize());
+        response.put("content", result.getContent());
+        response.put("image", result.isImage());
+        response.put("language", result.getLanguage());
+        if (result.getError() != null) {
+            response.put("error", result.getError());
+        }
+
+        return response;
+    }
 }
