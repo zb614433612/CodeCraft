@@ -48,14 +48,6 @@ spring:
       mode: always
       # 建表出错时继续执行（表已存在时不中断）
       continue-on-error: true
-  # MyBatis配置
-  mybatis:
-    # 类型别名包路径
-    type-aliases-package: com.example.agentdeepseek
-    # MyBatis配置项
-    configuration:
-      # 下划线转驼峰命名映射
-      map-underscore-to-camel-case: true
   # 数据存储配置（Redis）
   data:
     # Redis配置
@@ -85,6 +77,15 @@ spring:
     scheduling:
       pool:
         size: 3
+
+# MyBatis配置
+mybatis:
+  # 类型别名包路径
+  type-aliases-package: com.example.agentdeepseek
+  # MyBatis配置项
+  configuration:
+    # 下划线转驼峰命名映射
+    map-underscore-to-camel-case: true
 
 # SpringDoc OpenAPI配置
 springdoc:

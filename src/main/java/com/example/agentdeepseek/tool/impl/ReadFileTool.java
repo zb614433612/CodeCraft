@@ -245,16 +245,26 @@ public class ReadFileTool implements Tool {
             int sampleLen = bis.read(sampleBytes);
             if (sampleLen <= 0) return StandardCharsets.UTF_8;
 
-            // 用 CharsetDecoder 严格模式实际解码样本来判断
+            // 检查是否为纯ASCII（所有字节 < 128）
+            boolean isPureAscii = true;
+            for (int i = 0; i < sampleLen; i++) {
+                if ((sampleBytes[i] & 0xFF) >= 128) {
+                    isPureAscii = false;
+                    break;
+                }
+            }
+            if (isPureAscii) return StandardCharsets.UTF_8;
+
+            // 用CharsetDecoder严格模式实际解码样本来判断编码
+            // 优先级：UTF-8 > GB18030（兼容GBK） > 兜底用UTF-8
             if (canDecode(sampleBytes, sampleLen, StandardCharsets.UTF_8))
                 return StandardCharsets.UTF_8;
-            if (canDecode(sampleBytes, sampleLen, Charset.forName("GBK")))
-                return Charset.forName("GBK");
-            if (canDecode(sampleBytes, sampleLen, StandardCharsets.ISO_8859_1))
-                return StandardCharsets.ISO_8859_1;
+            if (canDecode(sampleBytes, sampleLen, Charset.forName("GB18030")))
+                return Charset.forName("GB18030");
+            // 兜底：现代项目基本使用UTF-8，不再回退到ISO-8859-1
+            return StandardCharsets.UTF_8;
         }
 
-        return StandardCharsets.UTF_8;
     }
 
     /**
@@ -305,7 +315,8 @@ public class ReadFileTool implements Tool {
             return readAllLinesInternal(filePath, charset);
         } catch (MalformedInputException e) {
             log.warn("使用 {} 解码失败 ({}), 降级尝试 GBK", charset, e.getMessage());
-            return readAllLinesInternal(filePath, Charset.forName("GBK"));
+            log.warn("使用 {} 解码失败 ({}), 降级尝试 GB18030", charset, e.getMessage());
+            return readAllLinesInternal(filePath, Charset.forName("GB18030"));
         }
     }
 

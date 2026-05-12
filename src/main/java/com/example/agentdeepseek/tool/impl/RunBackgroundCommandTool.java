@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -175,7 +176,7 @@ public class RunBackgroundCommandTool implements Tool {
     private void startOutputReader(int pid, Process process) {
         Thread reader = new Thread(() -> {
             try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    new InputStreamReader(process.getInputStream(), getProcessOutputCharset()))) {
                 String line;
                 while ((line = br.readLine()) != null) {
                     ProcessInfo info = PROCESSES.get(pid);
@@ -369,5 +370,19 @@ public class RunBackgroundCommandTool implements Tool {
      */
     public static ProcessInfo getProcess(int processId) {
         return PROCESSES.get(processId);
+    }
+
+    /**
+     * 获取适合当前系统的进程输出编码
+     * Windows 中文系统默认使用 GBK（cmd/PowerShell 输出编码）
+     * Linux/Mac 使用 UTF-8
+     */
+    private static Charset getProcessOutputCharset() {
+        String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
+        if (os.contains("win")) {
+            // Windows 上 cmd/PowerShell 输出使用系统默认编码（中文系统为 GBK）
+            return Charset.defaultCharset();
+        }
+        return StandardCharsets.UTF_8;
     }
 }

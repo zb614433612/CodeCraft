@@ -1,3 +1,5 @@
+import { getAuthHeaders } from '@/utils/http-client'
+
 export interface GitStatusResult {
   isRepo: boolean
   branch?: string
@@ -43,23 +45,6 @@ export interface GitAuthResult {
   success?: boolean
   error?: string
 }
-
-/**
- * 从 userStore 获取认证请求头
- */
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  try {
-    const { useUserStore } = await import('@/store/user')
-    const userStore = useUserStore()
-    if (userStore.token) {
-      return { 'Authorization': `Bearer ${userStore.token}` }
-    }
-  } catch (error) {
-    console.warn('获取用户token失败:', error)
-  }
-  return {}
-}
-
 /**
  * 获取 Git 仓库状态
  */

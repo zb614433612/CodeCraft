@@ -1,4 +1,5 @@
 import type { ApiResponse } from '@/store/user'
+import { getAuthHeaders } from '@/utils/http-client'
 
 export interface ProjectTreeNode {
   name: string
@@ -13,14 +14,7 @@ export interface DirectoryEntry {
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
-  let authHeader = {}
-  try {
-    const { useUserStore } = await import('@/store/user')
-    const userStore = useUserStore()
-    if (userStore.token) {
-      authHeader = { 'Authorization': `Bearer ${userStore.token}` }
-    }
-  } catch { /* ignore */ }
+  const authHeader = await getAuthHeaders()
 
   const response = await fetch(`/api${url}`, {
     headers: { 'Content-Type': 'application/json', ...authHeader, ...options.headers },
@@ -57,29 +51,9 @@ export async function writeProjectFile(path: string, content: string): Promise<A
     method: 'POST',
     body: JSON.stringify({ path, content })
   })
-  return request<null>('/project/write', {
-    method: 'POST',
-    body: JSON.stringify({ path, content })
-  })
 }
 
 // ===== 编译/运行/停止 =====
-
-async function authFetch(url: string, options: RequestInit = {}): Promise<any> {
-  let authHeader: Record<string, string> = {}
-  try {
-    const { useUserStore } = await import('@/store/user')
-    const userStore = useUserStore()
-    if (userStore.token) {
-      authHeader = { 'Authorization': `Bearer ${userStore.token}` }
-    }
-  } catch { /* ignore */ }
-  const response = await fetch(`/api${url}`, {
-    headers: { 'Content-Type': 'application/json', ...authHeader, ...options.headers },
-    ...options
-  })
-  return response.json()
-}
 
 export interface BuildResult {
   success: boolean
@@ -109,6 +83,15 @@ export interface OutputResult {
   success: boolean
   lines: string[]
   running: boolean
+}
+
+async function authFetch(url: string, options: RequestInit = {}): Promise<any> {
+  const authHeader = await getAuthHeaders()
+  const response = await fetch(`/api${url}`, {
+    headers: { 'Content-Type': 'application/json', ...authHeader, ...options.headers },
+    ...options
+  })
+  return response.json()
 }
 
 /** 编译项目 */

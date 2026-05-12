@@ -52,6 +52,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -86,11 +88,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
 
     // ===== 后台任务相关 =====
-    private final ExecutorService taskExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "bg-task-");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService taskExecutor = new ThreadPoolExecutor(
+            2,                              // corePoolSize — 核心常驻线程数
+            10,                             // maximumPoolSize — 最大线程数
+            30L,                            // keepAliveTime — 空闲线程回收时间
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(100), // 工作队列容量，排队超出后创建新线程
+            r -> {
+                Thread t = new Thread(r, "bg-task-");
+                t.setDaemon(true);
+                return t;
+            },
+            new ThreadPoolExecutor.CallerRunsPolicy() // 拒绝策略：调用者线程执行
+    );
     // 活跃任务的 Sinks 事件总线（conversationId → Sink）
     private final Map<Long, Sinks.Many<String>> taskEventSinks = new ConcurrentHashMap<>();
     // 活跃任务的 Flux 订阅引用（conversationId → Disposable，用于取消）

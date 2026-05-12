@@ -9,8 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.*;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
@@ -367,17 +368,37 @@ public class GrepSearchTool implements Tool {
 
     private Charset detectSimpleCharset(Path file) {
         try {
-            byte[] bytes = Files.readAllBytes(file);
-            String utf8Str = new String(bytes, StandardCharsets.UTF_8);
-            byte[] reEncoded = utf8Str.getBytes(StandardCharsets.UTF_8);
-            if (bytes.length == reEncoded.length) {
-                boolean valid = true;
-                for (int i = 0; i < bytes.length; i++) {
-                    if (bytes[i] != reEncoded[i]) { valid = false; break; }
+            // 只读取前 4096 字节作为样本（原方法读取整个文件）
+            int sampleSize = (int) Math.min(Files.size(file), 4096);
+            if (sampleSize <= 0) return StandardCharsets.UTF_8;
+
+            byte[] sample = new byte[sampleSize];
+            try (InputStream is = Files.newInputStream(file)) {
+                int readLen = is.read(sample);
+                if (readLen <= 0) return StandardCharsets.UTF_8;
+
+                // 检查是否为纯 ASCII
+                boolean isAscii = true;
+                for (int i = 0; i < readLen; i++) {
+                    if ((sample[i] & 0xFF) >= 128) { isAscii = false; break; }
                 }
-                if (valid) return StandardCharsets.UTF_8;
+                if (isAscii) return StandardCharsets.UTF_8;
+
+                // 用 CharsetDecoder 严格模式检测 UTF-8
+                CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT);
+                ByteBuffer bb = ByteBuffer.wrap(sample, 0, readLen);
+                CharBuffer cb = CharBuffer.allocate(readLen);
+                CoderResult result = decoder.decode(bb, cb, true);
+                if (!result.isError()) {
+                    result = decoder.flush(cb);
+                    if (!result.isError()) return StandardCharsets.UTF_8;
+                }
+
+                // UTF-8 解码失败，尝试 GB18030（兼容 GBK）
+                return Charset.forName("GB18030");
             }
-            return Charset.forName("GBK");
         } catch (Exception e) {
             return StandardCharsets.UTF_8;
         }
