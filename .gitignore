@@ -35,6 +35,7 @@ build/
 ### Frontend ###
 frontend/node_modules/
 frontend/dist/
+frontend/node/
 
 ### Electron ###
 electron/node_modules/
