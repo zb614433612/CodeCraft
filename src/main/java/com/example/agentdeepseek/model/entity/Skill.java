@@ -19,6 +19,7 @@ public class Skill {
     private String description;
     private String toolNames;
     private String instructions;
+    private String triggerWords;
     private Double confidence;
     private Integer usageCount;
     private Integer successCount;
@@ -40,5 +41,11 @@ public class Skill {
         this.failCount = 0;
         this.userId = userId;
         this.agentType = agentType;
+    }
+
+    public Skill(String name, String description, String toolNames, String instructions,
+                 String triggerWords, Long userId, String agentType) {
+        this(name, description, toolNames, instructions, userId, agentType);
+        this.triggerWords = triggerWords;
     }
 }

@@ -74,12 +74,14 @@ public class DeepSeekController {
 
     /**
      * 回答 ask_user 问题
+     * action 取值：approve（同意）/ approve_all（本轮对话全部同意）/ reject（拒绝）/ custom（其他，需输入消息）
      */
     @Operation(summary = "回答ask_user问题", description = "用户回答LLM提出的问题，回答会传递给正在等待的流")
     @PostMapping("/answer")
     public Map<String, Object> answerQuestion(@RequestBody Map<String, String> body) {
         String uuid = body.get("uuid");
         String answer = body.get("answer");
+        String action = body.get("action");
 
         if (uuid == null || uuid.isEmpty() || answer == null) {
             return Map.of("success", false, "error", "缺少必要参数 uuid 或 answer");
@@ -91,15 +93,24 @@ public class DeepSeekController {
             return Map.of("success", false, "error", "问题不存在或已超时，请重新发送消息");
         }
 
+        // 默认 action 为 approve（兼容旧版本前端）
+        if (action == null || action.isEmpty()) {
+            action = "approve";
+        }
+
+        // 将 action 和 answer 组合后传递给等待的流
+        // 格式: "__ACTION__:actionType:userMessage"
+        String combined = "__ACTION__:" + action + ":" + (answer != null ? answer : "");
+
         // 完成 CompletableFuture，唤醒等待的流
-        boolean completed = pq.getFuture().complete(answer);
+        boolean completed = pq.getFuture().complete(combined);
         if (!completed) {
             log.warn("问题已被回答: uuid={}", uuid);
             return Map.of("success", false, "error", "该问题已被回答过");
         }
 
         pendingQuestionStore.remove(uuid);
-        log.info("用户回答了问题: uuid={}, answer={}", uuid, answer);
+        log.info("用户回答了问题: uuid={}, action={}, answer={}", uuid, action, answer);
         return Map.of("success", true);
     }
 

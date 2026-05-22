@@ -16,6 +16,58 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   return {}
 }
 
+/**
+ * 401 未授权处理：清除用户登录状态并跳转到登录页面
+ * 提取为公共函数，供 request 和 authFetch 共用
+ */
+export async function handleUnauthorized(): Promise<void> {
+  try {
+    const { useUserStore } = await import('@/store/user')
+    const userStore = useUserStore()
+    userStore.clearUserInfo()
+    console.log('检测到401未授权，已清除用户登录状态')
+  } catch (error) {
+    console.warn('清除用户store失败:', error)
+  }
+
+  try {
+    const router = await import('@/router').then(module => module.default)
+    if (router) {
+      const currentRoute = router.currentRoute.value
+      if (currentRoute.path !== '/login') {
+        router.push('/login')
+        console.log('已重定向到登录页面')
+      }
+    }
+  } catch (error) {
+    console.warn('跳转到登录页面失败:', error)
+  }
+}
+
+/**
+ * 带认证和 401 自动跳转的 fetch 包装函数
+ * 自动注入 token，遇到 HTTP 401 自动清除登录状态并跳转到登录页
+ * 与原生 fetch 接口兼容，返回 Response 对象
+ */
+export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const authHeader = await getAuthHeaders()
+
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeader,
+      ...(options.headers || {})
+    }
+  })
+
+  if (response.status === 401) {
+    await handleUnauthorized()
+  }
+
+  return response
+}
+
 // 请求超时时间（毫秒）
 const REQUEST_TIMEOUT = 15000
 
@@ -52,27 +104,7 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
 
       // 处理401未授权错误：清除用户token并跳转到登录页面
       if (response.status === 401) {
-        try {
-          const { useUserStore } = await import('@/store/user')
-          const userStore = useUserStore()
-          userStore.clearUserInfo()
-          console.log('检测到401未授权，已清除用户登录状态')
-        } catch (error) {
-          console.warn('清除用户store失败:', error)
-        }
-
-        try {
-          const router = await import('@/router').then(module => module.default)
-          if (router) {
-            const currentRoute = router.currentRoute.value
-            if (currentRoute.path !== '/login') {
-              router.push('/login')
-              console.log('已重定向到登录页面')
-            }
-          }
-        } catch (error) {
-          console.warn('跳转到登录页面失败:', error)
-        }
+        await handleUnauthorized()
       }
 
       // 尝试解析错误消息
@@ -90,6 +122,12 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
     }
 
     const data: ApiResponse<T> = await response.json()
+
+    // 处理业务层面的401：后端可能返回 HTTP 200 但 code=401（如某些 Controller 内部校验 token）
+    if (data.code === 401) {
+      await handleUnauthorized()
+      throw new Error(data.message || '登录已过期，请重新登录')
+    }
 
     if (data.code !== 200) {
       throw new Error(data.message || '请求失败')

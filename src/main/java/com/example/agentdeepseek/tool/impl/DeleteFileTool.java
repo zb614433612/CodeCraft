@@ -1,10 +1,10 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.DeleteFileConfig;
-import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 import com.example.agentdeepseek.util.ProjectRootContext;
-import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -21,10 +21,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 文件删除工具
- * 直接物理删除文件或目录，手动模式下需要 ask_execution 授权
+ * 直接物理删除文件或目录，手动模式下需要用户授权
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.DELETE, affectsData = true, isPathSensitive = true, highRisk = true, description = "删除文件或目录")
 public class DeleteFileTool implements Tool {
 
     private final ObjectMapper objectMapper;
@@ -42,9 +43,10 @@ public class DeleteFileTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "删除文件或目录。手动模式下需要 ask_execution 授权。"
-                + "拒绝删除项目根目录、受保护目录（可通过配置文件定制）。"
-                + "删除目录时递归删除所有子文件和子目录";
+        return "【适用场景】删除项目中不再需要的文件或空目录，清理临时文件、过时代码。"
+                + "【与 EditFileTool / WriteFile 的区别】本工具直接物理删除，不可恢复；如需修改文件内容请用 EditFileTool，如需创建文件请用 WriteFile。"
+                + "【使用方式】传入要删除的文件或目录路径（支持相对路径和绝对路径）。手动模式下需要用户授权。删除目录时递归删除所有子文件和子目录。"
+                + "【限制】拒绝删除项目根目录和受保护目录（可通过配置文件定制）。";
     }
 
     @Override
@@ -56,7 +58,7 @@ public class DeleteFileTool implements Tool {
 
         ObjectNode path = objectMapper.createObjectNode();
         path.put("type", "string");
-        path.put("description", "要删除的文件或目录路径，支持绝对路径或相对于项目根目录的路径");
+        path.put("description", "【必填】要删除的文件或目录路径。示例：'src/main/java/com/example/OldFile.java' 或 './temp/logs'。支持相对路径（相对于项目根目录）和绝对路径。");
         properties.set("path", path);
 
         parameters.set("properties", properties);
@@ -66,15 +68,10 @@ public class DeleteFileTool implements Tool {
 
     @Override
     public String execute(JsonNode arguments) {
-        // manual 模式下请求用户授权
-        if ("manual".equals(ToolContext.getMode())) {
-            String response = PermissionContext.requestPermission(getName(), arguments, ToolContext.getConversationId());
-            if (response != null) return response;
-        }
 
         String targetPath = arguments.path("path").asText();
         if (targetPath.isEmpty()) {
-            return "错误：缺少必要参数 path";
+            return "【参数缺失】未提供 path 参数。请传入要删除的文件或目录路径，例如：path=\"src/main/java/com/example/OldFile.java\"";
         }
 
         Path target = Paths.get(targetPath);
@@ -94,7 +91,7 @@ public class DeleteFileTool implements Tool {
         }
 
         if (!Files.exists(target)) {
-            return "错误：路径不存在 - " + toRelativePath(target, root);
+            return "【文件不存在】路径 " + toRelativePath(target, root) + " 不存在，无法删除。建议：1) 检查文件名拼写是否正确 2) 先调用 read_project_tree 确认实际文件路径 3) 确认文件是否已被移动或删除";
         }
 
         try {
@@ -110,7 +107,7 @@ public class DeleteFileTool implements Tool {
             }
         } catch (IOException e) {
             log.error("删除失败: {}", toRelativePath(target, root), e);
-            return "错误：删除失败 - " + e.getMessage();
+            return "【删除失败】" + toRelativePath(target, root) + " 删除时发生 I/O 错误：" + e.getMessage() + "。建议：1) 检查文件是否被其他进程占用 2) 确认是否有足够的文件权限 3) 可尝试手动删除后继续操作";
         }
     }
 
@@ -131,22 +128,18 @@ public class DeleteFileTool implements Tool {
     private String safetyCheck(Path target, Path root) {
         // 不能删除项目根目录本身
         if (target.equals(root)) {
-            return "错误：不允许删除项目根目录";
+            return "【安全限制】不允许删除项目根目录。如需清理项目，请指定根目录下的具体子目录或文件路径。";
         }
 
         // 不能删除受保护目录及其子文件
         for (String dir : deleteFileConfig.getProtectedDirectories()) {
             Path protectedDir = root.resolve(dir).normalize();
             if (target.equals(protectedDir) || target.startsWith(protectedDir)) {
-                return "错误：不允许删除受保护目录 " + dir + " 及其子文件";
+                return "【安全限制】'" + dir + "' 是受保护目录，不允许删除该目录及其内部文件。当前目标 '" + toRelativePath(target, root) + "' 命中此限制。如需清理，请使用系统文件管理器手动操作。";
             }
         }
 
-        // 路径必须在项目范围内
-        if (!target.startsWith(root)) {
-            return "错误：删除路径不在项目范围内";
-        }
-
+        // 路径范围交由 ToolExecutionPipeline 层面二（PathSecurityChecker）统一校验
         return null;
     }
 
@@ -168,9 +161,9 @@ public class DeleteFileTool implements Tool {
             // 减掉目录本身
             int total = count.get() - 1;
             if (total > threshold) {
-                return "警告：目录 " + toRelativePath(dir, root) + " 包含 " + total
-                        + " 个文件/子目录，超过阈值 " + threshold
-                        + "。如需删除请确认后重试（可调整 delete-file.delete-warning-threshold 配置项）";
+                return "【删除确认】目录 " + toRelativePath(dir, root) + " 包含 " + total
+                        + " 个文件/子目录，超过安全阈值 " + threshold
+                        + "。如需继续删除，请确认后重试。提示：可通过配置项 delete-file.delete-warning-threshold 调整阈值。";
             }
         } catch (IOException e) {
             log.warn("统计目录文件数失败: {}", toRelativePath(dir, root), e);
@@ -220,7 +213,7 @@ public class DeleteFileTool implements Tool {
         String relativePath = toRelativePath(dir, root);
         if (Files.exists(dir)) {
             String failMsg = failures.isEmpty() ? "" : "失败文件：" + String.join(", ", failures);
-            return "错误：目录删除不完整，请检查文件权限" + (failMsg.isEmpty() ? "" : "。" + failMsg);
+            return "【部分失败】目录 " + relativePath + " 删除未完全成功，部分文件可能因权限不足或文件被占用无法删除" + (failMsg.isEmpty() ? "" : "。" + failMsg) + "。建议：1) 检查文件是否被其他进程占用 2) 以管理员权限重试 3) 手动清理残留文件";
         }
 
         if (!failures.isEmpty()) {

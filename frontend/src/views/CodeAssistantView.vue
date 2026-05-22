@@ -20,6 +20,11 @@
             :class="['tab-btn', { active: sidebarTab === 'skills' }]"
             @click="sidebarTab = 'skills'"
           ><span class="tab-full">技能</span><span class="tab-short">技能</span></button>
+          <button
+            v-if="agentInfos.length > 0"
+            :class="['tab-btn', { active: sidebarTab === 'agents' }]"
+            @click="sidebarTab = 'agents'"
+          ><span class="tab-full">子Agent</span><span class="tab-short">Agent</span></button>
         </div>
         <div class="sidebar-collapse-btn" @click="toggleCollapsed">
           <MenuFoldOutlined v-if="!collapsed" />
@@ -51,13 +56,31 @@
             <CodeOutlined />
           </div>
           <div class="conv-info">
-            <div class="conv-title">{{ conv.title }}</div>
+            <div v-if="editingConvId === conv.id" class="conv-title-editing" @click.stop>
+              <a-input
+                v-model:value="editingConvTitle"
+                size="small"
+                @keydown.enter.prevent="saveEditTitle(conv)"
+                @keydown.esc.prevent="cancelEditTitle"
+              />
+            </div>
+            <div v-else class="conv-title" @dblclick="startEditTitle(conv, $event)">{{ conv.title }}</div>
             <div class="conv-time">{{ formatTime(conv.updatedAt) }}</div>
           </div>
           <div class="conv-actions">
-            <a-button type="text" size="small" @click.stop="deleteConversation(conv.id)">
-              <delete-outlined />
-            </a-button>
+            <template v-if="editingConvId === conv.id">
+              <a-button type="text" size="small" @click.stop="saveEditTitle(conv)" :loading="isSavingConvTitle">
+                <check-outlined />
+              </a-button>
+              <a-button type="text" size="small" @click.stop="cancelEditTitle">
+                <close-outlined />
+              </a-button>
+            </template>
+            <template v-else>
+              <a-button type="text" size="small" @click.stop="deleteConversation(conv.id)">
+                <delete-outlined />
+              </a-button>
+            </template>
           </div>
         </div>
       </div>
@@ -70,6 +93,11 @@
       <!-- 技能面板 -->
       <div v-show="sidebarTab === 'skills'" class="skill-panel">
         <SkillList />
+      </div>
+
+      <!-- 子Agent面板 -->
+      <div v-show="sidebarTab === 'agents'" class="agent-panel-wrapper">
+        <AgentPanel :agents="agentInfos" />
       </div>
 
       <!-- 文件树 -->
@@ -112,7 +140,7 @@
           </div>
         </div>
         <!-- 文件标签操作按钮 -->
-        <div v-if="activeTab?.type === 'file'" class="tab-actions">
+        <div v-if="activeTab?.type === 'file' || activeTab?.type === 'chat'" class="tab-actions">
           <a-button
             size="small"
             class="tb-btn"
@@ -164,7 +192,7 @@
         key-field="id"
         v-slot="{ item: msg, active }"
       >
-        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [] : [msg.content?.length || 0, msg.thinking?.length || 0]">
+        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '']">
         <div :class="['message-item', msg.role]">
           <div class="message-avatar">
             <div v-if="msg.role === 'user'" class="avatar user-avatar">
@@ -184,20 +212,37 @@
                 <span class="streaming-dot"></span>
                 正在输入...
               </span>
+              <div
+                v-if="msg.role === 'user' && msg.snapshotId"
+                class="rollback-btn"
+                title="回滚代码"
+                @click="handleRollback(msg)"
+              >
+                <UndoOutlined />
+              </div>
             </div>
 
             <!-- 思考过程（仅AI消息） -->
-            <div v-if="msg.role === 'assistant' && msg.thinking" class="thinking-section">
+            <div v-if="msg.role === 'assistant' && (msg.thinking || msg.toolResults?.length || msg.matchedSkills?.length)" class="thinking-section">
               <div class="thinking-header" @click="toggleThinkingVisibility(msg.id)">
                 <span class="thinking-title">
                   <DownOutlined v-if="!getThinkingVisible(msg.id)" />
                   <UpOutlined v-else />
                   思考过程
                 </span>
+                <span v-if="msg.matchedSkills?.length" class="skill-match-tags">
+                  <span v-for="skill in msg.matchedSkills" :key="skill.name" class="skill-match-tag" :class="skill.confidence >= 0.7 ? 'skill-tag-high' : skill.confidence >= 0.4 ? 'skill-tag-mid' : 'skill-tag-low'">
+                    🔧 {{ skill.name }}
+                    <span class="skill-tag-conf">{{ (skill.confidence * 100).toFixed(0) }}%</span>
+                  </span>
+                </span>
+                <span class="thinking-summary" v-if="msg.toolResults?.length">
+                  · {{ msg.toolResults.length }} 次工具调用
+                </span>
                 <span class="thinking-hint">点击{{ getThinkingVisible(msg.id) ? '收起' : '展开' }}</span>
               </div>
-              <div v-if="getThinkingVisible(msg.id)" class="thinking-content">
-                <div v-if="msg.thinking || msg.toolResults?.length" class="thinking-text" v-html="formatThinking(msg.thinking, msg.toolResults)"></div>
+              <div v-if="getThinkingVisible(msg.id)" class="thinking-content" :data-think-scroll="msg.id">
+                <div class="thinking-text" v-html="formatThinking(msg.thinking, msg.toolResults)" @click="handleToolCardClick"></div>
               </div>
             </div>
             <div class="message-text code-message" v-html="formatMessage(msg.content)" v-if="msg.content"></div>
@@ -206,15 +251,6 @@
         </DynamicScrollerItem>
       </DynamicScroller>
 
-      <!-- 后台任务进行中指示器 -->
-      <div v-if="activeTask &amp;&amp; !isSending" class="stream-indicator task-reconnect-banner">
-        <span class="stream-pulse-dot"></span>
-        <span class="stream-indicator-text">
-          任务正在后台执行中（第 {{ activeTask.iteration + 1 }} 轮）... <span class="stream-elapsed">{{ formatElapsed(elapsedTime) }}</span>
-          <a-button size="small" type="link" @click="reconnectToTaskStream(parseInt(currentConversationId))">重新连接</a-button>
-        </span>
-      </div>
-
       <!-- 流式加载指示器 -->
       <div v-if="isSending &amp;&amp; streamStatus" class="stream-indicator">
         <span class="stream-pulse-dot"></span>
@@ -222,61 +258,178 @@
         <span class="stream-elapsed" v-if="elapsedTime > 0">{{ formatElapsed(elapsedTime) }}</span>
       </div>
 
-      <!-- 重连实时流式消息容器（独立消息盒子，溢出滚动） -->
-      <div v-if="reconnectLiveMsg" class="reconnect-container">
-        <div class="reconnect-header">
-          <span class="reconnect-dot"></span>
-          任务恢复中 - 实时输出
+      <!-- ask_user 问答面板 -->
+      <div v-if="pendingQuestion" class="ask-user-panel">
+        <!-- 权限授权面板（askType=permission）：显示4个按钮，grid两列布局 -->
+        <div v-if="pendingQuestion.askType === 'permission'">
+          <div class="ask-user-header">
+            <span class="ask-user-header-icon">🔒</span>
+            需要授权
+          </div>
+          <div class="ask-user-question">{{ pendingQuestion.question }}</div>
+          <div class="permission-btn-grid">
+            <a-button type="primary" class="permission-btn permission-btn-approve" @click="handlePermissionAction('approve')">同意</a-button>
+            <a-button type="primary" ghost class="permission-btn permission-btn-approve-all" @click="handlePermissionAction('approve_all')">本轮对话全部同意</a-button>
+            <a-button danger class="permission-btn permission-btn-reject" @click="handlePermissionAction('reject')">拒绝</a-button>
+            <a-button class="permission-btn permission-btn-custom" :class="{ active: pendingShowCustomInput }" @click="pendingShowCustomInput = !pendingShowCustomInput">
+              {{ pendingShowCustomInput ? '收起' : '其他（输入消息）' }}
+            </a-button>
+          </div>
+          <!-- 选择「其他」后展开输入框，带平滑过渡 -->
+          <transition name="custom-fade">
+            <div v-if="pendingShowCustomInput" class="permission-custom-row">
+              <a-input
+                v-model:value="pendingQuestionAnswer"
+                placeholder="请输入您的消息..."
+                @pressEnter="handlePermissionAction('custom')"
+              />
+              <a-button type="primary" class="custom-send-btn" @click="handlePermissionAction('custom')">发送</a-button>
+            </div>
+          </transition>
         </div>
-        <div class="reconnect-body">
-          <div class="message-item assistant">
-            <div class="message-avatar">
-              <div class="avatar ai-avatar">
-                <CodeOutlined />
+        <!-- 询问用户需求面板（默认/clarification）：保持原有输入框 -->
+        <div v-else>
+          <div class="ask-user-header">
+            <span class="ask-user-header-icon">💬</span>
+            需要确认
+          </div>
+          <div class="ask-user-question">{{ pendingQuestion.question }}</div>
+          <div class="ask-user-input-row">
+            <a-input
+              v-model:value="pendingQuestionAnswer"
+              placeholder="请输入回答..."
+              @pressEnter="submitPendingAnswer"
+            />
+            <a-button type="primary" @click="submitPendingAnswer">确认</a-button>
+          </div>
+        </div>
+      </div>
+      </div>
+
+        </template>
+        <!-- ===== 文件编辑标签 ===== -->
+        <template v-else-if="activeTab?.type === 'file'">
+          <div class="file-tab-layout">
+            <div class="file-tab-editor">
+              <FileEditor
+                :key="activeTab.id"
+                :file-path="activeTab.filePath || ''"
+                :content="activeTab.content || ''"
+                :original-content="activeTab.originalContent"
+                @save="onFileSaved"
+                @content-change="onFileContentChange"
+              />
+            </div>
+          </div>
+        </template>
+        <!-- ===== 差异对比标签 ===== -->
+        <template v-else-if="activeTab?.type === 'diff'">
+          <div class="diff-tab-content">
+            <div class="diff-tab-header">
+              <span class="diff-tab-title">差异对比: {{ activeTab.filePath }}</span>
+              <div class="diff-tab-actions">
+                <a-button size="small" danger @click="handleRevertFile(activeTab.filePath || '')">
+                  <UndoOutlined />
+                  撤销此文件改动
+                </a-button>
               </div>
             </div>
-            <div class="message-content">
-              <div class="message-meta">
-                <span class="message-role">AI</span>
-                <span class="message-time">重连中...</span>
-              </div>
-              <div v-if="reconnectLiveMsg.thinking" class="thinking-section">
-                <div class="thinking-header" @click="toggleThinkingVisibility('reconnect')">
-                  <span class="thinking-title">
-                    <DownOutlined v-if="!getThinkingVisible('reconnect')" />
-                    <UpOutlined v-else />
-                    思考过程
-                  </span>
-                  <span class="thinking-hint">点击{{ getThinkingVisible('reconnect') ? '收起' : '展开' }}</span>
-                </div>
-                <div v-if="getThinkingVisible('reconnect')" class="thinking-content">
-                  <div class="thinking-text" v-html="formatThinking(reconnectLiveMsg.thinking, [])"></div>
-                </div>
-              </div>
-              <div class="message-text code-message" v-html="formatMessage(reconnectLiveMsg.content)" v-if="reconnectLiveMsg.content"></div>
-              <div v-else class="message-text placeholder-text" style="color: #999;">等待模型响应...</div>
+            <div class="diff-tab-body">
+              <DiffView :content="activeTab.diffContent || ''" :title="'Diff: ' + (activeTab.filePath || '')" />
             </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- ===== 全局控制台（终端 + 运行日志） ===== -->
+      <div class="console-panel" :class="{ minimized: terminalMinimized }">
+        <!-- 拖拽调整大小的手柄 -->
+        <div
+          class="console-resize-handle"
+          @mousedown.prevent="startTerminalResize"
+        ></div>
+        <!-- Tab 栏 -->
+        <div class="console-tab-bar">
+          <div class="console-tabs">
+            <div
+              class="console-tab"
+              :class="{ active: consoleActiveTab === 'terminal' }"
+              @click="consoleActiveTab = 'terminal'"
+            >
+              <span class="console-tab-icon">&gt;_</span>
+              <span>终端</span>
+            </div>
+            <div
+              v-if="showBuildRunLog"
+              class="console-tab"
+              :class="{ active: consoleActiveTab === 'log' }"
+              @click="consoleActiveTab = 'log'"
+            >
+              <span class="console-dot" :class="{ running: isServiceRunning }"></span>
+              <span>运行日志</span>
+              <span
+                v-if="!isServiceRunning"
+                class="console-tab-close"
+                @click.stop="closeLogTab"
+              >×</span>
+            </div>
+          </div>
+          <div class="console-tab-actions">
+            <span class="console-tab-cwd" :title="displayCwd">{{ displayCwd }}</span>
+            <a-button size="small" type="text" class="console-tab-btn" @click="clearActiveConsole">
+              <ClearOutlined /> 清屏
+            </a-button>
+            <DownOutlined
+              v-if="!terminalMinimized"
+              class="console-tab-toggle"
+              @click="toggleTerminalMinimize"
+            />
+            <UpOutlined
+              v-else
+              class="console-tab-toggle"
+              @click="toggleTerminalMinimize"
+            />
+          </div>
+        </div>
+        <!-- 终端内容 -->
+        <div v-show="!terminalMinimized && consoleActiveTab === 'terminal'" class="console-panel-body" ref="terminalBodyRef">
+          <div
+            class="terminal-output"
+            ref="terminalOutputRef"
+            tabindex="0"
+            @keydown="handleTerminalKeydown"
+            @click="focusTerminal"
+          >
+            <div v-for="(line, i) in terminalLines" :key="i" class="terminal-line">{{ line }}</div>
+            <div v-if="isTerminalExecuting" class="terminal-line terminal-executing">
+              <LoadingOutlined spin /> 执行中...
+            </div>
+            <div class="terminal-line terminal-prompt-line" v-if="!isTerminalExecuting">
+              <span class="prompt-sign">{{ formatTerminalPrompt() }}</span>
+              <span class="prompt-input">{{ terminalCurrentInput }}</span>
+              <span class="prompt-cursor" :class="{ blink: terminalFocused }">|</span>
+            </div>
+          </div>
+        </div>
+        <!-- 运行日志内容 -->
+        <div v-show="!terminalMinimized && consoleActiveTab === 'log'" class="console-panel-body console-log-body">
+          <div
+            v-for="(line, i) in consoleLines"
+            :key="i"
+            :class="['log-line', {
+              'log-error': line.includes('[ERROR]') || line.includes('ERROR'),
+              'log-warn': line.includes('[WARNING]') || line.includes('WARN'),
+              'log-success': line.includes('BUILD SUCCESS') || line.includes('SUCCESS')
+            }]"
+          >{{ line }}</div>
+          <div v-if="isBuilding" class="log-loading">
+            <LoadingOutlined spin /> 编译中...
           </div>
         </div>
       </div>
 
-      <!-- ask_user 问答面板 -->
-      <div v-if="pendingQuestion" class="ask-user-panel">
-        <div class="ask-user-header">需要确认</div>
-        <div class="ask-user-question">{{ pendingQuestion.question }}</div>
-        <div class="ask-user-input-row">
-          <a-input
-            v-model:value="pendingQuestionAnswer"
-            placeholder="请输入回答..."
-            @pressEnter="submitPendingAnswer"
-          />
-          <a-button type="primary" @click="submitPendingAnswer">确认</a-button>
-        </div>
-      </div>
-
-      <!-- 输入区域 -->
-      <!-- 输入区域 -->
-      <footer class="chat-input-area">
+      <!-- ===== 输入区域（仅聊天标签时显示） ===== -->
+      <footer v-if="activeTab?.type === 'chat'" class="chat-input-area">
         <!-- 隐藏的文件选择器 -->
         <input
           ref="fileInputRef"
@@ -372,9 +525,9 @@
                 class="model-select"
                 dropdown-class-name="mode-dropdown"
               >
-                <a-select-option value="non-thinking">non-thinking</a-select-option>
-                <a-select-option value="thinking">thinking</a-select-option>
-                <a-select-option value="thinking_max">thinking_max</a-select-option>
+                <a-select-option value="non-thinking">关闭思考</a-select-option>
+                <a-select-option value="thinking">思考 (high)</a-select-option>
+                <a-select-option value="thinking_max">深度思考 (max)</a-select-option>
               </a-select>
             </div>
             <!-- 任务进度触发器 -->
@@ -385,6 +538,16 @@
               </span>
               <span class="task-trigger-text" v-if="taskItems.length === 0">任务</span>
               <span class="task-trigger-text" v-else>{{ completedTaskCount }}/{{ taskItems.length }}</span>
+            </div>
+            <!-- 文件改动触发器 -->
+            <div class="mode-selector changes-trigger" @click="toggleChangesPanel" :class="{ active: showChangesPanel }" :style="{ display: currentConversationId && !currentConversationId.startsWith('local-') ? '' : 'none' }">
+              <span class="mode-icon changes-trigger-icon">
+                <span>📄</span>
+              </span>
+              <span class="changes-trigger-text">改动</span>
+              <span v-if="sessionChanges" class="changes-trigger-badge">
+                +{{ sessionChanges.totalLinesAdded }}/-{{ sessionChanges.totalLinesDeleted }}
+              </span>
             </div>
           </div>
           <div class="footer-right" v-if="currentMessages.length > 0">
@@ -415,96 +578,82 @@
               <span v-if="item.depends_on && item.depends_on.length > 0" class="task-dropdown-deps">← {{ item.depends_on.join(', ') }}</span>
             </div>
           </div>      </div>
-        </footer>
+        <!-- 文件改动面板 -->
+        <div v-if="showChangesPanel && sessionChanges" class="changes-panel">
+          <div class="changes-panel-header">
+            <span class="changes-panel-title">📄 文件改动</span>
+            <span class="changes-panel-summary">
+              {{ sessionChanges.totalFiles }} 个文件
+              <span class="changes-summary-divider">·</span>
+              <span class="changes-add">+{{ sessionChanges.totalLinesAdded }}</span>
+              <span class="changes-del">-{{ sessionChanges.totalLinesDeleted }}</span>
+            </span>
+          </div>
+          <div class="changes-panel-body">
+            <div
+              v-for="file in sessionChanges.files"
+              :key="file.relativePath"
+              :class="['changes-panel-item', { 'is-rolled': file.rolledBack }]"
+            >
+              <div class="changes-file-row">
+                <div class="changes-file-info">
+                  <div class="changes-file-path-row">
+                    <span class="changes-file-icon">{{ file.wasNewFile ? '✨' : '📄' }}</span>
+                    <span class="changes-file-path" :title="file.relativePath">{{ file.relativePath }}</span>
+                  </div>
+                  <div class="changes-file-meta">
+                    <span v-if="file.wasNewFile" class="changes-badge changes-badge-new">新建</span>
+                    <span v-if="file.rolledBack" class="changes-badge changes-badge-rolled">已回滚</span>
+                    <span v-else class="changes-file-stats">
+                      <span class="changes-add">+{{ file.linesAdded }}</span>
+                      <span class="changes-del">-{{ file.linesDeleted }}</span>
+                    </span>
+                  </div>
+                </div>
+                <div class="changes-file-actions">
+                  <a-button
+                    size="small"
+                    :class="['changes-rollback-btn', { 'changes-rollback-btn--rolled': file.rolledBack }]"
+                    @click="handleRollbackFile(file.relativePath)"
+                    :disabled="file.rolledBack"
+                  >
+                    <UndoOutlined />
+                    <span>{{ file.rolledBack ? '已回滚' : '回滚' }}</span>
+                  </a-button>
+                </div>
+              </div>
+            </div>
+            <div v-if="sessionChanges.files.length === 0" class="changes-empty">
+              <span class="changes-empty-icon">📭</span>
+              <span>暂无文件改动</span>
+            </div>
+          </div>
+          <div class="changes-panel-footer">
+            <a-button
+              size="small"
+              class="changes-rollback-all-btn"
+              :disabled="!sessionChanges || sessionChanges.files.length === 0 || sessionChanges.files.every(f => f.rolledBack)"
+              @click="handleRollbackAll"
+            >
+              <UndoOutlined /> 全部回滚
+            </a-button>
+          </div>
         </div>
-        </template>
-        <!-- ===== 文件编辑标签 ===== -->
-        <template v-else-if="activeTab?.type === 'file'">
-          <div class="file-tab-layout">
-            <div class="file-tab-editor" :class="{ 'has-console': showConsole }">
-              <FileEditor
-                :key="activeTab.id"
-                :file-path="activeTab.filePath || ''"
-                :content="activeTab.content || ''"
-                :original-content="activeTab.originalContent"
-                @save="onFileSaved"
-                @content-change="onFileContentChange"
-              />
-            </div>
-            <!-- 控制台面板 -->
-            <div v-if="showConsole" class="file-tab-console">
-              <div class="console-header">
-                <span class="console-title">
-                  <span class="console-dot" :class="{ running: isServiceRunning }"></span>
-                  控制台
-                </span>
-                <div class="console-actions">
-                  <span class="console-status">
-                    {{ isServiceRunning ? '运行中' : '已停止' }}
-                    <template v-if="isServiceRunning">
-                      · {{ formatElapsed(runElapsed) }}
-                    </template>
-                  </span>
-                  <a-button size="small" type="text" class="console-btn" @click="clearConsole">
-                    <ClearOutlined /> 清屏
-                  </a-button>
-                  <a-button size="small" type="text" class="console-btn" @click="showConsole = false">
-                    <CloseOutlined />
-                  </a-button>
-                </div>
-              </div>
-              <div class="console-body">
-                <div
-                  v-for="(line, i) in consoleLines"
-                  :key="i"
-                  :class="['console-line', {
-                    'console-error': line.includes('[ERROR]') || line.includes('ERROR'),
-                    'console-warn': line.includes('[WARNING]') || line.includes('WARN'),
-                    'console-success': line.includes('BUILD SUCCESS') || line.includes('SUCCESS')
-                  }]"
-                >{{ line }}</div>
-                <div v-if="isBuilding" class="console-loading">
-                  <LoadingOutlined spin /> 编译中...
-                </div>
-              </div>
-            </div>
-            <!-- 控制台底部快捷展开条 -->
-            <div v-else class="console-trigger" @click="showConsole = true">
-              <span class="console-trigger-dot" :class="{ active: isServiceRunning }"></span>
-              控制台
-              <template v-if="isServiceRunning"> · {{ formatElapsed(runElapsed) }}</template>
-            </div>
-          </div>
-        </template>
-        <!-- ===== 差异对比标签 ===== -->
-        <template v-else-if="activeTab?.type === 'diff'">
-          <div class="diff-tab-content">
-            <div class="diff-tab-header">
-              <span class="diff-tab-title">差异对比: {{ activeTab.filePath }}</span>
-              <div class="diff-tab-actions">
-                <a-button size="small" danger @click="handleRevertFile(activeTab.filePath || '')">
-                  <UndoOutlined />
-                  撤销此文件改动
-                </a-button>
-              </div>
-            </div>
-            <div class="diff-tab-body">
-              <DiffView :content="activeTab.diffContent || ''" :title="'Diff: ' + (activeTab.filePath || '')" />
-            </div>
-          </div>
-        </template>
-      </div>
+      </footer>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, nextTick, watch, h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
-import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi } from '@/api/conversation'
+import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
 import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment } from '@/api/chat'
+import type { SkillMatchInfo } from '@/utils/sse-client'
+import type { AgentStreamEvent } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
+import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, type SessionChanges } from '@/api/snapshot'
 import { useSettingsStore } from '@/store/settings'
 import { renderMarkdown } from '@/utils/markdown'
 import { estimateTokenCount, formatTokenCount } from '@/utils/tokenCalculator'
@@ -520,6 +669,7 @@ import {
   PlusOutlined,
   SettingOutlined,
   CloseOutlined,
+  CheckOutlined,
   FolderOpenOutlined,
   UndoOutlined,
   PaperClipOutlined,
@@ -533,10 +683,12 @@ import FileEditor from '@/components/FileEditor.vue'
 import GitSidebar from '@/components/GitSidebar.vue'
 import DiffView from '@/components/DiffView.vue'
 import SkillList from '@/components/SkillList.vue'
+import AgentPanel from '@/components/AgentPanel.vue'
+import type { AgentInfo } from '@/components/AgentPanel.vue'
 import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
-import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput } from '@/api/project'
+import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput, execCommand } from '@/api/project'
 import { getGitDiff, gitRestore } from '@/api/git'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
@@ -558,9 +710,12 @@ interface ChatMessage {
   content: string
   thinking?: string
   toolResults?: { at: number; content: string }[]
+  matchedSkills?: { name: string; confidence: number; triggerWords: string }[]
   timestamp: number
   isStreaming?: boolean
   tokenCount?: number
+  turnId?: string
+  snapshotId?: string
 }
 
 // ===== 附件系统 =====
@@ -641,7 +796,6 @@ const formatFileSize = (bytes: number): string => {
 // ===== 编译/运行/控制台 =====
 const isBuilding = ref(false)
 const isServiceRunning = ref(false)
-const showConsole = ref(false)
 const consoleLines = ref<string[]>([])
 const runElapsed = ref(0)
 let consolePollTimer: ReturnType<typeof setInterval> | null = null
@@ -654,7 +808,8 @@ const handleBuild = async () => {
     return
   }
   isBuilding.value = true
-  showConsole.value = true
+  showBuildRunLog.value = true
+  consoleActiveTab.value = 'log'
   consoleLines.value = []
   try {
     const result = await buildProject(projectRoot)
@@ -679,7 +834,8 @@ const handleRun = async () => {
     message.warning('请先设置工作目录')
     return
   }
-  showConsole.value = true
+  showBuildRunLog.value = true
+  consoleActiveTab.value = 'log'
   consoleLines.value = ['正在启动服务...']
   try {
     const result = await runProject(projectRoot)
@@ -751,8 +907,220 @@ const stopConsolePolling = () => {
   }
 }
 
-const clearConsole = () => {
-  consoleLines.value = []
+// ===== 终端命令行（Shell 风格） =====
+const terminalCurrentInput = ref('')
+const terminalLines = ref<string[]>([])
+const terminalMinimized = ref(true) // 默认折叠
+const isTerminalExecuting = ref(false)
+const showBuildRunLog = ref(false)
+const consoleActiveTab = ref<'terminal' | 'log'>('terminal')
+const terminalOutputRef = ref<HTMLElement | null>(null)
+const terminalBodyRef = ref<HTMLElement | null>(null)
+const terminalFocused = ref(false)
+// 拖拽调整大小
+const terminalResizeStartY = ref(0)
+const terminalResizeStartHeight = ref(0)
+const terminalPanelRef = ref<HTMLElement | null>(null)
+// 当前工作目录（前端维护，支持 cd 命令）
+const terminalCwd = ref('')
+
+const displayCwd = computed(() => {
+  return terminalCwd.value || settingsStore.projectRoot || '未设置工作目录'
+})
+
+const formatTerminalPrompt = () => {
+  const cwd = terminalCwd.value || settingsStore.projectRoot || '.'
+  return cwd.replace(/\\/g, '/') + ' $'
+}
+
+const closeLogTab = () => {
+  showBuildRunLog.value = false
+  if (consoleActiveTab.value === 'log') {
+    consoleActiveTab.value = 'terminal'
+  }
+}
+
+const clearActiveConsole = () => {
+  if (consoleActiveTab.value === 'terminal') {
+    terminalLines.value = []
+  } else {
+    consoleLines.value = []
+  }
+}
+
+// 确保 terminalCwd 跟随 projectRoot 实时变化
+watch(() => settingsStore.projectRoot, (val) => {
+  if (val) {
+    terminalCwd.value = val
+  }
+}, { immediate: true })
+
+const focusTerminal = () => {
+  terminalFocused.value = true
+  nextTick(() => {
+    terminalOutputRef.value?.focus()
+  })
+}
+
+const handleTerminalKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    executeTerminalCommand()
+    return
+  }
+  if (e.key === 'Backspace') {
+    e.preventDefault()
+    terminalCurrentInput.value = terminalCurrentInput.value.slice(0, -1)
+    return
+  }
+  // Ctrl+C 清空当前输入
+  if (e.key === 'c' && e.ctrlKey) {
+    e.preventDefault()
+    terminalCurrentInput.value = ''
+    terminalLines.value.push(`${formatTerminalPrompt()} ${terminalCurrentInput.value}^C`)
+    return
+  }
+  // Tab 键阻止焦点离开
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    return
+  }
+  // 可打印字符
+  if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault()
+    terminalCurrentInput.value += e.key
+    return
+  }
+}
+
+/**
+ * 处理 cd 命令 — 前端直接修改 cwd，不请求后端
+ * 支持: cd ..  cd .  cd ~  cd D:  cd /d D:  cd path\to\dir
+ */
+const handleCdCommand = (target: string) => {
+  const current = terminalCwd.value || settingsStore.projectRoot || ''
+
+  if (!target || target === '~') {
+    // cd 或 cd ~ → 回到 projectRoot
+    terminalCwd.value = settingsStore.projectRoot || current
+  } else if (target === '.') {
+    // cd . → 不变
+    // no-op
+  } else if (target === '..') {
+    // cd .. → 上一级
+    const parent = current.replace(/\\/g, '/').replace(/\/[^/]*$/, '')
+    terminalCwd.value = parent || current
+  } else if (target.match(/^[a-zA-Z]:/) || target.match(/^\/\//) || target.match(/^\\\\/)) {
+    // 绝对路径（如 D:\dir 或 \\server\share）
+    terminalCwd.value = target
+  } else {
+    // 相对路径：在当前路径后追加
+    const separator = current.endsWith('\\') || current.endsWith('/') ? '' : '\\'
+    const resolved = current + separator + target
+    terminalCwd.value = resolved
+  }
+
+  terminalLines.value.push(`${formatTerminalPrompt().slice(0, -2)}$ cd ${target}`)
+}
+
+const executeTerminalCommand = async () => {
+  const cmd = terminalCurrentInput.value.trim()
+  if (!cmd) return
+
+  // 确保 cwd 已初始化
+  if (!terminalCwd.value && settingsStore.projectRoot) {
+    terminalCwd.value = settingsStore.projectRoot
+  }
+
+  const projectRoot = settingsStore.projectRoot
+  if (!projectRoot) {
+    message.warning('请先设置工作目录')
+    return
+  }
+
+  // 拦截 cd 命令（前端处理，不请求后端）
+  if (cmd === 'cd') {
+    handleCdCommand('')
+    terminalCurrentInput.value = ''
+    return
+  }
+  if (cmd.startsWith('cd ')) {
+    handleCdCommand(cmd.substring(3).trim())
+    terminalCurrentInput.value = ''
+    return
+  }
+
+  terminalLines.value.push(`${formatTerminalPrompt()} ${cmd}`)
+  terminalCurrentInput.value = ''
+  isTerminalExecuting.value = true
+
+  try {
+    const cwd = terminalCwd.value || projectRoot
+    const result = await execCommand(cmd, cwd)
+    if (result.output) {
+      const outputLines = result.output.split('\n')
+      for (const line of outputLines) {
+        terminalLines.value.push(line)
+      }
+    }
+    if (result.timedOut) {
+      terminalLines.value.push('[命令执行超时]')
+    } else if (result.exitCode !== 0) {
+      terminalLines.value.push(`[进程退出码: ${result.exitCode}]`)
+    }
+  } catch (e: any) {
+    terminalLines.value.push(`[错误] ${e.message}`)
+  } finally {
+    isTerminalExecuting.value = false
+    scrollTerminalToBottom()
+    focusTerminal()
+  }
+}
+
+const scrollTerminalToBottom = () => {
+  nextTick(() => {
+    if (terminalOutputRef.value) {
+      terminalOutputRef.value.scrollTop = terminalOutputRef.value.scrollHeight
+    }
+  })
+}
+
+const toggleTerminalMinimize = () => {
+  terminalMinimized.value = !terminalMinimized.value
+  if (!terminalMinimized.value) {
+    // 展开后聚焦
+    nextTick(() => {
+      focusTerminal()
+      scrollTerminalToBottom()
+    })
+  }
+}
+
+// 拖拽调整终端高度
+const startTerminalResize = (e: MouseEvent) => {
+  const panel = terminalBodyRef.value?.parentElement
+  if (!panel) return
+  terminalPanelRef.value = panel
+  terminalResizeStartY.value = e.clientY
+  terminalResizeStartHeight.value = panel.offsetHeight
+
+  document.addEventListener('mousemove', onTerminalResize)
+  document.addEventListener('mouseup', stopTerminalResize)
+}
+
+const onTerminalResize = (e: MouseEvent) => {
+  const panel = terminalPanelRef.value
+  if (!panel) return
+  const delta = terminalResizeStartY.value - e.clientY // 向上拖拽增大
+  const newHeight = terminalResizeStartHeight.value + delta
+  const minH = 100
+  const maxH = window.innerHeight * 0.7
+  panel.style.height = Math.max(minH, Math.min(maxH, newHeight)) + 'px'
+}
+
+const stopTerminalResize = () => {
+  document.removeEventListener('mousemove', onTerminalResize)
+  document.removeEventListener('mouseup', stopTerminalResize)
 }
 
 // 页面离开时停止轮询
@@ -914,13 +1282,60 @@ const isLoadingConversations = ref(false)
 const isLoadingMessages = ref(false)
 const scrollerRef = ref<any>(null)
 const collapsed = ref(false)
-const sidebarTab = ref<'conversation' | 'files' | 'git' | 'skills'>('conversation')
+const sidebarTab = ref<'conversation' | 'files' | 'git' | 'skills' | 'agents'>('conversation')
+
+// 会话标题编辑相关状态
+const editingConvId = ref<string>('')
+const editingConvTitle = ref('')
+const isSavingConvTitle = ref(false)
+
+// 开始编辑会话标题
+const startEditTitle = (conv: Conversation, event: Event) => {
+  event.stopPropagation()
+  editingConvId.value = conv.id
+  editingConvTitle.value = conv.title
+}
+
+// 取消编辑会话标题
+const cancelEditTitle = () => {
+  editingConvId.value = ''
+  editingConvTitle.value = ''
+}
+
+// 保存编辑会话标题
+const saveEditTitle = async (conv: Conversation) => {
+  const name = editingConvTitle.value.trim()
+  if (!name) {
+    message.warning('名称不能为空')
+    return
+  }
+  isSavingConvTitle.value = true
+  try {
+    const id = parseInt(conv.id)
+    if (!isNaN(id)) {
+      await updateConversationName(id, name)
+      conv.title = name
+      message.success('会话名称已更新')
+    }
+    editingConvId.value = ''
+    editingConvTitle.value = ''
+  } catch (error: any) {
+    console.error('更新会话名称失败:', error)
+    message.error(error.message || '更新会话名称失败')
+  } finally {
+    isSavingConvTitle.value = false
+  }
+}
+
+/** 子Agent状态列表（由 SSE agent_event 动态更新） */
+const agentInfos = ref<AgentInfo[]>([])
 const stopAbortController = ref<AbortController | null>(null)
 // 当用户点击「应用」时更新此值，触发文件树加载
 const fileTreeLoadPath = ref('')
 const showDirBrowser = ref(false)
-const pendingQuestion = ref<{ uuid: string; question: string } | null>(null)
+const pendingQuestion = ref<{ uuid: string; question: string; askType?: string } | null>(null)
 const pendingQuestionAnswer = ref('')
+const pendingShowCustomInput = ref(false)
 const streamStatus = ref('')
 const taskStartTime = ref<number | null>(null)
 const elapsedTime = ref(0)
@@ -976,6 +1391,7 @@ const executingTaskId = computed(() => {
 // 切换任务下拉
 const toggleTaskDropdown = () => {
   if (taskItems.value.length > 0) {
+    showChangesPanel.value = false
     showTaskDropdown.value = !showTaskDropdown.value
   }
 }
@@ -1002,17 +1418,35 @@ const totalContextTokens = computed(() => {
   return currentMessages.value.reduce((sum, msg) => sum + (msg.tokenCount || 0), 0)
 })
 
+const SAVED_CONV_KEY = 'code_assistant_last_conv_id'
+
+const saveConversationId = (id: string) => {
+  try { localStorage.setItem(SAVED_CONV_KEY, id) } catch (_) {}
+}
+const loadConversationId = (): string | null => {
+  try { return localStorage.getItem(SAVED_CONV_KEY) } catch (_) { return null }
+}
+const clearSavedConversationId = () => {
+  try { localStorage.removeItem(SAVED_CONV_KEY) } catch (_) {}
+}
+
 const fetchConversations = async () => {
   isLoadingConversations.value = true
   try {
     const response = await getConversationList('code_assistant')
     if (response.code === 200 && response.data) {
       conversations.value = response.data.map(mapConversationResponseToConversation)
-      // 默认选中第一个非本地会话
+      // 优先恢复上次查看的会话
       if (!currentConversationId.value && conversations.value.length > 0) {
-        const firstReal = conversations.value.find(c => !c.isLocal)
-        if (firstReal) {
-          selectConversation(firstReal.id)
+        const savedId = loadConversationId()
+        const savedConv = savedId ? conversations.value.find(c => c.id === savedId) : null
+        if (savedConv) {
+          selectConversation(savedConv.id)
+        } else {
+          const firstReal = conversations.value.find(c => !c.isLocal)
+          if (firstReal) {
+            selectConversation(firstReal.id)
+          }
         }
       }
     }
@@ -1032,12 +1466,126 @@ const fetchMessages = async (conversationId: string, force = false) => {
     if (response.code === 200 && response.data) {
       const groups = processMessageGroups(response.data)
       messages.value[conversationId] = groups as ChatMessage[]
+      // 历史消息加载后，匹配回滚快照
+      matchSnapshotsForMessages(conversationId)
+      // 加载会话改动统计
+      loadSessionChanges(conversationId)
     }
   } catch (error) {
     console.error('获取消息失败:', error)
   } finally {
     isLoadingMessages.value = false
   }
+}
+
+const matchSnapshotsForMessages = async (convId: string) => {
+  if (convId.startsWith('local-')) return
+  const sid = parseInt(convId)
+  if (isNaN(sid)) return
+  try {
+    const snapshots = await listSnapshots(sid)
+    if (!snapshots || snapshots.length === 0) return
+    const msgs = messages.value[convId]
+    if (!msgs) return
+    let changed = false
+    for (let i = 0; i < msgs.length; i++) {
+      const msg = msgs[i]
+      if (msg.role === 'user' && msg.turnId) {
+        const match = snapshots.find(s => s.turnId === msg.turnId && !s.rolledBack)
+        if (match && !msg.snapshotId) {
+          msgs[i].snapshotId = match.snapshotId
+          changed = true
+        }
+      }
+    }
+    // 强制刷新 DynamicScroller
+    if (changed) {
+      messages.value[convId] = [...msgs]
+    }
+  } catch (e) {
+    console.warn('匹配快照失败:', e)
+  }
+}
+
+// ===== 文件改动统计 =====
+const showChangesPanel = ref(false)
+const sessionChanges = ref<SessionChanges | null>(null)
+
+const toggleChangesPanel = async () => {
+  if (showChangesPanel.value) {
+    showChangesPanel.value = false
+    return
+  }
+  // 关闭任务面板
+  showTaskDropdown.value = false
+  // 加载数据
+  const sid = parseInt(currentConversationId.value)
+  if (!isNaN(sid) && !currentConversationId.value.startsWith('local-')) {
+    const changes = await getSessionChanges(sid)
+    if (changes) {
+      sessionChanges.value = changes
+    }
+  }
+  showChangesPanel.value = true
+}
+
+const loadSessionChanges = async (convId: string) => {
+  if (convId.startsWith('local-')) return
+  const sid = parseInt(convId)
+  if (isNaN(sid)) return
+  try {
+    const changes = await getSessionChanges(sid)
+    if (changes) {
+      sessionChanges.value = changes
+    }
+  } catch (e) {
+    console.warn('加载会话改动统计失败:', e)
+  }
+}
+
+const handleRollbackFile = async (relativePath: string) => {
+  const sid = parseInt(currentConversationId.value)
+  if (isNaN(sid)) return
+  Modal.confirm({
+    title: '回滚文件',
+    content: `确定要将 "${relativePath}" 回滚到本会话开始前的状态吗？`,
+    okText: '确认回滚',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      const success = await rollbackFile(sid, relativePath)
+      if (success) {
+        message.success(`文件已回滚: ${relativePath}`)
+        // 重新加载改动统计
+        await loadSessionChanges(currentConversationId.value)
+      } else {
+        message.error('文件回滚失败')
+      }
+    }
+  })
+}
+
+const handleRollbackAll = async () => {
+  const sid = parseInt(currentConversationId.value)
+  if (isNaN(sid)) return
+  if (!sessionChanges.value) return
+  Modal.confirm({
+    title: '回滚全部文件',
+    content: `确定要将全部 ${sessionChanges.value.files.length} 个文件回滚到本会话开始前的状态吗？此操作不可撤销！`,
+    okText: '确认全部回滚',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      const success = await rollbackAllFiles(sid)
+      if (success) {
+        message.success('全部文件已回滚')
+        // 重新加载改动统计
+        await loadSessionChanges(currentConversationId.value)
+      } else {
+        message.error('回滚失败')
+      }
+    }
+  })
 }
 
 // 监听消息加载完成后滚动到底部
@@ -1068,6 +1616,58 @@ const startNewChat = () => {
   messages.value[id] = []
 }
 
+/**
+ * 处理子Agent SSE事件，更新 agentInfos 状态
+ */
+const handleAgentEvent = (event: AgentStreamEvent) => {
+  const { agent_id, event: eventType, name, status, tool_name, file_path, result, reasoning_content, skills, summary } = event
+
+  let agent = agentInfos.value.find(a => a.agentId === agent_id)
+
+  if (eventType === 'agent_forked') {
+    if (!agent) {
+      agent = {
+        agentId: agent_id,
+        name: name || agent_id,
+        status: 'running' as const,
+        skills: [],
+        events: [] as any[]
+      }
+      agentInfos.value.push(agent)
+    }
+    agent.events.push({ type: 'status_change' as const, newStatus: 'running' as const, content: `子Agent「${name || agent_id}」已创建` })
+    return
+  }
+
+  if (!agent) return
+
+  if (eventType === 'agent_thinking' && reasoning_content) {
+    agent.events.push({ type: 'thinking' as const, content: reasoning_content })
+    return
+  }
+
+  if (eventType === 'agent_tool_call') {
+    agent.events.push({ type: 'tool_call' as const, toolName: tool_name || '', filePath: file_path || '', result: result || '' })
+    return
+  }
+
+  if (eventType === 'agent_skill_match' && skills) {
+    agent.events.push({ type: 'skill_match' as const, skills })
+    return
+  }
+
+  if (eventType === 'agent_status' && status) {
+    agent.status = status as 'running' | 'completed' | 'failed' | 'pending'
+    agent.events.push({ type: 'status_change' as const, newStatus: status, content: summary || '' })
+    return
+  }
+
+  if (eventType === 'agent_completed') {
+    agent.status = 'completed' as const
+    agent.events.push({ type: 'status_change' as const, newStatus: 'completed' as const, content: summary || '执行完毕' })
+  }
+}
+
 const deleteConversation = (id: string) => {
   Modal.confirm({
     title: '删除会话',
@@ -1092,6 +1692,43 @@ const deleteConversation = (id: string) => {
   })
 }
 
+// ===== 代码回滚 =====
+
+const handleRollback = async (msg: ChatMessage) => {
+  if (!msg.snapshotId) return
+
+  // 加载预览信息
+  const preview = await previewRollback(msg.snapshotId)
+  if (!preview) {
+    message.error('无法获取回滚预览信息')
+    return
+  }
+
+  // 构建确认对话框内容
+  const fileListHtml = preview.files.map(f =>
+    `<div style="padding:2px 0;font-size:13px">${f.action === 'delete' ? '🗑️ 删除' : '📄 恢复'} ${escapeHtml(f.relativePath)}</div>`
+  ).join('')
+
+  const contentHtml = `<div style="margin-bottom:8px;color:#666;font-size:13px">将回滚 ${preview.files.length} 个文件到修改前的状态：</div>${fileListHtml}`
+
+  Modal.confirm({
+    title: '确认回滚代码',
+    content: h('div', { innerHTML: contentHtml }),
+    okText: '确认回滚',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      const success = await executeRollback(msg.snapshotId!)
+      if (success) {
+        message.success('代码回滚成功')
+        msg.snapshotId = undefined // 移除回滚按钮，防止重复回滚
+      } else {
+        message.error('代码回滚失败')
+      }
+    }
+  })
+}
+
 // 执行模式切换
 const handleModeChange = (val: string) => {
   settingsStore.setMode('code_assistant', val as 'auto' | 'manual')
@@ -1111,10 +1748,20 @@ const stopStreaming = () => {
     const controller = stopAbortController.value
     stopAbortController.value = null
     controller.abort()
-    // 重连模式下同时取消后端任务
-    if (reconnectLiveMsg.value && currentConversationId.value) {
-      const convId = parseInt(currentConversationId.value)
-      if (!isNaN(convId)) cancelTask(convId)
+    // 取消后端正在运行的任务
+    // 先尝试从 conversations 列表中获取真实会话ID（complete 事件可能已更新列表中的 id）
+    let targetId = currentConversationId.value
+    if (targetId && targetId.startsWith('local-')) {
+      const conv = conversations.value.find(c => c.id === targetId)
+      if (conv && conv.id && !conv.id.startsWith('local-')) {
+        targetId = conv.id
+      }
+    }
+    if (targetId && !targetId.startsWith('local-')) {
+      const convIdNum = parseInt(targetId)
+      if (!isNaN(convIdNum)) {
+        cancelTask(convIdNum)
+      }
     }
   }
 }
@@ -1147,25 +1794,57 @@ const onDirSelected = (path: string) => {
   reloadFileTree()
 }
 
-// ask_user 回答函数
+// ask_user 回答函数（用于 clarification 类型）
 const submitPendingAnswer = async () => {
   if (!pendingQuestion.value || !pendingQuestionAnswer.value.trim()) return
   const q = pendingQuestion.value
   const answer = pendingQuestionAnswer.value.trim()
   try {
-    await submitAnswer(q.uuid, answer)
+    await submitAnswer(q.uuid, answer, 'approve')
     pendingQuestion.value = null
     pendingQuestionAnswer.value = ''
+    pendingShowCustomInput.value = false
     message.success('回答已发送')
   } catch (e: any) {
     message.error('回答发送失败: ' + (e.message || '未知错误'))
   }
 }
 
+// 处理权限授权按钮（4种 action）
+const handlePermissionAction = async (action: string) => {
+  if (!pendingQuestion.value) return
+  const q = pendingQuestion.value
+  // 对于 custom 类型，需要用户输入了内容
+  if (action === 'custom') {
+    if (!pendingQuestionAnswer.value.trim()) {
+      message.warning('请输入您的消息')
+      return
+    }
+  }
+  const answer = action === 'custom' ? pendingQuestionAnswer.value.trim() : action
+  try {
+    await submitAnswer(q.uuid, answer, action)
+    pendingQuestion.value = null
+    pendingQuestionAnswer.value = ''
+    pendingShowCustomInput.value = false
+    if (action === 'approve_all') {
+      message.success('已同意本轮所有操作')
+    } else if (action === 'approve') {
+      message.success('已同意')
+    } else if (action === 'reject') {
+      message.success('已拒绝')
+    } else if (action === 'custom') {
+      message.success('消息已发送')
+    }
+  } catch (e: any) {
+    message.error('操作失败: ' + (e.message || '未知错误'))
+  }
+}
+
 // 节流渲染：将流式更新聚合并限制在每 150ms 一次，避免高频 chunk 导致卡死
 let updateTimer: number | null = null
 
-const scheduleMessageUpdate = (convId: string) => {
+const scheduleMessageUpdate = (convId: string, thinkingMsgId?: string | number) => {
   if (updateTimer !== null) return
   updateTimer = window.setTimeout(() => {
     updateTimer = null
@@ -1174,10 +1853,17 @@ const scheduleMessageUpdate = (convId: string) => {
       messages.value[convId] = [...messages.value[convId]]
     }
     scrollToBottom()
+    // 等 DOM 实际更新后再滚动思考过程容器到底部
+    if (thinkingMsgId !== undefined) {
+      nextTick(() => {
+        const el = document.querySelector(`[data-think-scroll="${thinkingMsgId}"]`)
+        if (el) el.scrollTop = el.scrollHeight
+      })
+    }
   }, 150)
 }
 
-const flushMessageUpdate = (convId: string) => {
+const flushMessageUpdate = (convId: string, thinkingMsgId?: string | number) => {
   if (updateTimer !== null) {
     clearTimeout(updateTimer)
     updateTimer = null
@@ -1186,6 +1872,12 @@ const flushMessageUpdate = (convId: string) => {
     messages.value[convId] = [...messages.value[convId]]
   }
   scrollToBottom()
+  if (thinkingMsgId !== undefined) {
+    nextTick(() => {
+      const el = document.querySelector(`[data-think-scroll="${thinkingMsgId}"]`)
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  }
 }
 
 // 发送消息
@@ -1218,6 +1910,11 @@ const sendMessage = async () => {
     // 需要创建真实会话
     // 先发消息让后端创建会话
   }
+  // 用于在流式结束后统一迁移 convId（避免流式过程中数组引用变动导致内容重复）
+  let realSessionId: string | undefined = undefined
+
+  // 生成 turnId 用于快照匹配
+  const turnId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`
 
   // 添加用户消息
   const userMsg: ChatMessage = {
@@ -1225,7 +1922,8 @@ const sendMessage = async () => {
     role: 'user',
     content: finalMessage,
     timestamp: Date.now(),
-    tokenCount: estimateTokenCount(finalMessage)
+    tokenCount: estimateTokenCount(finalMessage),
+    turnId
   }
 
   // 清空附件列表
@@ -1273,8 +1971,16 @@ const sendMessage = async () => {
       executionMode: settingsStore.getMode('code_assistant'),
       projectRoot: settingsStore.projectRoot || undefined,
       model: settingsStore.getModel('code_assistant'),
-      thinkingMode: settingsStore.getThinkingMode('code_assistant')
+      thinkingMode: settingsStore.getThinkingMode('code_assistant'),
+      turnId
     }, abortCtrl)) {
+      // 每个事件都检查 sessionId —— 后端在第一个 SSE 事件中就返回了真实会话 ID，
+      // 但不在流式过程中迁移 convId（避免数组引用变动导致内容重复），
+      // 流式结束后在 finally 中统一迁移。
+      // 这里只保存 realSessionId，确保用户过早停止时 finally 中也能正确迁移。
+      if (convId.startsWith('local-') && event.sessionId && !realSessionId) {
+        realSessionId = String(event.sessionId)
+      }
       if (event.type === 'thinking') {
         streamStatus.value = '思考分析中...'
         // 检测工具调用结果标记，分离存储
@@ -1298,38 +2004,43 @@ const sendMessage = async () => {
           thinkingContent += event.data
         }
         assistantMsg.thinking = thinkingContent
-        // 节流刷新
-        scheduleMessageUpdate(convId)
+        // 节流刷新（携带思考消息ID，更新 DOM 后自动滚动到底部）
+        scheduleMessageUpdate(convId, assistantMsg.id)
       } else if (event.type === 'content') {
         streamStatus.value = '正在生成回答...'
         assistantMsg.content += event.data
         // 实时更新消息内容
         scheduleMessageUpdate(convId)
       } else if (event.type === 'complete' && event.sessionId) {
-        // 更新会话ID
-        const newId = String(event.sessionId)
-        if (convId.startsWith('local-') && newId) {
-          messages.value[newId] = messages.value[convId]
-          delete messages.value[convId]
-          currentConversationId.value = newId
-          convId = newId
-          // 更新会话列表
+        // 保存真实会话ID，流式结束后在 finally 中统一迁移
+        realSessionId = String(event.sessionId)
+        if (convId.startsWith('local-') && realSessionId) {
           const localConv = conversations.value.find(c => c.id === convId)
           if (localConv) {
-            localConv.id = newId
+            localConv.id = realSessionId
             localConv.isLocal = false
           }
-          // 刷新会话列表
-          fetchConversations()
         }
       } else if (event.type === 'ask_user') {
         try {
-          pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question }
+          pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification' }
           pendingQuestionAnswer.value = ''
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
         }
-      }
+        } else if (event.type === 'skill_match') {
+          const skills = event.data as SkillMatchInfo[]
+          if (skills.length > 0) {
+            assistantMsg.matchedSkills = skills.map(s => ({
+              name: s.name,
+              confidence: s.confidence,
+              triggerWords: s.triggerWords
+            }))
+          }
+        } else if (event.type === 'agent_event') {
+          const agentEvent = event.data as AgentStreamEvent
+          handleAgentEvent(agentEvent)
+        }
     }
 
     // 计算token
@@ -1339,32 +2050,50 @@ const sendMessage = async () => {
     assistantMsg.tokenCount = estimateTokenCount(fullContent) + (fullThinking ? estimateTokenCount(fullThinking) : 0) + estimateTokenCount(toolResultsText)
     assistantMsg.isStreaming = false
     streamStatus.value = ''
-    flushMessageUpdate(convId)
+    flushMessageUpdate(convId, assistantMsg.id)
+
+    // 查询快照，匹配当前消息的 turnId
+    if (!convId.startsWith('local-') && turnId) {
+      matchSnapshotsForMessages(convId)
+      // 加载会话改动统计
+      loadSessionChanges(convId)
+    }
 
     // 消息不为空时更新会话标题
     if (conv && !conv.isLocal) {
       // 从后端刷新获取标题
-      fetchConversations()
     }
   } catch (error: any) {
     if (error.message === '__USER_ABORT__') {
       console.log('用户中断流式响应')
       assistantMsg.isStreaming = false
       streamStatus.value = ''
-      flushMessageUpdate(convId)
+      flushMessageUpdate(convId, assistantMsg.id)
       return
     }
     console.error('发送消息失败:', error)
     assistantMsg.content = error.message || '发送失败，请重试'
     assistantMsg.isStreaming = false
     streamStatus.value = ''
-    flushMessageUpdate(convId)
+    flushMessageUpdate(convId, assistantMsg.id)
     message.error('发送失败: ' + (error.message || '未知错误'))
   } finally {
     isSending.value = false
     stopElapsedTimer()
     streamStatus.value = ''
+    stopAbortController.value = null
     scrollToBottom()
+    // 流式结束后统一迁移 convId（避免流式过程中数组引用变动导致内容重复）
+    if (convId.startsWith('local-') && realSessionId) {
+      messages.value[realSessionId] = messages.value[convId]
+      delete messages.value[convId]
+      currentConversationId.value = realSessionId
+      convId = realSessionId
+    }
+    // 流式完全结束后再刷新会话列表
+    if (!convId.startsWith('local-')) {
+      fetchConversations()
+    }
   }
 }
 
@@ -1374,64 +2103,90 @@ const handleShiftEnter = () => {
 
 // ===== 后台任务重连 =====
 
-const reconnectLiveMsg = ref<{ content: string; thinking: string } | null>(null)
-// 重连消息的渲染节流
-let reconnectRenderTimer: ReturnType<typeof setTimeout> | null = null
-
 const reconnectToTaskStream = async (convId: number) => {
   streamStatus.value = '任务恢复中...'
   isSending.value = true
   startElapsedTimer()
   const stringConvId = String(convId)
 
-  // 用单独的重连消息显示实时流式输出，不污染 messages 列表
-  reconnectLiveMsg.value = { content: '', thinking: '' }
-  let thinkingContent = ''
+  // 确保消息数组存在
+  if (!messages.value[stringConvId]) {
+    messages.value[stringConvId] = []
+  }
+  const msgs = messages.value[stringConvId]
 
-  // 创建 AbortController 用于终止按钮
+  // 查找最后一个 assistant 消息作为续接目标
+  let targetMsg: ChatMessage | undefined
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') {
+      targetMsg = msgs[i]
+      break
+    }
+  }
+
+  // 没有 assistant 消息则新建一个
+  if (!targetMsg) {
+    targetMsg = {
+      id: `reconnect-${Date.now()}`,
+      role: 'assistant',
+      content: '',
+      thinking: '',
+      toolResults: [],
+      timestamp: Date.now(),
+      isStreaming: true
+    }
+    msgs.push(targetMsg)
+  } else {
+    // 已有消息，设为 streaming 状态让 UI 显示加载动画
+    targetMsg.isStreaming = true
+  }
+  let thinkingContent = targetMsg.thinking || ''
+
   const abortCtrl = new AbortController()
   stopAbortController.value = abortCtrl
-
-  // 渲染节流：每秒最多更新 8 次 DOM
-  const scheduleRender = () => {
-    if (reconnectRenderTimer) return
-    reconnectRenderTimer = setTimeout(() => {
-      reconnectRenderTimer = null
-      // 触发 Vue 响应式更新（shallowRef 需手动触发）
-      if (reconnectLiveMsg.value) {
-        reconnectLiveMsg.value = { ...reconnectLiveMsg.value }
-      }
-      scrollToBottom()
-    }, 125)
-  }
 
   try {
     for await (const event of taskStream(convId, abortCtrl)) {
       if (event.type === 'thinking') {
-        const markerIdx = typeof event.data === 'string' ? event.data.indexOf('----工具调用:----') : -1
+        const data = typeof event.data === 'string' ? event.data : ''
+        const markerIdx = data.indexOf('----工具调用:----')
         if (markerIdx !== -1) {
           streamStatus.value = '执行工具中...'
-          const contentStart = event.data.indexOf('\n', markerIdx)
+          const contentStart = data.indexOf('\n', markerIdx)
           const toolContent = contentStart !== -1
-            ? event.data.substring(contentStart + 1).trim()
+            ? data.substring(contentStart + 1).trim()
             : ''
           if (toolContent) {
-            thinkingContent += '\n' + toolContent
+            // 后端使用 Replay Sink（Sinks.unsafe().many().replay().limit(100000)），
+            // 页面刷新后重连时会重放所有历史事件，导致工具结果重复添加到 toolResults。
+            // 通过比较 content 内容去重，避免工具卡片在页面上重复显示。
+            const isDuplicate = targetMsg.toolResults!.some(
+              existing => existing.content === toolContent
+            )
+            if (!isDuplicate) {
+              targetMsg.toolResults!.push({
+                at: thinkingContent.length,
+                content: toolContent
+              })
+            }
             parseTaskManagerResult(toolContent)
           }
-        } else if (typeof event.data === 'string') {
-          thinkingContent += event.data
+        } else {
+          // 普通 thinking 内容：Replay Sink 重放的历史内容已在 thinkingContent 中，跳过重复追加
+          if (!thinkingContent.endsWith(data)) {
+            thinkingContent += data
+          }
         }
-        reconnectLiveMsg.value.thinking = thinkingContent
-        scheduleRender()
+        targetMsg.thinking = thinkingContent
+        // 携带思考消息ID，更新 DOM 后自动滚动到底部
+        scheduleMessageUpdate(stringConvId, targetMsg.id)
       } else if (event.type === 'content') {
         streamStatus.value = '正在生成回答...'
-        reconnectLiveMsg.value.content += event.data
-        scheduleRender()
+        targetMsg.content = (targetMsg.content || '') + event.data
+        scheduleMessageUpdate(stringConvId)
       } else if (event.type === 'ask_user') {
-        // 手动模式下权限审批弹窗
         streamStatus.value = '等待用户授权...'
-        pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question }
+        pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification' }
         pendingQuestionAnswer.value = ''
       } else if (event.type === 'resume') {
         streamStatus.value = '继续执行中...'
@@ -1439,6 +2194,13 @@ const reconnectToTaskStream = async (convId: number) => {
         break
       }
     }
+
+    // 流结束，取消 streaming 状态
+    if (targetMsg) {
+      targetMsg.isStreaming = false
+    }
+    streamStatus.value = ''
+    flushMessageUpdate(stringConvId, targetMsg.id)
   } catch (error: any) {
     if (error?.name === 'AbortError') {
       console.log('重连任务流被用户终止')
@@ -1446,11 +2208,6 @@ const reconnectToTaskStream = async (convId: number) => {
       console.warn('重连任务流失败:', error)
     }
   } finally {
-    if (reconnectRenderTimer) {
-      clearTimeout(reconnectRenderTimer)
-      reconnectRenderTimer = null
-    }
-    reconnectLiveMsg.value = null
     streamStatus.value = ''
     isSending.value = false
     stopElapsedTimer()
@@ -1468,7 +2225,7 @@ const checkAndReconnect = async (convId: string) => {
     activeTask.value = task as any
     // 如果有待审批问题，立即展示审批对话框（页面刷新后重连）
     if (task.pendingQuestionUuid) {
-      pendingQuestion.value = { uuid: task.pendingQuestionUuid, question: task.pendingQuestionText || '请确认是否执行以上操作' }
+      pendingQuestion.value = { uuid: task.pendingQuestionUuid, question: task.pendingQuestionText || '请确认是否执行以上操作', askType: 'permission' }
       pendingQuestionAnswer.value = ''
       message.info('检测到有待审批的操作，请确认')
     }
@@ -1510,36 +2267,116 @@ const formatMessageTime = (timestamp: number) => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
 }
 
+/**
+ * 从工具调用结果内容中解析工具名称（格式：> **toolName**）
+ */
+function parseToolNameLine(content: string): { toolName: string; cleanContent: string } {
+  const firstLine = content.split('\n')[0]
+  const match = firstLine.match(/^> \*\*(.+?)\*\*$/)
+  if (match) {
+    const rest = content.indexOf('\n')
+    return {
+      toolName: match[1],
+      cleanContent: rest !== -1 ? content.substring(rest + 1).trim() : ''
+    }
+  }
+  return { toolName: '', cleanContent: content }
+}
+
+/**
+ * 渲染技能使用卡片（report_skill_result 工具结果专用）
+ * 解析格式：
+ *   技能「名称」(ID:N) 执行结果：成功/失败
+ *   当前置信度：XX%（共使用 N 次，成功 N / 失败 N）
+ */
+function renderSkillUsageCard(content: string): string | null {
+  const nameMatch = content.match(/技能「(.+?)」/)
+  if (!nameMatch) return null
+  const skillName = nameMatch[1]
+  const success = /执行结果[：:]\s*(成功)/.test(content)
+  const confMatch = content.match(/当前置信度[：:]\s*(\d+%?)%/)
+  const confidence = confMatch ? confMatch[1].replace('%', '') + '%' : ''
+  const statusText = success ? '技能使用成功' : '技能使用失败'
+  const statusIcon = success ? '&#10003;' : '&#10007;'
+  const cardClass = success ? 'skill-usage-success' : 'skill-usage-fail'
+  const firstLine = content.split('\n')[0].substring(0, 80)
+  const escaped = escapeHtml(content)
+
+  return `<div class="skill-usage-card tool-result-collapsed ${cardClass}">
+    <div class="tool-result-header">
+      <span class="tr-toggle">▶</span>
+      <span class="skill-usage-badge ${success ? 'skill-usage-badge-ok' : 'skill-usage-badge-fail'}">${statusIcon}</span>
+      <span class="tr-label">${escapeHtml(statusText)}：${escapeHtml(skillName)}</span>
+      ${confidence ? `<span class="skill-usage-conf">${escapeHtml(confidence)}</span>` : ''}
+      <span class="tr-summary">${escapeHtml(firstLine)}</span>
+    </div>
+    <div class="tool-result-body"><pre>${escaped}</pre></div>
+  </div>`
+}
+
 const formatThinking = (thinking: string | undefined, toolResults?: { at: number; content: string }[]) => {
   if (!thinking && (!toolResults || toolResults.length === 0)) return ''
   thinking = thinking || ''
-  // 缓存 key 包含 thinking 全文和 toolResults 摘要，不同 toolResults 产生不同 HTML
   const cacheKey = thinking + '|' + JSON.stringify(toolResults?.map(t => ({ at: t.at, len: t.content.length })))
   const cached = thinkingCache.get(cacheKey)
   if (cached !== undefined) return cached
-  const renderResult = (() => {
-  // 工具调用结果按位置注入
-  if (toolResults && toolResults.length > 0) {
-    const sorted = [...toolResults].sort((a, b) => a.at - b.at)
-    const parts: string[] = []
-    let lastPos = 0
-    for (const tr of sorted) {
-      if (tr.at > lastPos) {
-        parts.push(renderMarkdown(thinking.slice(lastPos, tr.at)))
-      }
-      const escaped = tr.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      parts.push(`<details class="thinking-tool-result"><summary>🔧 工具调用结果</summary><pre>${escaped}</pre></details>`)
-      lastPos = tr.at
-    }
-    if (lastPos < thinking.length) {
-      parts.push(renderMarkdown(thinking.slice(lastPos)))
-    }
-    return parts.join('\n')
-  }
 
-  return renderMarkdown(thinking)
-})()
-  // 缓存渲染结果
+  const renderResult = (() => {
+    if (toolResults && toolResults.length > 0) {
+      const sorted = [...toolResults].sort((a, b) => a.at - b.at)
+      const parts: string[] = ['<div class="thinking-timeline">']
+      let lastPos = 0
+      for (const tr of sorted) {
+        // 思考过程片段（到工具调用之间的推理）
+        if (tr.at > lastPos) {
+          const textSegment = thinking.slice(lastPos, tr.at)
+          if (textSegment.trim()) {
+            parts.push(`<div class="thinking-text-block">${renderMarkdown(textSegment)}</div>`)
+          }
+        }
+        // 工具调用结果卡片（含工具名称解析）
+        const { toolName, cleanContent } = parseToolNameLine(tr.content)
+        const displayContent = cleanContent || tr.content
+
+        // 技能使用卡片：report_skill_result 特殊渲染
+        if (toolName === 'report_skill_result') {
+          const skillUsageHtml = renderSkillUsageCard(displayContent)
+          if (skillUsageHtml) {
+            parts.push(skillUsageHtml)
+            lastPos = tr.at
+            continue
+          }
+        }
+
+        const escaped = escapeHtml(displayContent)
+        const isError = /^错误[：:]|【参数(?:缺失|错误)】|【权限(?:不足|拒绝)】|【会话上下文丢失】|\bCannot\b/i.test(displayContent.substring(0, 300))
+        const firstLine = displayContent.split('\n')[0].substring(0, 80)
+        const labelText = isError ? ('执行出错' + (toolName ? ' ' + toolName : '')) : ('工具' + (toolName || '') + '执行')
+        parts.push(`<div class="tool-result-card tool-result-collapsed ${isError ? 'tool-result-error' : ''}">
+          <div class="tool-result-header">
+            <span class="tr-toggle">▶</span>
+            <span class="tr-icon ${isError ? 'tr-icon-error' : 'tr-icon-success'}">${isError ? '&#10007;' : '&#10003;'}</span>
+            <span class="tr-label">${labelText}</span>
+            <span class="tr-summary">${escapeHtml(firstLine)}</span>
+          </div>
+          <div class="tool-result-body"><pre>${escaped}</pre></div>
+        </div>`)
+        lastPos = tr.at
+      }
+      // 剩余思考过程
+      if (thinking && lastPos < thinking.length) {
+        const remaining = thinking.slice(lastPos)
+        if (remaining.trim()) {
+          parts.push(`<div class="thinking-text-block">${renderMarkdown(remaining)}</div>`)
+        }
+      }
+      parts.push('</div>')
+      return parts.join('\n')
+    }
+    // 无工具调用，纯渲染思考文本
+    return thinking.trim() ? renderMarkdown(thinking) : ''
+  })()
+
   if (thinkingCache.size >= 200) {
     const firstKey = thinkingCache.keys().next().value
     if (firstKey) thinkingCache.delete(firstKey)
@@ -1561,6 +2398,19 @@ const formatMessage = (content: string) => {
   }
   markdownCache.set(content, html)
   return html
+}
+
+// HTML 转义辅助函数
+const escapeHtml = (text: string) => {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// 工具结果卡片点击折叠/展开
+const handleToolCardClick = (e: MouseEvent) => {
+  const header = (e.target as HTMLElement).closest('.tool-result-header')
+  if (header) {
+    header.parentElement?.classList.toggle('tool-result-collapsed')
+  }
 }
 
 // 滚动（双重保障：nextTick + rAF + 延时兜底，适配 DynamicScroller 渲染时机）
@@ -1599,6 +2449,9 @@ onMounted(() => {
     const target = e.target as HTMLElement
     if (!target.closest('.task-trigger') && !target.closest('.task-dropdown')) {
       showTaskDropdown.value = false
+    }
+    if (!target.closest('.changes-trigger') && !target.closest('.changes-panel')) {
+      showChangesPanel.value = false
     }
   })
 })
@@ -1715,7 +2568,10 @@ const parseTaskManagerResult = (content: string) => {
 
 watch(currentConversationId, (newId) => {
   if (newId && !newId.startsWith('local-')) {
+    saveConversationId(newId)
     checkAndReconnect(newId)
+  } else if (!newId) {
+    clearSavedConversationId()
   }
 })
 </script>
@@ -1847,6 +2703,21 @@ watch(currentConversationId, (newId) => {
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 12px;
+  cursor: pointer;
+}
+
+.conv-title:hover {
+  color: #1890ff;
+}
+
+.conv-title-editing {
+  margin: -2px 0;
+}
+
+.conv-title-editing .ant-input {
+  height: 28px;
+  font-size: 12px;
+  border-radius: 4px;
 }
 .conv-time {
   font-size: 10px;
@@ -2019,35 +2890,6 @@ watch(currentConversationId, (newId) => {
   min-height: 0;
   overflow: hidden;
 }
-.file-tab-editor.has-console {
-  flex: 1 1 55%;
-  min-height: 40%;
-}
-.file-tab-console {
-  flex: 1 1 45%;
-  min-height: 30%;
-  display: flex;
-  flex-direction: column;
-  background: #1e1e1e;
-  border-top: 2px solid #3c3c3c;
-}
-.console-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 12px;
-  background: #252526;
-  border-bottom: 1px solid #3c3c3c;
-  flex-shrink: 0;
-}
-.console-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #cccccc;
-  font-weight: 500;
-}
 .console-dot {
   width: 8px;
   height: 8px;
@@ -2062,82 +2904,6 @@ watch(currentConversationId, (newId) => {
 @keyframes consolePulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 4px #4ec9b0; }
   50% { opacity: 0.5; box-shadow: 0 0 8px #4ec9b0; }
-}
-.console-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.console-status {
-  font-size: 11px;
-  color: #858585;
-}
-.console-btn {
-  font-size: 11px !important;
-  color: #858585 !important;
-  height: 22px !important;
-  padding: 0 6px !important;
-}
-.console-btn:hover {
-  color: #cccccc !important;
-}
-.console-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px 12px;
-  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #d4d4d4;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.console-line {
-  min-height: 18px;
-  padding: 0;
-}
-.console-line.console-error {
-  color: #f48771;
-}
-.console-line.console-warn {
-  color: #dcdcaa;
-}
-.console-line.console-success {
-  color: #4ec9b0;
-}
-.console-loading {
-  color: #858585;
-  padding: 4px 0;
-  font-size: 12px;
-}
-.console-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 12px;
-  background: #252526;
-  border-top: 1px solid #3c3c3c;
-  font-size: 11px;
-  color: #858585;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.15s;
-  user-select: none;
-}
-.console-trigger:hover {
-  background: #333;
-  color: #cccccc;
-}
-.console-trigger-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #6a9955;
-  display: inline-block;
-}
-.console-trigger-dot.active {
-  background: #4ec9b0;
-  animation: consolePulse 1.5s ease-in-out infinite;
 }
 /* 标签操作按钮组 */
 .tab-items {
@@ -2227,6 +2993,10 @@ watch(currentConversationId, (newId) => {
 
 .message-avatar {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 
 .avatar {
@@ -2247,6 +3017,30 @@ watch(currentConversationId, (newId) => {
   background: linear-gradient(135deg, #1677ff, #0958d9);
   color: white;
   font-size: 18px;
+}
+
+/* 回滚按钮 */
+.rollback-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff0f0;
+  border: 1px solid #ffccc7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 10px;
+  color: #ff4d4f;
+  transition: all 0.2s;
+  user-select: none;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.rollback-btn:hover {
+  background: #ff4d4f;
+  border-color: #ff4d4f;
+  color: #fff;
 }
 
 .message-content {
@@ -2325,46 +3119,43 @@ watch(currentConversationId, (newId) => {
 }
 .thinking-header:hover { background: #e9edf2; }
 .thinking-title { font-weight: 600; color: #475569; flex: 1; }
+.thinking-summary { font-size: 11px; color: #64748b; margin-right: 4px; }
 .thinking-hint { font-size: 11px; color: #94a3b8; }
-.thinking-content { padding: 8px 12px; }
+.skill-match-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-right: 8px; }
+.skill-match-tag {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 500;
+}
+.skill-tag-high { background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
+.skill-tag-mid  { background: #fffbe6; color: #d48806; border: 1px solid #ffe58f; }
+.skill-tag-low  { background: #fff2f0; color: #cf1322; border: 1px solid #ffccc7; }
+.skill-tag-conf { font-size: 10px; opacity: 0.8; }
+.thinking-content { padding: 8px 12px; max-height: 600px; overflow-y: auto; }
 .thinking-text {
   font-size: 13px;
   line-height: 1.6;
   color: #475569;
+}
+
+/* thinking timeline layout */
+.thinking-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.thinking-text-block {
+  padding: 4px 0;
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
-
-/* tool result details (inline collapsible in thinking) */
-.thinking-tool-result {
-  margin: 6px 0;
-  border: 1px solid #d4dce8;
-  border-radius: 6px;
-  overflow: hidden;
-  background: #f0f4fa;
+.thinking-text-block p { margin: 4px 0; }
+.thinking-text-block code {
   font-size: 12px;
-}
-.thinking-tool-result summary {
-  padding: 4px 10px;
-  cursor: pointer;
-  user-select: none;
-  font-weight: 600;
-  color: #4f46e5;
-  background: #eef2f8;
-}
-.thinking-tool-result summary:hover {
-  background: #e4eaf2;
-}
-.thinking-tool-result pre {
-  margin: 0;
-  padding: 8px 10px;
-  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 12px;
-  line-height: 1.4;
-  color: #334155;
-  white-space: pre-wrap;
-  word-break: break-all;
+  padding: 1px 4px;
+  background: #eef2f6;
+  border-radius: 3px;
 }
 
 /* ===== 输入区域 ===== */
@@ -2466,12 +3257,15 @@ watch(currentConversationId, (newId) => {
 .input-wrapper {
   display: flex;
   gap: 8px;
-  align-items: flex-end;
+  align-items: center;
 }
 .input-wrapper :deep(.ant-input) {
   border-radius: 8px;
   resize: none;
   font-size: 14px;
+  min-height: 40px;
+  padding: 8px 11px;
+  line-height: 22px;
 }
 .send-btn {
   height: 40px;
@@ -2630,6 +3424,231 @@ watch(currentConversationId, (newId) => {
   font-family: 'SF Mono', 'Monaco', monospace;
 }
 
+/* 文件改动触发器 */
+.changes-trigger {
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s;
+}
+.changes-trigger:hover {
+  background: #e6f7ff;
+  border-color: #91d5ff;
+}
+.changes-trigger.active {
+  background: #fff7e6;
+  border-color: #ffa940;
+}
+.changes-trigger-icon {
+  font-size: 14px;
+}
+.changes-trigger-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: #595959;
+  white-space: nowrap;
+}
+.changes-trigger-badge {
+  font-size: 11px;
+  color: #52c41a;
+  font-weight: 600;
+  margin-left: 2px;
+  white-space: nowrap;
+}
+
+/* 文件改动面板 */
+.changes-panel {
+  position: absolute;
+  bottom: 100%;
+  left: 12px;
+  right: 12px;
+  margin-bottom: 8px;
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.10);
+  overflow: hidden;
+  z-index: 100;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+.changes-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+.changes-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a202c;
+}
+.changes-panel-summary {
+  font-size: 12px;
+  color: #8c8c8c;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.changes-summary-divider {
+  color: #d9d9d9;
+  margin: 0 2px;
+}
+.changes-panel-body {
+  overflow-y: auto;
+  flex: 1;
+}
+.changes-panel-item {
+  border-bottom: 1px solid #f5f5f5;
+  transition: background 0.15s;
+}
+.changes-panel-item:last-child {
+  border-bottom: none;
+}
+.changes-panel-item:hover {
+  background: #fafafa;
+}
+.changes-panel-item.is-rolled {
+  opacity: 0.6;
+}
+.changes-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  gap: 12px;
+}
+.changes-file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.changes-file-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.changes-file-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+.changes-file-path {
+  color: #262626;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+.changes-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.changes-badge {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-weight: 500;
+  line-height: 18px;
+  display: inline-block;
+}
+.changes-badge-new {
+  background: #f6ffed;
+  color: #52c41a;
+  border: 1px solid #b7eb8f;
+}
+.changes-badge-rolled {
+  background: #fff1f0;
+  color: #ff4d4f;
+  border: 1px solid #ffa39e;
+}
+.changes-file-stats {
+  font-size: 12px;
+  font-weight: 600;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+}
+.changes-add {
+  color: #52c41a;
+}
+.changes-del {
+  color: #ff4d4f;
+  margin-left: 4px;
+}
+.changes-file-actions {
+  flex-shrink: 0;
+}
+.changes-rollback-btn {
+  font-size: 12px;
+  color: #8c8c8c;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  padding: 0 8px;
+  height: 26px;
+  line-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s;
+}
+.changes-rollback-btn:not(:disabled):hover {
+  color: #ff4d4f !important;
+  border-color: #ff4d4f;
+  background: #fff1f0;
+}
+.changes-rollback-btn--rolled {
+  color: #bfbfbf !important;
+  border-color: #f0f0f0;
+  cursor: not-allowed;
+}
+.changes-empty {
+  padding: 32px 14px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #bfbfbf;
+  font-size: 13px;
+}
+.changes-empty-icon {
+  font-size: 24px;
+}
+.changes-panel-footer {
+  display: flex;
+  justify-content: center;
+  padding: 10px 14px;
+  border-top: 1px solid #f0f0f0;
+  flex-shrink: 0;
+  background: #fafafa;
+}
+.changes-rollback-all-btn {
+  font-size: 12px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 4px;
+  border-color: #ff4d4f;
+  color: #ff4d4f;
+}
+.changes-rollback-all-btn:not(:disabled):hover {
+  color: #fff !important;
+  background: #ff4d4f;
+  border-color: #ff4d4f;
+}
+.changes-rollback-all-btn:disabled {
+  border-color: #d9d9d9;
+  color: #bfbfbf;
+}
+
 .footer-left {
   display: flex;
   align-items: center;
@@ -2718,14 +3737,6 @@ watch(currentConversationId, (newId) => {
   font-size: 13px;
   color: #1677ff;
   font-weight: 500;
-}
-/* 后台任务重连指示器 */
-.task-reconnect-banner {
-  background: #fff7e6;
-  border-bottom: 1px solid #ffd591;
-}
-.task-reconnect-banner .stream-indicator-text {
-  color: #d46b08;
 }
 @keyframes streamPulse {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -2824,27 +3835,38 @@ watch(currentConversationId, (newId) => {
 :deep(.cbf-path) { color: #262626; }
 :deep(.cbf-summary) { color: #8c8c8c; }
 
-/* ask_user 问答面板 */
+/* ask_user 问答面板 — 全新样式 */
 .ask-user-panel {
-  margin: 0 16px 8px;
+  margin: 0 16px 12px;
   background: #fff;
-  border: 1px solid #d9d9d9;
-  border-radius: 8px;
-  padding: 16px;
-  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e8e8e8;
+  border-radius: 10px;
+  padding: 18px 20px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
 }
 .ask-user-header {
   font-weight: 600;
-  font-size: 14px;
-  color: #faad14;
-  margin-bottom: 8px;
+  font-size: 15px;
+  color: #262626;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ask-user-header-icon {
+  font-size: 16px;
+  line-height: 1;
 }
 .ask-user-question {
   font-size: 14px;
-  color: #333;
-  margin-bottom: 12px;
+  color: #434343;
+  margin-bottom: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
+  background: #fafafa;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border-left: 3px solid #1677ff;
 }
 .ask-user-input-row {
   display: flex;
@@ -2854,43 +3876,96 @@ watch(currentConversationId, (newId) => {
   flex: 1;
 }
 
-/* ===== 重连实时消息容器 ===== */
-.reconnect-container {
-  margin: 0 16px 8px;
-  border: 1px solid #e8e8e8;
-  border-radius: 8px;
-  background: #fafafa;
-  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.06);
-  overflow: hidden;
+/* 权限授权按钮 — grid 两列等宽布局 */
+.permission-btn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 0;
 }
-.reconnect-header {
+.permission-btn {
+  height: 38px !important;
+  font-size: 13px !important;
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  transition: all 0.2s ease !important;
+}
+.permission-btn-approve {
+  background: #1677ff !important;
+  border-color: #1677ff !important;
+  color: #fff !important;
+}
+.permission-btn-approve:hover {
+  background: #4096ff !important;
+  border-color: #4096ff !important;
+}
+.permission-btn-approve-all {
+  color: #1677ff !important;
+  border-color: #1677ff !important;
+  background: #fff !important;
+}
+.permission-btn-approve-all:hover {
+  color: #4096ff !important;
+  border-color: #4096ff !important;
+  background: #f0f5ff !important;
+}
+.permission-btn-reject {
+  color: #ff4d4f !important;
+  border-color: #ff4d4f !important;
+  background: #fff !important;
+}
+.permission-btn-reject:hover {
+  color: #ff7875 !important;
+  border-color: #ff7875 !important;
+  background: #fff2f0 !important;
+}
+.permission-btn-custom {
+  color: #595959 !important;
+  border-color: #d9d9d9 !important;
+  background: #fff !important;
+}
+.permission-btn-custom:hover {
+  color: #1677ff !important;
+  border-color: #1677ff !important;
+  background: #f0f5ff !important;
+}
+.permission-btn-custom.active {
+  color: #1677ff !important;
+  border-color: #1677ff !important;
+  background: #e6f4ff !important;
+}
+
+/* 自定义消息输入行 — 带过渡动画 */
+.permission-custom-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  font-size: 12px;
-  color: #666;
-  background: #f0f5ff;
-  border-bottom: 1px solid #e8e8e8;
+  gap: 8px;
+  margin-top: 10px;
 }
-.reconnect-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #1677ff;
-  animation: reconnect-pulse 1.2s ease-in-out infinite;
+.permission-custom-row .a-input {
+  flex: 1;
 }
-@keyframes reconnect-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+.custom-send-btn {
+  flex-shrink: 0;
 }
-.reconnect-body {
-  max-height: 360px;
-  overflow-y: auto;
-  padding: 12px 16px 4px;
+
+/* 展开/收起动画 */
+.custom-fade-enter-active {
+  animation: customFadeIn 0.2s ease-out;
 }
-.reconnect-body .message-item {
-  margin-bottom: 0;
+.custom-fade-leave-active {
+  animation: customFadeIn 0.15s ease-in reverse;
+}
+@keyframes customFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 80px;
+  }
 }
 
 .stream-elapsed {
@@ -2901,13 +3976,364 @@ watch(currentConversationId, (newId) => {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.task-reconnect-banner .stream-elapsed {
-  color: #d46b08;
+/* ===== 控制台面板（终端 + 运行日志 Tabs） ===== */
+.console-panel {
+  flex-shrink: 0;
+  background: #1e1e1e;
+  border-top: 1px solid #3c3c3c;
+  border-bottom: 1px solid #3c3c3c;
+  display: flex;
+  flex-direction: column;
+  min-height: 32px;
+  position: relative;
+}
+.console-panel.minimized {
+  flex: 0 0 auto !important;
+  height: auto !important;
+}
+/* 拖拽调整手柄 */
+.console-resize-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 10;
+}
+.console-resize-handle:hover {
+  background: rgba(78, 201, 176, 0.3);
+}
+/* Tab 栏 */
+.console-tab-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  min-height: 32px;
+  user-select: none;
+}
+.console-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+.console-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 12px;
+  height: 32px;
+  font-size: 12px;
+  color: #858585;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.console-tab:hover {
+  color: #cccccc;
+  background: #2d2d2d;
+}
+.console-tab.active {
+  color: #cccccc;
+  border-bottom-color: #4ec9b0;
+  background: #1e1e1e;
+}
+.console-tab-icon {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4ec9b0;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+}
+.console-tab-close {
+  font-size: 14px;
+  line-height: 1;
+  color: #858585;
+  padding: 0 2px;
+  border-radius: 3px;
+  margin-left: 2px;
+  transition: all 0.15s;
+}
+.console-tab-close:hover {
+  background: #ff4d4f;
+  color: white;
+}
+.console-tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+}
+.console-tab-cwd {
+  font-size: 11px;
+  color: #858585;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.console-tab-btn {
+  font-size: 11px !important;
+  color: #858585 !important;
+  height: 22px !important;
+  padding: 0 6px !important;
+}
+.console-tab-btn:hover {
+  color: #cccccc !important;
+}
+.console-tab-toggle {
+  font-size: 11px;
+  color: #858585;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+.console-tab-toggle:hover {
+  background: #3c3c3c;
+  color: #cccccc;
+}
+.console-panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.console-log-body {
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-align: left;
+}
+.terminal-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 12px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  outline: none;
+  cursor: text;
+  text-align: left;
+}
+.terminal-line {
+  min-height: 18px;
+  padding: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-align: left;
+}
+.terminal-executing {
+  color: #858585;
+  font-style: italic;
+}
+.terminal-prompt-line {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-height: 18px;
+}
+.prompt-sign {
+  color: #4ec9b0;
+  white-space: pre;
+  flex-shrink: 0;
+}
+.prompt-input {
+  color: #d4d4d4;
+  white-space: pre;
+}
+.prompt-cursor {
+  color: #d4d4d4;
+  font-weight: 100;
+  animation: terminalBlink 1s step-end infinite;
+}
+.prompt-cursor.blink {
+  visibility: visible;
+}
+@keyframes terminalBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ===== 运行日志内容样式 ===== */
+.log-line {
+  min-height: 18px;
+  padding: 0;
+  text-align: left;
+}
+.log-line.log-error {
+  color: #f48771;
+}
+.log-line.log-warn {
+  color: #dcdcaa;
+}
+.log-line.log-success {
+  color: #4ec9b0;
+}
+.log-loading {
+  color: #858585;
+  padding: 4px 0;
+  font-size: 12px;
 }
 </style>
 
 <!-- 非 scoped 样式：markdown 内容排版（v-html 内元素不受 scoped 影响） -->
 <style>
+/* ===== 工具调用结果卡片 ===== */
+.tool-result-card {
+  border: 1px solid #d4dce8;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #f8fafc;
+  font-size: 12px;
+}
+.tool-result-card.tool-result-error {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+.tool-result-card.tool-result-collapsed .tool-result-body {
+  display: none;
+}
+.tool-result-card.tool-result-collapsed .tr-toggle {
+  transform: rotate(0deg);
+}
+.tool-result-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+  color: #374151;
+  background: #eef2f8;
+  border-bottom: 1px solid #d4dce8;
+  transition: background 0.15s;
+}
+.tool-result-header:hover { background: #e4eaf2; }
+.tool-result-error .tool-result-header {
+  background: #fee;
+  border-bottom-color: #fca5a5;
+}
+.tool-result-error .tool-result-header:hover { background: #fdd; }
+.tr-toggle {
+  font-size: 10px;
+  color: #94a3b8;
+  transition: transform 0.2s;
+  transform: rotate(90deg);
+  flex-shrink: 0;
+}
+.tr-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+}
+.tr-icon-success {
+  background: #dcfce7;
+  color: #16a34a;
+}
+.tr-icon-error {
+  background: #fef2f2;
+  color: #dc2626;
+}
+.tr-label {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.tr-summary {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64748b;
+  font-weight: 400;
+  font-size: 11px;
+}
+.tool-result-body {
+  max-height: 400px;
+  overflow-y: auto;
+}
+.tool-result-body pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #334155;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.tool-result-error .tool-result-body pre { color: #991b1b; }
+
+/* ===== 技能使用卡片（report_skill_result 专用） ===== */
+.skill-usage-card {
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 12px;
+}
+.skill-usage-card.skill-usage-success {
+  border: 1px solid #86efac;
+  background: #f0fdf4;
+}
+.skill-usage-card.skill-usage-fail {
+  border: 1px solid #fca5a5;
+  background: #fef2f2;
+}
+.skill-usage-card .tool-result-header {
+  border-bottom: none;
+}
+.skill-usage-card.skill-usage-success .tool-result-header {
+  background: #dcfce7;
+}
+.skill-usage-card.skill-usage-fail .tool-result-header {
+  background: #fee;
+}
+.skill-usage-badge {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+}
+.skill-usage-badge-ok {
+  background: #16a34a;
+  color: #fff;
+}
+.skill-usage-badge-fail {
+  background: #dc2626;
+  color: #fff;
+}
+.skill-usage-conf {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
 /* ===== 代码块 ===== */
 .code-message pre {
   background: #f6f8fa;

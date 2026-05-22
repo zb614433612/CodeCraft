@@ -1,29 +1,29 @@
 # 服务器配置
 server:
   # 服务器端口
-  port: 8080
-
+  port: 8084
 # Spring配置
 spring:
+  # 允许循环引用（AgentForkManager ↔ ToolExecutor 通过工具形成良性循环）
+  main:
+    allow-circular-references: true
   # 应用名称配置
   application:
     # 应用名称
-    name: agent-deepseek
+    name: CodeCraft
   # 激活 local profile，自动加载 application-local.yml（覆盖优先级高于本文件）
   # 如果没有 application-local.yml，项目会使用下方的默认值启动，但数据库连接会失败
   profiles:
     active: local
   # 数据源配置
   datasource:
-    # MySQL驱动类
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    # 数据库连接URL
-    url: 'jdbc:mysql://localhost:3306/agent_deepseek?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&verifyServerCertificate=false&nullCatalogMeansCurrent=true&useLegacyDatetimeCode=false'
-    # 数据库用户名
-    username: root
-    # 数据库密码——由 application-local.yml 覆盖（profile 优先级更高）
-    # 如未配置，请创建 application-local.yml 或在环境变量中设置 DB_PASSWORD
-    password: ${DB_PASSWORD:__MUST_CONFIGURE_DB_PASSWORD__}
+    # H2 内嵌数据库驱动
+    driver-class-name: org.h2.Driver
+    # H2 文件数据库（数据持久化到文件，重启不丢失）+ MySQL 兼容模式
+    url: 'jdbc:h2:file:./data/codecraft;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false;INIT=CREATE SCHEMA IF NOT EXISTS PUBLIC'
+    # H2 默认用户名/密码
+    username: sa
+    password:
     # Hikari连接池配置
     hikari:
       # 最大连接池大小
@@ -48,35 +48,17 @@ spring:
       mode: always
       # 建表出错时继续执行（表已存在时不中断）
       continue-on-error: true
-  # 数据存储配置（Redis）
-  data:
-    # Redis配置
-    redis:
-      # Redis主机地址——由 application-local.yml 覆盖
-      host: ${REDIS_HOST:__MUST_CONFIGURE_REDIS_HOST__}
-      # Redis端口
-      port: 6379
-      # Redis密码——由 application-local.yml 覆盖
-      password: ${REDIS_PASSWORD:__MUST_CONFIGURE_REDIS_PASSWORD__}
-      # Redis数据库索引
-      database: 0
-      # 连接超时时间
-      connect-timeout: 2000ms
-      # Lettuce连接池配置
-      lettuce:
-        # 连接池配置
-        pool:
-          # 是否启用连接池
-          enabled: true
-          # 最大连接数
-          max-size: 8
-          # 最小空闲连接数
-          min-idle: 0
+
   # 定时任务线程池配置
   task:
     scheduling:
       pool:
         size: 3
+  # 缓存配置（使用 Caffeine 本地缓存）
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=500,expireAfterWrite=1h
 
 # MyBatis配置
 mybatis:
@@ -126,7 +108,19 @@ delete-file:
     - build
     - .idea
   # 目录删除前警告阈值，超过此文件数会要求用户二次确认
-  delete-warning-threshold: 50
+  directory-deletion-warning-threshold: 20
+
+# 编辑文件工具后处理配置（EditFileTool）
+edit-file:
+  # 编辑后自动格式化配置
+  formatter:
+    enabled: true                    # 是否启用编辑后自动格式化
+    timeout: 30000                   # 格式化超时（毫秒）
+  # 编辑后自动诊断配置
+  diagnostic:
+    enabled: true                    # 是否启用编辑后自动诊断
+    level: fast                      # 诊断级别：fast（单文件快速检查）/ full（项目级编译检查）
+    timeout: 15000                   # 诊断超时（毫秒）
 
 # 网络工具统一配置（web_search / web_fetch / http_request / check_network）
 network-tool:
@@ -172,6 +166,18 @@ deepseek:
   default-model: deepseek-v4-pro
   # 思考模式：non-thinking / thinking / thinking_max
   thinking-mode: thinking
+  # 上下文最大 token 数（DeepSeek 模型为 1M）
+  max-context-tokens: 1000000
+  # 上下文智能压缩配置
+  compaction:
+    enabled: true              # 是否启用智能压缩
+    warning-threshold: 0.7     # 黄色预警阈值（token 用量 > 70% 时标记）
+    compact-threshold: 0.85    # 橙色压缩阈值（> 85% 时立即执行 LLM 压缩）
+    drop-threshold: 0.95       # 红色丢弃阈值（压缩后仍 > 95% 时执行滑动窗口丢弃）
+    protect-rounds: 2          # 保护带轮数（最近的 N 轮对话不压缩不丢弃）
+    batch-size: 10             # 每批压缩的最大轮数
+    model: ""                  # 压缩使用的模型（留空使用 default-model）
+    async-precompress: true    # 是否启用异步预压缩（请求完成后后台压缩，下次请求零延迟）
   # 附件上传配置
   upload:
     max-size: 5242880                              # 最大文件大小（5MB）
@@ -179,14 +185,6 @@ deepseek:
     image-extensions: .png,.jpg,.jpeg,.gif,.bmp,.webp,.ico
   # 提示词文件与工具组映射
   tool-groups:
-    "system_prompt.txt":
-      - "web_search"
-      - "web_fetch"
-      - "get_weather"
-      - "create_skill"
-      - "list_skills"
-      - "delete_skill"
-      - "report_skill_result"
     "code_agent_prompt.txt":
       - "web_search"
       - "web_fetch"
@@ -198,17 +196,14 @@ deepseek:
       - "read_project_tree"
       - "project_info"
       - "run_command"
-      - "run_background_command"
-      - "code_analysis"
+      - "run_server"
       - "ask_clarification"
       - "task_manager"
       - "check_network"
       - "execute_sql"
       - "delete_file"
       - "http_request"
-      - "read_process_output"
-      - "kill_process"
-      - "list_processes"
+      - "service_control"
       - "git_status"
       - "git_diff"
       - "git_log"
@@ -216,8 +211,8 @@ deepseek:
       - "git_commit"
       - "git_branch"
       - "git_push"
-      - "create_skill"
-      - "list_skills"
-      - "delete_skill"
+      - "manage_skill"
       - "report_skill_result"
-    "romantic_chat_agent_prompt.txt": []
+      - "fork_agent"
+      - "collect_agent"
+      - "inspect_agent"

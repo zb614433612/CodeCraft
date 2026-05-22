@@ -1,5 +1,5 @@
 import type { ApiResponse } from '@/store/user'
-import { getAuthHeaders } from '@/utils/http-client'
+import { getAuthHeaders, authFetch } from '@/utils/http-client'
 import { readSseStream } from '@/utils/sse-client'
 import type { StreamChatEvent } from '@/utils/sse-client'
 
@@ -9,21 +9,21 @@ export interface ChatRequest {
   message: string
   sessionId?: number
   promptFileName?: string
-  userProfileId?: number
   executionMode?: string
   projectRoot?: string
   model?: string
   thinkingMode?: string
+  turnId?: string
 }
 
 // 流式聊天的额外选项
 export interface StreamChatOptions {
   promptFileName?: string
-  userProfileId?: number
   executionMode?: string
   projectRoot?: string
   model?: string
   thinkingMode?: string
+  turnId?: string
 }
 
 // 聊天响应数据（非流式，用于创建会话等）
@@ -74,7 +74,6 @@ export async function* streamChat(
   console.log('调用真实API /api/deepseek/chat/stream，消息:', message, 'sessionId:', sessionId, 'options:', options)
 
   const controller = abortController ?? new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30秒超时
 
   const requestBody: ChatRequest = { message }
   if (sessionId !== undefined) {
@@ -82,9 +81,6 @@ export async function* streamChat(
   }
   if (options?.promptFileName) {
     requestBody.promptFileName = options.promptFileName
-  }
-  if (options?.userProfileId !== undefined) {
-    requestBody.userProfileId = options.userProfileId
   }
   if (options?.executionMode) {
     requestBody.executionMode = options.executionMode
@@ -98,6 +94,9 @@ export async function* streamChat(
   if (options?.thinkingMode) {
     requestBody.thinkingMode = options.thinkingMode
   }
+  if (options?.turnId) {
+    requestBody.turnId = options.turnId
+  }
 
   try {
     yield* readSseStream('/api/deepseek/chat/stream', {
@@ -106,7 +105,6 @@ export async function* streamChat(
       signal: controller.signal
     })
   } catch (error: any) {
-    clearTimeout(timeoutId)
 
     if (error.name === 'AbortError' && abortController) {
       throw new Error('__USER_ABORT__')
@@ -122,7 +120,6 @@ export async function* streamChat(
 
     throw error
   } finally {
-    clearTimeout(timeoutId)
   }
 }
 
@@ -141,10 +138,7 @@ export async function checkActiveTask(conversationId: number): Promise<{
   pendingQuestionText?: string
 }> {
   try {
-    const authHeader = await getAuthHeaders()
-    const response = await fetch(`/api/deepseek/task/${conversationId}`, {
-      headers: { ...authHeader }
-    })
+    const response = await authFetch(`/api/deepseek/task/${conversationId}`)
     return await response.json()
   } catch (e) {
     console.warn('检查活跃任务失败:', e)
@@ -177,10 +171,8 @@ export async function* taskStream(
  */
 export async function cancelTask(conversationId: number): Promise<boolean> {
   try {
-    const authHeader = await getAuthHeaders()
-    const res = await fetch(`/api/deepseek/task/${conversationId}/cancel`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeader }
+    const res = await authFetch(`/api/deepseek/task/${conversationId}/cancel`, {
+      method: 'POST'
     })
     return res.ok
   } catch (e) {
@@ -210,6 +202,7 @@ export async function uploadAttachment(file: File): Promise<FileUploadResult> {
   const formData = new FormData()
   formData.append('file', file)
 
+  // uploadAttachment 使用 FormData，不能设置 Content-Type（让浏览器自动设 multipart boundary）
   const authHeader = await getAuthHeaders()
 
   const response = await fetch('/api/deepseek/upload', {

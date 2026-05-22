@@ -1,11 +1,40 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
 
 const DEV_MODE = process.env.DEV_MODE === 'true'
-const PORT = 8080
+
+/**
+ * 获取后端服务端口
+ * 优先级：环境变量 SERVER_PORT > application.yml 配置 > 默认值 8084
+ * 这样修改后端 application.yml 中的端口后，Electron 会自动跟随，无需同步修改此处
+ */
+function getBackendPort() {
+  // 1. 优先使用环境变量（打包部署时可用此方式覆盖）
+  if (process.env.SERVER_PORT) {
+    return parseInt(process.env.SERVER_PORT, 10)
+  }
+  // 2. 尝试从 application.yml 读取（开发环境）
+  try {
+    const configPath = path.join(__dirname, '..', 'src', 'main', 'resources', 'application.yml')
+    if (fs.existsSync(configPath)) {
+      const content = fs.readFileSync(configPath, 'utf-8')
+      // 精确匹配 server: 块下的 port，避免匹配到 redis/milvus 等其他配置的 port
+      const match = content.match(/^server:\s*\n\s+port:\s*(\d+)/m)
+      if (match) {
+        return parseInt(match[1], 10)
+      }
+    }
+  } catch (e) {
+    console.warn('读取 application.yml 失败，使用默认端口:', e.message)
+  }
+  // 3. 默认值
+  return 8084
+}
+
+const PORT = getBackendPort()
 const BACKEND_URL = `http://localhost:${PORT}`
 
 let mainWindow = null
@@ -61,10 +90,10 @@ function findJava() {
 function getJarPath() {
   if (app.isPackaged) {
     // 打包后 extraResources 位于 resources/ 目录下
-    return path.join(process.resourcesPath, 'backend', 'agent-deepseek.jar')
+    return path.join(process.resourcesPath, 'backend', 'codecraft.jar')
   }
   // 开发环境
-  return path.join(__dirname, '..', 'target', 'agent-deepseek-0.0.1-SNAPSHOT.jar')
+  return path.join(__dirname, '..', 'target', 'codecraft-0.0.1-SNAPSHOT.jar')
 }
 
 /**
@@ -76,7 +105,7 @@ function startBackend() {
 
   console.log(`启动后端服务: ${jarPath}`)
   console.log(`Java 路径: ${javaCmd}`)
-  javaProcess = spawn(javaCmd, ['-jar', jarPath], {
+  javaProcess = spawn(javaCmd, ['-Dfile.encoding=UTF-8', '-jar', jarPath], {
     cwd: path.dirname(jarPath),
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -104,6 +133,9 @@ function startBackend() {
  * 创建主窗口
  */
 function createWindow() {
+  // 移除默认菜单栏
+  Menu.setApplicationMenu(null)
+  
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -114,8 +146,8 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js')
     },
-    title: 'zb-agent',
-    icon: path.join(__dirname, '..', 'frontend', 'public', 'favicon.svg'),
+    title: 'CodeCraft',
+    icon: path.join(__dirname, 'icon.png'),
     show: false
   })
 

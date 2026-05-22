@@ -243,7 +243,7 @@ const onFinish = async (values: any) => {
     console.log('用户信息:', loginResponse.data)
 
     // 6. 跳转到目标页面或首页
-    const redirectPath = route.query.redirect as string || '/ai-assistant'
+    const redirectPath = route.query.redirect as string || '/code-assistant'
     router.push(redirectPath)
 
   } catch (error: any) {

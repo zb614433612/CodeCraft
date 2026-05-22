@@ -110,9 +110,7 @@ function confidenceClass(confidence: number): string {
 
 function agentLabel(agentType: string): string {
   const labels: Record<string, string> = {
-    code_assistant: '编码助手',
-    ai_assistant: 'AI 助手',
-    chat_assistant: '聊天助手'
+    code_assistant: '编码助手'
   }
   return labels[agentType] || agentType
 }

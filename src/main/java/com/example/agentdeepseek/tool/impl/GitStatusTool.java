@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +19,7 @@ import java.util.List;
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.READ, description = "查看Git状态")
 public class GitStatusTool implements Tool {
 
     private final GitCommandExecutor gitExecutor;
@@ -34,14 +37,17 @@ public class GitStatusTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "查看 Git 仓库状态，显示当前分支和文件变更列表（修改/新增/删除/未跟踪）";
+        return "【适用场景】查看工作区/暂存区有哪些文件发生变更，是 Git 操作的第一步（所有提交前的必经之路）\n"
+                + "【与 git_diff 区别】git_status 只看文件名和状态（改/增/删/未跟踪），不显示具体改了什么；需要看具体改动内容请用 git_diff\n"
+                + "【使用方式】直接调用，无需参数。返回当前分支名 + 按「已暂存/工作区变更/未跟踪」三区分类的文件列表\n"
+                + "【建议】提交前始终先调用本工具确认要提交的文件范围";
     }
 
     @Override
     public JsonNode getParameters() {
         ObjectNode parameters = objectMapper.createObjectNode();
         parameters.put("type", "object");
-        parameters.put("description", "无需参数");
+        parameters.put("description", "【无参数】直接调用即可。返回当前分支名 + 三区（暂存/工作区/未跟踪）文件列表，带变更统计信息");
         parameters.set("properties", objectMapper.createObjectNode());
         return parameters;
     }
@@ -58,7 +64,7 @@ public class GitStatusTool implements Tool {
         GitCommandExecutor.GitResult statusResult = gitExecutor.execute(projectRoot,
                 "status", "--porcelain", "--branch");
         if (!statusResult.success()) {
-            return "错误：获取 git 状态失败 - " + statusResult.output();
+            return "【Git 错误】git status 执行失败，请确认项目路径是有效的 Git 仓库（可手动运行 git status 验证）。Git 返回信息：" + statusResult.output();
         }
 
         String raw = statusResult.output();

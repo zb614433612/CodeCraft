@@ -3,18 +3,52 @@ import { getAuthHeaders } from './http-client'
 // ============================================================
 // 流式聊天响应的事件类型
 // ============================================================
+export interface SkillMatchInfo {
+  id: number
+  name: string
+  confidence: number
+  usageCount: number
+  triggerWords: string
+  description: string
+}
+
 export type StreamChatEvent = {
   type: 'thinking' | 'content' | 'complete' | 'resume'
   data: string
   sessionId?: number
 } | {
   type: 'ask_user'
-  data: { uuid: string; question: string }
+  data: { uuid: string; question: string; askType?: string }
+  sessionId?: number
+} | {
+  type: 'skill_match'
+  data: SkillMatchInfo[]
+  sessionId?: number
+} | {
+  type: 'agent_event'
+  data: AgentStreamEvent
   sessionId?: number
 } | {
   type: 'error'
   data: string
   sessionId?: number
+}
+
+/**
+ * 子Agent流式事件（与SSE事件格式对应）
+ */
+export interface AgentStreamEvent {
+  event: 'agent_forked' | 'agent_thinking' | 'agent_tool_call'
+       | 'agent_status' | 'agent_completed' | 'agent_skill_match'
+  agent_id: string
+  name?: string
+  status?: string
+  tool_name?: string
+  file_path?: string
+  result?: string
+  reasoning_content?: string
+  skills?: SkillMatchInfo[]
+  summary?: string
 }
 
 // ============================================================
@@ -37,7 +71,19 @@ export class SseParser {
       }
       // 处理 ask_user 事件
       if (parsed.event === 'ask_user') {
-        return { type: 'ask_user', data: { uuid: parsed.uuid, question: parsed.question }, sessionId: this.sessionId }
+        return { type: 'ask_user', data: { uuid: parsed.uuid, question: parsed.question, askType: parsed.askType }, sessionId: this.sessionId }
+      }
+      // 处理 skill_match 事件
+      if (parsed.event === 'skill_match') {
+        return { type: 'skill_match', data: parsed.skills || [], sessionId: this.sessionId }
+      }
+      // 处理子Agent事件（agent_forked / agent_thinking / agent_tool_call 等）
+      if (typeof parsed.event === 'string' && parsed.event.startsWith('agent_')) {
+        return {
+          type: 'agent_event',
+          data: parsed as AgentStreamEvent,
+          sessionId: this.sessionId
+        }
       }
       // 处理 resume 事件
       if (parsed.event === 'resume') {
@@ -62,6 +108,10 @@ export class SseParser {
         return { type: 'content', data: parsed.content, sessionId: this.sessionId }
       } else if (typeof parsed === 'string') {
         return { type: 'content', data: parsed, sessionId: this.sessionId }
+      } else if (this.sessionId !== undefined && Object.keys(parsed).length <= 2 && 'sessionId' in parsed) {
+        // 纯 sessionId 事件（后端在第一个事件中发送的真实会话 ID）
+        // 返回一个空 content 事件将 sessionId 传递给上层，不要丢弃
+        return { type: 'content', data: '', sessionId: this.sessionId }
       } else {
         return null
       }
@@ -186,8 +236,22 @@ export async function* readSseStream(
 
   try {
     while (true) {
+      // 检查是否已被用户中止（AbortController.abort()）
+      // 注意：reader.read() 在某些环境中不会因 signal abort 而抛错，
+      // 所以需要显式检查 signal.aborted 来确保取消生效
+      if (signal?.aborted) {
+        await reader.cancel()
+        throw new DOMException('The operation was aborted', 'AbortError')
+      }
+
       const { done, value } = await reader.read()
       if (done) break
+
+      // 读取到数据后再检查一次（避免在 reader.read() 阻塞期间 abort 但未抛错）
+      if (signal?.aborted) {
+        await reader.cancel()
+        throw new DOMException('The operation was aborted', 'AbortError')
+      }
 
       buffer += decoder.decode(value, { stream: true })
 

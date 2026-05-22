@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e293b"/>
+      <stop offset="100%" style="stop-color:#0f172a"/>
+    </linearGradient>
+    <linearGradient id="cGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#38bdf8"/>
+      <stop offset="100%" style="stop-color:#6366f1"/>
+    </linearGradient>
+    <linearGradient id="dotGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#22d3ee"/>
+      <stop offset="100%" style="stop-color:#3b82f6"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="url(#bgGrad)"/>
+  <g opacity="0.12">
+    <circle cx="128" cy="128" r="72" stroke="#38bdf8" stroke-width="2" stroke-dasharray="6 8"/>
+    <circle cx="128" cy="128" r="84" stroke="#6366f1" stroke-width="1.5" stroke-dasharray="4 10"/>
+  </g>
+  <g transform="translate(48, 44)">
+    <path d="M120 20 C80 20 40 50 40 96 C40 130 60 156 80 168" 
+          stroke="url(#cGrad)" stroke-width="14" stroke-linecap="round" fill="none"/>
+    <path d="M80 168 C90 174 100 178 110 180" 
+          stroke="url(#cGrad)" stroke-width="14" stroke-linecap="round" fill="none"/>
+    <line x1="40" y1="96" x2="110" y2="96" 
+          stroke="url(#cGrad)" stroke-width="14" stroke-linecap="round"/>
+    <circle cx="50" cy="62" r="6" fill="url(#dotGrad)"/>
+    <circle cx="50" cy="130" r="6" fill="url(#dotGrad)"/>
+  </g>
+  <line x1="148" y1="172" x2="170" y2="188" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" opacity="0.3"/>
+  <line x1="158" y1="172" x2="180" y2="188" stroke="#6366f1" stroke-width="3" stroke-linecap="round" opacity="0.2"/>
+</svg>

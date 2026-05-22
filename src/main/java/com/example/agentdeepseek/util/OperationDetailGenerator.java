@@ -1,9 +1,10 @@
 package com.example.agentdeepseek.util;
 
+import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -12,24 +13,24 @@ import java.util.List;
 
 /**
  * 操作详情生成器
- * 从受限工具的参数中生成格式化 markdown 文本，注入到 thinking 流中展示给用户
+ * 从受限工具的参数中生成格式化 markdown 文本，注入到 thinking 流中展示给用户。
+ * 权限判断委托给 ToolPermissionRegistry（统一来源）。
  */
 @Slf4j
+@Component
 public class OperationDetailGenerator {
 
-    /** 受限工具名称列表 */
-    public static final List<String> RESTRICTED_TOOLS = List.of(
-            "write_file", "edit_file", "delete_file",
-            "run_command", "run_background_command",
-            "execute_sql", "kill_process",
-            "git_add", "git_commit", "git_push"
-    );
+    private final ToolPermissionRegistry permissionRegistry;
+
+    public OperationDetailGenerator(ToolPermissionRegistry permissionRegistry) {
+        this.permissionRegistry = permissionRegistry;
+    }
 
     /**
-     * 判断工具是否需要审查
+     * 判断工具是否需要审查（委托给权限注册中心）
      */
-    public static boolean isRestricted(String toolName) {
-        return RESTRICTED_TOOLS.contains(toolName);
+    public boolean isRestricted(String toolName) {
+        return permissionRegistry.requiresDataApproval(toolName);
     }
 
     /**
@@ -39,16 +40,16 @@ public class OperationDetailGenerator {
      * @param arguments 工具参数 JSON
      * @return 格式化的 markdown 文本，如果无需生成则返回 null
      */
-    public static String generate(String toolName, JsonNode arguments) {
+    public String generate(String toolName, JsonNode arguments) {
         if (arguments == null) return null;
         return switch (toolName) {
             case "write_file" -> generateWriteFile(arguments);
             case "edit_file" -> generateEditFile(arguments);
             case "delete_file" -> generateDeleteFile(arguments);
             case "run_command" -> generateRunCommand(arguments, "💻 执行命令");
-            case "run_background_command" -> generateRunCommand(arguments, "💻 后台执行命令");
+            case "run_server" -> generateRunCommand(arguments, "🚀 启动服务");
             case "execute_sql" -> generateExecuteSql(arguments);
-            case "kill_process" -> generateKillProcess(arguments);
+            case "service_control" -> generateServiceControl(arguments);
             case "git_add" -> generateGitAdd(arguments);
             case "git_commit" -> generateGitCommit(arguments);
             case "git_push" -> generateGitPush(arguments);
@@ -73,7 +74,7 @@ public class OperationDetailGenerator {
             if (Files.exists(path)) {
                 exists = true;
                 try {
-                    oldContent = Files.readString(path, StandardCharsets.UTF_8);
+                    oldContent = FileEncodingDetector.readString(path);
                 } catch (Exception e) {
                     log.debug("读取原文件失败: {}", e.getMessage());
                 }
@@ -99,38 +100,16 @@ public class OperationDetailGenerator {
 
     private static String generateEditFile(JsonNode args) {
         String filePath = args.path("file_path").asText("");
-        String pattern = args.path("pattern").asText("");
-        String mode = args.path("mode").asText("regex");
-        String replacement = args.path("replacement").asText("");
+        String oldText = args.path("old_text").asText("");
+        String newText = args.path("new_text").asText("");
         if (filePath.isEmpty()) return null;
 
         StringBuilder sb = new StringBuilder();
         sb.append("> **📄 编辑文件:** `").append(filePath).append("`\n\n");
 
-        if ("line".equals(mode)) {
-            int startLine = args.path("start_line").asInt(0);
-            int endLine = args.path("end_line").asInt(0);
-            sb.append("> **模式:** line");
-            if (startLine > 0) {
-                sb.append(" | 行 ");
-                if (endLine > 0 && endLine != startLine) {
-                    sb.append(startLine).append("~").append(endLine);
-                } else {
-                    sb.append(startLine);
-                }
-            }
-            sb.append("\n\n");
-            sb.append("**替换为:**\n\n```\n").append(truncateContent(replacement)).append("\n```\n\n");
-        } else {
-            boolean multiline = args.path("multiline").asBoolean(false);
-            if (multiline) {
-                sb.append("> 多行模式 | ");
-            }
-
-            // 显示 pattern 和 replacement 的对比
-            sb.append("**匹配模式:**\n\n```\n").append(truncateContent(pattern)).append("\n```\n\n");
-            sb.append("**替换为:**\n\n```\n").append(truncateContent(replacement)).append("\n```\n\n");
-        }
+        sb.append("```diff\n");
+        sb.append(generateDiff(oldText, newText));
+        sb.append("\n```\n\n");
 
         return sb.toString();
     }
@@ -189,19 +168,31 @@ public class OperationDetailGenerator {
         return "> **🗄️ SQL " + label + "**\n\n```sql\n" + sql + "\n```\n\n";
     }
 
-    private static String generateKillProcess(JsonNode args) {
-        int pid = args.path("pid").asInt(0);
-        String name = args.path("name").asText("");
-        if (pid == 0 && name.isEmpty()) return null;
+    private static String generateServiceControl(JsonNode args) {
+        String action = args.path("action").asText("");
+        if (action.isEmpty()) return null;
 
         StringBuilder sb = new StringBuilder();
-        sb.append("> **⛔ 终止进程**\n\n");
-        if (pid > 0) sb.append("PID: ").append(pid);
-        if (!name.isEmpty()) {
-            if (pid > 0) sb.append(" | ");
-            sb.append("名称: ").append(name);
+        switch (action) {
+            case "list" -> sb.append("> **📋 列出后台服务**\n\n");
+            case "logs" -> {
+                int serviceId = args.path("service_id").asInt(0);
+                int tail = args.path("tail").asInt(0);
+                sb.append("> **📜 查看服务日志** #").append(serviceId);
+                if (tail > 0) sb.append(" (最后 ").append(tail).append(" 行)");
+                sb.append("\n\n");
+            }
+            case "stop" -> {
+                int serviceId = args.path("service_id").asInt(0);
+                boolean force = args.path("force").asBoolean(true);
+                sb.append("> **⛔ 停止服务** #").append(serviceId);
+                sb.append(force ? " (强制)" : " (优雅)");
+                sb.append("\n\n");
+            }
+            default -> {
+                return null;
+            }
         }
-        sb.append("\n\n");
         return sb.toString();
     }
 
@@ -251,7 +242,7 @@ public class OperationDetailGenerator {
                 }
                 // 输出所有新行（+）
                 while (ni < newLines.length
-                        && (oi >= oldLines.length || !oldLines[ni].equals(newLines[oi]))) {
+                        && (oi >= oldLines.length || !oldLines[oi].equals(newLines[ni]))) {
                     diffLines.add("+" + newLines[ni]);
                     ni++;
                 }

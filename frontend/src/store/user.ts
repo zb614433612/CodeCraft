@@ -17,7 +17,8 @@ export interface UserInfo {
   avatar?: string
   email?: string
   phone?: string
-  roles?: string[]
+  role?: string // 用户角色：admin=管理员, user=普通用户
+  roles?: string[] // 兼容多角色模式
   permissions?: string[]
   token?: string // 登录令牌
   expire?: number // 令牌过期时间（秒）
@@ -59,7 +60,7 @@ export interface UserActions {
   saveLoginResponse(response: ApiResponse<UserInfo>): void
 }
 
-export const useUserStore = defineStore<'user', UserState, {}, UserActions>('user', {
+export const useUserStore = defineStore('user', {
   state: (): UserState => ({
     // 用户信息
     userInfo: null,
@@ -83,7 +84,15 @@ export const useUserStore = defineStore<'user', UserState, {}, UserActions>('use
     // 获取随机码
     getRandomCode: (state) => state.randomCode,
     // 获取记住的用户名
-    getRememberedUsername: (state) => state.rememberedUsername
+    getRememberedUsername: (state) => state.rememberedUsername,
+    // 判断是否为管理员
+    isAdmin(): boolean {
+      if (!this.userInfo) return false
+      // 优先检查 role 字段（单角色），其次检查 roles 数组
+      return this.userInfo.role === 'admin' ||
+        (this.userInfo.roles && this.userInfo.roles.includes('admin')) ||
+        false
+    }
   },
 
   actions: {
@@ -145,7 +154,6 @@ export const useUserStore = defineStore<'user', UserState, {}, UserActions>('use
         if (userData.token) {
           this.setToken(userData.token)
         }
-        // 如果需要，也可以保存expire等信息
         if (import.meta.env.DEV) {
           console.log('登录响应数据已保存:', mappedUserInfo)
         }
@@ -153,6 +161,6 @@ export const useUserStore = defineStore<'user', UserState, {}, UserActions>('use
     }
   },
 
-  // 持久化配置（如果需要）
+  // 持久化配置
   persist: true
 })

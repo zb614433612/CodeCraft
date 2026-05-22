@@ -1,7 +1,7 @@
 {
-  "name": "zb-agent-desktop",
+  "name": "codecraft-desktop",
   "version": "1.0.0",
-  "description": "zb-agent 桌面应用（Electron）",
+  "description": "CodeCraft 桌面应用（Electron）",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -10,19 +10,21 @@
     "dist": "npm install electron-builder && electron-builder"
   },
   "build": {
-    "appId": "com.zb.agent",
-    "productName": "zb-agent",
+    "appId": "com.codecraft.app",
+    "productName": "CodeCraft",
     "directories": {
       "output": "release"
     },
     "files": [
       "main.js",
-      "package.json"
+      "package.json",
+      "icon.png"
     ],
+    "icon": "icon.ico",
     "extraResources": [
       {
-        "from": "../target/agent-deepseek-0.0.1-SNAPSHOT.jar",
-        "to": "backend/agent-deepseek.jar"
+        "from": "../target/codecraft-0.0.1-SNAPSHOT.jar",
+        "to": "backend/codecraft.jar"
       },
       {
         "from": "jre",
@@ -44,7 +46,9 @@
     }
   },
   "dependencies": {
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "electron": "^33.0.0",

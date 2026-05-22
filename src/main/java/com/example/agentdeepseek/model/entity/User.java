@@ -34,6 +34,31 @@ public class User {
     private String nickname;
 
     /**
+     * 角色：admin=管理员, user=普通用户
+     */
+    private String role;
+
+    /**
+     * 邮箱
+     */
+    private String email;
+
+    /**
+     * 手机号
+     */
+    private String phone;
+
+    /**
+     * 头像URL
+     */
+    private String avatar;
+
+    /**
+     * 状态：1=启用, 0=禁用
+     */
+    private Integer status;
+
+    /**
      * 创建时间
      */
     private LocalDateTime createTime;
@@ -53,6 +78,8 @@ public class User {
         this.username = username;
         this.password = password;
         this.nickname = nickname;
+        this.role = "user";
+        this.status = 1;
         this.createTime = LocalDateTime.now();
         this.updateTime = LocalDateTime.now();
     }

@@ -3,6 +3,7 @@ package com.example.agentdeepseek.service.impl;
 import com.example.agentdeepseek.model.vo.DirectoryEntry;
 import com.example.agentdeepseek.model.vo.ProjectTreeNode;
 import com.example.agentdeepseek.service.ProjectService;
+import com.example.agentdeepseek.util.FileEncodingDetector;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -35,28 +36,25 @@ public class ProjectServiceImpl implements ProjectService {
         "src/main/resources/static"
     );
 
-    /** 当前根目录，用于计算相对路径 */
-    private String currentRootPath = "";
-
     @Override
     public ProjectTreeNode getProjectTree(String rootPath, int depth) {
         if (rootPath == null || rootPath.trim().isEmpty()) {
             rootPath = System.getProperty("user.dir");
         }
         // 标准化路径分隔符
-        currentRootPath = rootPath.replace('\\', '/');
-        if (currentRootPath.endsWith("/")) {
-            currentRootPath = currentRootPath.substring(0, currentRootPath.length() - 1);
+        String root = rootPath.replace('\\', '/');
+        if (root.endsWith("/")) {
+            root = root.substring(0, root.length() - 1);
         }
-        log.debug("扫描项目文件树，根目录: {}, 深度: {}", currentRootPath, depth);
-        return buildNode(new File(currentRootPath), depth, 0);
+        log.debug("扫描项目文件树，根目录: {}, 深度: {}", root, depth);
+        return buildNode(new File(root), root, depth, 0);
     }
 
     /**
      * 递归构建树节点
      */
-    private ProjectTreeNode buildNode(File file, int maxDepth, int currentDepth) {
-        String relPath = getRelativePath(file);
+    private ProjectTreeNode buildNode(File file, String rootPath, int maxDepth, int currentDepth) {
+        String relPath = getRelativePath(file, rootPath);
         ProjectTreeNode node = new ProjectTreeNode();
         node.setName(file.getName());
         node.setPath(relPath);
@@ -75,8 +73,8 @@ public class ProjectServiceImpl implements ProjectService {
 
                 List<ProjectTreeNode> childNodes = new ArrayList<>();
                 for (File child : children) {
-                    if (shouldInclude(child)) {
-                        childNodes.add(buildNode(child, maxDepth, currentDepth + 1));
+                    if (shouldInclude(child, rootPath)) {
+                        childNodes.add(buildNode(child, rootPath, maxDepth, currentDepth + 1));
                     }
                 }
                 if (!childNodes.isEmpty()) {
@@ -91,14 +89,14 @@ public class ProjectServiceImpl implements ProjectService {
     /**
      * 判断文件/目录是否应该包含在树中
      */
-    private boolean shouldInclude(File file) {
+    private boolean shouldInclude(File file, String rootPath) {
         String name = file.getName();
         // 排除黑名单名称（如 .git、node_modules 等）
         if (EXCLUDED_NAMES.contains(name)) {
             return false;
         }
         // 排除黑名单路径前缀
-        String relPath = getRelativePath(file);
+        String relPath = getRelativePath(file, rootPath);
         for (String prefix : EXCLUDED_PREFIXES) {
             if (relPath.startsWith(prefix)) {
                 return false;
@@ -138,7 +136,7 @@ public class ProjectServiceImpl implements ProjectService {
         }
         List<DirectoryEntry> result = new ArrayList<>();
         for (File f : files) {
-            if (f.isDirectory() && shouldInclude(f)) {
+            if (f.isDirectory() && shouldInclude(f, parentPath)) {
                 String childPath = f.getAbsolutePath().replace('\\', '/');
                 result.add(new DirectoryEntry(f.getName(), childPath));
             }
@@ -159,11 +157,10 @@ public class ProjectServiceImpl implements ProjectService {
             Path path = Paths.get(filePath);
             if (!path.isAbsolute()) {
                 // 相对路径，基于项目根目录
-                path = Paths.get(currentRootPath, filePath);
+                path = Paths.get(System.getProperty("user.dir"), filePath);
             }
             log.debug("读取文件: {}", path);
-            byte[] bytes = Files.readAllBytes(path);
-            return new String(bytes, StandardCharsets.UTF_8);
+            return FileEncodingDetector.readString(path);
         } catch (java.io.IOException e) {
             log.error("读取文件失败: {}", filePath, e);
             throw new RuntimeException("读取文件失败: " + e.getMessage());
@@ -178,7 +175,7 @@ public class ProjectServiceImpl implements ProjectService {
         try {
             Path path = Paths.get(filePath);
             if (!path.isAbsolute()) {
-                path = Paths.get(currentRootPath, filePath);
+                path = Paths.get(System.getProperty("user.dir"), filePath);
             }
             log.debug("写入文件: {}", path);
             // 确保父目录存在
@@ -193,13 +190,13 @@ public class ProjectServiceImpl implements ProjectService {
     /**
      * 获取文件相对于项目根目录的路径
      */
-    private String getRelativePath(File file) {
+    private String getRelativePath(File file, String rootPath) {
         String absPath = file.getAbsolutePath().replace('\\', '/');
-        if (!absPath.startsWith(currentRootPath)) {
-            log.warn("文件路径不在项目根目录下: absPath={}, root={}", absPath, currentRootPath);
+        if (!absPath.startsWith(rootPath)) {
+            log.warn("文件路径不在项目根目录下: absPath={}, root={}", absPath, rootPath);
             return absPath;
         }
-        String relPath = absPath.substring(currentRootPath.length());
+        String relPath = absPath.substring(rootPath.length());
         if (relPath.startsWith("/")) {
             relPath = relPath.substring(1);
         }

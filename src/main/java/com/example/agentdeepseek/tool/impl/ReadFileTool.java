@@ -1,35 +1,41 @@
 package com.example.agentdeepseek.tool.impl;
-import com.example.agentdeepseek.util.ProjectRootContext;
 
 import com.example.agentdeepseek.tool.Tool;
+import com.example.agentdeepseek.tool.impl.readfile.FileReadEngine;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
+import com.example.agentdeepseek.tool.impl.readfile.FileNotFoundHandler;
+import com.example.agentdeepseek.tool.impl.readfile.FileOutputFormatter;
+import com.example.agentdeepseek.util.FileEncodingDetector;
+import com.example.agentdeepseek.util.ProjectRootContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.*;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
-import java.nio.charset.*;
+import java.io.IOException;
+import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * 读取文件工具
- * 支持行范围读取、分页读取和自动编码检测
+ * <p>
+ * 基于流式读取引擎实现，支持行范围读取、分页读取和自动编码检测。
+ * 优化特性：
+ * - P0: 流式读取（Files.lines），大文件 OOM 防护
+ * - P1: 单行截断（2000 字符），防上下文污染
+ * - P1: 模糊文件名建议（Levenshtein），LLM 友好
+ * - P2: 输出大小硬限制（100KB），防上下文溢出
+ * - P3: 结构化输出格式，LLM 解析更准
+ * - 新增目录读取支持
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.READ, isPathSensitive = true, description = "读取文件内容")
 public class ReadFileTool implements Tool {
-
-    private static final int DEFAULT_PAGE_SIZE = 50;
-    private static final int MAX_LINE_LENGTH = 100000; // 单行最大字符数，防止超大行内存溢出
-    private static final long MAX_FILE_SIZE = 100 * 1024 * 1024; // 最大读取文件大小 100MB
-    private static final double BINARY_NULL_THRESHOLD = 0.05; // 空字节比例超过此阈值视为二进制文件
 
     private final ObjectMapper objectMapper;
 
@@ -44,8 +50,21 @@ public class ReadFileTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "读取指定文件的内容，支持行范围读取（start_line/end_line）和分页读取（page/page_size）。"
-                + "自动检测文件编码（UTF-8/GBK 等）。用于查看源代码、配置文件、日志等各类文件";
+        return "读取文件内容或列出目录，返回带行号的内容。\n"
+                + "【适用场景】\n"
+                + "  - 阅读源代码、配置文件了解项目逻辑\n"
+                + "  - 查看日志、输出等文本文件\n"
+                + "  - 列出目录内容（传入目录路径即可）\n"
+                + "【读取方式】\n"
+                + "  - 不指定行范围：读取前2000行（默认）\n"
+                + "  - start_line + end_line：读取指定行范围（适合定位到具体代码段）\n"
+                + "  - page + page_size：分页读取（适合大文件）\n"
+                + "  注意：行范围和分页不能同时使用，同时指定时行范围优先\n"
+                + "【与 glob_files/grep_search 的区别】\n"
+                + "  - read_file: 读取已知文件的【具体内容】\n"
+                + "  - glob_files: 按文件名模式【找文件】\n"
+                + "  - grep_search: 按内容模式【搜文件】\n"
+                + "  - 标准流程：glob/grep 找到文件 → read_file 读内容";
     }
 
     @Override
@@ -55,26 +74,36 @@ public class ReadFileTool implements Tool {
 
         ObjectNode properties = objectMapper.createObjectNode();
 
+        // file_path - 必填
         ObjectNode filePath = objectMapper.createObjectNode();
         filePath.put("type", "string");
-        filePath.put("description", "文件路径，相对于项目根目录的路径或绝对路径");
+        filePath.put("description", "【必填】文件或目录路径。\n"
+                + "支持相对路径（如 'src/main/App.java'）或绝对路径。\n"
+                + "传入目录路径时列出目录内容");
         properties.set("file_path", filePath);
 
+        // start_line - 可选，行范围起始
         ObjectNode startLine = objectMapper.createObjectNode();
         startLine.put("type", "integer");
-        startLine.put("description", "起始行号（从1开始），与end_line配合使用");
+        startLine.put("description", "【可选】起始行号（从1开始），与 end_line 配合使用。\n"
+                + "不指定则从第1行开始。适合读取代码中特定区域");
         properties.set("start_line", startLine);
 
+        // end_line - 可选，行范围结束
         ObjectNode endLine = objectMapper.createObjectNode();
         endLine.put("type", "integer");
-        endLine.put("description", "结束行号，与start_line配合使用");
+        endLine.put("description", "【可选】结束行号（包含该行），与 start_line 配合使用。\n"
+                + "注意：与 page/page_size 互斥，同时指定时行范围优先");
         properties.set("end_line", endLine);
 
+        // page - 可选，分页
         ObjectNode page = objectMapper.createObjectNode();
         page.put("type", "integer");
-        page.put("description", "页码（从1开始），与page_size配合使用");
+        page.put("description", "【可选】页码（从1开始），与 page_size 配合使用实现分页读取。\n"
+                + "不指定任何参数时默认读取前2000行");
         properties.set("page", page);
 
+        // page_size - 可选，每页行数
         ObjectNode pageSize = objectMapper.createObjectNode();
         pageSize.put("type", "integer");
         pageSize.put("description", "每页行数，默认50");
@@ -89,268 +118,101 @@ public class ReadFileTool implements Tool {
     public String execute(JsonNode arguments) {
         String filePathStr = arguments.path("file_path").asText();
         if (filePathStr.isEmpty()) {
-            return "错误：缺少必要参数 file_path";
+            return "【缺少参数】请提供 file_path 参数。\n"
+                    + "示例：file_path='src/main/App.java' 或 file_path='pom.xml'";
         }
 
-        Path filePath;
-        try {
-            filePath = resolvePath(filePathStr);
-        } catch (SecurityException e) {
-            return "错误：" + e.getMessage();
-        }
+        // 解析路径
+        Path filePath = resolvePath(filePathStr);
+
+        // 检查路径是否存在
         if (!Files.exists(filePath)) {
-            return "错误：文件不存在 - " + filePath.toAbsolutePath();
+            // --- P1: 模糊文件名建议 ---
+            Path searchDir = filePath.getParent();
+            if (searchDir == null) searchDir = Paths.get(ProjectRootContext.get());
+            String suggestion = FileNotFoundHandler.suggest(filePath, searchDir);
+            if (suggestion != null) {
+                return suggestion;
+            }
+            return "【文件不存在】" + filePath.toAbsolutePath() + "\n"
+                    + "建议：先用 glob_files 搜索文件名，或用 read_project_tree 了解项目结构";
         }
-        if (!Files.isRegularFile(filePath)) {
-            return "错误：路径不是文件 - " + filePath.toAbsolutePath();
-        }
+
+        // 检查可读性
         if (!Files.isReadable(filePath)) {
-            return "错误：文件不可读 - " + filePath.toAbsolutePath();
+            return "错误：路径不可读 - " + filePath.toAbsolutePath();
         }
 
         try {
-            // 检查文件大小
-            long fileSize = Files.size(filePath);
-            if (fileSize > MAX_FILE_SIZE) {
-                return "错误：文件太大（" + fileSize + " 字节），超过最大限制 " + MAX_FILE_SIZE + " 字节";
+            // --- 目录读取支持 ---
+            if (Files.isDirectory(filePath)) {
+                var dirResult = FileReadEngine.readDirectory(filePath);
+                return FileOutputFormatter.format(dirResult);
             }
 
-            // 检测是否为二进制文件
-            if (isBinaryFile(filePath)) {
+            // --- 文件大小预检 ---
+            long fileSize = Files.size(filePath);
+            if (fileSize > 100 * 1024 * 1024) { // 100MB
+                return "错误：文件太大（" + fileSize + " 字节），超过最大限制 100MB";
+            }
+
+            // --- 二进制检测 ---
+            if (FileReadEngine.isBinaryFile(filePath)) {
                 return "错误：文件包含大量二进制数据，不是文本文件 - " + filePath.toAbsolutePath();
             }
 
-            // 检测编码
-            Charset charset = detectCharset(filePath);
-            if (charset == null) {
-                charset = StandardCharsets.UTF_8;
-            }
+            // --- 编码自动检测 ---
+            Charset charset = FileEncodingDetector.detectCharset(filePath);
 
-            // 读取所有行
-            List<String> allLines = readAllLines(filePath, charset);
-
-            // 解析参数
+            // --- 解析行范围/分页参数 ---
             boolean hasStartLine = arguments.has("start_line") && !arguments.path("start_line").isNull();
             boolean hasEndLine = arguments.has("end_line") && !arguments.path("end_line").isNull();
             boolean hasPage = arguments.has("page") && !arguments.path("page").isNull();
 
-            // 参数冲突提示：行范围和分页参数不能同时使用
+            // 参数冲突提示
             if ((hasStartLine || hasEndLine) && hasPage) {
                 log.warn("同时指定了行范围参数(start_line/end_line)和分页参数(page)，优先使用行范围模式");
             }
 
-            int startIdx, endIdx;
+            Integer startLine = hasStartLine ? arguments.path("start_line").asInt() : null;
+            Integer endLine = hasEndLine ? arguments.path("end_line").asInt() : null;
+            Integer page = hasPage ? arguments.path("page").asInt() : null;
+            Integer pageSize = arguments.has("page_size") && !arguments.path("page_size").isNull()
+                    ? arguments.path("page_size").asInt() : null;
 
-            if (hasStartLine || hasEndLine) {
-                // 行范围模式
-                int startLineNum = hasStartLine ? Math.max(1, arguments.path("start_line").asInt(1)) : 1;
-                int endLineNum = hasEndLine ? arguments.path("end_line").asInt(allLines.size()) : allLines.size();
-                startIdx = startLineNum - 1;
-                endIdx = Math.min(endLineNum, allLines.size());
-            } else if (hasPage) {
-                // 分页模式
-                int pageNum = Math.max(1, arguments.path("page").asInt(1));
-                int pageSize = arguments.has("page_size") ? Math.max(1, arguments.path("page_size").asInt(DEFAULT_PAGE_SIZE))
-                        : DEFAULT_PAGE_SIZE;
-                startIdx = (pageNum - 1) * pageSize;
-                endIdx = Math.min(startIdx + pageSize, allLines.size());
-            } else {
-                // 默认读取全部
-                startIdx = 0;
-                endIdx = allLines.size();
+            // --- P0: 流式读取 ---
+            var result = FileReadEngine.read(
+                    filePath, charset, startLine, endLine, page, pageSize
+            );
+
+            // 检查起始行是否超出范围
+            if (result.getLines().isEmpty() && result.getTotalLines() == 0) {
+                return "提示：文件为空";
+            }
+            if (result.getLines().isEmpty() && startLine != null && startLine > 1) {
+                return "提示：起始行 " + startLine + " 超出文件范围，文件共 " + result.getTotalLines() + " 行";
             }
 
-            if (startIdx >= allLines.size()) {
-                return "提示：起始位置超出文件范围，文件共 " + allLines.size() + " 行";
-            }
-            if (startIdx < 0) startIdx = 0;
+            // --- P3: 结构化格式化输出 ---
+            return FileOutputFormatter.format(result);
 
-            List<String> resultLines = allLines.subList(startIdx, endIdx);
-
-            // 构建结果
-            StringBuilder sb = new StringBuilder();
-            sb.append("文件：").append(filePath.toAbsolutePath()).append("\n");
-            sb.append("编码：").append(charset.name()).append("\n");
-            sb.append("总行数：").append(allLines.size()).append("\n");
-            sb.append("显示行：").append(startIdx + 1).append(" - ").append(endIdx).append("\n");
-            sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-
-            int lineNumWidth = String.valueOf(endIdx).length();
-            for (int i = 0; i < resultLines.size(); i++) {
-                String lineNum = String.format("%" + lineNumWidth + "d", startIdx + i + 1);
-                sb.append(" ").append(lineNum).append(" │ ").append(resultLines.get(i)).append("\n");
-            }
-            sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-
-            // 如果是行范围模式且有更多行，提示用户
-            if (endIdx < allLines.size()) {
-                sb.append("提示：还有 ").append(allLines.size() - endIdx).append(" 行未显示");
-                if (!hasPage && !hasStartLine) {
-                    sb.append("，可使用 page / page_size 参数分页查看");
-                }
-                sb.append("\n");
-            }
-
-            return sb.toString();
         } catch (IOException e) {
             log.error("读取文件失败: {}", filePath, e);
             return "错误：读取文件失败 - " + e.getMessage();
+        } catch (Exception e) {
+            log.error("读取文件异常: {}", filePath, e);
+            return "错误：读取文件异常 - " + e.getMessage();
         }
     }
 
     /**
-     * 解析文件路径，如果是相对路径则拼接项目根目录
+     * 解析文件路径，如果是相对路径则拼接项目根目录，带路径穿越防护
      */
     private Path resolvePath(String pathStr) {
         Path path = Paths.get(pathStr);
-        Path projectRoot = Paths.get(ProjectRootContext.get()).normalize();
-        Path resolved;
         if (path.isAbsolute()) {
-            resolved = path.normalize();
-        } else {
-            resolved = Paths.get(ProjectRootContext.get(), pathStr).normalize();
+            return path.normalize();
         }
-        // 路径穿越防护：确保解析后的路径在项目目录范围内
-        if (!resolved.startsWith(projectRoot)) {
-            throw new SecurityException("访问被拒绝：路径不在项目目录范围内 - " + resolved);
-        }
-        return resolved;
-    }
-
-    /**
-     * 检测文件编码
-     * 优先检测BOM，然后用 CharsetDecoder 实际解码样本来判断编码
-     */
-    private Charset detectCharset(Path filePath) throws IOException {
-        int sampleSize = (int) Math.min(Files.size(filePath), 4096);
-        if (sampleSize <= 0) return StandardCharsets.UTF_8;
-
-        try (InputStream is = Files.newInputStream(filePath);
-             BufferedInputStream bis = new BufferedInputStream(is)) {
-
-            // BOM检测
-            byte[] bom = new byte[3];
-            bis.mark(4);
-            int bomRead = bis.read(bom);
-            if (bomRead >= 3 && (bom[0] & 0xFF) == 0xEF && (bom[1] & 0xFF) == 0xBB && (bom[2] & 0xFF) == 0xBF)
-                return StandardCharsets.UTF_8;
-            if (bomRead >= 2 && (bom[0] & 0xFF) == 0xFE && (bom[1] & 0xFF) == 0xFF)
-                return Charset.forName("UTF-16BE");
-            if (bomRead >= 2 && (bom[0] & 0xFF) == 0xFF && (bom[1] & 0xFF) == 0xFE)
-                return Charset.forName("UTF-16LE");
-
-            // 读取样本
-            bis.reset();
-            byte[] sampleBytes = new byte[sampleSize];
-            int sampleLen = bis.read(sampleBytes);
-            if (sampleLen <= 0) return StandardCharsets.UTF_8;
-
-            // 检查是否为纯ASCII（所有字节 < 128）
-            boolean isPureAscii = true;
-            for (int i = 0; i < sampleLen; i++) {
-                if ((sampleBytes[i] & 0xFF) >= 128) {
-                    isPureAscii = false;
-                    break;
-                }
-            }
-            if (isPureAscii) return StandardCharsets.UTF_8;
-
-            // 用CharsetDecoder严格模式实际解码样本来判断编码
-            // 优先级：UTF-8 > GB18030（兼容GBK） > 兜底用UTF-8
-            if (canDecode(sampleBytes, sampleLen, StandardCharsets.UTF_8))
-                return StandardCharsets.UTF_8;
-            if (canDecode(sampleBytes, sampleLen, Charset.forName("GB18030")))
-                return Charset.forName("GB18030");
-            // 兜底：现代项目基本使用UTF-8，不再回退到ISO-8859-1
-            return StandardCharsets.UTF_8;
-        }
-
-    }
-
-    /**
-     * 判断字节数组能否用指定编码无错误解码
-     */
-    private boolean canDecode(byte[] bytes, int length, Charset charset) {
-        try {
-            CharsetDecoder decoder = charset.newDecoder()
-                    .onMalformedInput(CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(CodingErrorAction.REPORT);
-            ByteBuffer bb = ByteBuffer.wrap(bytes, 0, length);
-            CharBuffer cb = CharBuffer.allocate(length);
-            CoderResult result = decoder.decode(bb, cb, true);
-            if (result.isError()) return false;
-            result = decoder.flush(cb);
-            return !result.isError();
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /**
-     * 检测文件是否为二进制文件（通过检查空字节比例）
-     */
-    private boolean isBinaryFile(Path filePath) throws IOException {
-        int sampleSize = (int) Math.min(Files.size(filePath), 4096);
-        if (sampleSize <= 0) return false;
-
-        byte[] sample = new byte[sampleSize];
-        try (InputStream is = Files.newInputStream(filePath)) {
-            int bytesRead = is.read(sample);
-            if (bytesRead <= 0) return false;
-
-            int nullCount = 0;
-            for (int i = 0; i < bytesRead; i++) {
-                if (sample[i] == 0) nullCount++;
-            }
-            return (double) nullCount / bytesRead > BINARY_NULL_THRESHOLD;
-        }
-    }
-
-    /**
-     * 读取文件所有行，限制单行最大长度防止OOM
-     * 遇到 MalformedInputException 时自动降级尝试 GBK
-     */
-    private List<String> readAllLines(Path filePath, Charset charset) throws IOException {
-        try {
-            return readAllLinesInternal(filePath, charset);
-        } catch (MalformedInputException e) {
-            log.warn("使用 {} 解码失败 ({}), 降级尝试 GBK", charset, e.getMessage());
-            log.warn("使用 {} 解码失败 ({}), 降级尝试 GB18030", charset, e.getMessage());
-            return readAllLinesInternal(filePath, Charset.forName("GB18030"));
-        }
-    }
-
-    private List<String> readAllLinesInternal(Path filePath, Charset charset) throws IOException {
-        List<String> lines = new ArrayList<>();
-        try (BufferedReader reader = Files.newBufferedReader(filePath, charset)) {
-            StringBuilder sb = new StringBuilder();
-            int ch;
-            while ((ch = reader.read()) != -1) {
-                if (ch == '\n') {
-                    lines.add(sb.toString());
-                    sb = new StringBuilder();
-                } else if (ch == '\r') {
-                    // 处理 CR（单独换行或 CRLF）
-                    lines.add(sb.toString());
-                    sb = new StringBuilder();
-                    // 如果是 CRLF，吞掉紧随其后的 \n
-                    reader.mark(1);
-                    int next = reader.read();
-                    if (next != '\n') {
-                        reader.reset();
-                    }
-                } else {
-                    if (sb.length() < MAX_LINE_LENGTH) {
-                        sb.append((char) ch);
-                    }
-                }
-            }
-            if (sb.length() > 0 || lines.isEmpty()) {
-                lines.add(sb.toString());
-            }
-        } catch (MalformedInputException e) {
-            throw e; // 上层 catch 处理降级
-        }
-        return lines;
+        return Paths.get(ProjectRootContext.get(), pathStr).normalize();
     }
 }

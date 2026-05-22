@@ -23,6 +23,9 @@ public class LoginResponse {
     @Schema(description = "昵称", example = "管理员")
     private String nickname;
 
+    @Schema(description = "用户角色", example = "admin")
+    private String role;
+
     @Schema(description = "访问令牌", example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
     private String token;
 

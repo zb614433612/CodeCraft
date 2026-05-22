@@ -10,7 +10,10 @@ import java.util.List;
 public interface SkillService {
 
     Skill createSkill(String name, String description, String toolNames, String instructions,
-                      Long userId, String agentType);
+                      String triggerWords, Long userId, String agentType);
+
+    Skill updateSkill(Long skillId, String name, String description, String toolNames,
+                      String instructions, String triggerWords, Long userId);
 
     void deleteSkill(Long skillId, Long userId);
 

@@ -1,5 +1,5 @@
 import type { ApiResponse } from '@/store/user'
-import { getAuthHeaders } from '@/utils/http-client'
+import { authFetch as authFetchWithRedirect } from '@/utils/http-client'
 
 export interface ProjectTreeNode {
   name: string
@@ -14,10 +14,8 @@ export interface DirectoryEntry {
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
-  const authHeader = await getAuthHeaders()
-
-  const response = await fetch(`/api${url}`, {
-    headers: { 'Content-Type': 'application/json', ...authHeader, ...options.headers },
+  const response = await authFetchWithRedirect(`/api${url}`, {
+    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options
   })
   return response.json()
@@ -86,9 +84,8 @@ export interface OutputResult {
 }
 
 async function authFetch(url: string, options: RequestInit = {}): Promise<any> {
-  const authHeader = await getAuthHeaders()
-  const response = await fetch(`/api${url}`, {
-    headers: { 'Content-Type': 'application/json', ...authHeader, ...options.headers },
+  const response = await authFetchWithRedirect(`/api${url}`, {
+    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options
   })
   return response.json()
@@ -120,6 +117,21 @@ export async function stopProject(): Promise<StopResult> {
 /** 获取运行状态 */
 export async function getRunStatus(): Promise<StatusResult> {
   return authFetch('/project/run/status')
+}
+
+export interface ExecResult {
+  success: boolean
+  output: string
+  exitCode: number
+  timedOut: boolean
+}
+
+/** 执行自定义命令（终端用） */
+export async function execCommand(command: string, workingDirectory?: string, timeout?: number): Promise<ExecResult> {
+  return authFetch('/project/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command, workingDirectory, timeout })
+  })
 }
 
 /** 获取控制台输出 */

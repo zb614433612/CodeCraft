@@ -1,21 +1,22 @@
 package com.example.agentdeepseek.tool.impl;
 
-import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.util.ProjectRootContext;
-import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 
 /**
  * Git Commit 工具
- * 创建提交。自动模式下直接提交，手动模式下需要 ask_execution 授权
+ * 创建提交
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.GIT, affectsData = true, description = "创建Git提交")
 public class GitCommitTool implements Tool {
 
     private final GitCommandExecutor gitExecutor;
@@ -33,8 +34,10 @@ public class GitCommitTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "创建 Git 提交。需要提供提交信息（message）。"
-                + "手动模式下需要 ask_execution 授权";
+        return "【适用场景】将暂存区内容创建为一个版本快照（commit），是 git_add 之后的第二步\n"
+                + "【与 git_add 区别】git_add 只暂存文件变更是前置步骤，git_commit 才真正创建提交记录；请确保已用 git_add 暂存所需文件后再调用本工具\n"
+                + "【使用方式】先调用 git_add 暂存文件，再调用本工具传 message=\"feat: 功能描述\" 创建提交。message 建议用 conventional commits 格式\n"
+                + "【注意】手动模式下需要用户授权";
     }
 
     @Override
@@ -46,13 +49,8 @@ public class GitCommitTool implements Tool {
 
         ObjectNode message = objectMapper.createObjectNode();
         message.put("type", "string");
-        message.put("description", "提交信息（必填），如 \"feat: 添加用户登录功能\"");
+        message.put("description", "【必填】提交信息，建议按 conventional commits 格式: \"feat: 新增XX功能\"、\"fix: 修复XX问题\"、\"refactor: 重构XX模块\"、\"docs: 更新XX文档\"");
         properties.set("message", message);
-
-        ObjectNode files = objectMapper.createObjectNode();
-        files.put("type", "string");
-        files.put("description", "可选，要提交的文件列表描述，不影响实际提交内容");
-        properties.set("files", files);
 
         parameters.set("properties", properties);
         parameters.putArray("required").add("message");
@@ -63,16 +61,10 @@ public class GitCommitTool implements Tool {
     public String execute(JsonNode arguments) {
         String message = arguments.path("message").asText();
         if (message.isEmpty()) {
-            return "错误：缺少必要参数 message";
+            return "【参数错误】缺少必填参数 message。请提供提交信息，格式: message=\"feat: 简短描述所做改动\"";
         }
 
         String projectRoot = ProjectRootContext.get();
-
-        // manual 模式下请求用户授权
-        if ("manual".equals(ToolContext.getMode())) {
-            String response = PermissionContext.requestPermission(getName(), arguments, ToolContext.getConversationId());
-            if (response != null) return response;
-        }
 
         return executeCommit(projectRoot, message);
     }
@@ -82,14 +74,14 @@ public class GitCommitTool implements Tool {
         GitCommandExecutor.GitResult diffResult = gitExecutor.execute(projectRoot,
                 "diff", "--cached", "--quiet");
         if (diffResult.success()) {
-            return "错误：暂存区没有变更，请先使用 git_add 工具暂存文件";
+            return "【操作顺序错误】暂存区为空，没有可提交的内容。请先调用 git_add 工具暂存要提交的文件，再用 git_commit 创建提交。标准流程: git_add → git_commit";
         }
 
         GitCommandExecutor.GitResult result = gitExecutor.executeWithStoredAuth(
                 projectRoot, "commit", "-m", message);
 
         if (!result.success()) {
-            return "错误：提交失败 - " + result.output();
+            return "【Git 错误】git commit 失败。请检查：① git 用户配置（user.name/user.email 是否设置）；② 暂存区内容是否有效（非空）；③ pre-commit hook 是否拦截。Git 返回信息：" + result.output();
         }
 
         log.info("Git 提交成功: {}", message);

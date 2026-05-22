@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.tool.Tool;
+import com.example.agentdeepseek.util.FileEncodingDetector;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,12 +14,15 @@ import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
+import java.nio.charset.Charset;
 import java.nio.file.*;
 import java.util.*;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.READ, description = "获取项目信息")
 public class ProjectInfoTool implements Tool {
 
     private static final int MAX_MODULES = 50;
@@ -37,9 +41,10 @@ public class ProjectInfoTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "项目信息查询工具：解析 Maven (pom.xml) 或 npm (package.json) 项目信息。"
-                + "支持三种范围：structure（模块层次结构）、dependencies（依赖列表）、all（两者）。"
-                + "适用于了解项目组织结构和第三方库依赖";
+        return "【适用场景】查看项目模块层次结构、依赖列表（含版本），了解项目组织方式和第三方库。对 Maven 项目解析 pom.xml，对 npm 项目解析 package.json。"
+                + "【与 read_project_tree 的区别】本工具输出项目逻辑结构（模块、依赖），read_project_tree 输出文件系统物理结构。分析项目架构时两者配合使用效果最佳。"
+                + "【使用方式】必传 scope 参数选择查询范围：structure（仅模块层次）、dependencies（仅依赖列表）、all（两者）。可选 path 指定目录、filter 按依赖范围过滤。"
+                + "【注意】仅解析直接依赖，不解析传递依赖。仅支持识别 Maven（pom.xml）和 npm（package.json）项目。";
     }
 
     @Override
@@ -51,18 +56,18 @@ public class ProjectInfoTool implements Tool {
 
         ObjectNode path = objectMapper.createObjectNode();
         path.put("type", "string");
-        path.put("description", "项目目录路径（可选），默认为当前项目根目录");
+        path.put("description", "【可选】项目根目录路径，默认为当前项目根目录。示例：'./backend' 或 '/path/to/project'。支持相对路径和绝对路径。当 Maven 聚合项目有多个子模块时，指定父 pom 所在目录即可。");
         properties.set("path", path);
 
         ObjectNode scope = objectMapper.createObjectNode();
         scope.put("type", "string");
-        scope.put("description", "查询范围：structure（模块结构）、dependencies（依赖列表）、all（两者）");
+        scope.put("description", "【必填】查询范围，三选一：'structure'（仅模块层次结构和关键属性）、'dependencies'（仅依赖列表和版本号）、'all'（同时返回两者，信息最全）。初次了解项目建议用 all，仅查特定信息时用对应选项以减少输出。");
         scope.putArray("enum").add("structure").add("dependencies").add("all");
         properties.set("scope", scope);
 
         ObjectNode filter = objectMapper.createObjectNode();
         filter.put("type", "string");
-        filter.put("description", "依赖过滤（可选，仅 dependencies/all 时有效），如 compile/test 只显示某 scope 的 Maven 依赖，或 prod/dev 过滤 npm 依赖");
+        filter.put("description", "【可选】依赖范围过滤，仅在 scope 为 dependencies 或 all 时生效。Maven 项目按 scope 过滤：compile（默认/编译期）、test（测试）、provided（已提供）、runtime（运行时）、system（系统）。npm 项目按类型过滤：prod（生产依赖）、dev（开发依赖）、peer（对等依赖）。不填则显示全部类型的依赖。示例：filter='test' 只显示测试依赖。");
         properties.set("filter", filter);
 
         parameters.set("properties", properties);
@@ -77,7 +82,7 @@ public class ProjectInfoTool implements Tool {
         String filter = arguments.path("filter").asText("");
 
         if (scope.isEmpty()) {
-            return "错误：缺少必要参数 scope（可选值：structure / dependencies / all）";
+            return "【参数缺失】未提供 scope 参数。请指定查询范围：'structure'（模块结构）、'dependencies'（依赖列表）或 'all'（两者都查）。示例：scope='all'";
         }
 
         switch (scope) {
@@ -88,7 +93,7 @@ public class ProjectInfoTool implements Tool {
             case "all":
                 return getAllInfo(path, filter);
             default:
-                return "错误：不支持的 scope 值 '" + scope + "'，可选值：structure / dependencies / all";
+                return "【参数错误】scope 值 '" + scope + "' 无效。可选值仅限：structure（模块结构）、dependencies（依赖列表）、all（两者）。请修正后重试。";
         }
     }
 
@@ -99,14 +104,14 @@ public class ProjectInfoTool implements Tool {
     private String getModuleStructure(String pathStr) {
         Path pomPath = locatePom(pathStr);
         if (pomPath == null) {
-            return "错误：未找到 pom.xml 文件" + (pathStr.isEmpty() ? "（当前目录无 pom.xml）" : " - " + pathStr);
+            return "【文件未找到】未找到 pom.xml 文件" + (pathStr.isEmpty() ? "（当前项目根目录下无 pom.xml）" : "（路径 " + pathStr + " 下未找到）") + "。请确认：1) 当前项目是否为 Maven 项目 2) path 参数是否指向正确的项目目录 3) 如为 npm 项目，package.json 存在则会自动识别";
         }
         try {
             PomInfo rootPom = parsePom(pomPath);
             return buildStructureOutput(pomPath, rootPom);
         } catch (Exception e) {
             log.error("解析 pom.xml 失败", e);
-            return "错误：解析 pom.xml 失败 - " + e.getMessage();
+            return "【解析失败】解析 pom.xml 失败：" + e.getMessage() + "。请检查：1) pom.xml 是否为有效的 XML 格式 2) 文件编码是否正确（支持 UTF-8/GB18030）3) XML 标签是否完整闭合";
         }
     }
 
@@ -154,7 +159,7 @@ public class ProjectInfoTool implements Tool {
         } else if (hasNpm) {
             return formatNpmDeps(projectDir, packageJson, filter, true);
         } else {
-            return "错误：未找到 pom.xml 或 package.json，无法读取依赖信息";
+            return "【文件未找到】在项目目录中未找到 pom.xml 或 package.json，无法读取依赖信息。请确认：1) path 参数是否指向正确的项目根目录 2) 项目是否为 Maven 或 npm 项目 3) 如为其他构建工具（Gradle 等），当前版本暂不支持，可手动检查 build 配置文件";
         }
     }
 
@@ -171,7 +176,7 @@ public class ProjectInfoTool implements Tool {
             try {
                 rootPom = parsePom(pomPath);
             } catch (Exception e) {
-                return "错误：解析 pom.xml 失败 - " + e.getMessage();
+                return "【解析失败】解析 pom.xml 失败：" + e.getMessage() + "。请检查：1) pom.xml 是否为有效的 XML 格式 2) 文件编码是否正确（支持 UTF-8/GB18030）3) XML 标签是否完整闭合";
             }
         }
 
@@ -215,7 +220,9 @@ public class ProjectInfoTool implements Tool {
         factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
 
         try (InputStream is = Files.newInputStream(pomPath)) {
-            XMLStreamReader reader = factory.createXMLStreamReader(is, StandardCharsets.UTF_8.name());
+            // 自动检测编码（支持 UTF-8/GB18030），防止中文乱码
+            Charset detectedCharset = FileEncodingDetector.detectCharset(pomPath);
+            XMLStreamReader reader = factory.createXMLStreamReader(is, detectedCharset.name());
             try {
                 Deque<String> tagStack = new ArrayDeque<>();
                 Dependency currentDep = null;
@@ -397,7 +404,7 @@ public class ProjectInfoTool implements Tool {
             return buildMavenDepsOutput(projectDir, pom, filter, includeHeader);
         } catch (Exception e) {
             log.error("解析 Maven 依赖失败", e);
-            return "错误：解析 Maven 依赖失败 - " + e.getMessage();
+            return "【解析失败】解析 Maven 依赖失败：" + e.getMessage() + "。请检查：1) pom.xml 中 <dependencies> 节点格式是否正确 2) XML 文件编码是否符合标准 3) 依赖声明是否包含必需的 groupId 和 artifactId";
         }
     }
 
@@ -524,7 +531,8 @@ public class ProjectInfoTool implements Tool {
      */
     private String formatNpmDeps(Path projectDir, Path packagePath, String filter, boolean includeHeader) {
         try {
-            String content = Files.readString(packagePath, StandardCharsets.UTF_8);
+            // 自动检测编码读取（支持 UTF-8/GB18030），防止中文乱码
+            String content = FileEncodingDetector.readString(packagePath);
             // 【P0-1】使用 Jackson 替代手写 JSON 解析
             Map<String, String> prodDeps = extractJsonSection(content, "dependencies");
             Map<String, String> devDeps = extractJsonSection(content, "devDependencies");
@@ -536,7 +544,7 @@ public class ProjectInfoTool implements Tool {
             return buildNpmDepsOutput(projectDir, projectName, projectVersion,
                     prodDeps, devDeps, peerDeps, filter, includeHeader);
         } catch (IOException e) {
-            return "错误：读取 package.json 失败 - " + e.getMessage();
+            return "【读取失败】读取 package.json 失败：" + e.getMessage() + "。请检查：1) package.json 文件是否存在且可读 2) 文件编码是否为 UTF-8 3) 文件是否被其他进程锁定";
         }
     }
 

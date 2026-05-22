@@ -11,7 +11,7 @@ const hideLayout = computed(() => route.meta.hideLayout || false)
     <template v-if="!hideLayout">
       <header>
         <nav>
-          <RouterLink to="/ai-assistant">首页</RouterLink>
+          <RouterLink to="/code-assistant">首页</RouterLink>
           <RouterLink to="/login">登录</RouterLink>
         </nav>
       </header>

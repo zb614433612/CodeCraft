@@ -30,7 +30,6 @@ public class TokenAuthenticationFilter implements Filter {
             "/swagger-ui",
             "/api-docs",
             "/v3/api-docs",
-            "/api/kline-daily",
             "/api/skills"
     );
 
@@ -72,9 +71,15 @@ public class TokenAuthenticationFilter implements Filter {
             return;
         }
 
-        // 将userId存储到请求属性中，供后续使用
+        // 获取用户附加信息
+        String username = userService.getUsernameByToken(token);
+        String role = userService.getRoleByToken(token);
+
+        // 将用户信息存储到请求属性中，供后续使用
         request.setAttribute("userId", userId);
-        log.debug("Token验证通过: userId={}, uri={}", userId, requestURI);
+        request.setAttribute("username", username);
+        request.setAttribute("userRole", role);
+        log.debug("Token验证通过: userId={}, username={}, role={}, uri={}", userId, username, role, requestURI);
         chain.doFilter(request, response);
     }
 

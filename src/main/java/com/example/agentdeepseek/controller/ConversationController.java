@@ -2,10 +2,8 @@ package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
 import com.example.agentdeepseek.mapper.ConversationMapper;
-import com.example.agentdeepseek.mapper.UserProfileMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
-import com.example.agentdeepseek.model.entity.UserProfile;
 import com.example.agentdeepseek.service.ConversationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -27,14 +25,11 @@ public class ConversationController {
 
     private final ConversationService conversationService;
     private final ConversationMapper conversationMapper;
-    private final UserProfileMapper userProfileMapper;
 
     @Autowired
-    public ConversationController(ConversationService conversationService, ConversationMapper conversationMapper,
-                                  UserProfileMapper userProfileMapper) {
+    public ConversationController(ConversationService conversationService, ConversationMapper conversationMapper) {
         this.conversationService = conversationService;
         this.conversationMapper = conversationMapper;
-        this.userProfileMapper = userProfileMapper;
     }
 
     /**
@@ -65,22 +60,39 @@ public class ConversationController {
             @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
             @RequestAttribute("userId") Long userId) {
         log.info("查询会话消息请求: conversationId={}, userId={}", conversationId, userId);
-        // 验证会话是否存在且属于当前用户（同时检查conversation表和user_profile表）
-        boolean valid = false;
+        // 验证会话是否存在且属于当前用户
         Conversation conversation = conversationMapper.selectById(conversationId).orElse(null);
-        if (conversation != null && conversation.getUserId() != null && conversation.getUserId().equals(userId)) {
-            valid = true;
-        } else {
-            UserProfile userProfile = userProfileMapper.selectById(conversationId);
-            if (userProfile != null && userId.equals(userProfile.getUserId())) {
-                valid = true;
-            }
-        }
-        if (!valid) {
+        if (conversation == null || conversation.getUserId() == null || !conversation.getUserId().equals(userId)) {
             return ApiResponse.error(404, "会话不存在或无权访问");
         }
         List<ConversationMessage> messages = conversationService.getMessagesByConversationId(conversationId);
         return ApiResponse.success(messages);
+    }
+
+    /**
+     * 更新会话名称
+     */
+    @Operation(summary = "更新会话名称", description = "更新指定会话的name字段（会话标题）")
+    @PutMapping("/{conversationId}")
+    public ApiResponse<Void> updateConversation(
+            @Parameter(description = "会话ID", required = true)
+            @PathVariable Long conversationId,
+            @Parameter(description = "新的会话名称", required = true)
+            @RequestParam("name") String name,
+            @RequestAttribute("userId") Long userId) {
+        log.info("更新会话名称请求: conversationId={}, name={}, userId={}", conversationId, name, userId);
+        // 验证会话是否存在且属于当前用户
+        Conversation conversation = conversationMapper.selectById(conversationId)
+                .orElse(null);
+        if (conversation == null || conversation.getUserId() == null || !conversation.getUserId().equals(userId)) {
+            return ApiResponse.error(404, "会话不存在或无权访问");
+        }
+
+        conversation.setName(name);
+        conversation.setUpdatedAt(java.time.LocalDateTime.now());
+        conversationMapper.update(conversation);
+        log.info("会话名称更新成功，conversationId: {}", conversationId);
+        return ApiResponse.success(null, "更新成功");
     }
 
     /**

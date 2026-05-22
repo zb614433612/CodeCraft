@@ -1,14 +1,13 @@
 package com.example.agentdeepseek.service;
 
+import com.example.agentdeepseek.util.FileEncodingDetector;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
+import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
@@ -89,16 +88,12 @@ public class AttachmentReaderService {
 
         // 文本/代码文件：读取内容
         try {
-            StringBuilder content = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    content.append(line).append("\n");
-                }
-            }
+            // 读取原始字节并自动检测编码（支持 UTF-8/GB18030），防止中文乱码
+            byte[] rawBytes = file.getBytes();
+            Charset detectedCharset = FileEncodingDetector.detectCharset(rawBytes, rawBytes.length);
+            String content = new String(rawBytes, detectedCharset);
             result.setSuccess(true);
-            result.setContent(content.toString());
+            result.setContent(content);
             result.setImage(false);
             result.setLanguage(detectLanguage(ext));
         } catch (Exception e) {

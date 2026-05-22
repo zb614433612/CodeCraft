@@ -9,13 +9,17 @@
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.example</groupId>
-    <artifactId>agent-deepseek</artifactId>
+    <artifactId>codecraft</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>agent-deepseek</name>
-    <description>agent-deepseek</description>
+    <name>CodeCraft</name>
+    <description>CodeCraft - AI Coding Assistant</description>
     <url/>
     <licenses>
-        <license/>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
     </licenses>
     <developers>
         <developer/>
@@ -60,11 +64,11 @@
             <artifactId>milvus-sdk-java</artifactId>
             <version>2.3.4</version>
         </dependency>
-        <!-- MySQL Driver -->
+        <!-- H2 Database (内嵌数据库，替代 MySQL) -->
         <dependency>
-            <groupId>mysql</groupId>
-            <artifactId>mysql-connector-java</artifactId>
-            <version>8.0.33</version>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
         </dependency>
         <!-- MyBatis Spring Boot Starter -->
         <dependency>
@@ -77,15 +81,10 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
-        <!-- Redis -->
+        <!-- Caffeine 本地缓存（替代 Redis） -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
-        </dependency>
-        <!-- Apache Commons Pool 2 for Redis connection pooling -->
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-pool2</artifactId>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
         </dependency>
         <!-- Jsoup HTML解析库（web_fetch 用） -->
         <dependency>
@@ -98,6 +97,18 @@
             <groupId>commons-codec</groupId>
             <artifactId>commons-codec</artifactId>
             <version>1.16.0</version>
+        </dependency>
+        <!-- JTokkit - Java 版 tiktoken，精确 token 估算 -->
+        <dependency>
+            <groupId>com.knuddels</groupId>
+            <artifactId>jtokkit</artifactId>
+            <version>1.1.0</version>
+        </dependency>
+        <!-- juniversalchardet - Mozilla 通用编码检测库，支持 30+ 编码自动识别 -->
+        <dependency>
+            <groupId>com.github.albfernandez</groupId>
+            <artifactId>juniversalchardet</artifactId>
+            <version>2.5.0</version>
         </dependency>
     </dependencies>
 

@@ -18,6 +18,7 @@ export interface MessageResponse {
   role: string // SYSTEM, user, assistant, tool
   content: string
   reasoning: string | null
+  turnId: string | null
   createdAt: string // ISO字符串
 }
 
@@ -129,7 +130,8 @@ export function processMessageGroups(messages: MessageResponse[]): any[] {
         content: msg.content,
         timestamp,
         isStreaming: false,
-        tokenCount: estimateTokenCount(msg.content)
+        tokenCount: estimateTokenCount(msg.content),
+        turnId: msg.turnId || undefined
       })
     } else if (role === 'assistant') {
       if (!currentAssistantMsg) {
@@ -201,6 +203,13 @@ function processSinglePart(part: string, marker: string): { type: 'thinking' | '
     return { type: 'tool', content: toolContent }
   }
   return { type: 'thinking', content: part }
+}
+
+// 更新会话名称
+export async function updateConversationName(conversationId: number, name: string): Promise<ApiResponse<void>> {
+  return request<void>(`/conversation/${conversationId}?name=${encodeURIComponent(name)}`, {
+    method: 'PUT'
+  })
 }
 
 // 删除会话

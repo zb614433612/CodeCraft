@@ -4,25 +4,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 /**
  * 工具接口
- * 定义DeepSeek工具调用的基本契约
+ * 定义 DeepSeek 工具调用的基本契约
  */
 public interface Tool {
 
     /**
      * 获取工具名称
-     * @return 工具名称
      */
     String getName();
 
     /**
      * 获取工具描述
-     * @return 工具描述
      */
     String getDescription();
 
     /**
      * 获取工具参数模式（JSON Schema）
-     * @return 参数模式（JSON Schema格式）
      */
     JsonNode getParameters();
 

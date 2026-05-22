@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'
 import { useUserStore } from '@/store/user'
+import { message } from 'ant-design-vue'
 import Layout from '@/layouts/Layout.vue'
 
 const router = createRouter({
@@ -7,7 +8,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/ai-assistant'
+      redirect: '/code-assistant'
     },
     {
       path: '/login',
@@ -20,26 +21,46 @@ const router = createRouter({
       component: Layout,
       meta: { requiresAuth: true, hideLayout: true },
       children: [
-        {
-          path: 'ai-assistant',
-          name: 'ai-assistant',
-          component: () => import('@/views/HomeView.vue')
-        },
-        {
-          path: 'chat-assistant',
-          name: 'chat-assistant',
-          component: () => import('@/views/ChatAssistantView.vue')
-        },
-        {
-          path: 'stock-assistant',
-          name: 'stock-assistant',
-          component: () => import('@/views/StockAssistantView.vue')
-        },
+
         {
           path: 'code-assistant',
           name: 'code-assistant',
           component: () => import('@/views/CodeAssistantView.vue')
-        }
+        },
+        {
+          path: 'user-management',
+          name: 'user-management',
+          component: () => import('@/views/UserManageView.vue'),
+          meta: { requiresAdmin: true }
+        },
+        {
+          path: 'profile',
+          name: 'profile',
+          component: () => import('@/views/ProfileView.vue')
+        },
+        {
+          path: 'menu-permission',
+          name: 'menu-permission',
+          component: () => import('@/views/MenuPermissionView.vue'),
+          meta: { requiresAdmin: true }
+        },
+        {
+          path: 'config',
+          name: 'config',
+          component: () => import('@/views/ConfigView.vue')
+        },
+        {
+          path: 'logs',
+          name: 'logs',
+          component: () => import('@/views/LogView.vue')
+        },
+        {
+          path: 'schedule-tasks',
+          name: 'schedule-tasks',
+          component: () => import('@/views/ScheduleTaskView.vue'),
+          meta: { requiresAdmin: true }
+        },
+
       ]
     }
   ]
@@ -62,7 +83,15 @@ router.beforeEach((to: RouteLocationNormalized) => {
   // 检查路由是否仅允许未登录用户访问
   if (to.meta.requiresGuest && isLoggedIn) {
     // 已登录用户访问登录页面，重定向到首页
-    return { path: '/ai-assistant' }
+      return { path: '/code-assistant' }
+  }
+
+  // 检查路由是否需要管理员权限
+  if (to.meta.requiresAdmin) {
+    if (!userStore.isAdmin) {
+      message.warning('权限不足，需要管理员权限')
+      return { path: '/code-assistant' }
+    }
   }
 })
 

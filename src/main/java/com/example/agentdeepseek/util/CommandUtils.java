@@ -2,27 +2,226 @@ package com.example.agentdeepseek.util;
 
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStreamReader;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * 命令行工具公用方法
- * 主要解决 Windows 上 ProcessBuilder 不识别 .cmd/.bat 后缀的问题
+ * <p>
+ * 核心改进：通过系统 Shell 执行命令，支持管道、重定向、环境变量等 Shell 特性。
+ * 提供预检、编码检测等辅助功能。
  */
 @Slf4j
 public class CommandUtils {
+
+    /**
+     * 构建 Shell 包装命令，支持管道、重定向、环境变量等 Shell 特性
+     * <p>
+     * Windows: {@code cmd.exe /c "<command>"}
+     * Linux/Mac: {@code /bin/sh -c '<command>'}
+     *
+     * @param command 原始命令字符串（如 "mvn compile | grep error"）
+     * @return 适合 ProcessBuilder 的命令列表
+     */
+    public static List<String> buildShellCommand(String command) {
+        if (isWindows()) {
+            return List.of("cmd.exe", "/c", command);
+        } else {
+            return List.of("/bin/sh", "-c", command);
+        }
+    }
+
+    /**
+     * 检查命令是否可以执行的最外层（用于快速失败反馈）
+     * <p>
+     * 提取命令的第一个 token 作为可执行文件名，在 PATH 中搜索。
+     * 仅在命令看起来不包含特殊字符（无管道、重定向等）时有效。
+     * 有 Shell 包装时此检查作为辅助提示，不阻塞执行（Shell 自己也会报错）。
+     *
+     * @param command 命令字符串
+     * @return 如果可执行文件未找到，返回友好的错误描述；找到则返回 null
+     */
+    public static String checkExecutableExists(String command) {
+        if (command == null || command.isBlank()) return null;
+
+        // 提取第一个 token（可执行文件名）
+        String trimmed = command.trim();
+        String firstToken = tokenize(trimmed).stream().findFirst().orElse(null);
+        if (firstToken == null) return null;
+
+        // 路径形式（包含 / 或 \）→ 检查文件是否存在
+        if (firstToken.contains("/") || firstToken.contains("\\")) {
+            Path execPath = Paths.get(firstToken);
+            if (!Files.exists(execPath)) {
+                return "【文件不存在】指定的可执行文件未找到：" + execPath.toAbsolutePath() + "\n"
+                        + "【建议】1. 确认文件路径拼写正确（区分大小写）。\n"
+                        + "  2. 确认文件确实存在于该位置：ls -la " + execPath.toAbsolutePath() + "\n"
+                        + "  3. 如果在子目录中，使用正确的相对路径，如 \"./subdir/tool\"。";
+            }
+            return null;
+        }
+
+        // 内置命令或别名 → 跳过检查（由 Shell 处理）
+        if (isBuiltinCommand(firstToken)) return null;
+
+        // 在 PATH 中搜索
+        String fullPath = findExecutableInPath(firstToken);
+        if (fullPath == null) {
+            return "【命令未找到】\"" + firstToken + "\" 不在系统 PATH 中，可能未安装或未配置环境变量。\n"
+                    + "【建议】1. 确认已安装该工具：运行 \"" + firstToken + " --version\" 在终端中验证。\n"
+                    + "  2. 如果使用项目本地脚本（如 mvnw），使用相对路径：\"./mvnw\" 代替 \"mvnw\"。\n"
+                    + "  3. 如果刚安装，可能需要重启终端或刷新 PATH 环境变量。";
+        }
+        return null;
+    }
+
+    /**
+     * 在 PATH 中搜索可执行文件
+     *
+     * @param name 可执行文件名（如 "mvn", "node", "npm"）
+     * @return 完整路径，未找到返回 null
+     */
+    public static String findExecutableInPath(String name) {
+        if (name == null || name.isEmpty()) return null;
+        if (name.contains("/") || name.contains("\\")) return null;
+
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null || pathEnv.isEmpty()) return null;
+
+        String[] pathDirs = pathEnv.split(isWindows() ? ";" : ":");
+        List<String> extensions = isWindows() ? getWindowsExecutableExtensions() : List.of("");
+
+        for (String dir : pathDirs) {
+            if (dir.isEmpty()) continue;
+            Path dirPath = Paths.get(dir);
+            if (!Files.isDirectory(dirPath)) continue;
+            for (String ext : extensions) {
+                Path fullPath = dirPath.resolve(name + ext);
+                if (Files.exists(fullPath) && Files.isExecutable(fullPath)) {
+                    return fullPath.toString();
+                }
+            }
+        }
+        return null;
+    }
+
+    /** chcp 查询结果缓存（1分钟内不重复查询） */
+    private static volatile Charset detectedOutputCharset = null;
+    private static volatile long lastChcpCheckTime = 0;
+    private static final long CHCP_CACHE_TTL_MS = 60_000;
+
+    /**
+     * 获取适合当前系统的进程输出编码
+     * <p>
+     * Windows 上通过 chcp.com 查询当前活动代码页，准确判断 CMD/PowerShell 输出编码。
+     * 缓存检测结果 1 分钟，避免频繁调用 chcp。
+     * Linux/Mac 上直接返回 UTF-8。
+     * <p>
+     * 相比 {@code Charset.defaultCharset()} 的优势：
+     * 当 JVM 设置了 -Dfile.encoding=UTF-8 时，defaultCharset 返回 UTF-8，
+     * 但 Windows cmd 输出仍是系统代码页编码，此前方案会导致乱码。
+     */
+    public static Charset getProcessOutputCharset() {
+        if (isWindows()) {
+            // 缓存命中且在有效期内
+            if (detectedOutputCharset != null
+                    && System.currentTimeMillis() - lastChcpCheckTime < CHCP_CACHE_TTL_MS) {
+                return detectedOutputCharset;
+            }
+            // 通过 chcp.com 查询当前活动代码页
+            return detectWindowsCodePage();
+        }
+        return StandardCharsets.UTF_8;
+    }
+
+    /**
+     * 通过 chcp.com 查询 Windows 当前活动代码页
+     */
+    private static synchronized Charset detectWindowsCodePage() {
+        // 双重检查锁定
+        if (detectedOutputCharset != null
+                && System.currentTimeMillis() - lastChcpCheckTime < CHCP_CACHE_TTL_MS) {
+            return detectedOutputCharset;
+        }
+        try {
+            Process process = Runtime.getRuntime().exec("chcp.com");
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line = reader.readLine();
+                if (line != null) {
+                    // chcp 输出格式: "Active code page: 936"
+                    Matcher matcher = Pattern.compile("(\\d+)").matcher(line);
+                    if (matcher.find()) {
+                        int codePage = Integer.parseInt(matcher.group());
+                        detectedOutputCharset = codePageToCharset(codePage);
+                        lastChcpCheckTime = System.currentTimeMillis();
+                        log.debug("Windows 代码页检测: {} -> {}", codePage, detectedOutputCharset);
+                        return detectedOutputCharset;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("chcp 查询失败，回退 defaultCharset: {}", e.getMessage());
+        }
+        // 查询失败时回退到 Charset.defaultCharset()
+        detectedOutputCharset = Charset.defaultCharset();
+        lastChcpCheckTime = System.currentTimeMillis();
+        return detectedOutputCharset;
+    }
+
+    /**
+     * 将 Windows 代码页号映射为 Java Charset
+     */
+    private static Charset codePageToCharset(int codePage) {
+        switch (codePage) {
+            case 65001: return StandardCharsets.UTF_8;
+            case 936:   return Charset.forName("GBK");
+            case 950:   return Charset.forName("Big5");
+            case 932:   return Charset.forName("Shift_JIS");
+            case 949:   return Charset.forName("EUC-KR");
+            case 1250:  return Charset.forName("windows-1250");
+            case 1251:  return Charset.forName("windows-1251");
+            case 1252:  return Charset.forName("windows-1252");
+            case 1253:  return Charset.forName("windows-1253");
+            case 1254:  return Charset.forName("windows-1254");
+            case 1255:  return Charset.forName("windows-1255");
+            case 1256:  return Charset.forName("windows-1256");
+            case 1257:  return Charset.forName("windows-1257");
+            case 1258:  return Charset.forName("windows-1258");
+            default:
+                log.debug("未知代码页 {}，使用 defaultCharset", codePage);
+                return Charset.defaultCharset();
+        }
+    }
+
+    /**
+     * 判断 Windows 当前代码页是否为 UTF-8（65001）
+     */
+    public static boolean isUtf8CodePage() {
+        if (!isWindows()) return true;
+        return getProcessOutputCharset().equals(StandardCharsets.UTF_8);
+    }
 
     /**
      * Windows 兼容：解析可执行文件的完整路径
      * ProcessBuilder 在 Windows 上不会自动查找 PATHEXT（.cmd、.bat 等），
      * 导致直接使用 "mvn"、"npm"、"node" 等命令时找不到文件。
      * 此方法在 PATH 中搜索带扩展名的可执行文件并返回完整路径。
+     * <p>
+     * 仅用于结构化模式（executable + args），Shell 模式不需要此处理。
      *
      * @param cmdAndArgs 命令及参数列表，第一个元素为可执行文件名
      * @return 解析后的命令列表（第一个元素替换为完整路径），非 Windows 或无变化时返回原列表
@@ -32,24 +231,13 @@ public class CommandUtils {
         if (!isWindows()) return cmdAndArgs;
 
         String exec = cmdAndArgs.get(0);
-        // 如果已经有扩展名或是绝对路径/相对路径，不处理
         if (exec.contains(".") || exec.contains(File.separator)) return cmdAndArgs;
 
-        // 读取 PATHEXT 环境变量（.COM;.EXE;.BAT;.CMD;...）
-        String pathext = System.getenv("PATHEXT");
-        if (pathext == null || pathext.isEmpty()) return cmdAndArgs;
-
-        // 拆分 PATH 路径
+        List<String> extensions = getWindowsExecutableExtensions();
         String pathEnv = System.getenv("PATH");
         if (pathEnv == null || pathEnv.isEmpty()) return cmdAndArgs;
 
-        List<String> extensions = Arrays.stream(pathext.split(";"))
-                .map(String::toLowerCase)
-                .collect(Collectors.toList());
-
         String[] pathDirs = pathEnv.split(";");
-
-        // 在 PATH 中搜索可执行文件
         for (String dir : pathDirs) {
             if (dir.isEmpty()) continue;
             Path dirPath = Paths.get(dir);
@@ -64,8 +252,6 @@ public class CommandUtils {
                 }
             }
         }
-
-        // 没找到，返回原列表，让 ProcessBuilder 报错（会给出清晰的错误信息）
         log.warn("Windows 可执行文件未找到: {} (已搜索 PATH)", exec);
         return cmdAndArgs;
     }
@@ -74,7 +260,7 @@ public class CommandUtils {
      * 判断当前是否为 Windows 系统
      */
     public static boolean isWindows() {
-        return System.getProperty("os.name").toLowerCase().contains("win");
+        return System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
     }
 
     /**
@@ -93,14 +279,11 @@ public class CommandUtils {
         for (int i = 0; i < command.length(); i++) {
             char c = command.charAt(i);
 
-            // 处理转义字符（不在单引号内时有效）
             if (c == '\\' && !inSingleQuote) {
-                // 转义模式：下一个字符作为字面量加入
                 if (i + 1 < command.length()) {
                     i++;
                     current.append(command.charAt(i));
                 } else {
-                    // 末尾反斜杠，按字面保留
                     current.append('\\');
                 }
                 continue;
@@ -123,5 +306,36 @@ public class CommandUtils {
             tokens.add(current.toString());
         }
         return tokens;
+    }
+
+    /**
+     * 检查是否为 Shell 内置命令（不需要在 PATH 中存在）
+     */
+    private static boolean isBuiltinCommand(String cmd) {
+        String lower = cmd.toLowerCase(Locale.ROOT);
+        if (isWindows()) {
+            return List.of("cd", "dir", "echo", "set", "cls", "type", "copy", "del",
+                            "mkdir", "rmdir", "move", "ren", "call", "exit", "path",
+                            "pause", "prompt", "pushd", "popd", "title", "color")
+                    .contains(lower);
+        } else {
+            return List.of("cd", "echo", "exit", "export", "pwd", "set", "unset",
+                            "alias", "type", "source", "bg", "fg", "jobs", "kill",
+                            "test", "[", "true", "false")
+                    .contains(lower);
+        }
+    }
+
+    /**
+     * 获取 Windows 可执行文件扩展名列表（从 PATHEXT 环境变量读取）
+     */
+    private static List<String> getWindowsExecutableExtensions() {
+        String pathext = System.getenv("PATHEXT");
+        if (pathext == null || pathext.isEmpty()) {
+            return List.of(".exe", ".cmd", ".bat", ".com");
+        }
+        return Arrays.stream(pathext.split(";"))
+                .map(String::toLowerCase)
+                .collect(Collectors.toList());
     }
 }

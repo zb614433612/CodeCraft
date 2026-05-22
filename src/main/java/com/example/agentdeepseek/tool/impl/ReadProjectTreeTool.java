@@ -1,6 +1,8 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.tool.Tool;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,6 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.READ, isPathSensitive = true, description = "读取项目目录树")
 public class ReadProjectTreeTool implements Tool {
 
     private static final Set<String> EXCLUDED_DIRS = Set.of(
@@ -50,9 +53,9 @@ public class ReadProjectTreeTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "读取项目目录树结构，展示项目布局概览和文件类型统计。默认显示 3 层深度（最大 5 层）。"
-                + "适用于快速了解项目结构、目录组织方式和各类型文件分布情况。"
-                + "需要查看具体文件内容请使用 read_file 工具";
+        return "【适用场景】快速了解项目目录布局、查看有哪些模块/包、统计各类型文件分布。在开始一个新任务时通常应先调用本工具了解项目结构。"
+                + "【与 list_files / read_file 的区别】本工具输出树形结构的项目概览和文件类型统计，适合宏观了解项目全貌；list_files 列出单个目录内容；read_file 读取具体文件内容。"
+                + "【使用方式】默认不传参数即可查看整个项目（3层深度）。可指定 path 查看子目录，depth 控制展开深度（最大5层）。默认自动排除 .git、node_modules、target 等 build/IDE 目录。";
     }
 
     @Override
@@ -64,17 +67,17 @@ public class ReadProjectTreeTool implements Tool {
 
         ObjectNode path = objectMapper.createObjectNode();
         path.put("type", "string");
-        path.put("description", "目录路径（可选），默认为项目根目录");
+        path.put("description", "【可选】要查看的目录路径，默认为项目根目录。示例：'src/main/java/com/example' 查看特定包结构。支持相对路径和绝对路径。");
         properties.set("path", path);
 
         ObjectNode depth = objectMapper.createObjectNode();
         depth.put("type", "integer");
-        depth.put("description", "目录树深度，默认3，最大5");
+        depth.put("description", "【可选】目录树展开深度，默认3，最大5。建议：初览项目用2-3层，深入分析特定模块时用4-5层。深度越大输出越长，5层可能输出大量内容。");
         properties.set("depth", depth);
 
         ObjectNode showFileCount = objectMapper.createObjectNode();
         showFileCount.put("type", "boolean");
-        showFileCount.put("description", "是否显示各类型文件数量统计，默认 true");
+        showFileCount.put("description", "【可选】是否在输出末尾显示按扩展名统计的文件类型分布图（含柱状图）。默认 true。若只关心目录结构可设为 false 以减少输出。");
         properties.set("show_file_count", showFileCount);
 
         parameters.set("properties", properties);
@@ -98,10 +101,10 @@ public class ReadProjectTreeTool implements Tool {
         }
 
         if (!Files.exists(rootPath)) {
-            return "错误：目录不存在 - " + rootPath.toAbsolutePath();
+            return "【路径不存在】目录 " + rootPath.toAbsolutePath() + " 不存在。建议：1) 检查路径拼写是否正确 2) 先不传 path 参数查看项目根目录确认目录名 3) 确认目录是否已被删除或重命名";
         }
         if (!Files.isDirectory(rootPath)) {
-            return "错误：路径不是目录 - " + rootPath.toAbsolutePath();
+            return "【类型错误】路径 " + rootPath.toAbsolutePath() + " 是文件而非目录，无法展开为树形结构。如需查看文件内容，请使用 read_file 工具。";
         }
 
         // ===== 一次遍历构建内存树 =====

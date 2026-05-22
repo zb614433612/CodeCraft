@@ -1,7 +1,11 @@
 package com.example.agentdeepseek.tool;
 
+import com.example.agentdeepseek.service.SnapshotService;
+import com.example.agentdeepseek.tool.permission.ToolExecutionPipeline;
+import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
 import com.example.agentdeepseek.util.OperationDetailGenerator;
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.example.agentdeepseek.util.ProjectRootContext;
+import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -9,6 +13,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -23,15 +28,28 @@ public class ToolExecutor {
 
     private final ToolRegistry toolRegistry;
     private final ObjectMapper objectMapper;
+    private final SnapshotService snapshotService;
+    private final ToolExecutionPipeline executionPipeline;
+    private final ToolPermissionRegistry permissionRegistry;
+    private final OperationDetailGenerator detailGenerator;
 
-    public ToolExecutor(ToolRegistry toolRegistry, ObjectMapper objectMapper) {
+    public ToolExecutor(ToolRegistry toolRegistry, ObjectMapper objectMapper,
+                        SnapshotService snapshotService,
+                        ToolExecutionPipeline executionPipeline,
+                        ToolPermissionRegistry permissionRegistry,
+                        OperationDetailGenerator detailGenerator) {
         this.toolRegistry = toolRegistry;
         this.objectMapper = objectMapper;
+        this.snapshotService = snapshotService;
+        this.executionPipeline = executionPipeline;
+        this.permissionRegistry = permissionRegistry;
+        this.detailGenerator = detailGenerator;
     }
 
-    /**
-     * 工具调用结果
-     */
+    // ============================================================
+    // 工具调用结果
+    // ============================================================
+
     public static class ToolCallResult {
         private final String toolCallId;
         private final String toolName;
@@ -52,26 +70,16 @@ public class ToolExecutor {
             this.operationSummary = operationSummary;
         }
 
-        public String getToolCallId() {
-            return toolCallId;
-        }
-
-        public String getToolName() {
-            return toolName;
-        }
-
-        public String getContent() {
-            return content;
-        }
-
-        public boolean isRestricted() {
-            return restricted;
-        }
-
-        public String getOperationSummary() {
-            return operationSummary;
-        }
+        public String getToolCallId() { return toolCallId; }
+        public String getToolName() { return toolName; }
+        public String getContent() { return content; }
+        public boolean isRestricted() { return restricted; }
+        public String getOperationSummary() { return operationSummary; }
     }
+
+    // ============================================================
+    // 主入口
+    // ============================================================
 
     /**
      * 解析并执行工具调用
@@ -94,7 +102,6 @@ public class ToolExecutor {
                 }
             } catch (Exception e) {
                 log.error("执行工具调用失败: {}", toolCallNode, e);
-                // 生成错误结果，以便模型知道工具调用失败
                 String toolCallId = toolCallNode.path("id").asText("unknown");
                 String toolName = toolCallNode.path("function").path("name").asText("unknown");
                 String briefMsg = e.getMessage();
@@ -109,10 +116,12 @@ public class ToolExecutor {
         return results;
     }
 
+    // ============================================================
+    // 单个工具执行
+    // ============================================================
+
     /**
      * 执行单个工具调用
-     * @param toolCallNode 单个工具调用节点
-     * @return 工具调用结果
      */
     private ToolCallResult executeSingleToolCall(JsonNode toolCallNode) {
         String toolCallId = toolCallNode.path("id").asText();
@@ -128,58 +137,56 @@ public class ToolExecutor {
             return null;
         }
 
-        Tool tool = toolRegistry.getTool(toolName);
-        if (tool == null) {
-            log.warn("找不到工具: {}", toolName);
+        JsonNode arguments;
+        try {
+            String argsStr = functionNode.path("arguments").asText();
+            arguments = objectMapper.readTree(argsStr);
+        } catch (Exception e) {
+            log.error("解析工具参数失败: tool={}, arguments={}", toolName,
+                    functionNode.path("arguments"), e);
             return new ToolCallResult(toolCallId, toolName,
-                "错误：找不到工具 '" + toolName + "'");
+                "工具参数解析失败: " + e.getMessage());
         }
 
-        JsonNode arguments = functionNode.path("arguments");
+        // 查找并执行工具
+        Tool tool = toolRegistry.getTool(toolName);
+        if (tool == null) {
+            log.warn("工具未找到: {}", toolName);
+            return new ToolCallResult(toolCallId, toolName,
+                "错误：未知工具 \"" + toolName + "\"，请检查工具名称是否正确");
+        }
+
         try {
-            log.debug("执行工具调用: id={}, tool={}, arguments={}",
-                toolCallId, toolName, arguments);
-            log.debug("工具调用参数详情: {}", arguments.toString());
-            log.debug("工具调用参数节点类型: {}", arguments.getNodeType());
-            log.debug("工具调用参数是否为文本节点: {}", arguments.isTextual());
-            log.debug("工具调用参数是否为对象节点: {}", arguments.isObject());
-            log.debug("工具调用参数是否为数组节点: {}", arguments.isArray());
-            log.debug("工具调用参数是否为null: {}", arguments.isNull());
-            log.debug("工具调用参数是否为missing: {}", arguments.isMissingNode());
+            String displayArgs = detailGenerator.generate(toolName, arguments);
+            boolean isRestricted = permissionRegistry.requiresDataApproval(toolName);
 
-            // 检查参数是否为空字符串
-            if (arguments.isTextual() && arguments.asText().isEmpty()) {
-                log.warn("工具调用参数为空字符串！这可能表示DeepSeek还未完全发送参数，或者参数格式有问题");
-                log.debug("完整的function节点: {}", functionNode.toString());
-                log.debug("完整的toolCall节点: {}", toolCallNode.toString());
+            String filePathStr = resolveFilePath(toolName, arguments);
+
+            // 文件修改类工具：创建代码快照
+            if (isFileModifyingTool(toolName) && filePathStr != null) {
+                String turnId = ToolContext.getTurnId();
+                Long sessionId = ToolContext.getConversationId();
+                log.info("快照创建: tool={}, filePath={}, turnId={}, sessionId={}",
+                        toolName, filePathStr, turnId, sessionId);
+                SnapshotService.SnapshotSummary summary = snapshotService.createSnapshot(turnId, sessionId, filePathStr);
+                log.info("快照结果: {}", summary != null ? "已创建 snapshotId=" + summary.getSnapshotId() : "返回null");
             }
 
-            // 如果arguments是文本节点（JSON字符串），解析为对象
-            JsonNode parsedArguments = arguments;
-            if (arguments.isTextual()) {
-                try {
-                    log.debug("参数是文本节点，解析JSON字符串: {}", arguments.asText());
-                    parsedArguments = objectMapper.readTree(arguments.asText());
-                    log.debug("解析后的参数: {}", parsedArguments);
-                } catch (Exception e) {
-                    log.error("解析JSON参数失败: {}", arguments.asText(), e);
-                }
+            // 通过三层防护管道执行工具（替代 tool.execute() 直接调用）
+            String executionMode = ToolContext.getMode();
+            Long conversationId = ToolContext.getConversationId();
+            Long userId = ToolContext.getUserId();
+            String result = executionPipeline.execute(tool, toolName, arguments,
+                    executionMode, conversationId, userId);
+
+            // 工具执行后：计算文件改动统计
+            if (isFileModifyingTool(toolName) && filePathStr != null) {
+                String turnId = ToolContext.getTurnId();
+                snapshotService.computeDiffStats(turnId, filePathStr);
             }
 
-            String result = tool.execute(parsedArguments);
-
-            // 生成本地操作摘要（用于展示在 thinking 流中）
-            boolean isRestricted = OperationDetailGenerator.isRestricted(toolName);
-            String operationSummary = null;
-            if (isRestricted && parsedArguments != null) {
-                try {
-                    operationSummary = OperationDetailGenerator.generate(toolName, parsedArguments);
-                } catch (Exception e) {
-                    log.debug("生成操作摘要失败: {}", e.getMessage());
-                }
-            }
-
-            return new ToolCallResult(toolCallId, toolName, result, isRestricted, operationSummary);
+            return new ToolCallResult(toolCallId, toolName, result,
+                    isRestricted, displayArgs);
         } catch (Exception e) {
             log.error("工具执行异常: tool={}, arguments={}", toolName, arguments, e);
             String briefMsg = e.getMessage();
@@ -191,10 +198,41 @@ public class ToolExecutor {
         }
     }
 
+    private boolean isFileModifyingTool(String toolName) {
+        return "write_file".equals(toolName)
+                || "edit_file".equals(toolName)
+                || "delete_file".equals(toolName);
+    }
+
+    /**
+     * 从工具参数中提取文件路径，返回标准化绝对路径
+     */
+    private String resolveFilePath(String toolName, JsonNode arguments) {
+        String filePathStr = arguments.path("file_path").asText("");
+        if (filePathStr == null || filePathStr.isEmpty()) {
+            filePathStr = arguments.path("path").asText("");
+        }
+        if (filePathStr == null || filePathStr.isEmpty()) {
+            return null;
+        }
+        Path filePath = Path.of(filePathStr);
+        if (!filePath.isAbsolute()) {
+            String root = ProjectRootContext.get();
+            if (root != null) {
+                filePath = Path.of(root, filePathStr).normalize();
+            }
+        } else {
+            filePath = filePath.normalize();
+        }
+        return filePath.toString();
+    }
+
+    // ============================================================
+    // 消息构建
+    // ============================================================
+
     /**
      * 将工具调用结果转换为DeepSeek API期望的消息格式
-     * @param toolCallResults 工具调用结果列表
-     * @return 消息列表，每个消息包含role=tool和工具结果
      */
     public List<ObjectNode> buildToolMessages(List<ToolCallResult> toolCallResults) {
         List<ObjectNode> messages = new ArrayList<>();
@@ -203,7 +241,7 @@ public class ToolExecutor {
             message.put("role", "tool");
             message.put("content", result.getContent());
             message.put("tool_call_id", result.getToolCallId());
-
+            message.put("tool_name", result.getToolName());
             messages.add(message);
         }
         return messages;
@@ -211,30 +249,21 @@ public class ToolExecutor {
 
     /**
      * 从DeepSeek响应中提取tool_calls节点
-     * @param messageNode DeepSeek响应的message节点
-     * @return tool_calls节点，如果没有则返回null
      */
     public JsonNode extractToolCalls(JsonNode messageNode) {
         return messageNode.path("tool_calls");
     }
 
-    /**
-     * 构建工具定义列表，用于DeepSeek API请求
-     * @return 工具定义列表（JSON数组）
-     */
-    public ArrayNode buildToolDefinitions() {
-        return buildToolDefinitions(null);
-    }
+    // ============================================================
+    // 工具定义构建
+    // ============================================================
 
     /**
-     * 构建指定工具的定义列表，用于DeepSeek API请求
-     * @param toolNames 工具名称列表，如果为null或空列表则返回空数组（不注册任何工具）
-     * @return 工具定义列表（JSON数组）
+     * 构建工具定义列表
      */
     public ArrayNode buildToolDefinitions(List<String> toolNames) {
         ArrayNode toolsArray = objectMapper.createArrayNode();
         if (toolNames == null || toolNames.isEmpty()) {
-            // null或空列表表示不注册任何工具
             return toolsArray;
         }
 

@@ -6,8 +6,6 @@ export type ExecutionMode = 'auto' | 'manual'
 
 // 各助手的执行模式配置，手动为默认
 export interface ExecutionModes {
-  ai_assistant: ExecutionMode
-  chat_assistant: ExecutionMode
   code_assistant: ExecutionMode
 }
 
@@ -15,41 +13,34 @@ export interface ExecutionModes {
 export type Model = 'deepseek-v4-pro' | 'deepseek-v4-flash'
 
 // 思考模式类型
+// non-thinking -> thinking.type=disabled
+// thinking    -> thinking.type=enabled + reasoning_effort=high
+// thinking_max -> thinking.type=enabled + reasoning_effort=max
 export type ThinkingMode = 'non-thinking' | 'thinking' | 'thinking_max'
 
 // 各助手的模型配置
 export interface Models {
-  ai_assistant: Model
-  chat_assistant: Model
   code_assistant: Model
 }
 
 // 各助手的思考模式配置
 export interface ThinkingModes {
-  ai_assistant: ThinkingMode
-  chat_assistant: ThinkingMode
   code_assistant: ThinkingMode
 }
 
 export const useSettingsStore = defineStore('settings', () => {
   // 各助手的执行模式，默认 manual
   const executionModes = ref<ExecutionModes>({
-    ai_assistant: 'manual',
-    chat_assistant: 'manual',
     code_assistant: 'manual'
   })
 
   // 各助手的模型，默认 deepseek-v4-flash
   const models = ref<Models>({
-    ai_assistant: 'deepseek-v4-flash',
-    chat_assistant: 'deepseek-v4-flash',
     code_assistant: 'deepseek-v4-flash'
   })
 
   // 各助手的思考模式，默认 non-thinking
   const thinkingModes = ref<ThinkingModes>({
-    ai_assistant: 'non-thinking',
-    chat_assistant: 'non-thinking',
     code_assistant: 'non-thinking'
   })
 

@@ -3,7 +3,10 @@
     <!-- 左侧菜单栏 -->
     <aside class="sidebar" :class="{ collapsed }">
       <div class="sidebar-header">
-        <h2 class="app-title" :class="{ collapsed }">zb-agent</h2>
+        <div class="app-brand">
+          <img :src="appLogo" class="app-logo" :class="{ collapsed }" alt="CodeCraft" />
+          <h2 class="app-title" :class="{ collapsed }">CodeCraft</h2>
+        </div>
         <div class="collapse-btn" @click="toggleCollapsed">
           <MenuFoldOutlined v-if="!collapsed" />
           <MenuUnfoldOutlined v-else />
@@ -12,21 +15,54 @@
       <a-menu
         v-model:selectedKeys="selectedKeys"
         mode="inline"
-        :items="menuItems"
         :inline-collapsed="collapsed"
         @click="handleMenuClick"
         class="app-menu"
-      />
+      >
+        <!-- LINK 菜单 -->
+        <a-menu-item v-for="item in menuItems" :key="item.key">
+          <template #icon>
+            <component :is="item.icon" />
+          </template>
+          {{ item.label }}
+        </a-menu-item>
+        <!-- SETTING 菜单（分隔线 + 菜单项） -->
+        <template v-if="settingMenuItems.length > 0">
+          <a-menu-divider />
+          <a-menu-item v-for="item in settingMenuItems" :key="item.key">
+            <template #icon>
+              <component :is="item.icon" />
+            </template>
+            {{ item.label }}
+          </a-menu-item>
+        </template>
+      </a-menu>
       <div class="sidebar-footer">
-        <div class="user-info">
-          <div class="user-avatar">
-            {{ userStore.userInfo?.username?.charAt(0).toUpperCase() || 'U' }}
+        <a-dropdown :trigger="['click']" placement="top">
+          <div class="user-info" style="cursor: pointer; flex: 1;">
+            <div class="user-avatar">
+              {{ userStore.userInfo?.username?.charAt(0).toUpperCase() || 'U' }}
+            </div>
+            <div class="user-name">{{ userStore.userInfo?.username || '用户' }}</div>
           </div>
-          <div class="user-name">{{ userStore.userInfo?.username || '用户' }}</div>
-        </div>
-        <a-button type="text" :loading="isLoggingOut" @click="handleLogout">
-          <logout-outlined />
-        </a-button>
+          <template #overlay>
+            <a-menu>
+              <!-- 管理页面（MANAGE 类型，动态加载，由角色菜单权限控制） -->
+              <a-menu-item
+                v-for="item in manageMenuItems"
+                :key="item.key"
+                @click="router.push(item.key)"
+              >
+                <component :is="item.icon" v-if="item.icon" />
+                {{ item.label }}
+              </a-menu-item>
+              <a-menu-divider />
+              <a-menu-item key="logout" :disabled="isLoggingOut" @click="handleLogout">
+                <LogoutOutlined /> 注销登录
+              </a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
       </div>
     </aside>
 
@@ -38,21 +74,29 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, h } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { logout } from '@/api/user'
+import { getUserMenus } from '@/api/menu'
 import {
-  RobotOutlined,
-  MessageOutlined,
-  LineChartOutlined,
   CodeOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
-  MenuUnfoldOutlined
+  MenuUnfoldOutlined,
+  RobotOutlined,
+  MessageOutlined,
+  LineChartOutlined,
+  UserOutlined,
+  FormOutlined,
+  SafetyOutlined,
+  SettingOutlined,
+  ClockCircleOutlined,
+  FileTextOutlined
 } from '@ant-design/icons-vue'
 import type { MenuProps } from 'ant-design-vue'
+import appLogo from '@/assets/logo.svg'
 
 const router = useRouter()
 const route = useRoute()
@@ -64,36 +108,67 @@ const toggleCollapsed = () => {
   collapsed.value = !collapsed.value
 }
 
-// 菜单项定义
-const menuItems = computed(() => [
-  {
-    key: '/ai-assistant',
-    icon: () => h(RobotOutlined),
-    label: 'AI助手'
-  },
-  {
-    key: '/chat-assistant',
-    icon: () => h(MessageOutlined),
-    label: '聊天助手'
-  },
-  {
-    key: '/stock-assistant',
-    icon: () => h(LineChartOutlined),
-    label: '股票助手'
-  },
-  {
-    key: '/code-assistant',
-    icon: () => h(CodeOutlined),
-    label: '编码助手'
+// 菜单项定义（动态加载）
+const menuItems = ref<any[]>([])
+const manageMenuItems = ref<any[]>([])
+const settingMenuItems = ref<any[]>([])
+
+// 图标名称到组件的映射
+const iconMap: Record<string, any> = {
+  RobotOutlined, MessageOutlined, LineChartOutlined,
+  CodeOutlined, SettingOutlined, UserOutlined,
+  SafetyOutlined, FormOutlined, ClockCircleOutlined,
+  FileTextOutlined
+}
+
+// 加载左侧菜单和底部管理菜单
+const loadMenus = async () => {
+  try {
+    // 加载左侧 LINK 菜单
+    const linkRes = await getUserMenus('LINK')
+    if (linkRes.code === 200 && linkRes.data) {
+      menuItems.value = linkRes.data.map(m => ({
+        key: m.path,
+        icon: iconMap[m.icon as string] || RobotOutlined,
+        label: m.name
+      }))
+    }
+    // 加载左侧 SETTING 菜单
+    const settingRes = await getUserMenus('SETTING')
+    if (settingRes.code === 200 && settingRes.data) {
+      settingMenuItems.value = settingRes.data.map(m => ({
+        key: m.path,
+        icon: iconMap[m.icon as string] || RobotOutlined,
+        label: m.name
+      }))
+    }
+    // 加载底部 MANAGE 菜单
+    const manageRes = await getUserMenus('MANAGE')
+    if (manageRes.code === 200 && manageRes.data) {
+      manageMenuItems.value = manageRes.data.map(m => ({
+        key: m.path,
+        icon: iconMap[m.icon as string] || null,
+        label: m.name
+      }))
+    }
+  } catch (e) {
+    console.error('加载菜单失败', e)
+    menuItems.value = []
+    manageMenuItems.value = []
+    settingMenuItems.value = []
   }
-])
+}
 
 // 当前选中的菜单键，根据路由路径自动匹配
 const selectedKeys = ref<string[]>([route.path])
 
 // 监听路由变化，更新选中状态
-watch(() => route.path, (newPath) => {
+watch(() => route.path, (newPath, oldPath) => {
   selectedKeys.value = [newPath]
+  // 从菜单权限管理页面离开时重新加载菜单（权限可能已变更）
+  if (oldPath === '/menu-permission') {
+    loadMenus()
+  }
 })
 
 // 菜单点击处理
@@ -125,9 +200,11 @@ const handleLogout = async () => {
 }
 
 onMounted(() => {
+  // 加载左侧菜单
+  loadMenus()
   // 确保默认选中AI助手
   if (route.path === '/') {
-    router.push('/ai-assistant')
+    router.push('/code-assistant')
   }
 })
 </script>
@@ -177,6 +254,28 @@ onMounted(() => {
   font-size: 14px;
   overflow: hidden;
   text-overflow: clip;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.app-logo {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  transition: width 0.2s ease, height 0.2s ease;
+}
+
+.app-logo.collapsed {
+  width: 24px;
+  height: 24px;
 }
 
 .collapse-btn {

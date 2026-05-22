@@ -1,3 +1,5 @@
+import { authFetch } from '@/utils/http-client'
+
 export interface Skill {
   id: number
   name: string
@@ -33,6 +35,6 @@ export async function listSkills(userId: number): Promise<Skill[]> {
  */
 export async function deleteSkill(id: number, userId: number): Promise<DeleteResult> {
   const params = new URLSearchParams({ userId: String(userId) })
-  const res = await fetch(`/api/skills/${id}?${params}`, { method: 'DELETE' })
+  const res = await authFetch(`/api/skills/${id}?${params}`, { method: 'DELETE' })
   return res.json()
 }

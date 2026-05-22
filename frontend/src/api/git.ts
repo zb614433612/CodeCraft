@@ -1,4 +1,4 @@
-import { getAuthHeaders } from '@/utils/http-client'
+import { authFetch } from '@/utils/http-client'
 
 export interface GitStatusResult {
   isRepo: boolean
@@ -50,8 +50,7 @@ export interface GitAuthResult {
  */
 export async function getGitStatus(projectRoot: string): Promise<GitStatusResult> {
   const params = new URLSearchParams({ projectRoot })
-  const headers = await getAuthHeaders()
-  const res = await fetch(`/api/git/status?${params}`, { headers })
+  const res = await authFetch(`/api/git/status?${params}`)
   return res.json()
 }
 
@@ -62,8 +61,7 @@ export async function getGitDiff(projectRoot: string, file?: string, staged?: bo
   const params = new URLSearchParams({ projectRoot })
   if (file) params.append('file', file)
   if (staged) params.append('staged', 'true')
-  const headers = await getAuthHeaders()
-  const res = await fetch(`/api/git/diff?${params}`, { headers })
+  const res = await authFetch(`/api/git/diff?${params}`)
   return res.json()
 }
 
@@ -71,10 +69,8 @@ export async function getGitDiff(projectRoot: string, file?: string, staged?: bo
  * 暂存文件
  */
 export async function gitAdd(projectRoot: string, files?: string[], all?: boolean): Promise<GitAddResult> {
-  const headers = await getAuthHeaders()
-  const res = await fetch('/api/git/add', {
+  const res = await authFetch('/api/git/add', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ projectRoot, files, all })
   })
   return res.json()
@@ -84,10 +80,8 @@ export async function gitAdd(projectRoot: string, files?: string[], all?: boolea
  * 执行提交
  */
 export async function gitCommit(projectRoot: string, message: string): Promise<GitCommitResult> {
-  const headers = await getAuthHeaders()
-  const res = await fetch('/api/git/commit', {
+  const res = await authFetch('/api/git/commit', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ projectRoot, message })
   })
   return res.json()
@@ -99,8 +93,7 @@ export async function gitCommit(projectRoot: string, message: string): Promise<G
 export async function getGitLog(projectRoot: string, maxCount?: number): Promise<GitLogResult> {
   const params = new URLSearchParams({ projectRoot })
   if (maxCount) params.append('maxCount', String(maxCount))
-  const headers = await getAuthHeaders()
-  const res = await fetch(`/api/git/log?${params}`, { headers })
+  const res = await authFetch(`/api/git/log?${params}`)
   return res.json()
 }
 
@@ -108,10 +101,8 @@ export async function getGitLog(projectRoot: string, maxCount?: number): Promise
  * 保存 Git Token
  */
 export async function saveGitToken(projectRoot: string, token: string): Promise<GitAuthResult> {
-  const headers = await getAuthHeaders()
-  const res = await fetch('/api/git/auth', {
+  const res = await authFetch('/api/git/auth', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ projectRoot, token })
   })
   return res.json()
@@ -122,8 +113,7 @@ export async function saveGitToken(projectRoot: string, token: string): Promise<
  */
 export async function checkGitToken(projectRoot: string): Promise<GitAuthResult> {
   const params = new URLSearchParams({ projectRoot })
-  const headers = await getAuthHeaders()
-  const res = await fetch(`/api/git/auth?${params}`, { headers })
+  const res = await authFetch(`/api/git/auth?${params}`)
   return res.json()
 }
 
@@ -132,10 +122,8 @@ export async function checkGitToken(projectRoot: string): Promise<GitAuthResult>
  */
 export async function clearGitToken(projectRoot: string): Promise<GitAuthResult> {
   const params = new URLSearchParams({ projectRoot })
-  const headers = await getAuthHeaders()
-  const res = await fetch(`/api/git/auth?${params}`, {
-    method: 'DELETE',
-    headers
+  const res = await authFetch(`/api/git/auth?${params}`, {
+    method: 'DELETE'
   })
   return res.json()
 }
@@ -144,20 +132,16 @@ export async function clearGitToken(projectRoot: string): Promise<GitAuthResult>
  * 初始化 Git 仓库
  */
 export async function gitRestore(projectRoot: string, file: string): Promise<{ success: boolean; error?: string; output?: string }> {
-  const headers = await getAuthHeaders()
-  const res = await fetch('/api/git/restore', {
+  const res = await authFetch('/api/git/restore', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ projectRoot, file })
   })
   return res.json()
 }
 
 export async function gitInit(projectRoot: string, remoteUrl?: string, token?: string): Promise<{ success: boolean; error?: string }> {
-  const headers = await getAuthHeaders()
-  const res = await fetch('/api/git/init', {
+  const res = await authFetch('/api/git/init', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ projectRoot, remoteUrl, token })
   })
   return res.json()

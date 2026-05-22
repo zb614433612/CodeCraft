@@ -31,12 +31,33 @@ public class SkillServiceImpl implements SkillService {
 
     @Override
     public Skill createSkill(String name, String description, String toolNames, String instructions,
-                             Long userId, String agentType) {
-        Skill skill = new Skill(name, description, toolNames, instructions, userId, agentType);
+                             String triggerWords, Long userId, String agentType) {
+        Skill skill = new Skill(name, description, toolNames, instructions, triggerWords, userId, agentType);
         skill.setCreatedAt(LocalDateTime.now());
         skill.setUpdatedAt(LocalDateTime.now());
         skillMapper.insert(skill);
-        log.info("用户 {} 创建技能: {} (ID={}), 关联工具: {}", userId, name, skill.getId(), toolNames);
+        log.info("用户 {} 创建技能: {} (ID={}), 关联工具: {}, 触发词: {}", userId, name, skill.getId(), toolNames, triggerWords);
+        return skill;
+    }
+
+    @Override
+    public Skill updateSkill(Long skillId, String name, String description, String toolNames,
+                             String instructions, String triggerWords, Long userId) {
+        Skill skill = skillMapper.selectById(skillId).orElse(null);
+        if (skill == null) {
+            throw new IllegalArgumentException("技能不存在: " + skillId);
+        }
+        if (!skill.getUserId().equals(userId)) {
+            throw new SecurityException("无权修改其他用户的技能");
+        }
+        if (name != null) skill.setName(name);
+        if (description != null) skill.setDescription(description);
+        if (toolNames != null) skill.setToolNames(toolNames);
+        if (instructions != null) skill.setInstructions(instructions);
+        if (triggerWords != null) skill.setTriggerWords(triggerWords);
+        skill.setUpdatedAt(LocalDateTime.now());
+        skillMapper.update(skill);
+        log.info("用户 {} 更新技能: {} (ID={})", userId, skill.getName(), skillId);
         return skill;
     }
 
@@ -71,16 +92,10 @@ public class SkillServiceImpl implements SkillService {
 
     @Override
     public Skill reportResult(Long skillId, boolean success) {
+        int successInc = success ? 1 : 0;
+        int failInc = success ? 0 : 1;
+        skillMapper.atomicReportResult(skillId, successInc, failInc);
         Skill skill = getSkillById(skillId);
-        skill.setUsageCount(skill.getUsageCount() + 1);
-        if (success) {
-            skill.setSuccessCount(skill.getSuccessCount() + 1);
-        } else {
-            skill.setFailCount(skill.getFailCount() + 1);
-        }
-        int total = skill.getUsageCount();
-        skill.setConfidence(total > 0 ? (double) skill.getSuccessCount() / total : 0.5);
-        skillMapper.update(skill);
         log.debug("技能 {} 执行结果: success={}, 置信度={}", skillId, success, skill.getConfidence());
         return skill;
     }

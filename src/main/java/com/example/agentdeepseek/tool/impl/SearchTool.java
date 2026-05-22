@@ -17,6 +17,8 @@ import org.springframework.web.client.RestTemplate;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 
 /**
  * 互联网搜索工具
@@ -24,6 +26,7 @@ import java.nio.charset.StandardCharsets;
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.NETWORK, description = "网络搜索")
 public class SearchTool implements Tool {
 
     private static final int MAX_RESULT_TITLE_LENGTH = 150;
@@ -51,8 +54,10 @@ public class SearchTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "搜索互联网获取实时信息（通过 Bing 搜索引擎），返回标题、摘要片段和来源链接。适用于获取最新新闻、百科知识、实时数据等。"
-                + "当需要获取某条搜索结果的完整页面内容时，请使用 web_fetch 工具读取具体网页";
+        return "【适用场景】获取最新新闻、实时数据、百科知识、技术问题解决方案等需要搜索引擎聚合的信息。"
+                + "【与 web_fetch 的区别】web_search 返回多个结果的标题+摘要+链接（概览），web_fetch 读取某一个 URL 的完整页面内容（深入）。"
+                + "【建议】先用本工具搜索找到目标页面，再用 web_fetch 深入了解其中某个结果。"
+                + "搜索源为 Bing 搜索引擎（RSS 格式，无需 API Key）。";
     }
 
     @Override
@@ -64,8 +69,13 @@ public class SearchTool implements Tool {
         ObjectNode properties = objectMapper.createObjectNode();
         ObjectNode queryProperty = objectMapper.createObjectNode();
         queryProperty.put("type", "string");
-        queryProperty.put("description", "搜索关键词，尽量简洁精确");
+        queryProperty.put("description", "【必填】搜索关键词。尽量简洁精确，用空格分隔多个词。示例：Java 21 虚拟线程 最佳实践");
         properties.set("query", queryProperty);
+
+        ObjectNode count = objectMapper.createObjectNode();
+        count.put("type", "integer");
+        count.put("description", "【可选】返回结果数量，默认 " + config.getSearchMaxResults() + "，最大 " + config.getSearchMaxResults() + "。仅在需要更多/更少结果时传，一般情况下用默认值即可");
+        properties.set("count", count);
 
         parameters.set("properties", properties);
         parameters.putArray("required").add("query");
@@ -76,7 +86,7 @@ public class SearchTool implements Tool {
     public String execute(JsonNode arguments) {
         String query = arguments.path("query").asText("");
         if (query.isEmpty()) {
-            return "错误：搜索关键词不能为空";
+            return "【参数错误】query 参数不能为空。请提供搜索关键词，例如：{\"query\": \"Spring Boot 3 配置指南\"}";
         }
 
         try {
@@ -87,7 +97,7 @@ public class SearchTool implements Tool {
 
             String response = restTemplate.getForObject(url, String.class);
             if (response == null || response.isBlank()) {
-                return "错误：搜索引擎返回空响应";
+                return "【服务端错误】搜索引擎返回空响应，可能是网络问题或 Bing 暂时不可用。建议：1) 稍后重试 2) 更换搜索关键词 3) 使用 check_network 工具检测网络环境";
             }
 
             // 解析 RSS XML
@@ -95,13 +105,14 @@ public class SearchTool implements Tool {
             Elements items = doc.select("item");
 
             if (items.isEmpty()) {
-                return "未找到与「" + query + "」相关的搜索结果，请尝试使用不同的关键词";
+                return "【无结果】未找到与「" + query + "」相关的搜索结果。建议：1) 缩短关键词，用更通用的词（如将完整报错信息缩减为核心关键词）2) 去掉引号和特殊符号 3) 尝试用英文关键词搜索（英文结果通常更丰富）";
             }
 
             StringBuilder sb = new StringBuilder();
             sb.append("--- 搜索结果 ---\n\n");
 
-            int maxResults = config.getSearchMaxResults();
+            int maxResults = arguments.path("count").asInt(config.getSearchMaxResults());
+            maxResults = Math.min(maxResults, config.getSearchMaxResults());
             int count = Math.min(items.size(), maxResults);
             for (int i = 0; i < count; i++) {
                 Element item = items.get(i);
@@ -128,13 +139,13 @@ public class SearchTool implements Tool {
 
         } catch (org.springframework.web.client.ResourceAccessException e) {
             log.error("Bing 搜索连接失败: {}", e.getMessage());
-            return "错误：无法连接搜索引擎，请检查网络连接是否正常（Bing 搜索需要联网）";
+            return "【网络错误】无法连接 Bing 搜索引擎。建议：1) 使用 check_network 工具检测当前网络环境 2) 如果检测到国外网站不通，请在设置中启用代理 3) 确认 cn.bing.com 在当前网络可达";
         } catch (org.springframework.web.client.HttpStatusCodeException e) {
             log.error("Bing 搜索失败: {} - HTTP {}", query, e.getStatusCode());
-            return "错误：搜索失败 - 搜索引擎返回 HTTP " + e.getStatusCode().value();
+            return "【请求失败】搜索引擎返回 HTTP " + e.getStatusCode().value() + "。建议：1) 如果是 429 则请求过于频繁，等待几秒后再试 2) 如果是 5xx 则 Bing 服务暂时异常，稍后重试 3) 简化搜索关键词（缩短长度、去掉特殊字符）后重试";
         } catch (Exception e) {
             log.error("Bing 搜索失败", e);
-            return "错误：搜索失败 - " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            return "【未知错误】搜索异常（" + e.getClass().getSimpleName() + "）。建议：1) 检查搜索关键词是否包含特殊字符，尝试简化 2) 将中文关键词切换为英文尝试 3) 使用 check_network 检测网络状态后重试";
         }
     }
 

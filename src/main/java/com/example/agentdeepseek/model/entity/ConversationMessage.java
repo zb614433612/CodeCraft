@@ -44,6 +44,11 @@ public class ConversationMessage {
      */
     private String toolCalls;
 
+    /**
+     * turnId（前端生成，用于匹配回滚快照）
+     */
+    private String turnId;
+
 
     /**
      * 创建时间

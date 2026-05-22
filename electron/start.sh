@@ -1,9 +1,9 @@
 #!/bin/bash
-# zb-agent 桌面应用启动器 (Linux/Mac)
+# CodeCraft 桌面应用启动器 (Linux/Mac)
 cd "$(dirname "$0")"
 
 # 检查 JAR 是否存在
-if [ ! -f "../target/agent-deepseek-0.0.1-SNAPSHOT.jar" ]; then
+if [ ! -f "../target/codecraft-0.0.1-SNAPSHOT.jar" ]; then
     echo "错误: 未找到后端 JAR 文件！"
     echo "请先执行: mvn clean package -DskipTests"
     exit 1

@@ -7,8 +7,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 执行令牌管理器
- * 在 manual 模式下，每次 ask_execution 获得用户同意后发放一个令牌，
- * 受限工具（write_file/edit_file/run_command/run_background_command）执行时消耗该令牌。
+ * 在 manual 模式下，每个受限工具执行前通过 PermissionContext 向用户请求授权，
+ * 获得授权后发放一个令牌，工具执行时消耗该令牌。
  * 无令牌时受限工具直接返回"需要用户同意"消息，不执行实际操作。
  * 自动模式下不检查令牌。
  */

@@ -1,8 +1,8 @@
 package com.example.agentdeepseek.tool.impl;
 
-import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
-import com.example.agentdeepseek.util.ToolContext;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.DATABASE, affectsData = true, highRisk = true, description = "执行SQL语句")
 public class ExecuteSqlTool implements Tool {
 
     /** 单条 SQL 最大长度（字符） */
@@ -33,6 +34,8 @@ public class ExecuteSqlTool implements Tool {
     private static final Pattern COMMENT_PATTERN = Pattern.compile("^\\s*(/\\*.*?\\*/\\s*|--[^\n]*\n)*", Pattern.DOTALL);
     /** 匹配已有 LIMIT 子句的正则（忽略大小写、单词边界） */
     private static final Pattern LIMIT_PATTERN = Pattern.compile("\\bLIMIT\\b", Pattern.CASE_INSENSITIVE);
+    /** 匹配 SQL 字符串字面量的正则 */
+    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile("'[^']*'|'[^']*");
     /** 写操作关键字列表 */
     private static final List<String> WRITE_KEYWORDS = List.of(
             "INSERT", "UPDATE", "DELETE", "REPLACE",
@@ -55,9 +58,10 @@ public class ExecuteSqlTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "执行 SQL 查询和修改操作。SELECT 查询会自动限制最多 " + MAX_SELECT_ROWS + " 行。"
-                + "INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE 等写操作在手动模式下需要 ask_execution 授权。"
-                + "不支持多语句同时执行";
+        return "执行 SQL 查询和数据库修改操作。\n"
+                + "【适用场景】查询数据库表结构、验证数据是否写入成功、排查数据异常、执行必要的增删改操作\n"
+                + "【使用方式】SELECT 查询：直接传入 SQL（自动追加 LIMIT " + MAX_SELECT_ROWS + " 防止全表返回）。手动模式下所有 SQL 操作均需用户授权；自动模式下高危操作（DDL/DROP 等）仍需授权\n"
+                + "【注意】不支持多语句（以分号分隔的多条 SQL），每次只执行一条；SQL 最大 " + MAX_SQL_LENGTH + " 字符；SELECT 建议加 WHERE 条件避免全表扫描";
     }
 
     @Override
@@ -68,7 +72,7 @@ public class ExecuteSqlTool implements Tool {
         ObjectNode properties = objectMapper.createObjectNode();
         ObjectNode sql = objectMapper.createObjectNode();
         sql.put("type", "string");
-        sql.put("description", "要执行的 SQL 语句。SELECT 查询建议加 WHERE 条件避免全表扫描。");
+        sql.put("description", "【必填】单条 SQL 语句。SELECT 示例：\"SELECT id, name FROM users WHERE status = 'active'\"。写操作示例：\"UPDATE users SET status = 'inactive' WHERE id = 1\"。SELECT 查询务必加 WHERE 条件，避免全表扫描");
         properties.set("sql", sql);
 
         parameters.set("properties", properties);
@@ -80,30 +84,22 @@ public class ExecuteSqlTool implements Tool {
     public String execute(JsonNode arguments) {
         String sql = arguments.path("sql").asText().trim();
         if (sql.isEmpty()) {
-            return "错误：缺少必要参数 sql";
+            return "【错误类型】【缺少参数】sql 字段缺失或为空。请提供一条完整的 SQL 语句。示例：{\"sql\": \"SELECT * FROM users WHERE id = 1\"}";
         }
 
         // 长度检查
         if (sql.length() > MAX_SQL_LENGTH) {
-            return "错误：SQL 语句过长（" + sql.length() + " 字符），最大允许 " + MAX_SQL_LENGTH + " 字符";
+            return "【错误类型】【SQL 过长】SQL 语句 " + sql.length() + " 字符超出" + MAX_SQL_LENGTH + "字符限制。请精简查询条件，或拆分为多次调用（分别查询不同表/不同条件）";
         }
 
         // 多语句检查
         if (hasMultipleStatements(sql)) {
-            return "错误：不支持同时执行多条 SQL 语句";
+            return "【错误类型】【多语句禁止】检测到多条 SQL 语句（包含分号分隔）。请每次只执行一条 SQL，将多条语句拆分为多次独立调用。例如 UPDATE 和 SELECT 分两次调用";
         }
 
         // 提取 SQL 类型（去除注释前缀后判断）
         String cleanSql = stripComments(sql);
         String sqlType = detectSqlType(cleanSql);
-
-        // 写操作在手动模式下需要权限锁
-        if (!"SELECT".equals(sqlType)) {
-            if ("manual".equals(ToolContext.getMode())) {
-                String response = PermissionContext.requestPermission(getName(), arguments, ToolContext.getConversationId());
-                if (response != null) return response;
-            }
-        }
 
         try {
             if ("SELECT".equals(sqlType)) {
@@ -111,11 +107,11 @@ public class ExecuteSqlTool implements Tool {
             } else if ("WRITE".equals(sqlType)) {
                 return executeUpdate(sql);
             } else {
-                return "错误：无法识别的 SQL 类型，仅支持 SELECT 和常见写操作（INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE）";
+                return "【错误类型】【SQL 类型未知】无法识别的 SQL 语句类型。仅支持：SELECT 查询 和 写操作（INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE）。请检查 SQL 开头关键字是否正确，去掉前导注释后重试";
             }
         } catch (Exception e) {
             log.error("SQL 执行失败: {}", sql, e);
-            return "错误：SQL 执行失败 - " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            return "【错误类型】【SQL 执行异常】" + e.getClass().getSimpleName() + ": " + e.getMessage() + "。建议检查：① 表名/字段名是否存在 ② 字段类型是否匹配 ③ 约束条件是否冲突（如唯一索引重复）④ 外键依赖是否满足";
         }
     }
 
@@ -166,8 +162,9 @@ public class ExecuteSqlTool implements Tool {
      * 执行 SELECT 查询
      */
     private String executeSelect(String sql) {
-        // 使用正则检测是否已有 LIMIT 子句
-        if (!LIMIT_PATTERN.matcher(sql).find()) {
+        // 先去除字符串字面量再检测 LIMIT，避免字面量内的 LIMIT 被误匹配
+        String sqlNoLiterals = STRING_LITERAL_PATTERN.matcher(sql).replaceAll("");
+        if (!LIMIT_PATTERN.matcher(sqlNoLiterals).find()) {
             sql = sql + " LIMIT " + MAX_SELECT_ROWS;
         }
 
@@ -206,10 +203,8 @@ public class ExecuteSqlTool implements Tool {
 
         int rowCount = rows.size();
         StringBuilder summary = new StringBuilder("查询完成，返回 ").append(rowCount).append(" 行");
-        if (!LIMIT_PATTERN.matcher(sql).find() || sql.length() > sql.lastIndexOf(" LIMIT ") + 20) {
-            // 如果是我们追加的 LIMIT
-        }
-        if (rowCount >= MAX_SELECT_ROWS && LIMIT_PATTERN.matcher(sql).find()) {
+        // LIMIT 追加标记（用于后续判断是否为我们追加的）
+        if (rowCount >= MAX_SELECT_ROWS && LIMIT_PATTERN.matcher(sqlNoLiterals).find()) {
             summary.append("（受 ").append(MAX_SELECT_ROWS).append(" 行限制，结果可能不完整）");
         }
 

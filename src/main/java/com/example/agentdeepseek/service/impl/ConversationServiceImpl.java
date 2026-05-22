@@ -2,6 +2,7 @@ package com.example.agentdeepseek.service.impl;
 
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
+import com.example.agentdeepseek.mapper.SubAgentLogMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.service.ConversationService;
@@ -23,6 +24,9 @@ public class ConversationServiceImpl implements ConversationService {
     @Autowired
     private ConversationMessageMapper conversationMessageMapper;
 
+    @Autowired
+    private SubAgentLogMapper subAgentLogMapper;
+
     @Override
     public List<Conversation> getConversationsByUserId(Long userId, String agentType) {
         if (agentType != null && !agentType.trim().isEmpty()) {
@@ -39,9 +43,11 @@ public class ConversationServiceImpl implements ConversationService {
     @Override
     @Transactional
     public boolean deleteConversation(Long conversationId) {
-        // 先删除关联消息（虽然数据库有级联删除，但为了逻辑清晰，显式删除）
+        // 先删除子Agent执行记录（虽数据库有外键级联，但显式删除保持逻辑清晰）
+        subAgentLogMapper.deleteByConversationId(conversationId);
+        // 再删除关联消息
         conversationMessageMapper.deleteByConversationId(conversationId);
-        // 删除会话
+        // 最后删除会话
         int affectedRows = conversationMapper.delete(conversationId);
         return affectedRows > 0;
     }

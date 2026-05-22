@@ -32,4 +32,13 @@ public interface DeepSeekService {
      * 取消正在运行的后台任务
      */
     void cancelTask(Long conversationId);
+
+    /**
+     * 异步处理会话（用于定时任务等后台场景）
+     * 创建 ChatRequest 并调用 streamChat 处理，AI 回复自动保存到数据库
+     * @param conversationId 会话ID
+     * @param message 用户消息（任务指令）
+     * @param agentType agent类型（用于选择提示词文件）
+     */
+    void processConversationAsync(Long conversationId, String message, String agentType);
 }

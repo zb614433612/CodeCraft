@@ -81,6 +81,36 @@ public class ProjectBuildController {
         );
     }
 
+    @PostMapping("/exec")
+    @Operation(summary = "执行命令", description = "在指定工作目录下执行命令（终端用），超时默认 30s")
+    public Map<String, Object> exec(@RequestBody Map<String, String> body) {
+        String command = body.get("command");
+        String workingDirectory = body.getOrDefault("workingDirectory", "");
+        String timeoutStr = body.get("timeout");
+
+        if (command == null || command.trim().isEmpty()) {
+            return Map.of("success", false, "output", "命令不能为空", "exitCode", -1, "timedOut", false);
+        }
+
+        Long timeout = null;
+        if (timeoutStr != null && !timeoutStr.isEmpty()) {
+            try {
+                timeout = Long.parseLong(timeoutStr);
+            } catch (NumberFormatException ignored) {}
+        }
+
+        log.info("执行命令: command={}, dir={}", command, workingDirectory.isEmpty() ? "default" : workingDirectory);
+
+        ProjectBuildService.ExecResult result = projectBuildService.exec(command, workingDirectory, timeout);
+
+        return Map.of(
+                "success", result.success(),
+                "output", result.output(),
+                "exitCode", result.exitCode(),
+                "timedOut", result.timedOut()
+        );
+    }
+
     @GetMapping("/run/output")
     @Operation(summary = "获取控制台输出", description = "获取运行中项目的控制台输出，支持 tail 参数获取最近 N 行")
     public Map<String, Object> getOutput(@RequestParam(required = false) Integer tail) {
