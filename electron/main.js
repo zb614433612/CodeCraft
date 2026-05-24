@@ -105,8 +105,15 @@ function startBackend() {
 
   console.log(`启动后端服务: ${jarPath}`)
   console.log(`Java 路径: ${javaCmd}`)
+  // 使用 Electron 的用户数据目录作为工作目录，确保数据库文件位于统一位置
+  const dataDir = app.isPackaged ? app.getPath('userData') : path.dirname(jarPath)
+  // 确保数据目录存在
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true })
+  }
+  console.log(`后端工作目录: ${dataDir}`)
   javaProcess = spawn(javaCmd, ['-Dfile.encoding=UTF-8', '-jar', jarPath], {
-    cwd: path.dirname(jarPath),
+    cwd: dataDir,
     stdio: ['ignore', 'pipe', 'pipe']
   })
 

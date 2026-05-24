@@ -79,13 +79,14 @@ CREATE TABLE IF NOT EXISTS skill (
   user_id BIGINT NOT NULL COMMENT '所属用户ID',
   agent_type VARCHAR(50) NOT NULL COMMENT '所属助手类型 code_assistant',
   agent_config_id BIGINT COMMENT '所属Agent配置ID（null=全局技能）',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_user_agent (user_id, agent_type),
-  INDEX idx_agent_config_id (agent_config_id),
-  INDEX idx_confidence (confidence)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='技能表';
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
+-- H2 兼容的索引创建（MySQL 的 INDEX 内联定义在 H2 的 MODE=MySQL 下部分不支持）
+CREATE INDEX IF NOT EXISTS idx_skill_user_agent ON skill(user_id, agent_type);
+CREATE INDEX IF NOT EXISTS idx_skill_agent_config_id ON skill(agent_config_id);
+CREATE INDEX IF NOT EXISTS idx_skill_confidence ON skill(confidence);
 
 
 -- ============================================================
