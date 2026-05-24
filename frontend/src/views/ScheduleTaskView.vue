@@ -18,7 +18,7 @@
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'agentType'">
-          {{ agentTypeLabel(record.agentType) }}
+          {{ agentTypeLabel(record) }}
         </template>
         <template v-if="column.key === 'schedule'">
           <span v-if="record.cronExpression">{{ record.cronExpression }}</span>
@@ -67,8 +67,8 @@
           <a-input v-model:value="formData.name" placeholder="如：每日代码审查" />
         </a-form-item>
         <a-form-item label="Agent类型">
-          <a-select v-model:value="formData.agentType">
-            <a-select-option value="code_assistant">编码助手</a-select-option>
+          <a-select v-model:value="formData.agentConfigId" placeholder="选择Agent" @change="onAgentSelect">
+            <a-select-option v-for="a in agentList" :key="a.id" :value="a.id">{{ a.avatar }} {{ a.name }}</a-select-option>
           </a-select>
         </a-form-item>
         <a-form-item label="执行方式">
@@ -111,7 +111,10 @@ import {
   type ScheduleTaskItem, type CreateTaskParams
 } from '@/api/schedule-task'
 
+import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
+
 const router = useRouter()
+const agentList = ref<AgentConfig[]>([])
 const taskList = ref<ScheduleTaskItem[]>([])
 const loading = ref(false)
 
@@ -125,11 +128,12 @@ const columns = [
   { title: '操作', key: 'action', width: 200, fixed: 'right' }
 ]
 
-const agentTypeLabel = (type: string) => {
-  const map: Record<string, string> = {
-    code_assistant: '编码助手'
+const agentTypeLabel = (record: ScheduleTaskItem) => {
+  if (record.agentConfigId) {
+    const a = agentList.value.find(x => x.id === record.agentConfigId)
+    if (a) return (a.avatar || '') + ' ' + a.name
   }
-  return map[type] || type
+  return (record as any).agentType || '编码助手'
 }
 
 const formatTime = (t: string) => {
@@ -164,14 +168,16 @@ const executeDate = ref<string>()
 
 const formData = ref({
   name: '',
-  agentType: 'code_assistant',
+  agentConfigId: undefined as number | undefined,
   instruction: '',
   cronExpression: '',
   maxExecuteCount: 0
 })
 
+const onAgentSelect = () => {}
+
 const resetForm = () => {
-  formData.value = { name: '', agentType: 'code_assistant', instruction: '', cronExpression: '', maxExecuteCount: 0 }
+  formData.value = { name: '', agentConfigId: undefined, instruction: '', cronExpression: '', maxExecuteCount: 0 }
   scheduleType.value = 'once'
   executeDate.value = undefined
   isEditing.value = false
@@ -188,7 +194,7 @@ const openEditModal = (item: ScheduleTaskItem) => {
   editingId.value = item.id
   formData.value = {
     name: item.name,
-    agentType: item.agentType,
+    agentConfigId: item.agentConfigId,
     instruction: item.instruction,
     cronExpression: item.cronExpression || '',
     maxExecuteCount: item.maxExecuteCount
@@ -210,7 +216,8 @@ const handleModalOk = async () => {
   try {
     const params: CreateTaskParams = {
       name: formData.value.name,
-      agentType: formData.value.agentType,
+      agentType: 'code_assistant', // 兼容字段
+      agentConfigId: formData.value.agentConfigId,
       instruction: formData.value.instruction,
       maxExecuteCount: formData.value.maxExecuteCount
     }
@@ -268,7 +275,8 @@ const viewConversation = (item: ScheduleTaskItem) => {
   router.push(path)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  try { const res = await listAgentConfigs(); if (res.code === 200) agentList.value = res.data } catch {}
   loadList()
 })
 </script>

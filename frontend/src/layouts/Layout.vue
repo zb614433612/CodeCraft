@@ -19,23 +19,24 @@
         @click="handleMenuClick"
         class="app-menu"
       >
-        <!-- LINK 菜单 -->
-        <a-menu-item v-for="item in menuItems" :key="item.key">
-          <template #icon>
-            <component :is="item.icon" />
-          </template>
-          {{ item.label }}
-        </a-menu-item>
-        <!-- SETTING 菜单（分隔线 + 菜单项） -->
-        <template v-if="settingMenuItems.length > 0">
-          <a-menu-divider />
+        <!-- 聊天 菜单组 -->
+        <a-menu-item-group key="chat" title="聊天">
+          <a-menu-item v-for="item in menuItems" :key="item.key">
+            <template #icon>
+              <component :is="item.icon" />
+            </template>
+            {{ item.label }}
+          </a-menu-item>
+        </a-menu-item-group>
+        <!-- 设置 菜单组 -->
+        <a-menu-item-group v-if="settingMenuItems.length > 0" key="settings" title="设置">
           <a-menu-item v-for="item in settingMenuItems" :key="item.key">
             <template #icon>
               <component :is="item.icon" />
             </template>
             {{ item.label }}
           </a-menu-item>
-        </template>
+        </a-menu-item-group>
       </a-menu>
       <div class="sidebar-footer">
         <a-dropdown :trigger="['click']" placement="top">
@@ -297,6 +298,12 @@ onMounted(() => {
   flex: 1;
   border-right: none;
   padding: 10px 0;
+}
+
+/* 菜单分组标题左对齐 */
+:deep(.ant-menu-item-group-title) {
+  text-align: left !important;
+  padding-left: 24px !important;
 }
 
 .sidebar-footer {

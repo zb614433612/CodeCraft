@@ -50,18 +50,23 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ReloadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
-import { listSkills, deleteSkill, type Skill } from '@/api/skill'
+import { listSkills, deleteSkillApi, type SkillData } from '@/api/skill'
 import { useUserStore } from '@/store/user'
 import { message } from 'ant-design-vue'
 
+const { agentConfigId } = defineProps<{ agentConfigId?: number | null }>()
 const userStore = useUserStore()
-const skills = ref<Skill[]>([])
+const skills = ref<SkillData[]>([])
 const loading = ref(false)
 const error = ref('')
 
 onMounted(() => {
+  refreshSkills()
+})
+
+watch(() => agentConfigId, () => {
   refreshSkills()
 })
 
@@ -78,7 +83,12 @@ async function refreshSkills() {
   loading.value = true
   error.value = ''
   try {
-    skills.value = await listSkills(userId)
+    const res = await listSkills(userId, agentConfigId || undefined)
+    if (res.code === 200 && res.data) {
+      skills.value = res.data
+    } else {
+      skills.value = []
+    }
   } catch (e: any) {
     error.value = '加载技能失败: ' + (e.message || '未知错误')
   } finally {
@@ -90,13 +100,9 @@ async function handleDelete(id: number) {
   const userId = getUserId()
   if (!userId) return
   try {
-    const result = await deleteSkill(id, userId)
-    if (result.success) {
-      message.success('技能已删除')
-      await refreshSkills()
-    } else {
-      message.error(result.message || '删除失败')
-    }
+    await deleteSkillApi(id, userId)
+    message.success('技能已删除')
+    await refreshSkills()
   } catch (e: any) {
     message.error('删除失败: ' + (e.message || '未知错误'))
   }

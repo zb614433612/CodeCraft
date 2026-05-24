@@ -111,7 +111,7 @@ mvn clean package -DskipTests
 mvn clean package -DskipTests -DskipFrontend=true
 
 # 输出文件
-# target/codecraft-0.0.1-SNAPSHOT.jar  （约 67MB）
+# target/codecraft-1.0.1.jar  （约 67MB）
 ```
 
 ---
@@ -170,13 +170,13 @@ npm run dist
 
 ```
 electron/release/
-├── CodeCraft-Setup-1.0.0.exe    # NSIS 安装程序（发行用）
-└── CodeCraft-1.0.0-win.zip       # 绿色版压缩包（可选）
+├── CodeCraft-Setup-1.0.1.exe    # NSIS 安装程序（发行用）
+└── CodeCraft-1.0.1-win.zip       # 绿色版压缩包（可选）
 ```
 
 ### 安装运行
 
-双击 `CodeCraft-Setup-1.0.0.exe` 安装，安装后桌面会生成快捷方式。
+双击 `CodeCraft-Setup-1.0.1.exe` 安装，安装后桌面会生成快捷方式。
 
 > **运行注意事项：**
 > - ✅ **无需安装 Java** — JRE 已内置在 EXE 中
@@ -203,7 +203,7 @@ cd ..
 npm run dist
 
 # 4. 安装生成的 EXE
-# 双击 electron/release/CodeCraft-Setup-1.0.0.exe
+# 双击 electron/release/CodeCraft-Setup-1.0.1.exe
 ```
 
 ---

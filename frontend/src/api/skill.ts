@@ -1,40 +1,43 @@
-import { authFetch } from '@/utils/http-client'
+import { request } from '@/utils/http-client'
 
-export interface Skill {
-  id: number
+export interface SkillData {
+  id?: number
   name: string
   description: string
   toolNames: string
   instructions: string
-  confidence: number
-  usageCount: number
-  successCount: number
-  failCount: number
+  triggerWords?: string
+  confidence?: number
+  usageCount?: number
+  successCount?: number
+  failCount?: number
   userId: number
-  agentType: string
-  createdAt: string
-  updatedAt: string
+  agentType?: string
+  agentConfigId?: number
+  createdAt?: string
+  updatedAt?: string
 }
 
-export interface DeleteResult {
-  success: boolean
-  message?: string
-}
-
-/**
- * 获取用户技能列表
- */
-export async function listSkills(userId: number): Promise<Skill[]> {
+export async function listSkills(userId: number, agentConfigId?: number) {
   const params = new URLSearchParams({ userId: String(userId) })
-  const res = await fetch(`/api/skills?${params}`)
-  return res.json()
+  if (agentConfigId) params.set('agentConfigId', String(agentConfigId))
+  return request<SkillData[]>(`/skills?${params}`)
 }
 
-/**
- * 删除技能
- */
-export async function deleteSkill(id: number, userId: number): Promise<DeleteResult> {
-  const params = new URLSearchParams({ userId: String(userId) })
-  const res = await authFetch(`/api/skills/${id}?${params}`, { method: 'DELETE' })
-  return res.json()
+export async function createSkill(data: Partial<SkillData>) {
+  return request<{ success: boolean; data: SkillData; message: string }>('/skills', {
+    method: 'POST',
+    body: JSON.stringify(data)
+  })
+}
+
+export async function updateSkill(id: number, data: Partial<SkillData>) {
+  return request<{ success: boolean; data: SkillData; message: string }>(`/skills/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data)
+  })
+}
+
+export async function deleteSkillApi(id: number, userId: number) {
+  return request<{ success: boolean; message: string }>(`/skills/${id}?userId=${userId}`, { method: 'DELETE' })
 }

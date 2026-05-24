@@ -31,11 +31,14 @@ public class ManageSkillTool implements Tool {
     private final ObjectMapper objectMapper;
     private final SkillService skillService;
     private final ToolRegistry toolRegistry;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
-    public ManageSkillTool(ObjectMapper objectMapper, SkillService skillService, ToolRegistry toolRegistry) {
+    public ManageSkillTool(ObjectMapper objectMapper, SkillService skillService, ToolRegistry toolRegistry,
+                           org.springframework.jdbc.core.JdbcTemplate jdbcTemplate) {
         this.objectMapper = objectMapper;
         this.skillService = skillService;
         this.toolRegistry = toolRegistry;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     @Override
@@ -145,13 +148,13 @@ public class ManageSkillTool implements Tool {
         }
 
         Long userId = ToolContext.getUserId();
-        String agentType = ToolContext.getAgentType();
+        Long agentConfigId = ToolContext.getAgentConfigId();
 
         return switch (action) {
-            case "create" -> handleCreate(arguments, userId, agentType);
+            case "create" -> handleCreate(arguments, userId, agentConfigId);
             case "update" -> handleUpdate(arguments, userId);
             case "delete" -> handleDelete(arguments, userId);
-            case "list" -> handleList(userId);
+            case "list" -> handleList(userId, agentConfigId);
             default -> "【无效操作】action=\"" + action + "\" 不是有效操作。"
                     + "可选值：create（创建技能）、update（编辑技能）、delete（删除技能）、list（查看技能列表）。"
                     + "请检查拼写后重试。";
@@ -162,7 +165,7 @@ public class ManageSkillTool implements Tool {
     // create
     // ============================================================
 
-    private String handleCreate(JsonNode args, Long userId, String agentType) {
+    private String handleCreate(JsonNode args, Long userId, Long agentConfigId) {
         String name = args.path("name").asText();
         String description = args.path("description").asText();
         String instructions = args.path("instructions").asText();
@@ -178,7 +181,7 @@ public class ManageSkillTool implements Tool {
                     + "。请补充后重新调用。";
         }
 
-        if (userId == null || agentType == null) {
+        if (userId == null) {
             return "【会话上下文丢失】无法获取当前用户或助手类型信息。请重试，若持续失败请联系管理员。";
         }
 
@@ -211,9 +214,10 @@ public class ManageSkillTool implements Tool {
         List<Skill> existingSkills = skillService.listSkills(userId);
         Skill similarSkill = null;
         double highestSimilarity = 0;
-        Skill candidate = new Skill(name, description, toolNames, instructions, triggerWords, userId, agentType);
+        Skill candidate = new Skill(name, description, toolNames, instructions, triggerWords, userId, "custom");
+        candidate.setAgentConfigId(agentConfigId);
         for (Skill existing : existingSkills) {
-            if (!agentType.equals(existing.getAgentType())) continue;
+            if (existing.getAgentConfigId() != null && !existing.getAgentConfigId().equals(agentConfigId)) continue;
             double sim = skillService.calculateSimilarity(candidate, existing);
             if (sim > highestSimilarity) {
                 highestSimilarity = sim;
@@ -221,7 +225,11 @@ public class ManageSkillTool implements Tool {
             }
         }
 
-        Skill skill = skillService.createSkill(name, description, toolNames, instructions, triggerWords, userId, agentType);
+        Skill skill = skillService.createSkill(name, description, toolNames, instructions, triggerWords, userId, "custom");
+        if (agentConfigId != null) {
+            skill.setAgentConfigId(agentConfigId);
+            jdbcTemplate.update("UPDATE skill SET agent_config_id = ? WHERE id = ?", agentConfigId, skill.getId());
+        }
 
         StringBuilder result = new StringBuilder();
         result.append("技能「").append(name).append("」创建成功 (ID: ").append(skill.getId()).append(")\n");
@@ -341,12 +349,18 @@ public class ManageSkillTool implements Tool {
     // list
     // ============================================================
 
-    private String handleList(Long userId) {
+    private String handleList(Long userId, Long agentConfigId) {
         if (userId == null) {
             return "【会话上下文丢失】无法获取当前用户信息。请重试，若持续失败请联系管理员。";
         }
 
         List<Skill> skills = skillService.listSkills(userId);
+        // 按 Agent 过滤
+        if (agentConfigId != null) {
+            skills = skills.stream()
+                .filter(s -> s.getAgentConfigId() == null || s.getAgentConfigId().equals(agentConfigId))
+                .collect(java.util.stream.Collectors.toList());
+        }
         if (skills.isEmpty()) {
             return "当前用户尚无已创建的技能。如果你发现某个多步骤操作被重复执行了 3 次以上，"
                     + "可用 action=create 创建技能以提升后续效率。提供 trigger_words（触发词）能让技能自动匹配用户问题。";

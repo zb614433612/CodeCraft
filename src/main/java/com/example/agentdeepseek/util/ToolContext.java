@@ -13,6 +13,7 @@ public class ToolContext {
     private static final ThreadLocal<Long> currentConversationId = new ThreadLocal<>();
     private static final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
     private static final ThreadLocal<String> currentAgentType = new ThreadLocal<>();
+    private static final ThreadLocal<Long> currentAgentConfigId = new ThreadLocal<>();
     private static final ThreadLocal<String> currentTurnId = new ThreadLocal<>();
 
     public static void set(String mode, Long conversationId) {
@@ -55,11 +56,20 @@ public class ToolContext {
         return currentAgentType.get();
     }
 
+    public static Long getAgentConfigId() {
+        return currentAgentConfigId.get();
+    }
+
+    public static void setAgentConfigId(Long agentConfigId) {
+        currentAgentConfigId.set(agentConfigId);
+    }
+
     public static void clear() {
         currentExecutionMode.remove();
         currentConversationId.remove();
         currentUserId.remove();
         currentAgentType.remove();
+        currentAgentConfigId.remove();
         currentTurnId.remove();
     }
 }

@@ -41,10 +41,17 @@ public class ConversationController {
     public ApiResponse<List<Conversation>> getConversationList(
             @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
             @RequestAttribute("userId") Long userId,
-            @Parameter(description = "会话类型筛选：ai_assistant / chat_assistant / code_assistant，为空则查询所有")
-            @RequestParam(value = "agentType", required = false) String agentType) {
-        log.info("查询会话列表请求: userId={}, agentType={}", userId, agentType);
-        List<Conversation> conversations = conversationService.getConversationsByUserId(userId, agentType);
+            @Parameter(description = "会话类型筛选，为空则查询所有")
+            @RequestParam(value = "agentType", required = false) String agentType,
+            @Parameter(description = "Agent配置ID筛选（切换Agent时用，优先于agentType）")
+            @RequestParam(value = "agentConfigId", required = false) Long agentConfigId) {
+        log.info("查询会话列表请求: userId={}, agentType={}, agentConfigId={}", userId, agentType, agentConfigId);
+        List<Conversation> conversations;
+        if (agentConfigId != null) {
+            conversations = conversationService.getConversationsByAgentConfigId(userId, agentConfigId);
+        } else {
+            conversations = conversationService.getConversationsByUserId(userId, agentType);
+        }
         return ApiResponse.success(conversations);
     }
 

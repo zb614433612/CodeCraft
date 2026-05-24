@@ -45,6 +45,16 @@ public class Conversation {
     private String agentType;
 
     /**
+     * Agent配置ID，关联agent_config表
+     */
+    private Long agentConfigId;
+
+    /**
+     * 会话级工作目录
+     */
+    private String workDir;
+
+    /**
      * 构造函数，用于创建新会话（无用户）
      * @param name 会话名称
      */
@@ -74,6 +84,22 @@ public class Conversation {
         this.name = name;
         this.userId = userId;
         this.agentType = agentType;
+        this.createdAt = LocalDateTime.now();
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    /**
+     * 构造函数，用于创建新会话（带用户、agent类型和agent配置）
+     * @param name 会话名称
+     * @param userId 用户ID
+     * @param agentType 会话类型
+     * @param agentConfigId Agent配置ID
+     */
+    public Conversation(String name, Long userId, String agentType, Long agentConfigId) {
+        this.name = name;
+        this.userId = userId;
+        this.agentType = agentType;
+        this.agentConfigId = agentConfigId;
         this.createdAt = LocalDateTime.now();
         this.updatedAt = LocalDateTime.now();
     }

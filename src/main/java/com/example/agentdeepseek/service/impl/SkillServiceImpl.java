@@ -85,6 +85,11 @@ public class SkillServiceImpl implements SkillService {
     }
 
     @Override
+    public List<Skill> listActiveByAgentConfigId(Long agentConfigId) {
+        return skillMapper.selectActiveByAgentConfigId(agentConfigId);
+    }
+
+    @Override
     public Skill getSkillById(Long skillId) {
         return skillMapper.selectById(skillId)
                 .orElseThrow(() -> new IllegalArgumentException("技能不存在: " + skillId));

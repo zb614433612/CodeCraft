@@ -9,6 +9,7 @@ public class ScheduleTask {
     private Long id;
     private String name;
     private String agentType;
+    private Long agentConfigId;
     private String instruction;
     private String cronExpression;
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")

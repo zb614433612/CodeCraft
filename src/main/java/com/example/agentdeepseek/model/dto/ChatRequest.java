@@ -44,4 +44,7 @@ public class ChatRequest {
 
     @Schema(description = "前端生成的 turnId，用于匹配快照（每次用户消息生成唯一ID）", example = "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
     private String turnId;
+
+    @Schema(description = "Agent配置ID（可选），指定使用的自定义Agent配置", example = "1")
+    private Long agentConfigId;
 }

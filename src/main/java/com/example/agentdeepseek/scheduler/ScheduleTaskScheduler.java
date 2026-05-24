@@ -41,6 +41,7 @@ public class ScheduleTaskScheduler {
                     "  id BIGINT AUTO_INCREMENT PRIMARY KEY," +
                     "  name VARCHAR(100) NOT NULL," +
                     "  agent_type VARCHAR(50) NOT NULL," +
+                    "  agent_config_id BIGINT," +
                     "  instruction CLOB NOT NULL," +
                     "  cron_expression VARCHAR(100)," +
                     "  execute_time TIMESTAMP," +
@@ -53,6 +54,9 @@ public class ScheduleTaskScheduler {
                     "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
                     "  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
+            // 兼容旧表：添加 agent_config_id 列
+            try { stmt.execute("ALTER TABLE schedule_task ADD COLUMN agent_config_id BIGINT"); }
+            catch (Exception ignored) { /* 列已存在 */ }
             log.info("定时任务表初始化完成");
         } catch (Exception e) {
             log.warn("定时任务表初始化异常: {}", e.getMessage());
@@ -81,6 +85,7 @@ public class ScheduleTaskScheduler {
         conv.setName(task.getName().length() > 20 ? task.getName().substring(0, 20) : task.getName());
         conv.setUserId(task.getUserId());
         conv.setAgentType(task.getAgentType());
+        conv.setAgentConfigId(task.getAgentConfigId());
         conv.setCreatedAt(LocalDateTime.now());
         conv.setUpdatedAt(LocalDateTime.now());
         conversationMapper.insert(conv);
@@ -116,6 +121,6 @@ public class ScheduleTaskScheduler {
         }
 
         // 5. 异步调用 AI 处理
-        deepSeekService.processConversationAsync(conversationId, task.getInstruction(), task.getAgentType());
+        deepSeekService.processConversationAsync(conversationId, task.getInstruction(), task.getAgentType(), task.getAgentConfigId());
     }
 }

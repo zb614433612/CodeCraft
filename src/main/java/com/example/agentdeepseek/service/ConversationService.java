@@ -19,6 +19,11 @@ public interface ConversationService {
     List<Conversation> getConversationsByUserId(Long userId, String agentType);
 
     /**
+     * 根据用户ID和Agent配置ID查询会话列表（切换 Agent 时用）
+     */
+    List<Conversation> getConversationsByAgentConfigId(Long userId, Long agentConfigId);
+
+    /**
      * 根据会话ID查询消息列表（不分页）
      * @param conversationId 会话ID
      * @return 消息列表

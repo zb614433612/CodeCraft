@@ -3,9 +3,11 @@ package com.example.agentdeepseek.service.impl;
 import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
+import com.example.agentdeepseek.mapper.AgentConfigMapper;
 import com.example.agentdeepseek.model.dto.ChatRequest;
 
 import com.example.agentdeepseek.model.entity.AgentTask;
+import com.example.agentdeepseek.model.entity.AgentConfig;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
@@ -106,6 +108,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     @Autowired
     private ConfigService configService;
+
+    @Autowired
+    private AgentConfigMapper agentConfigMapper;
 
     // 常量定义
     private static final String DATA_PREFIX = "data: ";
@@ -304,6 +309,66 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 log.debug("添加agent_task.pending_question_text列失败，可能已经存在: {}", e.getMessage());
             }
 
+            // ===== Agent系统：兼容旧数据库，添加新列 =====
+            try {
+                jdbcTemplate.execute("ALTER TABLE conversation ADD COLUMN agent_config_id BIGINT AFTER agent_type");
+                log.info("添加conversation.agent_config_id列成功");
+            } catch (Exception e) {
+                log.debug("添加conversation.agent_config_id列失败，可能已存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE conversation ADD COLUMN work_dir VARCHAR(500) AFTER agent_config_id");
+                log.info("添加conversation.work_dir列成功");
+            } catch (Exception e) {
+                log.debug("添加conversation.work_dir列失败，可能已存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE skill ADD COLUMN agent_config_id BIGINT AFTER agent_type");
+                log.info("添加skill.agent_config_id列成功");
+            } catch (Exception e) {
+                log.debug("添加skill.agent_config_id列失败，可能已存在: {}", e.getMessage());
+            }
+            // 确保 agent_config 表存在
+            try {
+                jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS agent_config (" +
+                        "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
+                        "name VARCHAR(100) NOT NULL, " +
+                        "description VARCHAR(500), " +
+                        "avatar VARCHAR(20) DEFAULT '🤖', " +
+                        "system_prompt TEXT, " +
+                        "tool_names TEXT, " +
+                        "model_name VARCHAR(100) DEFAULT 'deepseek-v4-flash', " +
+                        "thinking_mode VARCHAR(20) DEFAULT 'non-thinking', " +
+                        "execution_mode VARCHAR(10) DEFAULT 'manual', " +
+                        "work_dir VARCHAR(500), " +
+                        "sort_order INT DEFAULT 0, " +
+                        "enabled TINYINT DEFAULT 1, " +
+                        "is_default TINYINT DEFAULT 0, " +
+                        "is_builtin TINYINT DEFAULT 0, " +
+                        "user_id BIGINT, " +
+                        "created_at DATETIME NOT NULL, " +
+                        "updated_at DATETIME NOT NULL, " +
+                        "INDEX idx_user_id (user_id), " +
+                        "INDEX idx_enabled (enabled), " +
+                        "INDEX idx_sort (sort_order)" +
+                        ")");
+                log.info("创建agent_config表成功");
+            } catch (Exception e) {
+                log.debug("创建agent_config表失败，可能已存在: {}", e.getMessage());
+            }
+            // 初始化默认 Agent
+            try {
+                jdbcTemplate.update(
+                        "INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at) " +
+                        "VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', NULL, 1, 1, 1, 1, NOW(), NOW())");
+                log.info("初始化默认Agent成功");
+            } catch (Exception e) {
+                log.debug("初始化默认Agent失败，可能已存在: {}", e.getMessage());
+            }
+            // 兼容旧数据：更新菜单名称和Agent名称
+            try { jdbcTemplate.update("UPDATE sys_menu SET name = 'AI 助手' WHERE id = 4 AND name = '编码助手'"); } catch (Exception ignored) {}
+            try { jdbcTemplate.update("UPDATE agent_config SET name = 'AI 助手' WHERE id = 1 AND is_builtin = 1 AND name = '编码助手'"); } catch (Exception ignored) {}
+
             log.debug("数据库表初始化完成");
         } catch (Exception e) {
             log.warn("数据库表初始化失败，但应用将继续启动。错误: {}", e.getMessage());
@@ -330,7 +395,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param agentType 会话类型
      * @return 会话对象
      */
-    private Conversation getOrCreateConversation(Long sessionId, String userMessage, Long userId, String agentType) {
+    private Conversation getOrCreateConversation(Long sessionId, String userMessage, Long userId, String agentType, Long agentConfigId, String workDir) {
         if (sessionId != null) {
             Optional<Conversation> conversationOpt = conversationMapper.selectById(sessionId);
             if (conversationOpt.isPresent()) {
@@ -347,9 +412,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String sessionName = userMessage.length() > SESSION_NAME_TRUNCATE_LENGTH
                 ? userMessage.substring(0, SESSION_NAME_TRUNCATE_LENGTH)
                 : userMessage;
-        Conversation conversation = new Conversation(sessionName, userId, agentType);
+        Conversation conversation = new Conversation(sessionName, userId, agentType, agentConfigId);
+        if (workDir != null) {
+            conversation.setWorkDir(workDir);
+        }
         conversationMapper.insert(conversation);
-        log.debug("创建新会话: ID={}, Name={}, UserId={}, AgentType={}", conversation.getId(), conversation.getName(), userId, agentType);
+        log.debug("创建新会话: ID={}, Name={}, UserId={}, AgentType={}, AgentConfigId={}, WorkDir={}",
+                conversation.getId(), conversation.getName(), userId, agentType, agentConfigId, workDir);
         return conversation;
     }
 
@@ -827,21 +896,109 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String userMessage = request.getMessage();
         Long sessionId = request.getSessionId();
         Long userId = request.getUserId();
-        String promptFileName = request.getPromptFileName();
-        if (promptFileName == null || promptFileName.trim().isEmpty()) {
-            promptFileName = "code_agent_prompt.txt";
-        }
-        // 加载提示词内容
-        String promptContent = PromptUtil.getPrompt(promptFileName);
-        // 从配置中获取该 prompt 文件对应的工具组
-        List<String> toolNames = deepSeekConfig.getToolGroups()
-                .getOrDefault(promptFileName, Collections.emptyList());
 
-        String agentType = resolveAgentType(promptFileName);
+        // 检查是否有自定义 Agent 配置
+        Long agentConfigId = request.getAgentConfigId();
+        
+        String promptContent;
+        List<String> toolNames;
+        String agentType;
+        String modelName;
+        String thinkingMode;
+        String executionMode;
+        String workDir;
+
+        if (agentConfigId != null) {
+            // ===== 使用自定义 Agent 配置 =====
+            AgentConfig agentConfig = agentConfigMapper.selectById(agentConfigId).orElse(null);
+            if (agentConfig == null) {
+                log.warn("Agent 配置不存在: agentConfigId={}, 回退到默认配置", agentConfigId);
+                promptContent = PromptUtil.getPrompt("code_agent_prompt.txt");
+                toolNames = deepSeekConfig.getToolGroups()
+                        .getOrDefault("code_agent_prompt.txt", Collections.emptyList());
+                agentType = "code_assistant";
+                modelName = deepSeekConfig.getDefaultModel();
+                thinkingMode = deepSeekConfig.getThinkingMode();
+                executionMode = request.getExecutionMode() != null ? request.getExecutionMode() : "auto";
+                workDir = ProjectRootContext.get();
+                agentConfigId = null;
+            } else {
+                // 1. 系统提示词
+                if (agentConfig.getSystemPrompt() != null && !agentConfig.getSystemPrompt().trim().isEmpty()) {
+                    promptContent = agentConfig.getSystemPrompt();
+                } else {
+                    promptContent = PromptUtil.getPrompt("code_agent_prompt.txt");
+                }
+                
+                // 2. 工具列表
+                if (agentConfig.getToolNames() != null && !agentConfig.getToolNames().trim().isEmpty()) {
+                    try {
+                        toolNames = objectMapper.readValue(agentConfig.getToolNames(), List.class);
+                    } catch (Exception e) {
+                        log.warn("解析 Agent 工具列表失败, 使用全部工具: {}", e.getMessage());
+                        toolNames = deepSeekConfig.getToolGroups()
+                                .getOrDefault("code_agent_prompt.txt", Collections.emptyList());
+                    }
+                } else {
+                    toolNames = deepSeekConfig.getToolGroups()
+                            .getOrDefault("code_agent_prompt.txt", Collections.emptyList());
+                }
+                
+                // 3. Agent 类型
+                agentType = "agent_" + agentConfig.getId();
+                
+                // 4. 模型配置
+                modelName = agentConfig.getModelName() != null ? agentConfig.getModelName() : deepSeekConfig.getDefaultModel();
+                thinkingMode = agentConfig.getThinkingMode() != null ? agentConfig.getThinkingMode() : deepSeekConfig.getThinkingMode();
+                
+                // 5. 执行模式
+                executionMode = agentConfig.getExecutionMode() != null ? agentConfig.getExecutionMode() : "auto";
+                
+                // 6. 工作目录
+                workDir = agentConfig.getWorkDir();
+                if (workDir != null && !workDir.trim().isEmpty()) {
+                    ProjectRootContext.set(workDir);
+                } else {
+                    workDir = ProjectRootContext.get();
+                }
+            }
+        } else {
+            // ===== 默认 Agent =====
+            String promptFileName = request.getPromptFileName();
+            if (promptFileName == null || promptFileName.trim().isEmpty()) {
+                promptFileName = "code_agent_prompt.txt";
+            }
+            promptContent = PromptUtil.getPrompt(promptFileName);
+            toolNames = deepSeekConfig.getToolGroups()
+                    .getOrDefault(promptFileName, Collections.emptyList());
+            agentType = resolveAgentType(promptFileName);
+            modelName = deepSeekConfig.getDefaultModel();
+            thinkingMode = deepSeekConfig.getThinkingMode();
+            executionMode = "auto";
+            workDir = ProjectRootContext.get();
+        }
+
+        // ===== 运行时配置（前端传入）优先于 Agent 配置 =====
+        if (request.getModel() != null && !request.getModel().isEmpty()) {
+            modelName = request.getModel();
+        }
+        if (request.getThinkingMode() != null && !request.getThinkingMode().isEmpty()) {
+            thinkingMode = request.getThinkingMode();
+        }
+        if (request.getExecutionMode() != null && !request.getExecutionMode().isEmpty()) {
+            executionMode = request.getExecutionMode();
+        }
+        if (request.getProjectRoot() != null && !request.getProjectRoot().isEmpty()) {
+            workDir = request.getProjectRoot();
+            ProjectRootContext.set(workDir);
+        }
+        request.setModel(modelName);
+        request.setThinkingMode(thinkingMode);
+        request.setExecutionMode(executionMode);
 
         Long conversationId;
         Long storageConversationId;
-        Conversation conversation = getOrCreateConversation(sessionId, userMessage, userId, agentType);
+        Conversation conversation = getOrCreateConversation(sessionId, userMessage, userId, agentType, agentConfigId, workDir);
         conversationId = conversation.getId();
         storageConversationId = conversationId;
 
@@ -889,7 +1046,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         // 注入执行模式指令到系统提示词
-        String executionMode = request.getExecutionMode();
         if (executionMode != null && !executionMode.isEmpty()) {
             String modeInstruction;
             if ("manual".equals(executionMode)) {
@@ -912,12 +1068,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String injectedSkillsSection = null; // 注入到用户消息的技能内容（供工具循环复用）
 
         // 注入技能：通过 SkillMatcher 自动匹配 + 合并技能工具，注入到用户消息开头
-        if (userId != null && agentType != null) {
+        if (userId != null) {
             try {
-                List<Skill> activeSkills = skillService.listActiveSkills(userId, agentType);
-                log.info("技能注入: userId={}, agentType={}, 活跃技能数={}, 用户消息前50字=\"{}\"",
-                        userId, agentType, activeSkills.size(),
-                        userMessage.length() > 50 ? userMessage.substring(0, 50) + "..." : userMessage);
+                List<Skill> activeSkills;
+                if (agentConfigId != null) {
+                    // 按 Agent 配置过滤技能 + 全局技能
+                    activeSkills = skillService.listActiveByAgentConfigId(agentConfigId);
+                    log.info("技能注入(Agent{}): agentConfigId={}, 活跃技能数={}", agentConfigId, agentConfigId, activeSkills.size());
+                } else {
+                    activeSkills = skillService.listActiveSkills(userId, agentType);
+                    log.info("技能注入: userId={}, agentType={}, 活跃技能数={}, 用户消息前50字=\"{}\"",
+                            userId, agentType, activeSkills.size(),
+                            userMessage.length() > 50 ? userMessage.substring(0, 50) + "..." : userMessage);
+                }
                 if (!activeSkills.isEmpty()) {
                     // 使用匹配引擎自动筛选当前问题最相关的 Top-5 技能
                     List<Skill> matchedSkills = skillMatcher.match(userMessage, activeSkills);
@@ -1033,11 +1196,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // non-thinking -> thinking.type=disabled
         // thinking    -> thinking.type=enabled + reasoning_effort=high
         // thinking_max -> thinking.type=enabled + reasoning_effort=max
-        String thinkingMode = request.getThinkingMode();
-        if (thinkingMode == null || thinkingMode.isEmpty()) {
-            thinkingMode = deepSeekConfig.getThinkingMode();
+        String thinkingModeForApi = request.getThinkingMode();
+        if (thinkingModeForApi == null || thinkingModeForApi.isEmpty()) {
+            thinkingModeForApi = deepSeekConfig.getThinkingMode();
         }
-        if ("non-thinking".equals(thinkingMode)) {
+        if ("non-thinking".equals(thinkingModeForApi)) {
             Map<String, Object> thinking = new HashMap<>();
             thinking.put("type", "disabled");
             apiRequest.put("thinking", thinking);
@@ -1045,7 +1208,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             Map<String, Object> thinking = new HashMap<>();
             thinking.put("type", "enabled");
             apiRequest.put("thinking", thinking);
-            apiRequest.put("reasoning_effort", "thinking_max".equals(thinkingMode) ? "max" : "high");
+            apiRequest.put("reasoning_effort", "thinking_max".equals(thinkingModeForApi) ? "max" : "high");
         }
 
         // 保存项目根目录到 API 请求中（不在发送给 API 的字段中，仅内部使用）
@@ -1064,6 +1227,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
         if (agentType != null) {
             apiRequest.put("_agentType", agentType);
+        }
+        if (agentConfigId != null) {
+            apiRequest.put("_agentConfigId", agentConfigId);
         }
         // 保存 turnId 到 API 请求中（内部使用，供快照创建时关联消息）
         String turnId = request.getTurnId();
@@ -1344,16 +1510,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     @Override
-    public void processConversationAsync(Long conversationId, String message, String agentType) {
+    public void processConversationAsync(Long conversationId, String message, String agentType, Long agentConfigId) {
         ChatRequest request = new ChatRequest();
         request.setMessage(message);
         request.setSessionId(conversationId);
         request.setExecutionMode("auto");
-        // 根据 agent 类型选择提示词文件
+        request.setAgentConfigId(agentConfigId);
         String promptFile = "code_agent_prompt.txt";
-        if ("code_assistant".equals(agentType)) {
-            promptFile = "code_agent_prompt.txt";
-        }
         request.setPromptFileName(promptFile);
 
         log.info("定时任务触发 AI 处理: conversationId={}, agentType={}", conversationId, agentType);
@@ -2131,6 +2294,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     String agentType = (String) apiRequest.get("_agentType");
                                     Long userId = (Long) apiRequest.get("_userId");
                                     String currentTurnId = (String) apiRequest.get("_turnId");
+                                    Long currentAgentConfigId = (Long) apiRequest.get("_agentConfigId");
                                     String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
 
                                     // 从工具调用参数生成操作摘要（在所有模式下都注入 thinking 流）
@@ -2345,6 +2509,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             if (currentTurnId != null) {
                                                                 ToolContext.setTurnId(currentTurnId);
                                                             }
+                                                            if (currentAgentConfigId != null) {
+                                                                ToolContext.setAgentConfigId(currentAgentConfigId);
+                                                            }
                                                             PermissionContext.set(pendingQuestionStore, objectMapper);
                                                             PermissionContext.setApproved();
 
@@ -2417,6 +2584,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             agentType, userId);
                                     if (currentTurnId != null) {
                                         ToolContext.setTurnId(currentTurnId);
+                                    }
+                                    if (currentAgentConfigId != null) {
+                                        ToolContext.setAgentConfigId(currentAgentConfigId);
                                     }
                                     PermissionContext.set(pendingQuestionStore, objectMapper);
 

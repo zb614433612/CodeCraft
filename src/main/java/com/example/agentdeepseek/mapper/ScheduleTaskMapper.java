@@ -15,6 +15,7 @@ public interface ScheduleTaskMapper {
         @Result(property = "id", column = "id"),
         @Result(property = "name", column = "name"),
         @Result(property = "agentType", column = "agent_type"),
+        @Result(property = "agentConfigId", column = "agent_config_id"),
         @Result(property = "instruction", column = "instruction"),
         @Result(property = "cronExpression", column = "cron_expression"),
         @Result(property = "executeTime", column = "execute_time"),
@@ -34,13 +35,13 @@ public interface ScheduleTaskMapper {
     @ResultMap("taskResultMap")
     ScheduleTask selectById(Long id);
 
-    @Insert("INSERT INTO schedule_task (name, agent_type, instruction, cron_expression, execute_time, status, max_execute_count, user_id) " +
-            "VALUES (#{name}, #{agentType}, #{instruction}, #{cronExpression}, #{executeTime}, " +
+    @Insert("INSERT INTO schedule_task (name, agent_type, agent_config_id, instruction, cron_expression, execute_time, status, max_execute_count, user_id) " +
+            "VALUES (#{name}, #{agentType}, #{agentConfigId}, #{instruction}, #{cronExpression}, #{executeTime}, " +
             "COALESCE(#{status}, 'ENABLED'), COALESCE(#{maxExecuteCount}, 0), #{userId})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(ScheduleTask task);
 
-    @Update("UPDATE schedule_task SET name=#{name}, agent_type=#{agentType}, instruction=#{instruction}, " +
+    @Update("UPDATE schedule_task SET name=#{name}, agent_type=#{agentType}, agent_config_id=#{agentConfigId}, instruction=#{instruction}, " +
             "cron_expression=#{cronExpression}, execute_time=#{executeTime}, status=#{status}, " +
             "max_execute_count=#{maxExecuteCount} WHERE id=#{id}")
     int update(ScheduleTask task);

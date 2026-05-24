@@ -26,6 +26,7 @@ public class Skill {
     private Integer failCount;
     private Long userId;
     private String agentType;
+    private Long agentConfigId;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 

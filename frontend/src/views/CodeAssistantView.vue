@@ -38,6 +38,8 @@
           <PlusOutlined />
           <span>新建会话</span>
         </div>
+        <!-- Agent 选择器 -->
+        <AgentSelector @change="onAgentChange" ref="agentSelectorRef" />
         <div v-if="isLoadingConversations" class="loading-conversations">
           <a-spin size="small" />
           <span>加载会话中...</span>
@@ -92,7 +94,7 @@
 
       <!-- 技能面板 -->
       <div v-show="sidebarTab === 'skills'" class="skill-panel">
-        <SkillList />
+        <SkillList :agent-config-id="currentAgentConfigId" />
       </div>
 
       <!-- 子Agent面板 -->
@@ -106,7 +108,7 @@
           <span class="project-root-label">工作目录</span>
           <div class="project-root-row">
             <a-input
-              v-model:value="settingsStore.projectRoot"
+              :value="agentRuntime.workDir"
               placeholder="点击右侧按钮选择目录"
               size="small"
               class="project-root-input"
@@ -493,8 +495,8 @@
               <SettingOutlined class="mode-icon" />
               <span class="mode-label">执行</span>
               <a-select
-                :value="settingsStore.getMode('code_assistant')"
-                @change="handleModeChange"
+                :value="agentRuntime.executionMode"
+                @change="(v: string) => { updateAgentRuntime('executionMode', v) }"
                 size="small"
                 class="mode-select"
                 dropdown-class-name="mode-dropdown"
@@ -506,8 +508,8 @@
             <div class="mode-selector">
               <SettingOutlined class="mode-icon" />
               <a-select
-                :value="settingsStore.getModel('code_assistant')"
-                @change="handleModelChange"
+                :value="agentRuntime.model"
+                @change="(v: string) => { updateAgentRuntime('model', v) }"
                 size="small"
                 class="model-select"
                 dropdown-class-name="mode-dropdown"
@@ -519,8 +521,8 @@
             <div class="mode-selector">
               <SettingOutlined class="mode-icon" />
               <a-select
-                :value="settingsStore.getThinkingMode('code_assistant')"
-                @change="handleThinkingModeChange"
+                :value="agentRuntime.thinkingMode"
+                @change="(v: string) => { updateAgentRuntime('thinkingMode', v) }"
                 size="small"
                 class="model-select"
                 dropdown-class-name="mode-dropdown"
@@ -690,6 +692,7 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput, execCommand } from '@/api/project'
 import { getGitDiff, gitRestore } from '@/api/git'
+import AgentSelector from '@/components/AgentSelector.vue'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
 
@@ -732,6 +735,41 @@ interface AttachedFile {
 
 const attachedFiles = ref<AttachedFile[]>([])
 const fileInputRef = ref<HTMLInputElement | null>(null)
+
+// Agent 选择器相关
+const agentSelectorRef = ref<InstanceType<typeof AgentSelector> | null>(null)
+const currentAgentConfigId = ref<number | null>(null)
+const currentAgentWorkDir = ref<string>('')
+const skillsRefreshKey = ref(0)
+
+// Agent 运行时配置（computed，确保响应式追踪）
+const agentRuntime = computed(() => ({
+  model: agentSelectorRef.value?.runtime?.model || 'deepseek-v4-flash',
+  thinkingMode: agentSelectorRef.value?.runtime?.thinkingMode || 'non-thinking',
+  executionMode: agentSelectorRef.value?.runtime?.executionMode || 'manual',
+  workDir: agentSelectorRef.value?.runtime?.workDir || ''
+}))
+
+const updateAgentRuntime = (key: string, value: string) => {
+  const rt = agentSelectorRef.value?.runtime
+  if (rt) {
+    (rt as any)[key] = value
+    agentSelectorRef.value?.saveRuntime()
+  }
+}
+
+const onAgentChange = (agentId: number | null | undefined, agent: any) => {
+  currentAgentConfigId.value = agentId ?? null
+  currentAgentWorkDir.value = agent?.workDir || ''
+  // 切换 Agent：清空当前会话和聊天记录，重新加载
+  currentConversationId.value = null
+  conversations.value = []
+  currentMessages.value = []
+  clearSavedConversationId()  // 清空全局会话缓存，避免串 Agent
+  fetchConversations()
+  skillsRefreshKey.value++
+  reloadFileTree()
+}
 
 const triggerFileUpload = () => {
   fileInputRef.value?.click()
@@ -1433,7 +1471,7 @@ const clearSavedConversationId = () => {
 const fetchConversations = async () => {
   isLoadingConversations.value = true
   try {
-    const response = await getConversationList('code_assistant')
+    const response = await getConversationList(undefined, currentAgentConfigId.value || undefined)
     if (response.code === 200 && response.data) {
       conversations.value = response.data.map(mapConversationResponseToConversation)
       // 优先恢复上次查看的会话
@@ -1768,9 +1806,8 @@ const stopStreaming = () => {
 
 // 设置项目工作目录
 const reloadFileTree = () => {
-  if (settingsStore.projectRoot) {
-    fileTreeLoadPath.value = settingsStore.projectRoot
-  }
+  const wd = agentRuntime.value.workDir || settingsStore.projectRoot
+  if (wd) fileTreeLoadPath.value = wd
 }
 
 // 调用原生目录选择对话框（Electron）或目录浏览器（浏览器）
@@ -1789,8 +1826,13 @@ const selectProjectRoot = async () => {
 
 // 目录浏览器选择完成回调
 const onDirSelected = (path: string) => {
-  settingsStore.projectRoot = path
   showDirBrowser.value = false
+  if (agentSelectorRef.value) {
+    agentSelectorRef.value.runtime.workDir = path
+    agentSelectorRef.value.saveRuntime()
+  } else {
+    settingsStore.projectRoot = path
+  }
   reloadFileTree()
 }
 
@@ -1811,20 +1853,25 @@ const submitPendingAnswer = async () => {
 }
 
 // 处理权限授权按钮（4种 action）
+const permissionLock = ref(false)
 const handlePermissionAction = async (action: string) => {
-  if (!pendingQuestion.value) return
+  if (permissionLock.value || !pendingQuestion.value) return
   const q = pendingQuestion.value
+  // 立即加锁并清空面板，防止 SSE 流重复推送覆盖
+  permissionLock.value = true
+  pendingQuestion.value = null
   // 对于 custom 类型，需要用户输入了内容
   if (action === 'custom') {
     if (!pendingQuestionAnswer.value.trim()) {
       message.warning('请输入您的消息')
+      permissionLock.value = false
+      pendingQuestion.value = q
       return
     }
   }
   const answer = action === 'custom' ? pendingQuestionAnswer.value.trim() : action
   try {
     await submitAnswer(q.uuid, answer, action)
-    pendingQuestion.value = null
     pendingQuestionAnswer.value = ''
     pendingShowCustomInput.value = false
     if (action === 'approve_all') {
@@ -1838,6 +1885,9 @@ const handlePermissionAction = async (action: string) => {
     }
   } catch (e: any) {
     message.error('操作失败: ' + (e.message || '未知错误'))
+    pendingQuestion.value = q
+  } finally {
+    permissionLock.value = false
   }
 }
 
@@ -1968,11 +2018,12 @@ const sendMessage = async () => {
 
     for await (const event of streamChat(finalMessage, sessionId, {
       promptFileName: PROMPT_FILE,
-      executionMode: settingsStore.getMode('code_assistant'),
-      projectRoot: settingsStore.projectRoot || undefined,
-      model: settingsStore.getModel('code_assistant'),
-      thinkingMode: settingsStore.getThinkingMode('code_assistant'),
-      turnId
+      executionMode: agentRuntime.value.executionMode,
+      projectRoot: agentRuntime.value.workDir || undefined,
+      model: agentRuntime.value.model,
+      thinkingMode: agentRuntime.value.thinkingMode,
+      turnId,
+      agentConfigId: currentAgentConfigId.value
     }, abortCtrl)) {
       // 每个事件都检查 sessionId —— 后端在第一个 SSE 事件中就返回了真实会话 ID，
       // 但不在流式过程中迁移 convId（避免数组引用变动导致内容重复），
@@ -2438,12 +2489,10 @@ watch(() => currentMessages.value.length + '|' + (currentMessages.value[currentM
 })
 
 onMounted(() => {
-  fetchConversations()
   scrollToBottom()
   // 如有已保存的工作目录，自动加载文件树
-  if (settingsStore.projectRoot) {
-    fileTreeLoadPath.value = settingsStore.projectRoot
-  }
+  const wd = agentRuntime.value.workDir || settingsStore.projectRoot
+  if (wd) fileTreeLoadPath.value = wd
   // 点击外部关闭任务下拉
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement

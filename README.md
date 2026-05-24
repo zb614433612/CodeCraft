@@ -31,6 +31,7 @@
 - **任务拆解与并行**：自动将复杂任务拆解为子任务，创建多个子 Agent 并行执行
 - **自动纠错**：执行失败自动重试、切换方案，连续失败自动上报
 - **技能系统**：支持创建和管理技能，让 AI 学习你的工作流
+- **自定义 Agent**：支持创建多个 AI Agent 配置，每个 Agent 可独立设置提示词、工具集、模型、执行模式
 
 ### 👨‍💻 编码辅助
 - 智能代码生成与修改
@@ -38,6 +39,14 @@
 - 代码搜索与定位
 - 差异对比（Diff View）
 - 文件快照管理
+- 会话级工作目录隔离
+
+### 🎛️ Agent 配置管理
+- 创建多个自定义 AI Agent（编码助手、代码审查、测试生成等）
+- 每个 Agent 独立配置：系统提示词、可用工具、AI 模型、思考模式
+- 自动/手动执行模式切换
+- 技能与 Agent 关联，技能按 Agent 隔离管理
+- 定时任务绑定指定 Agent
 
 ### 🔧 项目管理
 - Maven 项目构建与管理
@@ -149,9 +158,9 @@ codecraft/
 │   └── main/resources/           # 配置文件和静态资源
 ├── frontend/                     # Vue3 前端源码
 │   ├── src/
-│   │   ├── api/                  # 后端 API 调用
-│   │   ├── components/           # 组件
-│   │   ├── views/                # 页面
+│   │   ├── api/                  # 后端 API 调用（agent-config, chat, conversation, skill 等）
+│   │   ├── components/           # 组件（AgentSelector, SkillList 等）
+│   │   ├── views/                # 页面（AgentConfigView, SkillManageView 等）
 │   │   ├── store/                # 状态管理
 │   │   └── utils/                # 工具函数
 │   └── public/                   # 静态资源
@@ -161,6 +170,7 @@ codecraft/
 │   └── start.sh / start.bat     # 启动脚本
 ├── pom.xml                       # Maven 构建配置
 ├── BUILD_AND_RUN.md              # 构建与运行指南
+├── CHANGELOG.md                   # 版本更新日志
 ├── .gitignore                    # Git 忽略规则
 └── application-local.yml.example # 本地配置模板
 ```

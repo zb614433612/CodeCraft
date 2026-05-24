@@ -4,6 +4,7 @@ export interface ScheduleTaskItem {
   id: number
   name: string
   agentType: string
+  agentConfigId?: number
   instruction: string
   cronExpression?: string
   executeTime?: string
@@ -18,6 +19,7 @@ export interface ScheduleTaskItem {
 export interface CreateTaskParams {
   name: string
   agentType: string
+  agentConfigId?: number
   instruction: string
   cronExpression?: string
   executeTime?: string

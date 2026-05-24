@@ -60,6 +60,16 @@ const router = createRouter({
           component: () => import('@/views/ScheduleTaskView.vue'),
           meta: { requiresAdmin: true }
         },
+        {
+          path: 'skill-manage',
+          name: 'skill-manage',
+          component: () => import('@/views/SkillManageView.vue')
+        },
+        {
+          path: 'agent-config',
+          name: 'agent-config',
+          component: () => import('@/views/AgentConfigView.vue')
+        },
 
       ]
     }

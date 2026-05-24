@@ -40,5 +40,5 @@ public interface DeepSeekService {
      * @param message 用户消息（任务指令）
      * @param agentType agent类型（用于选择提示词文件）
      */
-    void processConversationAsync(Long conversationId, String message, String agentType);
+     void processConversationAsync(Long conversationId, String message, String agentType, Long agentConfigId);
 }

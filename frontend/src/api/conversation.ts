@@ -31,9 +31,15 @@ export interface Conversation {
 }
 
 // 获取会话列表
-export async function getConversationList(agentType?: string): Promise<ApiResponse<ConversationResponse[]>> {
-  const params = agentType ? `?agentType=${agentType}` : ''
-  const response = await request<ConversationResponse[]>(`/conversation/list${params}`, {
+export async function getConversationList(agentType?: string, agentConfigId?: number): Promise<ApiResponse<ConversationResponse[]>> {
+  const params = new URLSearchParams()
+  if (agentConfigId) {
+    params.set('agentConfigId', String(agentConfigId))
+  } else if (agentType) {
+    params.set('agentType', agentType)
+  }
+  const qs = params.toString()
+  const response = await request<ConversationResponse[]>(`/conversation/list${qs ? '?' + qs : ''}`, {
     method: 'GET'
   })
   return response

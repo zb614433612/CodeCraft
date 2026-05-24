@@ -15,14 +15,14 @@ import java.util.Optional;
 public interface SkillMapper {
 
     @Insert("INSERT INTO skill (name, description, tool_names, instructions, trigger_words, confidence, " +
-            "usage_count, success_count, fail_count, user_id, agent_type, created_at, updated_at) " +
+            "usage_count, success_count, fail_count, user_id, agent_type, agent_config_id, created_at, updated_at) " +
             "VALUES (#{name}, #{description}, #{toolNames}, #{instructions}, #{triggerWords}, #{confidence}, " +
-            "#{usageCount}, #{successCount}, #{failCount}, #{userId}, #{agentType}, #{createdAt}, #{updatedAt})")
+            "#{usageCount}, #{successCount}, #{failCount}, #{userId}, #{agentType}, #{agentConfigId}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Skill skill);
 
     @Select("SELECT id, name, description, tool_names, instructions, trigger_words, confidence, " +
-            "usage_count, success_count, fail_count, user_id, agent_type, created_at, updated_at " +
+            "usage_count, success_count, fail_count, user_id, agent_type, agent_config_id, created_at, updated_at " +
             "FROM skill WHERE id = #{id}")
     @Results(id = "skillResultMap", value = {
         @Result(property = "id", column = "id"),
@@ -37,30 +37,41 @@ public interface SkillMapper {
         @Result(property = "failCount", column = "fail_count"),
         @Result(property = "userId", column = "user_id"),
         @Result(property = "agentType", column = "agent_type"),
+        @Result(property = "agentConfigId", column = "agent_config_id"),
         @Result(property = "createdAt", column = "created_at"),
         @Result(property = "updatedAt", column = "updated_at")
     })
     Optional<Skill> selectById(Long id);
 
     @Select("SELECT id, name, description, tool_names, instructions, trigger_words, confidence, " +
-            "usage_count, success_count, fail_count, user_id, agent_type, created_at, updated_at " +
+            "usage_count, success_count, fail_count, user_id, agent_type, agent_config_id, created_at, updated_at " +
             "FROM skill WHERE user_id = #{userId} AND agent_type = #{agentType} " +
             "ORDER BY confidence DESC, usage_count DESC")
     @ResultMap("skillResultMap")
     List<Skill> selectByUserAndAgent(@Param("userId") Long userId, @Param("agentType") String agentType);
 
     @Select("SELECT id, name, description, tool_names, instructions, trigger_words, confidence, " +
-            "usage_count, success_count, fail_count, user_id, agent_type, created_at, updated_at " +
+            "usage_count, success_count, fail_count, user_id, agent_type, agent_config_id, created_at, updated_at " +
             "FROM skill WHERE user_id = #{userId} AND agent_type = #{agentType} " +
             "AND confidence >= 0.1 ORDER BY confidence DESC, usage_count DESC")
     @ResultMap("skillResultMap")
     List<Skill> selectActiveByUserAndAgent(@Param("userId") Long userId, @Param("agentType") String agentType);
 
     @Select("SELECT id, name, description, tool_names, instructions, trigger_words, confidence, " +
-            "usage_count, success_count, fail_count, user_id, agent_type, created_at, updated_at " +
+            "usage_count, success_count, fail_count, user_id, agent_type, agent_config_id, created_at, updated_at " +
             "FROM skill WHERE user_id = #{userId} ORDER BY created_at DESC")
     @ResultMap("skillResultMap")
     List<Skill> selectByUserId(@Param("userId") Long userId);
+
+    /**
+     * 按 agentConfigId 查询活跃技能
+     */
+    @Select("SELECT id, name, description, tool_names, instructions, trigger_words, confidence, " +
+            "usage_count, success_count, fail_count, user_id, agent_type, agent_config_id, created_at, updated_at " +
+            "FROM skill WHERE (agent_config_id = #{agentConfigId} OR agent_config_id IS NULL) AND confidence >= 0.1 " +
+            "ORDER BY confidence DESC, usage_count DESC")
+    @ResultMap("skillResultMap")
+    List<Skill> selectActiveByAgentConfigId(@Param("agentConfigId") Long agentConfigId);
 
     @Update("UPDATE skill SET name = #{name}, description = #{description}, " +
             "tool_names = #{toolNames}, instructions = #{instructions}, " +

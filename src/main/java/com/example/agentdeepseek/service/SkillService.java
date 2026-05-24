@@ -21,6 +21,11 @@ public interface SkillService {
 
     List<Skill> listActiveSkills(Long userId, String agentType);
 
+    /**
+     * 根据Agent配置ID获取活跃技能列表
+     */
+    List<Skill> listActiveByAgentConfigId(Long agentConfigId);
+
     Skill getSkillById(Long skillId);
 
     Skill reportResult(Long skillId, boolean success);

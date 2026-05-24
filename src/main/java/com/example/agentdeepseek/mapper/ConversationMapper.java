@@ -25,7 +25,7 @@ public interface ConversationMapper {
      * @param conversation 会话实体
      * @return 受影响的行数
      */
-    @Insert("INSERT INTO conversation (name, user_id, agent_type, created_at, updated_at) VALUES (#{name}, #{userId}, #{agentType}, #{createdAt}, #{updatedAt})")
+    @Insert("INSERT INTO conversation (name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at) VALUES (#{name}, #{userId}, #{agentType}, #{agentConfigId}, #{workDir}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Conversation conversation);
 
@@ -34,12 +34,14 @@ public interface ConversationMapper {
      * @param id 会话ID
      * @return 会话实体
      */
-    @Select("SELECT id, name, user_id, agent_type, created_at, updated_at FROM conversation WHERE id = #{id}")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE id = #{id}")
     @Results(id = "conversationResultMap", value = {
         @Result(property = "id", column = "id"),
         @Result(property = "name", column = "name"),
         @Result(property = "userId", column = "user_id"),
         @Result(property = "agentType", column = "agent_type"),
+        @Result(property = "agentConfigId", column = "agent_config_id"),
+        @Result(property = "workDir", column = "work_dir"),
         @Result(property = "createdAt", column = "created_at"),
         @Result(property = "updatedAt", column = "updated_at")
     })
@@ -49,7 +51,7 @@ public interface ConversationMapper {
      * 查询所有会话（按创建时间倒序）
      * @return 会话列表
      */
-    @Select("SELECT id, name, user_id, agent_type, created_at, updated_at FROM conversation ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation ORDER BY created_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectAll();
 
@@ -58,7 +60,7 @@ public interface ConversationMapper {
      * @param userId 用户ID
      * @return 会话列表
      */
-    @Select("SELECT id, name, user_id, agent_type, created_at, updated_at FROM conversation WHERE user_id = #{userId} ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} ORDER BY created_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectByUserId(Long userId);
 
@@ -68,9 +70,16 @@ public interface ConversationMapper {
      * @param agentType 会话类型
      * @return 会话列表
      */
-    @Select("SELECT id, name, user_id, agent_type, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_type = #{agentType} ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_type = #{agentType} ORDER BY created_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectByUserIdAndAgentType(@Param("userId") Long userId, @Param("agentType") String agentType);
+
+    /**
+     * 按 agentConfigId 查询会话列表（切换 Agent 时用）
+     */
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_config_id = #{agentConfigId} ORDER BY created_at DESC")
+    @ResultMap("conversationResultMap")
+    List<Conversation> selectByUserIdAndAgentConfigId(@Param("userId") Long userId, @Param("agentConfigId") Long agentConfigId);
 
     /**
      * 更新会话信息（名称和更新时间）
