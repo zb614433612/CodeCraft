@@ -25,7 +25,7 @@
               </div>
               <span class="card-desc">{{ skill.description || '暂无描述' }}</span>
               <div class="card-meta">
-                <span>置信度 {{ (skill.confidence || 0.5 * 100).toFixed(0) }}%</span>
+                <span>置信度 {{ ((skill.confidence ?? 0.5) * 100).toFixed(0) }}%</span>
                 <span>使用 {{ skill.usageCount || 0 }} 次</span>
                 <span v-if="skill.triggerWords">触发词：{{ formatTriggerPreview(skill.triggerWords) }}</span>
               </div>
@@ -210,7 +210,16 @@ const fetchList = async () => {
   loading.value = true
   try {
     const res = await listSkills(userId(), filterAgentId.value)
-    if (res.code === 200) skills.value = res.data
+    if (res.code === 200) {
+      // 按置信度降序排列，置信度相同按创建时间升序
+      const sorted = [...res.data].sort((a: SkillData, b: SkillData) => {
+        const confA = a.confidence ?? 0.5
+        const confB = b.confidence ?? 0.5
+        if (confB !== confA) return confB - confA
+        return (a.createdAt || '').localeCompare(b.createdAt || '')
+      })
+      skills.value = sorted
+    }
   } catch (e: any) { message.error(e.message) }
   finally { loading.value = false }
 }
@@ -293,7 +302,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.skill-manage-container { padding: 24px; background: #f5f7fa; min-height: 100vh; }
+.skill-manage-container { padding: 24px; background: #f5f7fa; height: 100%; overflow-y: auto; box-sizing: border-box; }
 .page-header { margin-bottom: 16px; padding: 16px 20px; background: white; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
 .page-title { margin: 0; font-size: 20px; font-weight: 600; color: #1a202c; }
 .skill-content { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
