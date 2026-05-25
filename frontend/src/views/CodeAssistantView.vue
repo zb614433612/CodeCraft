@@ -233,7 +233,7 @@
                   思考过程
                 </span>
                 <span v-if="msg.matchedSkills?.length" class="skill-match-tags">
-                  <span v-for="skill in msg.matchedSkills" :key="skill.name" class="skill-match-tag" :class="skill.confidence >= 0.7 ? 'skill-tag-high' : skill.confidence >= 0.4 ? 'skill-tag-mid' : 'skill-tag-low'">
+                  <span v-for="skill in msg.matchedSkills" :key="skill.name" class="skill-match-tag" :title="skill.name" :class="skill.confidence >= 0.7 ? 'skill-tag-high' : skill.confidence >= 0.4 ? 'skill-tag-mid' : 'skill-tag-low'">
                     🔧 {{ skill.name }}
                     <span class="skill-tag-conf">{{ (skill.confidence * 100).toFixed(0) }}%</span>
                   </span>
@@ -3354,11 +3354,12 @@ watch(currentConversationId, (newId) => {
 .thinking-title { font-weight: 600; color: #475569; flex: 1; }
 .thinking-summary { font-size: 11px; color: #64748b; margin-right: 4px; }
 .thinking-hint { font-size: 11px; color: #94a3b8; }
-.skill-match-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-right: 8px; }
+.skill-match-tags { display: flex; gap: 4px; margin-right: 8px; overflow: hidden; flex-shrink: 1; min-width: 0; }
 .skill-match-tag {
   display: inline-flex; align-items: center; gap: 3px;
   padding: 1px 8px; border-radius: 10px;
   font-size: 11px; font-weight: 500;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .skill-tag-high { background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
 .skill-tag-mid  { background: #fffbe6; color: #d48806; border: 1px solid #ffe58f; }

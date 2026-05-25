@@ -90,6 +90,11 @@ public class SkillMatcher {
         // 按置信度降序排序
         topSkills.sort(Comparator.comparingDouble(Skill::getConfidence).reversed());
 
+        // ★ 强制截断到 TOP_K，防止保底逻辑导致技能超过限制
+        if (topSkills.size() > TOP_K) {
+            topSkills = topSkills.stream().limit(TOP_K).collect(Collectors.toList());
+        }
+
         String shortQuery = userMessage.length() > 50 ? userMessage.substring(0, 50) + "..." : userMessage;
         if (topSkills.isEmpty()) {
             log.info("技能匹配: query=\"{}\" → 无匹配技能 (活跃技能数={})", shortQuery, activeSkills.size());

@@ -82,13 +82,20 @@ async function refreshSkills() {
   }
   loading.value = true
   error.value = ''
-  try {
-    const res = await listSkills(userId, agentConfigId || undefined)
-    if (res.code === 200 && res.data) {
-      skills.value = res.data
-    } else {
-      skills.value = []
-    }
+    try {
+      const res = await listSkills(userId, agentConfigId || undefined)
+      if (res.code === 200 && res.data) {
+        // 按置信度降序排列，置信度相同按创建时间升序
+        const sorted = [...res.data].sort((a, b) => {
+          const confA = a.confidence ?? 0.5
+          const confB = b.confidence ?? 0.5
+          if (confB !== confA) return confB - confA
+          return (a.createdAt || '').localeCompare(b.createdAt || '')
+        })
+        skills.value = sorted
+      } else {
+        skills.value = []
+      }
   } catch (e: any) {
     error.value = '加载技能失败: ' + (e.message || '未知错误')
   } finally {

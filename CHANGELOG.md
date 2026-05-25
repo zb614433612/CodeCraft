@@ -4,7 +4,29 @@
 
 ---
 
-## [1.0.2] - 2026-05-25
+## [1.0.3] - 2026-05-25
+
+### 🎉 新增功能
+
+- **Agent 选择器展开/收起**：AgentSelector 组件默认只显示前 3 个 Agent，超过 3 个时显示"展开全部"按钮，避免拥堵
+- **技能列表按置信度排序**：SkillList 技能列表按置信度降序排列，置信度相同按创建时间升序，最高效的技能优先展示
+- **定时任务按 Agent 过滤**：ScheduleTaskView 新增 Agent 过滤下拉框，可快速筛选指定 Agent 的定时任务
+- **技能标签溢出处理**：CodeAssistantView 中技能匹配标签增加 title 属性和溢出省略样式，长技能名不会撑破布局
+
+### 🔧 修复优化
+
+- **主内容区域滚动修复**：Layout.vue 中 main-content 的 `overflow` 从 `hidden` 改为 `overflow-y: auto`，修复某些场景下内容无法滚动的问题
+- **技能匹配强制截断**：SkillMatcher.java 增加强制截断逻辑，确保返回的技能不会超过 TOP_K 限制，防止保底逻辑导致技能数超限
+
+### 🏷️ 版本号
+
+- 后端：`1.0.2` → `1.0.3`
+- Electron：`1.0.2` → `1.0.3`
+- 打包产物：`CodeCraft-Setup-1.0.2.exe` → `CodeCraft-Setup-1.0.3.exe`
+
+---
+
+
 
 ### 🎉 新增功能
 

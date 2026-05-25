@@ -354,7 +354,7 @@ onMounted(() => {
 
 .main-content {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto !important;
   height: 100vh;
 }
 

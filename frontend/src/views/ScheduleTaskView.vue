@@ -8,8 +8,14 @@
       </a-button>
     </div>
 
+    <div class="toolbar">
+      <a-select v-model:value="filterAgentId" placeholder="按Agent过滤" allowClear style="width:220px" @change="loadList">
+        <a-select-option v-for="a in agentList" :key="a.id" :value="a.id">{{ a.avatar }} {{ a.name }}</a-select-option>
+      </a-select>
+    </div>
+
     <a-table
-      :dataSource="taskList"
+      :dataSource="filteredTaskList"
       :columns="columns"
       :loading="loading"
       rowKey="id"
@@ -101,7 +107,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { useRouter } from 'vue-router'
@@ -115,7 +121,12 @@ import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 
 const router = useRouter()
 const agentList = ref<AgentConfig[]>([])
+const filterAgentId = ref<number | undefined>()
 const taskList = ref<ScheduleTaskItem[]>([])
+const filteredTaskList = computed(() => {
+  if (!filterAgentId.value) return taskList.value
+  return taskList.value.filter(t => t.agentConfigId === filterAgentId.value)
+})
 const loading = ref(false)
 
 const columns = [
@@ -305,6 +316,13 @@ onMounted(async () => {
   font-size: 20px;
   font-weight: 600;
   color: #1a202c;
+}
+
+.toolbar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  justify-content: space-between;
 }
 
 .form-hint {

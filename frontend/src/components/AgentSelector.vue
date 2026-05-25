@@ -5,7 +5,7 @@
       <span>Agent</span>
     </div>
     <div
-      v-for="agent in agentList"
+      v-for="agent in visibleList"
       :key="agent.id"
       :class="['agent-menu-item', { active: selectedId === agent.id }]"
       @click="switchAgent(agent)"
@@ -13,12 +13,17 @@
       <span class="agent-avatar">{{ agent.avatar || '🤖' }}</span>
       <span class="agent-name">{{ agent.name }}</span>
     </div>
+    <div v-if="agentList.length > 3" class="agent-expand-btn" @click="expandAll = !expandAll">
+      <span>{{ expandAll ? '收起' : `展开全部 (${agentList.length})` }}</span>
+      <DownOutlined v-if="!expandAll" />
+      <UpOutlined v-else />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { RobotOutlined } from '@ant-design/icons-vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { RobotOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
 import { listAgentConfigs, updateAgentRuntime, type AgentConfig } from '@/api/agent-config'
 
 const emit = defineEmits<{
@@ -26,6 +31,11 @@ const emit = defineEmits<{
 }>()
 
 const agentList = ref<AgentConfig[]>([])
+const expandAll = ref(false)
+const visibleList = computed(() => {
+  if (expandAll.value || agentList.value.length <= 3) return agentList.value
+  return agentList.value.slice(0, 3)
+})
 const selectedId = ref<number | undefined>(undefined)
 const loading = ref(false)
 
@@ -110,4 +120,11 @@ defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime })
 .agent-menu-item.active { background: #e6f4ff; color: #1677ff; font-weight: 500; }
 .agent-avatar { font-size: 16px; flex-shrink: 0; }
 .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-expand-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; margin: 2px 0; border-radius: 6px;
+  cursor: pointer; font-size: 12px; color: #1677ff;
+  transition: background .15s;
+}
+.agent-expand-btn:hover { background: #f0f5ff; }
 </style>
