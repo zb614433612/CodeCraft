@@ -36,6 +36,12 @@ public class TokenStore {
             .maximumSize(10000)
             .build();
 
+    /** userId → token 集合映射，用于修改密码/禁用用户时批量失效 token */
+    private final Cache<Long, java.util.Set<String>> userIdTokenMap = Caffeine.newBuilder()
+            .expireAfterWrite(TOKEN_EXPIRE_SECONDS, TimeUnit.SECONDS)
+            .maximumSize(10000)
+            .build();
+
     @PostConstruct
     public void init() {
         log.info("TokenStore 初始化完成（Caffeine 本地缓存），Token 过期={}s，验证码过期={}s",
@@ -60,6 +66,21 @@ public class TokenStore {
 
     public void saveToken(String token, Map<String, String> userInfo) {
         tokenCache.put(token, new HashMap<>(userInfo));
+        // 记录 userId → token 映射，用于批量失效
+        String userIdStr = userInfo.get("id");
+        if (userIdStr != null) {
+            try {
+                Long userId = Long.parseLong(userIdStr);
+                java.util.Set<String> tokens = userIdTokenMap.getIfPresent(userId);
+                if (tokens == null) {
+                    tokens = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+                    userIdTokenMap.put(userId, tokens);
+                }
+                tokens.add(token);
+            } catch (NumberFormatException e) {
+                log.warn("无法解析 userId: {}", userIdStr);
+            }
+        }
     }
 
     public boolean hasToken(String token) {
@@ -83,7 +104,39 @@ public class TokenStore {
         }
     }
 
+    /**
+     * 失效指定用户的所有 token（修改密码、禁用用户时调用）
+     */
+    public void invalidateUserTokens(Long userId) {
+        java.util.Set<String> tokens = userIdTokenMap.getIfPresent(userId);
+        if (tokens != null) {
+            synchronized (tokens) {
+                for (String token : tokens) {
+                    tokenCache.invalidate(token);
+                }
+                tokens.clear();
+            }
+            userIdTokenMap.invalidate(userId);
+            log.info("已失效用户 {} 的所有登录 token", userId);
+        }
+    }
+
     public void deleteToken(String token) {
+        // 同步清理 userIdTokenMap
+        Map<String, String> userInfo = tokenCache.getIfPresent(token);
+        if (userInfo != null) {
+            String userIdStr = userInfo.get("id");
+            if (userIdStr != null) {
+                try {
+                    Long userId = Long.parseLong(userIdStr);
+                    java.util.Set<String> tokens = userIdTokenMap.getIfPresent(userId);
+                    if (tokens != null) {
+                        tokens.remove(token);
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
         tokenCache.invalidate(token);
     }
 }

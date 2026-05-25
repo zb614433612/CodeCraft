@@ -1,0 +1,27 @@
+# ============================================================
+# 本地环境配置模板
+# 复制本文件为 application-local.yml 并填入实际配置
+# application-local.yml 已在 .gitignore 中，不会提交到 Git
+#
+# 为什么用这个文件？
+# - application-local.yml 是 Spring Boot profile 配置，优先级高于 application.yml
+# - 和项目在同一目录，方便管理
+# - 比系统环境变量更直观，不需要修改系统配置
+# ============================================================
+
+# DeepSeek API 密钥（必须配置）
+deepseek:
+  api-key: sk-你的API密钥
+
+# Milvus 向量数据库（可选）
+milvus:
+  host: localhost
+  port: 19530
+  token: 你的Milvus认证token
+
+# 代理配置（可选，国内访问海外 API 时使用）
+network-tool:
+  proxy:
+    enabled: false
+    host: 127.0.0.1
+    port: 7890

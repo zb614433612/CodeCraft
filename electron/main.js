@@ -98,7 +98,7 @@ function getJarPath() {
     return path.join(process.resourcesPath, 'backend', 'codecraft.jar')
   }
   // 开发环境
-  return path.join(__dirname, '..', 'target', 'codecraft-0.0.1-SNAPSHOT.jar')
+  return path.join(__dirname, '..', 'target', 'codecraft-1.0.1.jar')
 }
 
 /**

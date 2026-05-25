@@ -56,6 +56,14 @@ CodeCraft 需要配置 AI 模型的 API Key 才能正常使用。
 - **代理配置**：如果需要通过代理访问外部网络，可在 `application.yml` 的 `network-tool.proxy` 中配置
 - **服务器端口**：默认 `8084`，可通过环境变量 `SERVER_PORT` 或修改 `application.yml` 中的 `server.port`
 
+> ⚠️ **首次运行前**：项目启动时会自动加载 `application-local.yml`（优先级高于 `application.yml`）。
+> 请复制模板文件 `application-local.yml.example` 为 `application-local.yml`，并填入你的 API Key：
+> ```bash
+> cp application-local.yml.example application-local.yml
+> # 然后编辑 application-local.yml，填入 deepseek.api-key
+> ```
+> 该文件已在 `.gitignore` 中排除，不会提交到 Git。
+
 ---
 
 ## 开发模式运行

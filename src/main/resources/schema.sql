@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS conversation (
   INDEX idx_user_id (user_id),
   INDEX idx_agent_type (agent_type),
   INDEX idx_agent_config_id (agent_config_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='会话表';
 
 -- 创建会话消息表
 CREATE TABLE IF NOT EXISTS conversation_message (
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS conversation_message (
   INDEX idx_conversation_id (conversation_id),
   INDEX idx_created_at (created_at),
   FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话消息表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='会话消息表';
 
 -- 创建上下文压缩记录表
 CREATE TABLE IF NOT EXISTS conversation_compaction (
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS conversation_compaction (
   INDEX idx_end_message (end_message_id),
   INDEX idx_superseded (superseded),
   FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='上下文压缩记录表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='上下文压缩记录表';
 
 -- 创建用户表（使用sys_user避免关键字冲突）
 CREATE TABLE IF NOT EXISTS sys_user (
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS sys_user (
   create_time DATETIME NOT NULL COMMENT '创建时间',
   update_time DATETIME NOT NULL COMMENT '更新时间',
   INDEX idx_username (username)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='用户表';
 
 
 
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS sub_agent_log (
   INDEX idx_agent_id (agent_id),
   INDEX idx_status (status),
   FOREIGN KEY (parent_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='子Agent执行记录表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='子Agent执行记录表';
 
 
 -- ============================================================
@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS sys_menu (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_parent_id (parent_id),
   INDEX idx_sort (sort_order)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='菜单表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='菜单表';
 
 -- 2. 角色表
 CREATE TABLE IF NOT EXISTS sys_role (
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS sys_role (
   status TINYINT DEFAULT 1 COMMENT '状态：1=启用, 0=禁用',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='角色表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='角色表';
 
 -- 3. 角色-菜单关联表
 CREATE TABLE IF NOT EXISTS sys_role_menu (
@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS sys_role_menu (
   UNIQUE KEY uk_role_menu (role_id, menu_id),
   FOREIGN KEY (role_id) REFERENCES sys_role(id) ON DELETE CASCADE,
   FOREIGN KEY (menu_id) REFERENCES sys_menu(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='角色菜单关联表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='角色菜单关联表';
 
 -- 初始化数据
 -- 角色
@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS sys_config (
   config_value TEXT COMMENT '配置值',
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_config_key (config_key)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统配置表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='系统配置表';
 
 INSERT IGNORE INTO sys_config (config_key, config_value) VALUES ('deepseek_api_key', '');
 
@@ -221,7 +221,7 @@ CREATE TABLE IF NOT EXISTS schedule_task (
   INDEX idx_task_status (status),
   INDEX idx_task_agent_type (agent_type),
   INDEX idx_task_user_id (user_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='定时任务表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='定时任务表';
 
 -- 新增 SETTING 菜单：定时任务
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
@@ -259,7 +259,7 @@ CREATE TABLE IF NOT EXISTS agent_config (
   INDEX idx_user_id (user_id),
   INDEX idx_enabled (enabled),
   INDEX idx_sort (sort_order)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Agent配置表';
+) DEFAULT CHARSET=utf8mb4 COMMENT='Agent配置表';
 
 -- 初始化默认编码助手 Agent（内置，不可修改删除）
 INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at)

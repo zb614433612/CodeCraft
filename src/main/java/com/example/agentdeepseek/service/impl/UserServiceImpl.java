@@ -315,10 +315,8 @@ public class UserServiceImpl implements UserService {
         user.setUpdateTime(LocalDateTime.now());
         userMapper.update(user);
 
-        // 清除该用户的Token，强制重新登录
-        // 由于无法通过userId反查所有token，此处不处理
-        // 用户下次操作时使用旧token会因验证通过但密码已改...实际上token仍有效
-        // 更完善的做法：登录时记录 userId→token 的映射，或使用JWT无状态token
-        log.info("用户修改密码: userId={}", userId);
+        // 清除该用户的所有登录 token，强制重新登录
+        tokenStore.invalidateUserTokens(userId);
+        log.info("用户修改密码并清除所有 token: userId={}", userId);
     }
 }
