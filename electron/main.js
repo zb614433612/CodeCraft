@@ -104,6 +104,59 @@ function getJarPath() {
 /**
  * 启动 Spring Boot 后端 JAR
  */
+/**
+ * 清理所有旧数据：H2 数据库文件 + 浏览器 localStorage
+ * 每次启动时无条件执行，确保安装/重装/升级后不会残留任何旧数据
+ */
+function cleanAllData(dataDir) {
+  console.log('清理所有旧数据（每次启动无条件执行）...')
+
+  // 1. 清理 H2 数据库文件
+  const dbDir = path.join(dataDir, 'data')
+  const dbFile = path.join(dbDir, 'codecraft.mv.db')
+  try {
+    if (fs.existsSync(dbFile)) {
+      fs.unlinkSync(dbFile)
+      console.log('已删除旧数据库文件:', dbFile)
+    }
+    const traceFile = path.join(dbDir, 'codecraft.trace.db')
+    if (fs.existsSync(traceFile)) {
+      fs.unlinkSync(traceFile)
+    }
+  } catch (e) {
+    console.error('清理数据库失败:', e.message)
+  }
+
+  // 2. 清理浏览器 localStorage（旧登录 token 会导致页面加载时鉴权异常）
+  try {
+    const localStorageDir = path.join(dataDir, 'Local Storage')
+    if (fs.existsSync(localStorageDir)) {
+      const files = fs.readdirSync(localStorageDir)
+      for (const file of files) {
+        const filePath = path.join(localStorageDir, file)
+        fs.unlinkSync(filePath)
+        console.log('已清理缓存文件:', filePath)
+      }
+      console.log('已清除浏览器 localStorage，用户需要重新登录')
+    }
+  } catch (e) {
+    console.error('清理 localStorage 失败:', e.message)
+  }
+
+  // 3. 清理 Session 和 Cache 等其他浏览器数据
+  const sessionDir = path.join(dataDir, 'Session Storage')
+  try {
+    if (fs.existsSync(sessionDir)) {
+      const files = fs.readdirSync(sessionDir)
+      for (const file of files) {
+        fs.unlinkSync(path.join(sessionDir, file))
+      }
+    }
+  } catch (e) {
+    console.error('清理 Session 失败:', e.message)
+  }
+}
+
 function startBackend() {
   const jarPath = getJarPath()
   const javaCmd = findJava()
@@ -117,6 +170,11 @@ function startBackend() {
     fs.mkdirSync(dataDir, { recursive: true })
   }
   console.log(`后端工作目录: ${dataDir}`)
+
+  // 每次启动都清理所有旧数据，确保无残留
+  if (app.isPackaged) {
+    cleanAllData(dataDir)
+  }
   javaProcess = spawn(javaCmd, ['-Dfile.encoding=UTF-8', '-jar', jarPath], {
     cwd: dataDir,
     stdio: ['ignore', 'pipe', 'pipe']
@@ -156,7 +214,8 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      webSecurity: false  // 关闭同源策略限制，避免 Electron 端页面路由跳转异常
     },
     title: 'CodeCraft',
     icon: path.join(__dirname, 'icon.png'),

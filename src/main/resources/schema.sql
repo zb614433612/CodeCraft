@@ -280,3 +280,22 @@ INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_t
 -- 管理员分配技能管理菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 12;
+
+-- ============================================================
+-- Agent 后台任务表（用于追踪流式任务状态、支持页面刷新后重连）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_task (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id BIGINT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'running',
+  iteration INT DEFAULT 0,
+  max_iterations INT DEFAULT 50,
+  error_message TEXT,
+  event_count INT DEFAULT 0,
+  pending_question_uuid VARCHAR(36),
+  pending_question_text TEXT,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_task_conv_id ON agent_task(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_agent_task_status ON agent_task(status);

@@ -133,16 +133,25 @@
         </a-form-item>
 
         <a-form-item label="工具选择">
-          <div class="tools-checkbox-group">
-            <a-checkbox
-              v-for="tool in availableTools"
-              :key="tool"
-              :checked="formData.tools.includes(tool)"
-              @change="(e: any) => toggleTool(tool, e.target.checked)"
-              class="tool-checkbox"
-            >
-              {{ tool }}
-            </a-checkbox>
+          <div v-if="loadingTools" class="form-hint">加载工具列表中...</div>
+          <div v-else class="tools-collapse">
+            <a-collapse v-model:activeKey="activeCategoryKeys" :bordered="false" ghost>
+              <a-collapse-panel v-for="cat in toolCategories" :key="cat.code" :header="cat.label + '（' + cat.tools.length + '个工具）'">
+                <div class="tools-group">
+                  <div v-for="tool in cat.tools" :key="tool.name" class="tool-item">
+                    <a-checkbox
+                      :checked="formData.tools?.includes(tool.name)"
+                      @change="(e: any) => toggleTool(tool.name, e.target.checked)"
+                      class="tool-checkbox"
+                    >
+                      <span class="tool-name">{{ tool.name }}</span>
+                    </a-checkbox>
+                    <span class="tool-desc">{{ tool.description }}</span>
+                    <span v-if="tool.risk === 'high'" class="tool-risk-badge" title="高危操作">⚠️</span>
+                  </div>
+                </div>
+              </a-collapse-panel>
+            </a-collapse>
           </div>
           <div class="tools-actions">
             <a-button size="small" type="link" @click="selectAllTools">全选</a-button>
@@ -176,6 +185,7 @@ import {
   setDefaultAgentConfig,
   type AgentConfig
 } from '@/api/agent-config'
+import { listToolRegistry, type ToolCategory } from '@/api/tools'
 
 // ===== 状态 =====
 const agentList = ref<AgentConfig[]>([])
@@ -187,6 +197,10 @@ const oldToolNames = ref<string[] | null>(null)
 const modalSaving = ref(false)
 const settingDefaultId = ref<number | null>(null)
 const showEmojiPicker = ref(false)
+const toolCategories = ref<ToolCategory[]>([])
+const loadingTools = ref(false)
+const allToolNames = ref<string[]>([])
+const activeCategoryKeys = ref<string[]>([])
 
 // 常用 emoji 列表
 const emojiList = [
@@ -194,17 +208,6 @@ const emojiList = [
   '🦄', '🐙', '🦀', '🐳', '🦋', '🌻', '🌟', '🔥',
   '💡', '🎯', '🚀', '⚡', '🎨', '🔧', '📚', '💻',
   '🧠', '👾', '🗿', '🤠', '😎', '🧙', '🦸', '🎭'
-]
-
-// 可用工具列表
-const availableTools = [
-  'web_search', 'web_fetch', 'read_file', 'write_file', 'edit_file',
-  'glob_files', 'grep_search', 'read_project_tree', 'project_info',
-  'run_command', 'run_server', 'ask_clarification', 'task_manager',
-  'check_network', 'execute_sql', 'delete_file', 'http_request',
-  'service_control', 'git_status', 'git_diff', 'git_log', 'git_add',
-  'git_commit', 'git_branch', 'git_push', 'manage_skill',
-  'report_skill_result', 'fork_agent', 'collect_agent', 'inspect_agent'
 ]
 
 // 解析 toolNames JSON 字符串为 tools 数组
@@ -240,6 +243,23 @@ const fetchList = async () => {
     message.error(e.message || '获取 Agent 列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+// ===== 工具注册表加载 =====
+const fetchToolRegistry = async () => {
+  loadingTools.value = true
+  try {
+    const res = await listToolRegistry()
+    if (res.code === 200 && res.data?.categories) {
+      toolCategories.value = res.data.categories
+      allToolNames.value = res.data.categories.flatMap(c => c.tools.map(t => t.name))
+      activeCategoryKeys.value = res.data.categories.map(c => c.code)
+    }
+  } catch (e: any) {
+    console.warn('获取工具注册表失败:', e.message)
+  } finally {
+    loadingTools.value = false
   }
 }
 
@@ -363,7 +383,7 @@ const toggleTool = (tool: string, checked: boolean) => {
 }
 
 const selectAllTools = () => {
-  formData.tools = [...availableTools]
+  formData.tools = [...allToolNames.value]
 }
 
 // ===== 浏览工作目录 =====
@@ -382,6 +402,7 @@ const browseWorkDir = () => {
 
 onMounted(() => {
   fetchList()
+  fetchToolRegistry()
 })
 </script>
 
@@ -616,28 +637,64 @@ onMounted(() => {
   outline: 2px solid #1890ff;
 }
 
-.tools-checkbox-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  max-height: 200px;
-  overflow-y: auto;
-  padding: 8px;
-  background: #fafafa;
-  border-radius: 6px;
+/* 工具选择 - 折叠面板 */
+.tools-collapse {
   border: 1px solid #f0f0f0;
-  margin-bottom: 4px;
+  border-radius: 6px;
+  background: #fafafa;
+  max-height: 360px;
+  overflow-y: auto;
 }
-
+.tools-collapse :deep(.ant-collapse-header) {
+  padding: 8px 12px !important;
+  font-weight: 500;
+  font-size: 13px;
+}
+.tools-collapse :deep(.ant-collapse-content-box) {
+  padding: 4px 12px 12px !important;
+}
+.tools-group {
+  width: 100%;
+}
+.tool-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 0;
+  gap: 6px;
+}
+.tool-item:hover {
+  background: #f0f5ff;
+  border-radius: 4px;
+}
 .tool-checkbox {
-  width: calc(33.33% - 4px);
   margin: 0;
-  font-size: 12px;
 }
-
+.tool-name {
+  font-family: 'Courier New', Consolas, monospace;
+  font-size: 12px;
+  color: #1a202c;
+  min-width: 130px;
+  display: inline-block;
+}
+.tool-desc {
+  font-size: 12px;
+  color: #8c8c8c;
+  flex: 1;
+}
+.tool-risk-badge {
+  font-size: 13px;
+  cursor: help;
+  flex-shrink: 0;
+}
+.form-hint {
+  font-size: 12px;
+  color: #8c8c8c;
+  padding: 8px;
+}
 .tools-actions {
   display: flex;
   gap: 8px;
+  margin-top: 6px;
 }
 
 /* 响应式 */

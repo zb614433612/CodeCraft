@@ -758,17 +758,77 @@ const updateAgentRuntime = (key: string, value: string) => {
   }
 }
 
+// ===== 多Agent后台流式 - 辅助函数 =====
+const saveAgentSnapshot = (agentId: number) => {
+  agentSnapshots.value[agentId] = {
+    conversations: JSON.parse(JSON.stringify(conversations.value)),
+    currentConversationId: currentConversationId.value
+  }
+}
+const loadAgentSnapshot = (agentId: number): AgentSnapshotData | null => {
+  return agentSnapshots.value[agentId] || null
+}
+const onStreamComplete = (convId: string, agentId: number | null) => {
+  // 从后台流式列表中移除
+  backgroundStreams.value = backgroundStreams.value.filter(s => s.convId !== convId)
+}
+
 const onAgentChange = (agentId: number | null | undefined, agent: any) => {
+  const oldAgentId = currentAgentConfigId.value
+
+  // 第一步：保存当前 Agent 的快照
+  if (oldAgentId) {
+    saveAgentSnapshot(oldAgentId)
+  }
+
+  // 第二步：如果当前有流式输出，转移到后台继续运行（不 abort）
+  if (isSending.value && stopAbortController.value && currentConversationId.value) {
+    backgroundStreams.value.push({
+      convId: currentConversationId.value,
+      agentConfigId: oldAgentId!,
+      abortController: stopAbortController.value,
+      realSessionId: activeStreamInfo.value?.realSessionId
+    })
+    // 清除 activeStreamInfo，信息已转移到 backgroundStreams
+    activeStreamInfo.value = null
+  }
+
+  // 第三步：重置当前会话状态（不停止后台流式）
+  isSending.value = false
+  stopAbortController.value = null
+  streamStatus.value = ''
+  pendingQuestion.value = null
+
+  // 第四步：更新当前 Agent
   currentAgentConfigId.value = agentId ?? null
   currentAgentWorkDir.value = agent?.workDir || ''
-  // 切换 Agent：清空当前会话和聊天记录，重新加载
-  currentConversationId.value = null
-  conversations.value = []
-  currentMessages.value = []
-  clearSavedConversationId()  // 清空全局会话缓存，避免串 Agent
-  fetchConversations()
+
+  // 第五步：恢复目标 Agent 的快照 或 重新加载
+  // ★ 关键：messages 不清空！后台流式还在写入旧会话的数据
+  const snap = agentId ? loadAgentSnapshot(agentId) : null
+  if (snap) {
+    conversations.value = snap.conversations
+    currentConversationId.value = snap.currentConversationId
+  } else {
+    currentConversationId.value = null
+    conversations.value = []
+    fetchConversations()
+  }
+  clearSavedConversationId()
   skillsRefreshKey.value++
-  reloadFileTree()
+
+  // 第六步：文件树
+  if (agent?.workDir) {
+    fileTreeLoadPath.value = agent.workDir
+  } else {
+    fileTreeLoadPath.value = ''
+  }
+
+  // 第七步：恢复流式状态（如果新 Agent 有后台流式在运行）
+  if (agentId && backgroundStreams.value.some(s => s.agentConfigId === agentId)) {
+    isSending.value = true
+    streamStatus.value = '后台输出中...'
+  }
 }
 
 const triggerFileUpload = () => {
@@ -1322,6 +1382,27 @@ const scrollerRef = ref<any>(null)
 const collapsed = ref(false)
 const sidebarTab = ref<'conversation' | 'files' | 'git' | 'skills' | 'agents'>('conversation')
 
+// ===== 多Agent后台流式 =====
+interface BackgroundStream {
+  convId: string
+  agentConfigId: number
+  abortController: AbortController
+  /** 后端返回的真实会话ID（用于取消后端任务） */
+  realSessionId?: number
+}
+interface AgentSnapshotData {
+  conversations: Conversation[]
+  currentConversationId: string
+}
+/** 切换到后台继续运行的流式列表（切换Agent时不中止） */
+const backgroundStreams = ref<BackgroundStream[]>([])
+/** 各Agent的会话快照（用于切换Agent时保存和恢复conversations列表） */
+const agentSnapshots = ref<Record<number, AgentSnapshotData>>({})
+/** 当前正在前台运行的流式信息（直接关联 stopAbortController，用于停止时取消后端任务） */
+const activeStreamInfo = ref<{ convId: string; realSessionId?: number } | null>(null)
+/** 当前流式的真实会话ID（后端在第一个SSE事件中返回），stopStreaming直接读取 */
+const currentStreamSessionId = ref<number | null>(null)
+
 // 会话标题编辑相关状态
 const editingConvId = ref<string>('')
 const editingConvTitle = ref('')
@@ -1780,35 +1861,74 @@ const handleThinkingModeChange = (val: string) => {
   settingsStore.setThinkingMode('code_assistant', val as 'non-thinking' | 'thinking' | 'thinking_max')
 }
 
-// 停止流式响应
+// 停止流式响应（只停止当前Agent的流式，其他Agent的后台流式不受影响）
 const stopStreaming = () => {
+  const currentAgentId = currentAgentConfigId.value
+  const currentConvId = currentConversationId.value
+
+  // 收集要取消的后端任务ID
+  const cancelIds: number[] = []
+
+  // 停止当前会话的流式（stopAbortController 中的流式）
   if (stopAbortController.value) {
-    const controller = stopAbortController.value
+    stopAbortController.value.abort()
     stopAbortController.value = null
-    controller.abort()
-    // 取消后端正在运行的任务
-    // 先尝试从 conversations 列表中获取真实会话ID（complete 事件可能已更新列表中的 id）
-    let targetId = currentConversationId.value
-    if (targetId && targetId.startsWith('local-')) {
-      const conv = conversations.value.find(c => c.id === targetId)
-      if (conv && conv.id && !conv.id.startsWith('local-')) {
-        targetId = conv.id
+  }
+
+  // 停止后台流式中属于当前 Agent 的流式
+  backgroundStreams.value = backgroundStreams.value.filter(bg => {
+    if (bg.agentConfigId === currentAgentId) {
+      bg.abortController.abort()
+      if (bg.realSessionId) {
+        cancelIds.push(bg.realSessionId)
       }
+      return false
     }
-    if (targetId && !targetId.startsWith('local-')) {
-      const convIdNum = parseInt(targetId)
-      if (!isNaN(convIdNum)) {
-        cancelTask(convIdNum)
+    return true
+  })
+
+  // 从 currentStreamSessionId 获取（最直接的路径）
+  if (currentStreamSessionId.value) {
+    cancelIds.push(currentStreamSessionId.value)
+    currentStreamSessionId.value = null
+  }
+
+  // 从 currentConversationId 获取（如果不是 local-xxx）
+  if (currentConvId && !currentConvId.startsWith('local-')) {
+    const id = parseInt(currentConvId)
+    if (!isNaN(id)) {
+      cancelIds.push(id)
+    }
+  }
+
+  // 兜底：从 conversations 列表中找对应 local-xxx 的真实ID
+  if (currentConvId && currentConvId.startsWith('local-')) {
+    const conv = conversations.value.find(c => c.id === currentConvId)
+    if (conv && !conv.id.startsWith('local-')) {
+      const id = parseInt(conv.id)
+      if (!isNaN(id)) {
+        cancelIds.push(id)
       }
     }
   }
+
+  // 统一去重后取消所有后端任务
+  const uniqueIds = [...new Set(cancelIds)]
+  if (uniqueIds.length === 0 && currentConvId && !currentConvId.startsWith('local-')) {
+    const id = parseInt(currentConvId)
+    if (!isNaN(id)) {
+      uniqueIds.push(id)
+    }
+  }
+  for (const id of uniqueIds) {
+    cancelTask(id)
+  }
+
+  // 立即重置当前 UI 状态
+  isSending.value = false
+  streamStatus.value = ''
 }
 
-// 设置项目工作目录
-const reloadFileTree = () => {
-  const wd = agentRuntime.value.workDir || settingsStore.projectRoot
-  if (wd) fileTreeLoadPath.value = wd
-}
 
 // 调用原生目录选择对话框（Electron）或目录浏览器（浏览器）
 const selectProjectRoot = async () => {
@@ -1816,7 +1936,7 @@ const selectProjectRoot = async () => {
     const dir = await (window as any).electronAPI.selectDirectory()
     if (dir) {
       settingsStore.projectRoot = dir
-      reloadFileTree()
+      fileTreeLoadPath.value = dir
     }
   } else {
     // 浏览器环境：弹出目录浏览器弹窗
@@ -1833,7 +1953,7 @@ const onDirSelected = (path: string) => {
   } else {
     settingsStore.projectRoot = path
   }
-  reloadFileTree()
+  fileTreeLoadPath.value = path
 }
 
 // ask_user 回答函数（用于 clarification 类型）
@@ -1935,6 +2055,18 @@ const flushMessageUpdate = (convId: string, thinkingMsgId?: string | number) => 
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
   if (!text || isSending.value) return
+
+  // 检查工作目录是否已设置（Agent 配置或全局设置均可）
+  if (!agentRuntime.value.workDir && !settingsStore.projectRoot) {
+    message.warning('请先在左侧「文件」面板中设置工作目录')
+    return
+  }
+
+  // 如果没有激活的会话，自动创建一个本地会话
+  if (!currentConversationId.value) {
+    startNewChat()
+  }
+
   // 发送新消息时清除旧的任务清单
   clearTaskList()
 
@@ -1955,9 +2087,8 @@ const sendMessage = async () => {
   }
 
   let convId = currentConversationId.value
-  // 如果是新会话，需要找到或创建真实的会话ID
-  if (!convId || convId.startsWith('local-')) {
-    // 需要创建真实会话
+  // 如果是本地会话，后续流式结束后会迁移到真实会话ID
+  if (convId && convId.startsWith('local-')) {
     // 先发消息让后端创建会话
   }
   // 用于在流式结束后统一迁移 convId（避免流式过程中数组引用变动导致内容重复）
@@ -2009,6 +2140,8 @@ const sendMessage = async () => {
 
   const abortCtrl = new AbortController()
   stopAbortController.value = abortCtrl
+  // 记录当前流式信息，用于停止时直接取消后端任务
+  activeStreamInfo.value = { convId }
 
   try {
     const sessionId = convId.startsWith('local-') ? undefined : parseInt(convId)
@@ -2019,7 +2152,7 @@ const sendMessage = async () => {
     for await (const event of streamChat(finalMessage, sessionId, {
       promptFileName: PROMPT_FILE,
       executionMode: agentRuntime.value.executionMode,
-      projectRoot: agentRuntime.value.workDir || undefined,
+      projectRoot: agentRuntime.value.workDir || settingsStore.projectRoot || undefined,
       model: agentRuntime.value.model,
       thinkingMode: agentRuntime.value.thinkingMode,
       turnId,
@@ -2059,12 +2192,30 @@ const sendMessage = async () => {
         scheduleMessageUpdate(convId, assistantMsg.id)
       } else if (event.type === 'content') {
         streamStatus.value = '正在生成回答...'
-        assistantMsg.content += event.data
         // 实时更新消息内容
+        if (event.data) {
+          assistantMsg.content += event.data
+        }
+        // 第一个 content 事件中获取 sessionId（后端在第一个事件中就会返回）
+        if (event.sessionId && !currentStreamSessionId.value) {
+          currentStreamSessionId.value = event.sessionId
+        }
+        // 始终同步更新 backgroundStreams 中的 realSessionId（后台流式场景，不依赖 !realSessionId 条件）
+        if (event.sessionId) {
+          const bgEntry = backgroundStreams.value.find(s => s.convId === convId)
+          if (bgEntry) {
+            bgEntry.realSessionId = event.sessionId
+          }
+        }
         scheduleMessageUpdate(convId)
       } else if (event.type === 'complete' && event.sessionId) {
         // 保存真实会话ID，流式结束后在 finally 中统一迁移
         realSessionId = String(event.sessionId)
+        // 同步更新 backgroundStreams 中的 realSessionId，用于停止时取消后端任务
+        const bgEntry = backgroundStreams.value.find(s => s.convId === convId)
+        if (bgEntry) {
+          bgEntry.realSessionId = event.sessionId
+        }
         if (convId.startsWith('local-') && realSessionId) {
           const localConv = conversations.value.find(c => c.id === convId)
           if (localConv) {
@@ -2120,6 +2271,13 @@ const sendMessage = async () => {
       assistantMsg.isStreaming = false
       streamStatus.value = ''
       flushMessageUpdate(convId, assistantMsg.id)
+      // 如果已经获取到真实会话ID，提前迁移 convId，避免 finally 中迁移触发 checkAndReconnect 重连
+      if (realSessionId) {
+        messages.value[realSessionId] = messages.value[convId]
+        delete messages.value[convId]
+        currentConversationId.value = realSessionId
+        convId = realSessionId
+      }
       return
     }
     console.error('发送消息失败:', error)
@@ -2133,12 +2291,29 @@ const sendMessage = async () => {
     stopElapsedTimer()
     streamStatus.value = ''
     stopAbortController.value = null
+    // 清除 activeStreamInfo（流式已结束，可能是正常结束或被 stopStreaming 提前清掉）
+    if (activeStreamInfo.value?.convId === convId) {
+      activeStreamInfo.value = null
+    }
+    // 通知后台流式管理：当前流式已结束
+    onStreamComplete(convId, currentAgentConfigId.value)
     scrollToBottom()
     // 流式结束后统一迁移 convId（避免流式过程中数组引用变动导致内容重复）
     if (convId.startsWith('local-') && realSessionId) {
       messages.value[realSessionId] = messages.value[convId]
       delete messages.value[convId]
-      currentConversationId.value = realSessionId
+      // 只有当前还在看这个会话，才迁移 currentConversationId
+      if (currentConversationId.value === convId) {
+        currentConversationId.value = realSessionId
+      } else {
+        // 用户已切走，更新快照中的 convId 以保持一致性
+        for (const key in agentSnapshots.value) {
+          if (agentSnapshots.value[key]?.currentConversationId === convId) {
+            agentSnapshots.value[key].currentConversationId = realSessionId
+            break
+          }
+        }
+      }
       convId = realSessionId
     }
     // 流式完全结束后再刷新会话列表
@@ -2271,6 +2446,8 @@ const reconnectToTaskStream = async (convId: number) => {
 
 const checkAndReconnect = async (convId: string) => {
   if (convId.startsWith('local-')) return
+  // 如果该会话已经在后台流式运行中，跳过重连（避免双流式冲突）
+  if (backgroundStreams.value.some(s => s.convId === convId)) return
   const task = await checkActiveTask(parseInt(convId))
   if (task.active) {
     activeTask.value = task as any
@@ -2490,9 +2667,11 @@ watch(() => currentMessages.value.length + '|' + (currentMessages.value[currentM
 
 onMounted(() => {
   scrollToBottom()
-  // 如有已保存的工作目录，自动加载文件树
-  const wd = agentRuntime.value.workDir || settingsStore.projectRoot
-  if (wd) fileTreeLoadPath.value = wd
+  // 仅当当前 Agent 配置了工作目录时才自动加载文件树
+  // 不自动使用 settingsStore.projectRoot（需要用户主动点击「选择目录」）
+  if (agentRuntime.value.workDir) {
+    fileTreeLoadPath.value = agentRuntime.value.workDir
+  }
   // 点击外部关闭任务下拉
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement

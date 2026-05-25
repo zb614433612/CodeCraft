@@ -1,7 +1,7 @@
 <template>
   <div class="file-tree">
     <div class="ft-header" v-if="tree || loading">
-      <span class="ft-current-path">{{ displayRoot || '加载中...' }}</span>
+      <span class="ft-current-path">{{ displayRoot || (loading ? '加载中...' : '') }}</span>
       <ReloadOutlined :class="['ft-reload', { loading: loading }]" @click="fetchTree" />
     </div>
     <div v-if="loading" class="ft-loading">
@@ -83,6 +83,10 @@ watch(() => props.rootPath, (newPath) => {
     tree.value = null
     error.value = ''
     fetchTree()
+  } else {
+    // rootPath 被清空时，同时清空文件树
+    tree.value = null
+    error.value = ''
   }
 })
 

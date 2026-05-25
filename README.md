@@ -27,8 +27,9 @@
 ## ✨ 核心功能
 
 ### 🤖 AI Agent 能力
-- **多工具调用**：读写文件、搜索代码、执行命令、操作 Git、调用 API 等 30+ 工具
+- **多工具调用**：读写文件、搜索代码、执行命令、操作 Git、调用 API 等 30+ 工具，工具选择区按类型分组折叠显示，标注高危操作 ⚠️
 - **任务拆解与并行**：自动将复杂任务拆解为子任务，创建多个子 Agent 并行执行
+- **多 Agent 后台流式切换**：切换 Agent 时后台流式继续运行，切回自动恢复，支持多个 Agent 同时并行流式
 - **自动纠错**：执行失败自动重试、切换方案，连续失败自动上报
 - **技能系统**：支持创建和管理技能，让 AI 学习你的工作流
 - **自定义 Agent**：支持创建多个 AI Agent 配置，每个 Agent 可独立设置提示词、工具集、模型、执行模式
@@ -86,7 +87,7 @@
 不想搭建开发环境？直接下载已打包好的安装包：
 
 - 前往 **[GitHub Releases 页面](https://github.com/zb614433612/CodeCraft/releases)** 
-- 下载最新版本的 `CodeCraft-Setup-x.x.x.exe`
+- 下载最新版本的 `CodeCraft-Setup-1.0.2.exe`
 - 双击安装即可使用，**无需安装 Java**（JRE 已内置在安装包中）
 
 > 安装后启动，会先启动后端服务（等待约 10~30 秒），然后自动打开主界面。
@@ -144,7 +145,7 @@ codecraft/
 │   │   └── com/example/agentdeepseek/
 │   │       ├── common/           # 通用枚举、响应封装
 │   │       ├── config/           # 配置类
-│   │       ├── controller/       # REST API 控制器
+│ │       ├── controller/       # REST API 控制器（含工具注册表 API）
 │   │       ├── filter/           # 过滤器（Token 鉴权）
 │   │       ├── mapper/           # MyBatis 数据访问层
 │   │       ├── model/            # DTO、实体、VO
@@ -158,11 +159,11 @@ codecraft/
 │   └── main/resources/           # 配置文件和静态资源
 ├── frontend/                     # Vue3 前端源码
 │   ├── src/
-│   │   ├── api/                  # 后端 API 调用（agent-config, chat, conversation, skill 等）
-│   │   ├── components/           # 组件（AgentSelector, SkillList 等）
-│   │   ├── views/                # 页面（AgentConfigView, SkillManageView 等）
-│   │   ├── store/                # 状态管理
-│   │   └── utils/                # 工具函数
+│ │   ├── api/                  # 后端 API 调用（agent-config, chat, conversation, skill, tools 等）
+│ │   ├── components/           # 组件（AgentSelector, SkillList, FileTree 等）
+│ │   ├── views/                # 页面（CodeAssistantView, AgentConfigView, SkillManageView 等）
+│ │   ├── store/                # 状态管理
+│ │   └── utils/                # 工具函数
 │   └── public/                   # 静态资源
 ├── electron/                     # Electron 桌面壳
 │   ├── main.js                   # Electron 主进程

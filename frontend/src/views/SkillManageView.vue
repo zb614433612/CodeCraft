@@ -75,17 +75,29 @@
         </a-form-item>
 
         <a-form-item label="工具选择" required>
-          <div v-if="!selectedAgentTools.length" class="form-hint">请先选择关联Agent</div>
-          <div v-else class="tools-checkbox-group">
-            <a-checkbox
-              v-for="tool in selectedAgentTools"
-              :key="tool"
-              :checked="formTools.includes(tool)"
-              @change="(e: any) => toggleTool(tool, e.target.checked)"
-              class="tool-checkbox"
-            >{{ tool }}</a-checkbox>
+          <div v-if="loadingTools" class="form-hint">加载工具列表中...</div>
+          <div v-else-if="!form.agentConfigId" class="form-hint">请先选择关联Agent</div>
+          <div v-else-if="!selectedAgentToolCategories.length" class="form-hint">该Agent没有可用工具</div>
+          <div v-else class="tools-collapse">
+            <a-collapse :bordered="false" ghost>
+              <a-collapse-panel v-for="cat in selectedAgentToolCategories" :key="cat.code" :header="cat.label + '（' + cat.tools.length + '个工具）'">
+                <div class="tools-group">
+                  <div v-for="tool in cat.tools" :key="tool.name" class="tool-item">
+                    <a-checkbox
+                      :checked="formTools.includes(tool.name)"
+                      @change="(e: any) => toggleTool(tool.name, e.target.checked)"
+                      class="tool-checkbox"
+                    >
+                      <span class="tool-name">{{ tool.name }}</span>
+                    </a-checkbox>
+                    <span class="tool-desc">{{ tool.description }}</span>
+                    <span v-if="tool.risk === 'high'" class="tool-risk-badge" title="高危操作">⚠️</span>
+                  </div>
+                </div>
+              </a-collapse-panel>
+            </a-collapse>
           </div>
-          <div v-if="selectedAgentTools.length" class="tools-actions">
+          <div v-if="selectedAgentToolCategories.length" class="tools-actions">
             <a-button size="small" type="link" @click="selectAllTools">全选</a-button>
             <a-button size="small" type="link" @click="formTools = []">清空</a-button>
           </div>
@@ -110,20 +122,13 @@ import { message } from 'ant-design-vue'
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { listSkills, createSkill, updateSkill, deleteSkillApi, type SkillData } from '@/api/skill'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
+import { listToolRegistry, type ToolCategory } from '@/api/tools'
 import { useUserStore } from '@/store/user'
-
-const AVAILABLE_TOOLS = [
-  'web_search', 'web_fetch', 'read_file', 'write_file', 'edit_file',
-  'glob_files', 'grep_search', 'read_project_tree', 'project_info',
-  'run_command', 'run_server', 'ask_clarification', 'task_manager',
-  'check_network', 'execute_sql', 'delete_file', 'http_request',
-  'service_control', 'git_status', 'git_diff', 'git_log', 'git_add',
-  'git_commit', 'git_branch', 'git_push', 'manage_skill',
-  'report_skill_result', 'fork_agent', 'collect_agent', 'inspect_agent'
-]
 
 const userStore = useUserStore()
 const agents = ref<AgentConfig[]>([])
+const toolCategories = ref<ToolCategory[]>([])
+const loadingTools = ref(false)
 const skills = ref<SkillData[]>([])
 const loading = ref(false)
 const filterAgentId = ref<number | undefined>()
@@ -138,18 +143,51 @@ const editId = ref<number | null>(null)
 
 const userId = () => userStore.userInfo?.userId || userStore.userInfo?.id || 1
 
-// 当前选中Agent的工具列表
-const selectedAgentTools = computed(() => {
+// 所有工具名扁平列表（用于全选和判断）
+const allToolNamesFlat = computed(() => {
+  return toolCategories.value.flatMap(c => c.tools.map(t => t.name))
+})
+
+// 当前选中Agent的工具列表（分组格式）
+const selectedAgentToolCategories = computed(() => {
   if (!form.value.agentConfigId) return []
   const agent = agents.value.find(a => a.id === form.value.agentConfigId)
   if (!agent) return []
-  // 如果Agent配置了工具列表就用它的，否则（默认编码助手等）用全部工具
+
+  let agentToolNames: string[] = []
   if (agent.toolNames) {
-    try { const tools = JSON.parse(agent.toolNames) as string[]; return tools.length > 0 ? tools : AVAILABLE_TOOLS }
-    catch { return AVAILABLE_TOOLS }
+    try {
+      const tools = JSON.parse(agent.toolNames) as string[]
+      agentToolNames = tools.length > 0 ? tools : allToolNamesFlat.value
+    } catch {
+      agentToolNames = allToolNamesFlat.value
+    }
+  } else {
+    agentToolNames = allToolNamesFlat.value
   }
-  return AVAILABLE_TOOLS
+
+  // 按分类分组过滤
+  return toolCategories.value
+    .map(cat => ({
+      ...cat,
+      tools: cat.tools.filter(t => agentToolNames.includes(t.name))
+    }))
+    .filter(cat => cat.tools.length > 0)
 })
+
+const fetchToolRegistry = async () => {
+  loadingTools.value = true
+  try {
+    const res = await listToolRegistry()
+    if (res.code === 200 && res.data?.categories) {
+      toolCategories.value = res.data.categories
+    }
+  } catch (e: any) {
+    console.warn('获取工具注册表失败:', e.message)
+  } finally {
+    loadingTools.value = false
+  }
+}
 
 const onAgentChange = () => { formTools.value = [] }
 
@@ -157,7 +195,9 @@ const toggleTool = (tool: string, checked: boolean) => {
   if (checked) { if (!formTools.value.includes(tool)) formTools.value.push(tool) }
   else { formTools.value = formTools.value.filter(t => t !== tool) }
 }
-const selectAllTools = () => { formTools.value = [...selectedAgentTools.value] }
+const selectAllTools = () => {
+  formTools.value = selectedAgentToolCategories.value.flatMap(c => c.tools.map(t => t.name))
+}
 
 const getAgentName = (id?: number) => agents.value.find(a => a.id === id)?.name || '全局'
 
@@ -248,6 +288,7 @@ const handleDelete = async (id: number) => {
 onMounted(async () => {
   try { const res = await listAgentConfigs(); if (res.code === 200) agents.value = res.data } catch {}
   await fetchList()
+  fetchToolRegistry()
 })
 </script>
 
@@ -270,8 +311,17 @@ onMounted(async () => {
 .card-meta { display: flex; gap: 16px; font-size: 12px; color: #999; }
 .card-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
-.tools-checkbox-group { display: flex; flex-wrap: wrap; gap: 4px 8px; max-height: 180px; overflow-y: auto; padding: 4px 0; }
-.tool-checkbox { font-size: 12px; margin-right: 0; }
-.tools-actions { margin-top: 6px; }
-.form-hint { font-size: 12px; color: #8c8c8c; margin-top: 4px; }
+/* 工具选择 - 折叠面板 */
+.tools-collapse { border: 1px solid #f0f0f0; border-radius: 6px; background: #fafafa; max-height: 360px; overflow-y: auto; }
+.tools-collapse :deep(.ant-collapse-header) { padding: 8px 12px !important; font-weight: 500; font-size: 13px; }
+.tools-collapse :deep(.ant-collapse-content-box) { padding: 4px 12px 12px !important; }
+.tools-group { width: 100%; }
+.tool-item { display: flex; align-items: center; padding: 3px 0; gap: 6px; }
+.tool-item:hover { background: #f0f5ff; border-radius: 4px; }
+.tool-checkbox { margin: 0; font-size: 12px; }
+.tool-name { font-family: 'Courier New', Consolas, monospace; font-size: 12px; color: #1a202c; min-width: 130px; display: inline-block; }
+.tool-desc { font-size: 12px; color: #8c8c8c; flex: 1; }
+.tool-risk-badge { font-size: 13px; cursor: help; flex-shrink: 0; }
+.tools-actions { margin-top: 6px; display: flex; gap: 8px; }
+.form-hint { font-size: 12px; color: #8c8c8c; padding: 8px; }
 </style>

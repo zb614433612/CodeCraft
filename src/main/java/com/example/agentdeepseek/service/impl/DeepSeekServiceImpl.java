@@ -286,23 +286,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         "error_message TEXT, " +
                         "event_count INT DEFAULT 0, " +
                         "created_at DATETIME NOT NULL, " +
-                        "updated_at DATETIME NOT NULL, " +
-                        "INDEX idx_conversation_id (conversation_id), " +
-                        "INDEX idx_status (status)" +
-                        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+                        "updated_at DATETIME NOT NULL" +
+                        ")");
                 log.debug("创建agent_task表成功");
             } catch (Exception e) {
                 log.debug("创建agent_task表失败，可能已经存在: {}", e.getMessage());
             }
             // 添加pending_question列到agent_task表（用于页面刷新后重连展示审批对话框）
             try {
-                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN pending_question_uuid VARCHAR(36) AFTER event_count");
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS pending_question_uuid VARCHAR(36)");
                 log.debug("添加agent_task.pending_question_uuid列成功");
             } catch (Exception e) {
                 log.debug("添加agent_task.pending_question_uuid列失败，可能已经存在: {}", e.getMessage());
             }
             try {
-                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN pending_question_text TEXT AFTER pending_question_uuid");
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS pending_question_text TEXT");
                 log.debug("添加agent_task.pending_question_text列成功");
             } catch (Exception e) {
                 log.debug("添加agent_task.pending_question_text列失败，可能已经存在: {}", e.getMessage());

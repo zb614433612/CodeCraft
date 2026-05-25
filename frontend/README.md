@@ -48,6 +48,8 @@ npm run build
 ## 页面功能
 
 - **CodeAssistantView** — 与 AI Agent 对话的主界面
+- **AgentConfigView** — 自定义 AI Agent 配置管理（提示词、工具集、模型、执行模式）
+- **SkillManageView** — 技能管理（创建/编辑/删除技能、绑定 Agent）
 - **ConfigView** — 系统配置管理
 - **LoginView** — 用户登录
 - **UserManageView** — 用户管理
