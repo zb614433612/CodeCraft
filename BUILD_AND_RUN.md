@@ -30,7 +30,7 @@ CodeCraft 需要配置 AI 模型的 API Key 才能正常使用。
 
 **推荐方式：通过页面配置**
 
-启动后端服务后，打开浏览器访问 `http://localhost:8084`，按以下步骤操作：
+启动后端服务后，打开浏览器访问 `http://localhost:8085`，按以下步骤操作：
 
 1. 使用默认账号登录（如需）
 2. 点击左侧菜单 **「配置」**
@@ -54,7 +54,7 @@ CodeCraft 需要配置 AI 模型的 API Key 才能正常使用。
 
 - **Milvus 向量数据库**：默认连接 `localhost:19530`，可在 `application.yml` 中修改
 - **代理配置**：如果需要通过代理访问外部网络，可在 `application.yml` 的 `network-tool.proxy` 中配置
-- **服务器端口**：默认 `8084`，可通过环境变量 `SERVER_PORT` 或修改 `application.yml` 中的 `server.port`
+- **服务器端口**：默认 `8085`，可通过环境变量 `SERVER_PORT` 或修改 `application.yml` 中的 `server.port`
 
 > ⚠️ **首次运行前**：项目启动时会自动加载 `application-local.yml`（优先级高于 `application.yml`）。
 > 请复制模板文件 `application-local.yml.example` 为 `application-local.yml`，并填入你的 API Key：
@@ -78,7 +78,7 @@ mvn clean package -DskipTests
 mvn spring-boot:run
 ```
 
-后端启动后访问 `http://localhost:8084` 即可打开前端页面。
+后端启动后访问 `http://localhost:8085` 即可打开前端页面。
 
 > **默认登录账号**：`admin` / `123456` 🔑
 > ⚠️ 首次登录后请务必在「用户管理」中修改密码，确保安全！
@@ -91,7 +91,7 @@ mvn spring-boot:run
 ```bash
 cd frontend
 npm install
-npm run dev          # 开发服务器，端口 5173，代理 API 到 8084
+npm run dev          # 开发服务器，端口 5173，代理 API 到 8085
 ```
 
 前端开发模式下需先启动后端（`mvn spring-boot:run`）。

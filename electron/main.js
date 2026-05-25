@@ -102,61 +102,125 @@ function getJarPath() {
 }
 
 /**
- * 启动 Spring Boot 后端 JAR
+ * 获取当前 exe 文件的修改时间戳（毫秒）
+ * 用于检测是否发生了覆盖安装（exe 被重新替换）
  */
+function getExeMtime() {
+  try {
+    const exePath = app.getPath('exe')
+    const stat = fs.statSync(exePath)
+    return stat.mtimeMs
+  } catch (e) {
+    console.warn('获取 exe 文件信息失败:', e.message)
+    return 0
+  }
+}
+
 /**
- * 清理所有旧数据：H2 数据库文件 + 浏览器 localStorage
- * 每次启动时无条件执行，确保安装/重装/升级后不会残留任何旧数据
+ * 读取上次记录的 exe 修改时间戳
+ */
+function getLastExeMtime(dataDir) {
+  const flagFile = path.join(dataDir, '.exe_mtime')
+  try {
+    if (fs.existsSync(flagFile)) {
+      return parseFloat(fs.readFileSync(flagFile, 'utf-8')) || 0
+    }
+  } catch (e) {
+    console.warn('读取 exe 时间戳记录失败:', e.message)
+  }
+  return 0
+}
+
+/**
+ * 记录当前 exe 修改时间戳
+ */
+function saveExeMtime(dataDir, mtime) {
+  const flagFile = path.join(dataDir, '.exe_mtime')
+  try {
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true })
+    }
+    fs.writeFileSync(flagFile, String(mtime), 'utf-8')
+  } catch (e) {
+    console.warn('保存 exe 时间戳记录失败:', e.message)
+  }
+}
+
+/**
+ * 清理所有旧数据：H2 数据库文件 + 浏览器 localStorage + Session Storage
+ * 仅在检测到覆盖安装后执行，确保重装后无残留
  */
 function cleanAllData(dataDir) {
-  console.log('清理所有旧数据（每次启动无条件执行）...')
+  console.log('检测到覆盖安装，正在清理旧数据...')
 
   // 1. 清理 H2 数据库文件
   const dbDir = path.join(dataDir, 'data')
-  const dbFile = path.join(dbDir, 'codecraft.mv.db')
-  try {
-    if (fs.existsSync(dbFile)) {
-      fs.unlinkSync(dbFile)
-      console.log('已删除旧数据库文件:', dbFile)
+  const dbFiles = [
+    path.join(dbDir, 'codecraft.mv.db'),
+    path.join(dbDir, 'codecraft.trace.db')
+  ]
+  for (const file of dbFiles) {
+    try {
+      if (fs.existsSync(file)) {
+        fs.unlinkSync(file)
+        console.log('已删除数据库文件:', file)
+      }
+    } catch (e) {
+      console.error('删除数据库文件失败:', e.message)
     }
-    const traceFile = path.join(dbDir, 'codecraft.trace.db')
-    if (fs.existsSync(traceFile)) {
-      fs.unlinkSync(traceFile)
-    }
-  } catch (e) {
-    console.error('清理数据库失败:', e.message)
   }
 
-  // 2. 清理浏览器 localStorage（旧登录 token 会导致页面加载时鉴权异常）
+  // 2. 清理浏览器 localStorage（持久化设置和登录 token）
+  const localStorageDir = path.join(dataDir, 'Local Storage')
   try {
-    const localStorageDir = path.join(dataDir, 'Local Storage')
     if (fs.existsSync(localStorageDir)) {
-      const files = fs.readdirSync(localStorageDir)
-      for (const file of files) {
-        const filePath = path.join(localStorageDir, file)
-        fs.unlinkSync(filePath)
-        console.log('已清理缓存文件:', filePath)
+      for (const file of fs.readdirSync(localStorageDir)) {
+        fs.unlinkSync(path.join(localStorageDir, file))
       }
-      console.log('已清除浏览器 localStorage，用户需要重新登录')
+      console.log('已清理 localStorage')
     }
   } catch (e) {
     console.error('清理 localStorage 失败:', e.message)
   }
 
-  // 3. 清理 Session 和 Cache 等其他浏览器数据
+  // 3. 清理 Session Storage
   const sessionDir = path.join(dataDir, 'Session Storage')
   try {
     if (fs.existsSync(sessionDir)) {
-      const files = fs.readdirSync(sessionDir)
-      for (const file of files) {
+      for (const file of fs.readdirSync(sessionDir)) {
         fs.unlinkSync(path.join(sessionDir, file))
       }
+      console.log('已清理 Session Storage')
     }
   } catch (e) {
-    console.error('清理 Session 失败:', e.message)
+    console.error('清理 Session Storage 失败:', e.message)
+  }
+
+  console.log('旧数据清理完成')
+}
+
+/**
+ * 检查 exe 文件是否被替换（覆盖安装），是则清理旧数据
+ * 对比逻辑：首次安装无记录 → 清理；exe 修改时间变化 → 清理；相同 → 正常启动跳过
+ */
+function checkDataCleanup(dataDir) {
+  if (!app.isPackaged) {
+    return // 开发模式不触发清理
+  }
+  const currentMtime = getExeMtime()
+  if (currentMtime === 0) {
+    return // 无法获取 exe 信息，跳过
+  }
+  const lastMtime = getLastExeMtime(dataDir)
+  if (lastMtime === 0 || currentMtime !== lastMtime) {
+    cleanAllData(dataDir)
+    saveExeMtime(dataDir, currentMtime)
   }
 }
 
+/**
+ * 启动 Spring Boot 后端 JAR
+ */
 function startBackend() {
   const jarPath = getJarPath()
   const javaCmd = findJava()
@@ -170,11 +234,6 @@ function startBackend() {
     fs.mkdirSync(dataDir, { recursive: true })
   }
   console.log(`后端工作目录: ${dataDir}`)
-
-  // 每次启动都清理所有旧数据，确保无残留
-  if (app.isPackaged) {
-    cleanAllData(dataDir)
-  }
   javaProcess = spawn(javaCmd, ['-Dfile.encoding=UTF-8', '-jar', jarPath], {
     cwd: dataDir,
     stdio: ['ignore', 'pipe', 'pipe']
@@ -214,8 +273,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
-      webSecurity: false  // 关闭同源策略限制，避免 Electron 端页面路由跳转异常
+      preload: path.join(__dirname, 'preload.js')
     },
     title: 'CodeCraft',
     icon: path.join(__dirname, 'icon.png'),
@@ -257,6 +315,10 @@ ipcMain.handle('dialog:selectDirectory', async () => {
 async function start() {
   // 非开发模式：自动启动后端
   if (!DEV_MODE) {
+    // 在启动后端之前，先检测 exe 文件是否被替换（覆盖安装），是则清理旧数据
+    const dataDir = app.getPath('userData')
+    checkDataCleanup(dataDir)
+
     startBackend()
     try {
       await waitForBackend()

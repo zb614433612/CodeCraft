@@ -1935,6 +1935,11 @@ const selectProjectRoot = async () => {
   if ((window as any).electronAPI?.selectDirectory) {
     const dir = await (window as any).electronAPI.selectDirectory()
     if (dir) {
+      // 同步更新 Agent 运行时配置，确保左侧面板 UI 即时刷新
+      if (agentSelectorRef.value) {
+        agentSelectorRef.value.runtime.workDir = dir
+        agentSelectorRef.value.saveRuntime()
+      }
       settingsStore.projectRoot = dir
       fileTreeLoadPath.value = dir
     }

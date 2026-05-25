@@ -113,7 +113,7 @@ mvn clean package -DskipTests
 # 2️⃣ 启动后端服务
 mvn spring-boot:run
 
-# 3️⃣ 访问 http://localhost:8084
+# 3️⃣ 访问 http://localhost:8085
 ```
 
 ### 单独启动前端（热更新）
