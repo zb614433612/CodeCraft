@@ -143,14 +143,14 @@ interface ApiResponse<T = any> {
 
 ## 跨域配置
 
-Vite 代理配置已添加，前端请求 `/api` 路径会自动代理到 `http://localhost:8085`：
+Vite 代理配置已添加，前端请求 `/api` 路径会自动代理到 `http://localhost:8084`：
 
 ```typescript
 // vite.config.ts
 server: {
   proxy: {
     '/api': {
-      target: 'http://localhost:8085',
+      target: 'http://localhost:8084',
       changeOrigin: true,
       rewrite: (path) => path.replace(/^\/api/, '/api')
     }
@@ -178,7 +178,7 @@ npm run preview
 
 ## 注意事项
 
-1. **后端API**: 确保后端服务在 `http://localhost:8085` 运行
+1. **后端API**: 确保后端服务在 `http://localhost:8084` 运行
 2. **跨域**: 开发环境下使用 Vite 代理，生产环境需要配置反向代理
 3. **密码加密**: MD5加密仅为示例，实际生产环境应使用更安全的加密方式
 4. **错误处理**: 所有API调用都有 try-catch 错误处理
