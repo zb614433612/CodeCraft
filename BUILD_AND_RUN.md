@@ -1,6 +1,10 @@
 # CodeCraft 构建与运行指南
 
-> 🎯 **只是想使用 CodeCraft？** 前往 [GitHub Releases](https://github.com/zb614433612/CodeCraft/releases) 下载已打包好的 `CodeCraft-Setup-x.x.x.exe`，双击安装即可使用，无需阅读本文档。
+> 🎯 **只是想使用 CodeCraft？** 前往 [GitHub Releases](https://github.com/zb614433612/CodeCraft/releases) 下载打包好的安装包：
+> - **Windows**：`CodeCraft-Setup-x.x.x.exe`
+> - **macOS**：`CodeCraft-x.x.x.dmg`
+>
+> 双击安装即可使用，无需阅读本文档。
 >
 > 本文档仅供**开发者**或**需要自行构建**的用户参考。
 
@@ -116,7 +120,11 @@ mvn clean package -DskipTests -DskipFrontend=true
 
 ---
 
-## Electron 打包为 EXE（免 Java 依赖）
+---
+
+# 🪟 Windows 打包
+
+## Windows：打包为 EXE 安装程序（NSIS）
 
 打包后的 EXE **自带 JRE 运行环境**，目标机器无需安装 Java。
 
@@ -136,7 +144,7 @@ mvn clean package -DskipTests -DskipFrontend=true
 3. **裁剪内置 JRE**（首次或 JDK 版本变更时需要）：
    ```cmd
    cd electron
-   
+
    :: 用 jlink 裁剪最小化 JRE（约 43MB）
    "%JAVA_HOME%\bin\jlink" ^
      --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
@@ -162,16 +170,19 @@ mvn clean package -DskipTests -DskipFrontend=true
 ```bash
 cd electron
 
+# 安装依赖（首次）
+npm install
+
 # 打包为安装程序（NSIS 安装包）
-npm run dist
+npm run dist:win
 ```
 
 ### 打包输出
 
 ```
 electron/release/
-├── CodeCraft-Setup-1.0.1.exe    # NSIS 安装程序（发行用）
-└── CodeCraft-1.0.1-win.zip       # 绿色版压缩包（可选）
+├── CodeCraft-Setup-1.0.1.exe       # NSIS 安装程序（发行用）
+└── CodeCraft-1.0.1-win.zip         # 绿色版压缩包（可选）
 ```
 
 ### 安装运行
@@ -186,24 +197,241 @@ electron/release/
 
 ---
 
-## 完整流程速查
+---
+
+# 🍎 macOS 打包
+
+## macOS：打包为 DMG 磁盘映像
+
+打包后的 DMG **自带 JRE 运行环境**，目标机器无需安装 Java。
+
+> ⚠️ **重要提示**：DMG 打包**只能在 macOS 上执行**，无法在 Windows 或 Linux 上交叉打包。因为 DMG 创建依赖 macOS 的 `hdiutil` 系统工具。
+
+### 前置条件
+
+1. **macOS 系统**（Intel 或 Apple Silicon 均可）
+
+2. **JDK 17+**（用于 `jlink` 裁剪 JRE）
+   ```bash
+   # 验证 JDK 已安装
+   /usr/libexec/java_home -V
+   jlink --version
+   ```
+
+3. **后端 JAR** 已构建：
+   ```bash
+   mvn clean package -DskipTests
+   ```
+
+4. **裁剪 macOS 版内置 JRE**（首次或 JDK 版本变更时需要）：
+
+   > ⚠️ 必须使用 **macOS 版 JDK** 来裁剪，裁剪出的 JRE 仅能在 macOS 上运行。
+
+   ```bash
+   cd electron
+
+   # 先删除旧的 Windows 版 JRE（如果有）
+   rm -rf jre
+
+   # 用 jlink 裁剪最小化 JRE（约 43MB）
+   # 注意：macOS 上 java 路径不含 .exe 后缀
+   export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+
+   "$JAVA_HOME/bin/jlink" \
+     --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+     --strip-debug --compress 2 --no-header-files --no-man-pages \
+     --output jre
+   ```
+
+   > 验证裁剪结果：`ls jre/bin/java` 应该存在（不是 `java.exe`！）
+
+5. **准备 macOS 图标**（将 `icon.png` 转为 `icon.icns`）：
+
+   ```bash
+   cd electron
+
+   # 创建临时 iconset 目录
+   mkdir icon.iconset
+
+   # 生成各尺寸 PNG（macOS 要求）
+   sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
+   sips -z 32 32     icon.png --out icon.iconset/icon_16x16@2x.png
+   sips -z 32 32     icon.png --out icon.iconset/icon_32x32.png
+   sips -z 64 64     icon.png --out icon.iconset/icon_32x32@2x.png
+   sips -z 128 128   icon.png --out icon.iconset/icon_128x128.png
+   sips -z 256 256   icon.png --out icon.iconset/icon_128x128@2x.png
+   sips -z 256 256   icon.png --out icon.iconset/icon_256x256.png
+   sips -z 512 512   icon.png --out icon.iconset/icon_256x256@2x.png
+   sips -z 512 512   icon.png --out icon.iconset/icon_512x512.png
+   sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
+
+   # 生成 icns 文件
+   iconutil -c icns icon.iconset
+
+   # 清理临时目录
+   rm -rf icon.iconset
+   ```
+
+   > 最终得到 `electron/icon.icns`，`electron-builder` 会自动使用它。
+
+6. **（可选）DMG 背景图**：在 `electron/` 目录下放一张 `dmg-background.png`（540×380），作为 DMG 打开后的背景。
+
+### 打包命令
 
 ```bash
-# ===== 从零开始全流程 =====
+cd electron
+
+# 安装依赖（首次）
+npm install
+
+# 打包为 DMG
+npm run dist:mac
+```
+
+### 打包输出
+
+```
+electron/release/
+├── CodeCraft-1.0.1.dmg              # DMG 磁盘映像（发行用）
+├── CodeCraft-1.0.1-mac.zip          # 绿色版压缩包（可选）
+└── mac/                             # 未打包的 .app 目录
+    └── CodeCraft.app
+```
+
+### 安装运行
+
+1. 双击 `CodeCraft-1.0.1.dmg` 挂载磁盘映像
+2. 将 `CodeCraft.app` 拖到 `Applications` 文件夹
+3. 首次打开时，由于未签名，需要**右键 → 打开**（或到「系统偏好设置 → 安全性与隐私」中允许）
+
+> **运行注意事项：**
+> - ✅ **无需安装 Java** — JRE 已内置在 .app 中
+> - ✅ 后端 JAR 已内置，无需额外放置
+> - ✅ 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒），然后加载前端页面
+> - ⚠️ H2 数据库文件默认存储在 `~/Library/Application Support/CodeCraft/data`，无需额外配置
+
+### macOS 代码签名（可选）
+
+如果需要分发到未开启"任何来源"的 Mac，建议进行代码签名和公证：
+
+```bash
+# 设置签名环境变量
+export APPLE_ID="your@email.com"
+export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+export APPLE_TEAM_ID="YOUR_TEAM_ID"
+
+# 签名 + 公证
+cd electron
+npm run dist:mac
+```
+
+在 `electron/package.json` 的 `build.mac` 中补充：
+```json
+"mac": {
+  "hardenedRuntime": true,
+  "gatekeeperAssess": false,
+  "entitlements": "entitlements.mac.plist",
+  "entitlementsInherit": "entitlements.mac.plist"
+}
+```
+
+> 以上配置已在 `package.json` 中预设好了。
+
+---
+
+---
+
+# 🐧 Linux 打包
+
+## Linux：打包为 AppImage / deb
+
+```bash
+cd electron
+
+# 裁剪 Linux 版 JRE（与 macOS 类似，使用 Linux 版 JDK）
+rm -rf jre
+export JAVA_HOME=/path/to/linux-jdk-17
+"$JAVA_HOME/bin/jlink" \
+  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+  --strip-debug --compress 2 --no-header-files --no-man-pages \
+  --output jre
+
+# 打包
+npm install
+npm run dist:linux
+```
+
+输出：
+```
+electron/release/
+├── CodeCraft-1.0.1.AppImage    # AppImage（免安装，双击运行）
+└── CodeCraft-1.0.1.deb         # deb 包（Debian/Ubuntu）
+```
+
+---
+
+---
+
+## 完整流程速查
+
+### Windows 全流程
+
+```bash
+# ===== 从零开始 =====
 
 # 1. 构建后端 JAR（含前端）
 mvn clean package -DskipTests
 
-# 2. 裁剪内置 JRE（仅首次或 JDK 变更时）
+# 2. 裁剪 Windows 内置 JRE（仅首次或 JDK 变更时）
 cd electron
 "%JAVA_HOME%\bin\jlink" --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi --strip-debug --compress 2 --no-header-files --no-man-pages --output jre
 
-# 3. 打包 Electron 桌面应用
-cd ..
-npm run dist
+# 3. 打包
+npm install
+npm run dist:win
 
-# 4. 安装生成的 EXE
+# 4. 安装
 # 双击 electron/release/CodeCraft-Setup-1.0.1.exe
+```
+
+### macOS 全流程
+
+```bash
+# ===== 从零开始 =====
+
+# 1. 构建后端 JAR（含前端）
+mvn clean package -DskipTests
+
+# 2. 裁剪 macOS 内置 JRE
+cd electron
+rm -rf jre
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+"$JAVA_HOME/bin/jlink" \
+  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+  --strip-debug --compress 2 --no-header-files --no-man-pages \
+  --output jre
+
+# 3. 生成 macOS 图标
+mkdir icon.iconset
+sips -z 16 16 icon.png --out icon.iconset/icon_16x16.png
+sips -z 32 32 icon.png --out icon.iconset/icon_16x16@2x.png
+sips -z 32 32 icon.png --out icon.iconset/icon_32x32.png
+sips -z 64 64 icon.png --out icon.iconset/icon_32x32@2x.png
+sips -z 128 128 icon.png --out icon.iconset/icon_128x128.png
+sips -z 256 256 icon.png --out icon.iconset/icon_128x128@2x.png
+sips -z 256 256 icon.png --out icon.iconset/icon_256x256.png
+sips -z 512 512 icon.png --out icon.iconset/icon_256x256@2x.png
+sips -z 512 512 icon.png --out icon.iconset/icon_512x512.png
+sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
+iconutil -c icns icon.iconset
+rm -rf icon.iconset
+
+# 4. 打包
+npm install
+npm run dist:mac
+
+# 5. 安装
+# 双击 electron/release/CodeCraft-1.0.1.dmg 挂载后拖入 Applications
 ```
 
 ---
@@ -234,7 +462,13 @@ codecraft/
 │   └── public/                 # 静态资源
 ├── electron/                   # Electron 桌面壳
 │   ├── main.js                 # Electron 主进程
-│   ├── package.json            # Electron 配置
+│   ├── preload.js              # Electron 预加载脚本
+│   ├── package.json            # Electron 构建配置（含 win/mac/linux 打包设置）
+│   ├── entitlements.mac.plist  # macOS 代码签名权限声明
+│   ├── icon.ico                # Windows 图标
+│   ├── icon.png                # 通用图标（Linux + macOS 源素材）
+│   ├── icon.icns               # macOS 图标（需手动生成）
+│   ├── dmg-background.png      # DMG 背景图（可选）
 │   ├── start.bat               # Windows 启动脚本
 │   └── start.sh                # Linux/Mac 启动脚本
 ├── pom.xml                     # Maven 构建配置

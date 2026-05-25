@@ -7,7 +7,10 @@
     "start": "electron .",
     "dev": "cross-env DEV_MODE=true electron .",
     "pack": "npm install electron-builder && electron-builder --dir",
-    "dist": "npm install electron-builder && electron-builder"
+    "dist": "npm install electron-builder && electron-builder",
+    "dist:win": "npm install electron-builder && electron-builder --win",
+    "dist:mac": "npm install electron-builder && electron-builder --mac",
+    "dist:linux": "npm install electron-builder && electron-builder --linux"
   },
   "build": {
     "appId": "com.codecraft.app",
@@ -17,10 +20,10 @@
     },
     "files": [
       "main.js",
+      "preload.js",
       "package.json",
       "icon.png"
     ],
-    "icon": "icon.ico",
     "extraResources": [
       {
         "from": "../target/codecraft-1.0.1.jar",
@@ -35,10 +38,42 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "icon.ico"
     },
     "mac": {
-      "target": "dmg"
+      "target": "dmg",
+      "icon": "icon.icns",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "无需使用麦克风",
+        "NSCameraUsageDescription": "无需使用摄像头"
+      }
+    },
+    "dmg": {
+      "title": "CodeCraft",
+      "icon": "icon.icns",
+      "background": "dmg-background.png",
+      "contents": [
+        { "x": 130, "y": 220, "type": "file", "path": "CodeCraft.app" },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      }
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "icon.png",
+      "category": "Development"
     },
     "nsis": {
       "oneClick": false,

@@ -69,16 +69,21 @@ function waitForBackend(retries = 30, interval = 2000) {
  * 优先级：内置 JRE > JAVA_HOME > 系统 PATH
  */
 function findJava() {
+  const javaExe = process.platform === 'win32' ? 'java.exe' : 'java'
+
   // 打包模式下优先使用内置 JRE
   if (app.isPackaged) {
-    const bundledJava = path.join(process.resourcesPath, 'jre', 'bin', 'java.exe')
+    const bundledJava = path.join(process.resourcesPath, 'jre', 'bin', javaExe)
     if (fs.existsSync(bundledJava)) {
       return bundledJava
     }
   }
   // 其次使用 JAVA_HOME 环境变量
   if (process.env.JAVA_HOME) {
-    return path.join(process.env.JAVA_HOME, 'bin', 'java.exe')
+    const javaHomePath = path.join(process.env.JAVA_HOME, 'bin', javaExe)
+    if (fs.existsSync(javaHomePath)) {
+      return javaHomePath
+    }
   }
   // 最后回退到系统 PATH
   return 'java'
