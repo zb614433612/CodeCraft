@@ -1,4 +1,4 @@
-# CodeCraft 构建与运行指南
+﻿# CodeCraft 构建与运行指南
 
 > 🎯 **只是想使用 CodeCraft？** 前往 [GitHub Releases](https://github.com/zb614433612/CodeCraft/releases) 下载打包好的安装包：
 > - **Windows**：`CodeCraft-Setup-x.x.x.exe`
@@ -123,7 +123,7 @@ mvn clean package -DskipTests
 mvn clean package -DskipTests -DskipFrontend=true
 
 # 输出文件
-# target/codecraft-1.0.3.jar  （约 67MB）
+# target/codecraft-1.0.4.jar  （约 67MB）
 ```
 
 ---
@@ -189,13 +189,13 @@ npm run dist:win
 
 ```
 electron/release/
-├── CodeCraft-Setup-1.0.3.exe       # NSIS 安装程序（发行用）
-└── CodeCraft-1.0.3-win.zip         # 绿色版压缩包（可选）
+├── CodeCraft-Setup-1.0.4.exe       # NSIS 安装程序（发行用）
+└── CodeCraft-1.0.4-win.zip         # 绿色版压缩包（可选）
 ```
 
 ### 安装运行
 
-双击 `CodeCraft-Setup-1.0.3.exe` 安装，安装后桌面会生成快捷方式。
+双击 `CodeCraft-Setup-1.0.4.exe` 安装，安装后桌面会生成快捷方式。
 
 > **运行注意事项：**
 > - ✅ **无需安装 Java** — JRE 已内置在 EXE 中
@@ -300,15 +300,15 @@ npm run dist:mac
 
 ```
 electron/release/
-├── CodeCraft-1.0.3.dmg              # DMG 磁盘映像（发行用）
-├── CodeCraft-1.0.3-mac.zip          # 绿色版压缩包（可选）
+├── CodeCraft-1.0.4.dmg              # DMG 磁盘映像（发行用）
+├── CodeCraft-1.0.4-mac.zip          # 绿色版压缩包（可选）
 └── mac/                             # 未打包的 .app 目录
     └── CodeCraft.app
 ```
 
 ### 安装运行
 
-1. 双击 `CodeCraft-1.0.3.dmg` 挂载磁盘映像
+1. 双击 `CodeCraft-1.0.4.dmg` 挂载磁盘映像
 2. 将 `CodeCraft.app` 拖到 `Applications` 文件夹
 3. 首次打开时，由于未签名，需要**右键 → 打开**（或到「系统偏好设置 → 安全性与隐私」中允许）
 
@@ -372,8 +372,8 @@ npm run dist:linux
 输出：
 ```
 electron/release/
-├── CodeCraft-1.0.3.AppImage    # AppImage（免安装，双击运行）
-└── CodeCraft-1.0.3.deb         # deb 包（Debian/Ubuntu）
+├── CodeCraft-1.0.4.AppImage    # AppImage（免安装，双击运行）
+└── CodeCraft-1.0.4.deb         # deb 包（Debian/Ubuntu）
 ```
 
 ---
@@ -399,7 +399,7 @@ npm install
 npm run dist:win
 
 # 4. 安装
-# 双击 electron/release/CodeCraft-Setup-1.0.3.exe
+# 双击 electron/release/CodeCraft-Setup-1.0.4.exe
 ```
 
 ### macOS 全流程
@@ -439,7 +439,7 @@ npm install
 npm run dist:mac
 
 # 5. 安装
-# 双击 electron/release/CodeCraft-1.0.3.dmg 挂载后拖入 Applications
+# 双击 electron/release/CodeCraft-1.0.4.dmg 挂载后拖入 Applications
 ```
 
 ---

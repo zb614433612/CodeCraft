@@ -169,7 +169,7 @@ CodeCraft 支持主 Agent **创建多个子 Agent 在后台并行执行子任务
 - **内置 Node.js** — 前端运行时已打包，无需单独安装
 - **H2 嵌入式数据库** — 零配置，无需安装 MySQL/PostgreSQL
 - **Caffeine 缓存** — 替代 Redis，省去中间件部署
-- **一键安装包** — `CodeCraft Setup 1.0.3.exe` 双击即用
+- **一键安装包** — `CodeCraft Setup 1.0.4.exe` 双击即用
 
 ### 🎛️ 多 Agent 配置系统
 > **🦾 不同角色、不同能力、不同模型**
@@ -210,7 +210,7 @@ CodeCraft 支持主 Agent **创建多个子 Agent 在后台并行执行子任务
 不想搭建开发环境？直接下载已打包好的安装包：
 
 - 前往 **[GitHub Releases 页面](https://github.com/zb614433612/CodeCraft/releases)** 
-- 下载最新版本的 `CodeCraft-Setup-1.0.3.exe`
+- 下载最新版本的 `CodeCraft-Setup-1.0.4.exe`
 - 双击安装即可使用，**无需安装 Java**（JRE 已内置在安装包中）
 
 > 安装后启动，会先启动后端服务（等待约 10~30 秒），然后自动打开主界面。
