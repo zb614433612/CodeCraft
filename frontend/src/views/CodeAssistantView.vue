@@ -1260,24 +1260,32 @@ const activeTabId = ref('chat')
 
 const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value) || tabs.value[0])
 
+// 判断是否为绝对路径（Windows盘符或Unix绝对路径）
+const isAbsolutePath = (p: string) => /^[a-zA-Z]:[/\\]/.test(p) || p.startsWith('/')
+
 // 双击文件树中的文件，打开文件编辑标签
 const onFileDblClick = async (path: string, isDirectory: boolean) => {
   if (isDirectory) return
-  const existing = tabs.value.find(t => t.type === 'file' && t.filePath === path)
+  // 将相对路径转为绝对路径：文件树返回的 path 是相对于 fileTreeLoadPath 的相对路径
+  // 直接传给后端 /api/project/read 时，后端用 user.dir 拼接可能路径不对（Electron桌面端 user.dir 是jar目录）
+  const resolvedPath = (!isAbsolutePath(path) && fileTreeLoadPath.value)
+    ? fileTreeLoadPath.value.replace(/[/\\]$/, '') + '/' + path
+    : path
+  const existing = tabs.value.find(t => t.type === 'file' && t.filePath === resolvedPath)
   if (existing) {
     activeTabId.value = existing.id
     return
   }
   try {
-    const res = await readProjectFile(path)
+    const res = await readProjectFile(resolvedPath)
     if (res.code === 200 && res.data !== null) {
       const fileName = path.split('/').pop() || path.split('\\').pop() || path
-      const tabId = `file-${path}`
+      const tabId = `file-${resolvedPath}`
       tabs.value.push({
         id: tabId,
         type: 'file',
         title: fileName,
-        filePath: path,
+        filePath: resolvedPath,
         content: res.data,
         originalContent: res.data,
         isDirty: false

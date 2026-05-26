@@ -153,20 +153,21 @@ function saveExeMtime(dataDir, mtime) {
 function cleanAllData(dataDir) {
   console.log('检测到覆盖安装，正在清理旧数据...')
 
-  // 1. 清理 H2 数据库文件
-  const dbDir = path.join(dataDir, 'data')
-  const dbFiles = [
-    path.join(dbDir, 'codecraft.mv.db'),
-    path.join(dbDir, 'codecraft.trace.db')
-  ]
-  for (const file of dbFiles) {
-    try {
-      if (fs.existsSync(file)) {
-        fs.unlinkSync(file)
-        console.log('已删除数据库文件:', file)
+  // 1. 清理 H2 数据库文件（两处：jar包目录 + userData旧版兼容）
+  const jarDir = path.dirname(getJarPath())
+  const dbDirs = [path.join(jarDir, 'data'), path.join(dataDir, 'data')]
+  const dbFileNames = ['codecraft.mv.db', 'codecraft.trace.db']
+  for (const dbDir of dbDirs) {
+    for (const fileName of dbFileNames) {
+      const file = path.join(dbDir, fileName)
+      try {
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file)
+          console.log('已删除数据库文件:', file)
+        }
+      } catch (e) {
+        console.error('删除数据库文件失败:', e.message)
       }
-    } catch (e) {
-      console.error('删除数据库文件失败:', e.message)
     }
   }
 
@@ -227,15 +228,24 @@ function startBackend() {
 
   console.log(`启动后端服务: ${jarPath}`)
   console.log(`Java 路径: ${javaCmd}`)
-  // 使用 Electron 的用户数据目录作为工作目录，确保数据库文件位于统一位置
-  const dataDir = app.isPackaged ? app.getPath('userData') : path.dirname(jarPath)
-  // 确保数据目录存在
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true })
+
+  // cwd 设置为 jar 包所在目录，保证 Java 中 user.dir 指向正确位置
+  // 这样 H2 数据库 ./data、snapshots、logs 等都放在 jar 包旁边
+  const workDir = path.dirname(jarPath)
+  // 确保工作目录存在
+  if (!fs.existsSync(workDir)) {
+    fs.mkdirSync(workDir, { recursive: true })
   }
-  console.log(`后端工作目录: ${dataDir}`)
-  javaProcess = spawn(javaCmd, ['-Dfile.encoding=UTF-8', '-jar', jarPath], {
-    cwd: dataDir,
+  console.log(`后端工作目录: ${workDir}`)
+
+  // 通过系统属性将 userData 路径传给 Java，方便需要时使用
+  const userDataDir = app.isPackaged ? app.getPath('userData') : workDir
+  javaProcess = spawn(javaCmd, [
+    '-Dfile.encoding=UTF-8',
+    `-Dapp.userdata=${userDataDir}`,
+    '-jar', jarPath
+  ], {
+    cwd: workDir,
     stdio: ['ignore', 'pipe', 'pipe']
   })
 

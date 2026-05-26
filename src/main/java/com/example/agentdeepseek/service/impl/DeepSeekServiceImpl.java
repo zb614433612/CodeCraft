@@ -155,8 +155,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                OperationDetailGenerator detailGenerator,
                                ToolPermissionRegistry permissionRegistry,
                                PathSecurityChecker pathSecurityChecker,
-                               CompactionService compactionService,
-                               AgentEventBus agentEventBus) {
+                                CompactionService compactionService,
+                                AgentEventBus agentEventBus,
+                                MessagePersister messagePersister,
+                                ContextBuilder contextBuilder,
+                                ToolLoopManager toolLoopManager) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -174,7 +177,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.pathSecurityChecker = pathSecurityChecker;
         this.compactionService = compactionService;
         this.agentEventBus = agentEventBus;
+        this.messagePersister = messagePersister;
+        this.contextBuilder = contextBuilder;
+        this.toolLoopManager = toolLoopManager;
     }
+
+    // ===== 拆分出的组件 =====
+    private final MessagePersister messagePersister;
+    private final ContextBuilder contextBuilder;
+    private final ToolLoopManager toolLoopManager;
 
     @jakarta.annotation.PostConstruct
     public void initDynamicApiKey() {
@@ -374,61 +385,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
-     * 根据提示词文件名映射会话类型
-     */
-    private String resolveAgentType(String promptFileName) {
-        if (promptFileName == null) return "ai_assistant";
-        return switch (promptFileName) {
-            case "code_agent_prompt.txt" -> "code_assistant";
-            default -> "code_assistant";
-        };
-    }
-
-    /**
-     * 获取或创建会话
-     * @param sessionId 可选会话ID，如果为null则创建新会话
-     * @param userMessage 用户消息，用于生成会话名称
-     * @param userId 用户ID，可以为null
-     * @param agentType 会话类型
-     * @return 会话对象
-     */
-    private Conversation getOrCreateConversation(Long sessionId, String userMessage, Long userId, String agentType, Long agentConfigId, String workDir) {
-        if (sessionId != null) {
-            Optional<Conversation> conversationOpt = conversationMapper.selectById(sessionId);
-            if (conversationOpt.isPresent()) {
-                Conversation conversation = conversationOpt.get();
-                // 更新会话更新时间
-                conversation.setUpdatedAt(LocalDateTime.now());
-                conversationMapper.update(conversation);
-                return conversation;
-            }
-            // 如果会话不存在，则创建新会话（或抛出异常，这里选择创建新会话）
-            log.warn("指定的会话ID {} 不存在，将创建新会话", sessionId);
-        }
-        // 创建新会话
-        String sessionName = userMessage.length() > SESSION_NAME_TRUNCATE_LENGTH
-                ? userMessage.substring(0, SESSION_NAME_TRUNCATE_LENGTH)
-                : userMessage;
-        Conversation conversation = new Conversation(sessionName, userId, agentType, agentConfigId);
-        if (workDir != null) {
-            conversation.setWorkDir(workDir);
-        }
-        conversationMapper.insert(conversation);
-        log.debug("创建新会话: ID={}, Name={}, UserId={}, AgentType={}, AgentConfigId={}, WorkDir={}",
-                conversation.getId(), conversation.getName(), userId, agentType, agentConfigId, workDir);
-        return conversation;
-    }
-
-    /**
      * 保存用户消息
      * @param conversationId 会话ID
      * @param content 消息内容
      * @param turnId 前端生成的 turnId（用于匹配回滚快照）
      */
     private void saveUserMessage(Long conversationId, String content, String turnId) {
-        ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
-        msg.setTurnId(turnId);
-        conversationMessageMapper.insert(msg);
+        messagePersister.saveUserMessage(conversationId, content, turnId);
     }
 
     /**
@@ -438,7 +401,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param reasoning 思考过程
      */
     private void saveAssistantMessage(Long conversationId, String content, String reasoning) {
-        saveConversationMessage(conversationId, MessageRole.ASSISTANT, content, reasoning, null);
+        messagePersister.saveAssistantMessage(conversationId, content, reasoning);
     }
 
     /**
@@ -447,7 +410,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param content 工具调用结果内容（将存储到reasoning字段）
      */
     private void saveToolMessage(Long conversationId, String content) {
-        saveConversationMessage(conversationId, MessageRole.TOOL, null, content, null);
+        messagePersister.saveToolMessage(conversationId, content);
     }
 
     /**
@@ -457,7 +420,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param toolCalls 工具调用数据块（JSON格式），可选
      */
     private void saveAssistantReasoning(Long conversationId, String reasoning, String toolCalls) {
-        saveConversationMessage(conversationId, MessageRole.ASSISTANT, null, reasoning, toolCalls);
+        messagePersister.saveAssistantReasoning(conversationId, reasoning, toolCalls);
     }
 
 
@@ -471,417 +434,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param toolCalls 工具调用数据块（JSON格式，存储到tool_calls字段），可以为null
      */
     private void saveConversationMessage(Long conversationId, MessageRole role, String content, String reasoning, String toolCalls) {
-        ConversationMessage message = new ConversationMessage(conversationId, role, content, reasoning, toolCalls);
-        conversationMessageMapper.insert(message);
-        log.debug("保存{}消息: conversationId={}, contentLength={}, reasoningLength={}, toolCallsLength={}",
-                role, conversationId,
-                content != null ? content.length() : 0,
-                reasoning != null ? reasoning.length() : 0,
-                toolCalls != null ? toolCalls.length() : 0);
-    }
-
-    /**
-     * 根据会话ID构建历史消息列表，用于API请求
-     * 将数据库中的消息格式转换为DeepSeek API所需的消息格式
-     * 集成三级阈值压缩策略：应用已有压缩记录 → 智能压缩 → 滑动窗口丢弃
-     * @param conversationId 会话ID
-     * @return 消息列表，每个元素包含role、content和可选的tool_calls
-     */
-    private List<Map<String, Object>> buildMessagesFromHistory(Long conversationId) {
-        // 1. 加载原始消息
-        List<ConversationMessage> dbMessages = conversationMessageMapper.selectByConversationId(conversationId);
-
-        // 2. 应用已有的压缩记录（将已被压缩的消息替换为摘要）
-        compactionService.applyCompactionRecords(conversationId, dbMessages);
-
-        // 3. 将消息转换为 API 格式
-        List<Map<String, Object>> result = new ArrayList<>();
-        // 记录每个 assistant 消息在 result 中的索引 → 它期望的 tool_call ID 列表
-        java.util.Map<Integer, List<String>> assistantToolCallIdsMap = new java.util.HashMap<>();
-        // 记录所有已被 TOOL 消息消耗的 tool_call ID
-        java.util.Set<String> consumedToolCallIds = new java.util.HashSet<>();
-        // 辅助队列：按顺序排队等待 TOOL 消息匹配的 tool_call ID
-        java.util.Queue<String> pendingToolCallIdQueue = new java.util.LinkedList<>();
-
-        for (ConversationMessage msg : dbMessages) {
-            Map<String, Object> messageMap = new HashMap<>();
-            MessageRole role = msg.getRole();
-
-            // 根据角色处理消息
-            if (role == MessageRole.USER || role == MessageRole.SYSTEM) {
-                messageMap.put("role", role.getValue());
-                String content = msg.getContent() != null ? msg.getContent() : "";
-                messageMap.put("content", content);
-                result.add(messageMap);
-            } else if (role == MessageRole.ASSISTANT) {
-                messageMap.put("role", "assistant");
-
-                // 遇到新的 assistant 消息时，如果之前还有未消耗的 tool_call ID，
-                // 说明上一个 assistant 的 tool_calls 缺少对应的 TOOL 消息
-                // 记录这些未消耗的 ID 以便后续精确修复
-                if (!pendingToolCallIdQueue.isEmpty()) {
-                    log.warn("发现未消耗的tool call IDs，可能数据不一致: {}", pendingToolCallIdQueue);
-                    pendingToolCallIdQueue.clear();
-                }
-
-                if (msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
-                    try {
-                        JsonNode toolCallsNode = objectMapper.readTree(msg.getToolCalls());
-                        messageMap.put("tool_calls", toolCallsNode);
-
-                        if (toolCallsNode.isArray()) {
-                            List<String> idList = new ArrayList<>();
-                            for (JsonNode toolCall : toolCallsNode) {
-                                JsonNode idNode = toolCall.path("id");
-                                if (!idNode.isMissingNode() && !idNode.isNull()) {
-                                    String id = idNode.asText();
-                                    pendingToolCallIdQueue.add(id);
-                                    idList.add(id);
-                                }
-                            }
-                            // 记录当前 assistant 消息期望的 tool_call ID 列表
-                            assistantToolCallIdsMap.put(result.size(), idList);
-                        }
-                    } catch (Exception e) {
-                        log.warn("解析tool_calls JSON失败: {}", e.getMessage());
-                    }
-                }
-
-                String content = msg.getContent();
-                if (content != null && !content.isEmpty()) {
-                    messageMap.put("content", content);
-                }
-
-                String reasoning = msg.getReasoning();
-                if (reasoning != null && !reasoning.isEmpty()) {
-                    messageMap.put("reasoning_content", reasoning);
-                }
-
-                result.add(messageMap);
-            } else if (role == MessageRole.TOOL) {
-                if (!pendingToolCallIdQueue.isEmpty()) {
-                    String toolCallId = pendingToolCallIdQueue.poll();
-                    consumedToolCallIds.add(toolCallId);
-                    messageMap.put("role", "tool");
-                    messageMap.put("tool_call_id", toolCallId);
-
-                    String content = msg.getReasoning() != null ? msg.getReasoning() :
-                            (msg.getContent() != null ? msg.getContent() : "");
-                    messageMap.put("content", content);
-
-                    result.add(messageMap);
-                } else {
-                    log.warn("TOOL消息没有对应的tool call ID，跳过该消息: {}", msg.getId());
-                }
-            }
-        }
-
-        // 精确修复：只移除缺少对应 TOOL 消息的 assistant 消息的 tool_calls
-        // 判断标准：assistant 消息的 tool_call ID 列表中，存在未被 TOOL 消息消耗的 ID
-        boolean hasOrphanToolCalls = false;
-        for (java.util.Map.Entry<Integer, List<String>> entry : assistantToolCallIdsMap.entrySet()) {
-            int msgIndex = entry.getKey();
-            List<String> expectedIds = entry.getValue();
-            boolean allConsumed = true;
-            for (String id : expectedIds) {
-                if (!consumedToolCallIds.contains(id)) {
-                    allConsumed = false;
-                    break;
-                }
-            }
-            if (!allConsumed) {
-                Map<String, Object> msg = result.get(msgIndex);
-                if (msg.containsKey("tool_calls")) {
-                    msg.remove("tool_calls");
-                    log.info("精确修复：从assistant消息[{}]中移除了孤立的tool_calls（缺少对应的TOOL消息）", msgIndex);
-                    hasOrphanToolCalls = true;
-                }
-            }
-        }
-        if (hasOrphanToolCalls) {
-            log.warn("上下文孤立修复完成：移除了 {} 条缺少TOOL消息的assistant消息的tool_calls", 
-                     assistantToolCallIdsMap.size() - 
-                     (int)assistantToolCallIdsMap.values().stream()
-                         .filter(ids -> ids.stream().allMatch(consumedToolCallIds::contains))
-                         .count());
-        }
-
-        // 4. 三级阈值上下文管理：先尝试压缩，兜底丢弃
-        int maxTokens = deepSeekConfig.getMaxContextTokens();
-        int estimatedTokens = TokenEstimator.estimateMessages(result);
-
-        // 4a. 如果超过压缩阈值，执行智能压缩
-        if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
-            log.info("历史上下文超限（压缩阈值），尝试智能压缩：估算 {} tokens, 上限 {}",
-                    estimatedTokens, maxTokens);
-            int afterCompactTokens = compactionService.compact(conversationId, result);
-            if (afterCompactTokens > 0) {
-                estimatedTokens = afterCompactTokens;
-                log.info("智能压缩完成，压缩后 {} tokens", estimatedTokens);
-            }
-        }
-
-        // 4b. 如果压缩后仍超过丢弃阈值，执行滑动窗口丢弃
-        if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
-            log.warn("智能压缩后仍超限，执行滑动窗口丢弃：估算 {} tokens, 上限 {}",
-                    estimatedTokens, maxTokens);
-            trimToTokenBudget(result, maxTokens);
-        }
-
-        return result;
-    }
-
-
-    /**
-     * Token 感知的上下文滑动窗口裁剪（兜底策略）
-     * 从最早的历史开始，按完整轮次（user + assistant + tool）裁剪，保留保护带
-     * @param messages 消息列表（会直接修改）
-     * @param maxTokens token 上限
-     */
-    private void trimToTokenBudget(List<Map<String, Object>> messages, int maxTokens) {
-        if (messages == null || messages.isEmpty()) return;
-
-        int estimatedTokens = TokenEstimator.estimateMessages(messages);
-        if (estimatedTokens <= maxTokens) return;
-
-        int beforeSize = messages.size();
-        log.warn("上下文滑动窗口丢弃：估算 {} tokens (上限 {}), 开始裁剪（共 {} 条消息）",
-                estimatedTokens, maxTokens, beforeSize);
-
-        // 保护带：保留最后 protectRounds 轮 + 当前用户消息
-        int protectRounds = deepSeekConfig.getCompaction().getProtectRounds();
-        int protectStart = findProtectStart(messages, protectRounds);
-
-        // 从索引 1 开始裁剪（保留 system 消息），到保护带起始位置结束
-        int idx = 1;
-        int lastIdx = Math.min(protectStart, messages.size() - 1);
-        while (idx < lastIdx) {
-            // 找到当前轮次的结束：[idx, endIdx)
-            int endIdx = idx + 1;
-            while (endIdx < lastIdx) {
-                String role = (String) messages.get(endIdx).get("role");
-                if ("user".equals(role) || "system".equals(role)) break;
-                endIdx++;
-            }
-
-            // 移除这一轮（从后往前删避免索引错乱）
-            for (int i = endIdx - 1; i >= idx; i--) {
-                messages.remove(i);
-            }
-            lastIdx = Math.min(protectStart, messages.size() - 1);
-
-            estimatedTokens = TokenEstimator.estimateMessages(messages);
-            if (estimatedTokens <= maxTokens) break;
-        }
-
-        int trimmed = beforeSize - messages.size();
-        log.info("上下文丢弃完成：移除了 {} 条消息，剩余 {} 条，估算 {} tokens",
-                trimmed, messages.size(), estimatedTokens);
-    }
-
-    /**
-     * 查找保护带的起始位置
-     * 从后往前找，找到第 protectRounds 个 user 消息的索引
-     */
-    private int findProtectStart(List<Map<String, Object>> messages, int protectRounds) {
-        if (messages == null || messages.isEmpty()) return 0;
-        int roundsFound = 0;
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            String role = (String) messages.get(i).get("role");
-            if ("user".equals(role)) {
-                roundsFound++;
-                if (roundsFound > protectRounds) {
-                    return i + 1;
-                }
-            }
-        }
-        return 1; // 保护带覆盖全部，从索引 1 开始
-    }
-
-
-    /**
-     * 从delta节点中提取content和reasoning_content字段
-     * @param deltaNode JSON delta节点
-     * @return 包含content和reasoning的Map
-     */
-    private Map<String, String> extractFromDeltaNode(JsonNode deltaNode) {
-        Map<String, String> result = new HashMap<>();
-        result.put("content", "");
-        result.put("reasoning", "");
-
-        if (deltaNode.isMissingNode()) {
-            return result;
-        }
-
-        // 提取content
-        JsonNode contentNode = deltaNode.path("content");
-        if (!contentNode.isMissingNode() && !contentNode.isNull()) {
-            String contentValue = contentNode.asText("");
-            if (!contentValue.isEmpty()) {
-                result.put("content", contentValue);
-            }
-        }
-
-        // 提取reasoning_content
-        JsonNode reasoningNode = deltaNode.path("reasoning_content");
-        if (!reasoningNode.isMissingNode() && !reasoningNode.isNull()) {
-            String reasoningValue = reasoningNode.asText("");
-            if (!reasoningValue.isEmpty()) {
-                result.put("reasoning", reasoningValue);
-            }
-        }
-
-        return result;
-    }
-
-
-    /**
-     * 从流式响应中提取content和reasoning_content内容
-     * @param streamResponse 流式响应字符串（SSE格式）
-     * @return 包含content和reasoning的Map，如果解析失败则返回空Map
-     */
-    private Map<String, String> extractContentAndReasoningFromStreamResponse(String streamResponse) {
-        Map<String, String> result = new HashMap<>();
-        StringBuilder contentBuilder = new StringBuilder();
-        StringBuilder reasoningBuilder = new StringBuilder();
-
-        try {
-            // 使用Jackson的JsonParser流式解析多个JSON对象
-            JsonParser parser = objectMapper.getFactory().createParser(streamResponse);
-
-            // 尝试解析多个顶级JSON对象
-            while (true) {
-                try {
-                    if (parser.nextToken() == null) {
-                        break; // 没有更多tokens
-                    }
-
-                    // 读取整个JSON对象
-                    JsonNode root = objectMapper.readTree(parser);
-
-                    // 检查是否有choices数组
-                    JsonNode choices = root.path("choices");
-                    if (choices.isArray() && choices.size() > 0) {
-                        JsonNode delta = choices.get(0).path("delta");
-                        Map<String, String> extracted = extractFromDeltaNode(delta);
-                        String content = extracted.get("content");
-                        String reasoning = extracted.get("reasoning");
-
-                        if (!content.isEmpty()) {
-                            contentBuilder.append(content);
-                        }
-                        if (!reasoning.isEmpty()) {
-                            reasoningBuilder.append(reasoning);
-                        }
-                    }
-                } catch (Exception e) {
-                    // 跳过无法解析的对象（如[DONE]标记或其他非JSON内容）
-                    log.debug("解析JSON对象失败，继续下一个对象: {}", e.getMessage());
-                    // 尝试跳过无效内容并继续
-                    try {
-                        // 跳过当前token
-                        parser.skipChildren();
-                    } catch (Exception skipEx) {
-                        // 如果无法跳过，尝试继续
-                    }
-                }
-            }
-
-            parser.close();
-
-            // 将累积的结果放入Map
-            result.put("content", contentBuilder.toString());
-            result.put("reasoning", reasoningBuilder.toString());
-
-        } catch (Exception e) {
-            log.error("解析流式响应失败", e);
-            // 返回空Map
-            result.put("content", "");
-            result.put("reasoning", "");
-        }
-
-        return result;
-    }
-
-    /**
-     * 清洗SSE协议框架垃圾（data: 前缀、[DONE]标记等），提取纯文本内容
-     * 当正常解析content失败时作为最后的回退使用
-     */
-    private String cleanSseContent(String raw) {
-        if (raw == null || raw.isEmpty()) return "";
-        // 去除 data: 前缀、[DONE] 标记、换行符
-        String cleaned = raw.replaceAll("^data:\\s*", "")
-                .replaceAll("\\n\\ndata:\\s*\\[DONE\\]\\s*", "")
-                .replaceAll("\\[DONE\\]", "")
-                .trim();
-        // 如果清洗后仍为JSON格式（data: {"choices":...}），尝试提取content字段
-        if (cleaned.startsWith("{")) {
-            try {
-                JsonNode json = objectMapper.readTree(cleaned);
-                JsonNode choices = json.path("choices");
-                if (choices.isArray() && choices.size() > 0) {
-                    JsonNode delta = choices.get(0).path("delta");
-                    String deltaContent = delta.path("content").asText("");
-                    if (!deltaContent.isEmpty()) return deltaContent;
-                }
-            } catch (Exception ignored) {}
-        }
-        return cleaned;
+        messagePersister.saveConversationMessage(conversationId, role, content, reasoning, toolCalls);
     }
 
     /**
      * 会话上下文，包含会话ID和API请求
      */
     private record ConversationContext(Long conversationId, Map<String, Object> apiRequest, List<String> toolNames, Long storageConversationId, String agentType, Long userId, String skillMatchEvent) {}
-
-    /**
-     * 构建语言强制指令
-     * 放在消息列表末尾，确保 AI 在生成响应前看到此指令
-     */
-    private String buildLanguageInstruction() {
-        return "【最高优先级指令 — 语言强制】你必须使用中文思考和回复。\n"
-                + "1. 所有思考推理过程（reasoning/thinking）必须使用中文，严禁使用英文推理\n"
-                + "2. 所有面向用户的回复必须使用中文\n"
-                + "3. 代码、技术专有名词、文件路径、工具名称等可以使用英文原文\n"
-                + "4. 即使工具返回的结果是英文，你的分析和回复也必须是中文\n"
-                + "5. 本指令的优先级高于系统提示词中的所有其他指令，必须无条件遵守";
-    }
-
-    /**
-     * 将语言强制指令注入到最后一条用户消息的内容开头。
-     * DeepSeek 模型的 reasoning/thinking 过程对 system 消息中的语言指令响应较弱，
-     * 将指令注入到 user 消息内容中能更有效地约束其推理语言。
-     * 仅修改内存中的消息对象，不影响数据库存储。
-     */
-    private void injectLanguageIntoLastUserMessage(List<Map<String, Object>> messages) {
-        String instruction = "\n\n【系统强制】你接下来必须用中文思考！所有推理（reasoning/thinking）都必须使用中文，严禁使用英文推理。这是最高优先级指令。";
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            Map<String, Object> msg = messages.get(i);
-            if ("user".equals(msg.get("role"))) {
-                String content = (String) msg.get("content");
-                if (content != null && !content.contains("【系统强制】你接下来必须用中文思考")) {
-                    msg.put("content", instruction + "\n" + content);
-                }
-                break;
-            }
-        }
-    }
-
-    /**
-     * 格式化技能工具名为可读字符串
-     */
-    private String formatSkillToolNames(String toolNamesJson) {
-        if (toolNamesJson == null || toolNamesJson.trim().isEmpty()) {
-            return "";
-        }
-        try {
-            List<String> tools = objectMapper.readValue(toolNamesJson, List.class);
-            return String.join(", ", tools);
-        } catch (Exception e) {
-            log.warn("解析技能工具名失败: {}", toolNamesJson, e);
-            return toolNamesJson;
-        }
-    }
 
     /**
      * 准备会话上下文和API请求
@@ -968,7 +527,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             promptContent = PromptUtil.getPrompt(promptFileName);
             toolNames = deepSeekConfig.getToolGroups()
                     .getOrDefault(promptFileName, Collections.emptyList());
-            agentType = resolveAgentType(promptFileName);
+            agentType = contextBuilder.resolveAgentType(promptFileName);
             modelName = deepSeekConfig.getDefaultModel();
             thinkingMode = deepSeekConfig.getThinkingMode();
             executionMode = "auto";
@@ -995,15 +554,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         Long conversationId;
         Long storageConversationId;
-        Conversation conversation = getOrCreateConversation(sessionId, userMessage, userId, agentType, agentConfigId, workDir);
+        Conversation conversation = contextBuilder.getOrCreateConversation(sessionId, userMessage, userId, agentType, agentConfigId, workDir);
         conversationId = conversation.getId();
         storageConversationId = conversationId;
 
         // 保存用户消息
-        saveUserMessage(storageConversationId, userMessage, request.getTurnId());
+        messagePersister.saveUserMessage(storageConversationId, userMessage, request.getTurnId());
 
         // 构建历史消息（包括本次用户消息）
-        List<Map<String, Object>> historyMessages = buildMessagesFromHistory(conversationId);
+        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId);
 
         // 检查是否为首次会话（是否已存在SYSTEM消息）
         boolean hasSystemMessage = historyMessages.stream()
@@ -1016,7 +575,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // 在首次会话时注入角色性格配置（追加到系统提示词末尾）
             String characterProfile = configService.getValue("character_profile");
             if (characterProfile != null && !characterProfile.isEmpty() && !"{}".equals(characterProfile.trim())) {
-                String charSection = buildCharacterSection(characterProfile);
+                String charSection = CharacterPromptUtil.buildCharacterSection(characterProfile);
                 if (charSection != null) {
                     if (systemPrompt == null) {
                         systemPrompt = charSection;
@@ -1029,7 +588,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
             if (systemPrompt != null && !systemPrompt.trim().isEmpty()) {
                 // 保存SYSTEM消息到数据库
-                saveConversationMessage(storageConversationId, MessageRole.SYSTEM, systemPrompt, null, null);
+                        messagePersister.saveConversationMessage(storageConversationId, MessageRole.SYSTEM, systemPrompt, null, null);
 
                 // 将SYSTEM消息添加到历史消息列表的开头
                 Map<String, Object> systemMessage = new HashMap<>();
@@ -1122,7 +681,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             } catch (Exception e) {
                                 log.warn("解析技能 {} 的工具列表失败", skill.getId(), e);
                             }
-                            String toolNamesFormatted = formatSkillToolNames(skill.getToolNames());
+                            String toolNamesFormatted = contextBuilder.formatSkillToolNames(skill.getToolNames());
                             String instructions = skill.getInstructions() != null ? skill.getInstructions() : "";
                             skillsList.append("\n【").append(skill.getName()).append("】(ID:").append(skill.getId()).append(")")
                                     .append(" | 置信度 ").append(String.format("%.0f%%", skill.getConfidence() * 100))
@@ -1174,12 +733,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 注入语言强制指令到消息列表末尾（靠近响应位置，优先级最高）
         Map<String, Object> langInstruction = new HashMap<>();
         langInstruction.put("role", "system");
-        langInstruction.put("content", buildLanguageInstruction());
+        langInstruction.put("content", contextBuilder.buildLanguageInstruction());
         historyMessages.add(langInstruction);
 
         // 同时将语言指令注入到最后一条用户消息内容中
         // （DeepSeek 的 reasoning 对 user 消息中的指令响应更强）
-        injectLanguageIntoLastUserMessage(historyMessages);
+        contextBuilder.injectLanguageIntoLastUserMessage(historyMessages);
 
         // 构建API请求体
         Map<String, Object> apiRequest = new HashMap<>();
@@ -1330,14 +889,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     .doOnComplete(() -> {
                         // 流式响应完成，保存助手消息
                         String fullResponse = responseBuilder.toString();
-                        Map<String, String> extracted = extractContentAndReasoningFromStreamResponse(fullResponse);
+                        Map<String, String> extracted = contextBuilder.extractContentAndReasoningFromStreamResponse(fullResponse);
                         String content = extracted.get("content");
                         String reasoning = extracted.get("reasoning");
                         if (content == null || content.isEmpty()) {
-                            content = cleanSseContent(fullResponse);
+                            content = contextBuilder.cleanSseContent(fullResponse);
                             log.warn("未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
                         }
-                        saveAssistantMessage(storageConversationId, content, reasoning);
+                        messagePersister.saveAssistantMessage(storageConversationId, content, reasoning);
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);
                         // 异步预压缩：提前压缩最早的历史，降低下次请求延迟
@@ -1349,18 +908,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     // ===== 后台任务管理 =====
 
     private void cancelRunningTask(Long conversationId) {
-        Disposable sub = taskSubscriptions.remove(conversationId);
-        if (sub != null && !sub.isDisposed()) {
-            sub.dispose();
-            log.info("取消会话 {} 的正在运行的后台任务", conversationId);
-        }
-        agentEventBus.unregister(conversationId);
-        judgeGrantedIterations.remove(conversationId);
-        try {
-            jdbcTemplate.update("UPDATE agent_task SET status = 'cancelled', updated_at = NOW() WHERE conversation_id = ? AND status = 'running'", conversationId);
-        } catch (Exception e) {
-            log.debug("取消任务记录失败: {}", e.getMessage());
-        }
+        toolLoopManager.cancelRunningTask(conversationId, taskSubscriptions, judgeGrantedIterations);
     }
 
     /**
@@ -1532,17 +1080,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param text 待审批问题文本，为null时清除
      */
     private void updatePendingQuestion(Long conversationId, String uuid, String text) {
-        try {
-            if (uuid != null) {
-                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = ?, pending_question_text = ?, updated_at = NOW() WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
-                        uuid, text, conversationId);
-            } else {
-                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = NULL, pending_question_text = NULL, updated_at = NOW() WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
-                        conversationId);
-            }
-        } catch (Exception e) {
-            log.debug("更新待审批问题失败: {}", e.getMessage());
-        }
+        toolLoopManager.updatePendingQuestion(conversationId, uuid, text);
     }
 
     /**
@@ -1565,7 +1103,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // 构建初始消息列表
         List<Map<String, Object>> messages = new ArrayList<>();
-        List<Map<String, Object>> historyMessages = buildMessagesFromHistory(conversationId);
+        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId);
         for (Map<String, Object> msg : historyMessages) {
             Map<String, Object> mutableMsg = new HashMap<>(msg);
             messages.add(mutableMsg);
@@ -1590,11 +1128,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 注入语言强制指令（工具循环中同样需要）
         Map<String, Object> langInstruction = new HashMap<>();
         langInstruction.put("role", "system");
-        langInstruction.put("content", buildLanguageInstruction());
+        langInstruction.put("content", contextBuilder.buildLanguageInstruction());
         messages.add(langInstruction);
 
         // 同时将语言指令注入到最后一条用户消息内容中
-        injectLanguageIntoLastUserMessage(messages);
+        contextBuilder.injectLanguageIntoLastUserMessage(messages);
 
         // 初始化评委扩展计数器
         judgeGrantedIterations.put(conversationId, 0);
@@ -1645,12 +1183,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 构建子Agent结果汇总输入文本
      */
     private String buildSubAgentSummaryInput(List<SubAgentResult> subResults) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < subResults.size(); i++) {
-            sb.append("===== 子Agent ").append(i + 1).append(" =====\n");
-            sb.append(subResults.get(i).toResultString()).append("\n\n");
-        }
-        return sb.toString();
+        return toolLoopManager.buildSubAgentSummaryInput(subResults);
     }
 
     /**
@@ -1693,141 +1226,33 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 检测最近连续的工具调用是否重复（相同工具+相同关键参数）
      */
     private boolean hasRepeatedCalls(List<Map<String, Object>> messages, int threshold) {
-        int repeatCount = 0;
-        String lastPattern = null;
-
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            Map<String, Object> msg = messages.get(i);
-            if (!"assistant".equals(msg.get("role")) || !msg.containsKey("tool_calls")) {
-                continue;
-            }
-
-            JsonNode toolCalls = (JsonNode) msg.get("tool_calls");
-            String pattern = buildToolCallPattern(toolCalls);
-            if (pattern == null || pattern.isEmpty()) continue;
-
-            if (lastPattern == null) {
-                lastPattern = pattern;
-                repeatCount = 1;
-            } else if (pattern.equals(lastPattern)) {
-                repeatCount++;
-                if (repeatCount >= threshold) return true;
-            } else {
-                return false;
-            }
-        }
-        return false;
+        return toolLoopManager.hasRepeatedCalls(messages, threshold);
     }
 
     /**
      * 构建工具调用的特征签名，用于比较是否重复
      */
     private String buildToolCallPattern(JsonNode toolCalls) {
-        if (toolCalls == null || !toolCalls.isArray() || toolCalls.isEmpty()) return "";
-        List<String> signatures = new ArrayList<>();
-        for (JsonNode call : toolCalls) {
-            String name = call.path("function").path("name").asText("");
-            String args = call.path("function").path("arguments").asText("");
-            signatures.add(extractToolKey(name, args));
-        }
-        Collections.sort(signatures);
-        return String.join("|", signatures);
+        return toolLoopManager.buildToolCallPattern(toolCalls);
     }
 
     /**
      * 提取工具调用的关键参数标识，忽略不影响结果的参数差异
      */
     private String extractToolKey(String toolName, String argsJson) {
-        if (argsJson == null || argsJson.isEmpty() || "null".equals(argsJson)) {
-            return toolName;
-        }
-        try {
-            JsonNode args = objectMapper.readTree(argsJson);
-            return switch (toolName) {
-                case "read_file", "write_file", "edit_file", "delete_file" -> {
-                    String path = args.path("file_path").asText("");
-                    if (path.isEmpty()) path = args.path("path").asText("");
-                    yield toolName + ":" + (path.isEmpty() ? "*" : path);
-                }
-                case "run_command", "run_server" -> {
-                    String cmd = args.path("command").asText("");
-                    yield toolName + ":" + (cmd.isEmpty() ? "*" : cmd);
-                }
-                case "execute_sql" -> {
-                    String sql = args.path("sql").asText("");
-                    yield toolName + ":" + (sql.isEmpty() ? "*" : sql);
-                }
-                case "git_add" -> {
-                    String files = args.path("files").asText("");
-                    yield toolName + ":" + (files.isEmpty() ? "*" : files);
-                }
-                case "git_commit" -> {
-                    String msg = args.path("message").asText("");
-                    yield toolName + ":" + (msg.isEmpty() ? "*" : msg);
-                }
-                case "git_push", "service_control" -> {
-                    String action = args.path("action").asText("");
-                    yield toolName + ":" + (action.isEmpty() ? "*" : action);
-                }
-                default -> toolName;
-            };
-        } catch (Exception e) {
-            return toolName;
-        }
+        return toolLoopManager.extractToolKey(toolName, argsJson);
     }
 
     // ===== 评委评估（迭代超限处理） =====
 
     /**
-     * 评委判断结果
-     */
-    private static class JudgeResult {
-        String judgment; // "extend" or "reject"
-        String reason;
-        int additionalIterations;
-        String summary;
-    }
 
     /**
      * 解析评委 JSON 响应
      * 支持处理被 ```json 代码块包裹的情况
      */
-    private JudgeResult parseJudgeResult(String response) {
-        try {
-            // 检测 API 调用失败的错误文本，避免无效 JSON 解析
-            if (response.startsWith("错误：")) {
-                log.warn("评委 API 调用返回错误: {}", response);
-                return null;
-            }
-            String jsonStr = response;
-            // 提取 ```json ... ``` 包裹的内容
-            if (jsonStr.contains("```json")) {
-                jsonStr = jsonStr.substring(jsonStr.indexOf("```json") + 7);
-                jsonStr = jsonStr.substring(0, jsonStr.indexOf("```"));
-            } else if (jsonStr.contains("```")) {
-                jsonStr = jsonStr.substring(jsonStr.indexOf("```") + 3);
-                jsonStr = jsonStr.substring(0, jsonStr.indexOf("```"));
-            }
-            jsonStr = jsonStr.trim();
-
-            JsonNode root = objectMapper.readTree(jsonStr);
-            JudgeResult result = new JudgeResult();
-            result.judgment = root.path("judgment").asText("");
-            result.reason = root.path("reason").asText("");
-            result.additionalIterations = root.path("additional_iterations").asInt(10);
-            result.summary = root.path("summary").asText("");
-
-            if (!"extend".equals(result.judgment) && !"reject".equals(result.judgment)) {
-                log.warn("评委返回未知判断: {}", result.judgment);
-                return null;
-            }
-            if (result.judgment.isEmpty()) return null;
-
-            return result;
-        } catch (Exception e) {
-            log.warn("解析评委响应失败: {}", e.getMessage());
-            return null;
-        }
+    private ToolLoopManager.JudgeResult parseJudgeResult(String response) {
+        return toolLoopManager.parseJudgeResult(response);
     }
 
     /**
@@ -1837,85 +1262,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 确保评委聚焦于当前伦次的对话和任务。
      */
     private String buildJudgeContext(List<Map<String, Object>> messages) {
-        StringBuilder sb = new StringBuilder();
-
-        // ===== 1. 提取多轮对话历史（所有用户消息，标注轮次） =====
-        sb.append("## 对话历史（多轮）\n");
-        int round = 0;
-        for (Map<String, Object> msg : messages) {
-            if ("user".equals(msg.get("role"))) {
-                round++;
-                String uc = (String) msg.get("content");
-                if (uc != null && !uc.isEmpty()) {
-                    String truncated = uc.length() > 300 ? uc.substring(0, 300) + "..." : uc;
-                    sb.append("[轮次 ").append(round).append("] ").append(truncated).append("\n");
-                }
-            }
-        }
-        if (round == 0) {
-            sb.append("(无用户消息)\n");
-        }
-
-        // ===== 2. 提取工具调用历史摘要（含轮次标记） =====
-        sb.append("\n## 工具调用历史\n");
-        int iter = 0;
-        int currentRound = 0;
-
-        // 先找到所有用户消息的位置，用于标记轮次边界
-        java.util.List<Integer> userMsgPositions = new java.util.ArrayList<>();
-        for (int i = 0; i < messages.size(); i++) {
-            if ("user".equals(messages.get(i).get("role"))) {
-                userMsgPositions.add(i);
-            }
-        }
-
-        for (int i = 0; i < messages.size(); i++) {
-            Map<String, Object> msg = messages.get(i);
-            // 检查是否跨越了用户消息边界（进入新轮次）
-            for (int pos : userMsgPositions) {
-                if (i == pos) {
-                    currentRound++;
-                    break;
-                }
-            }
-            if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
-                JsonNode toolCalls = (JsonNode) msg.get("tool_calls");
-                if (toolCalls != null && toolCalls.isArray()) {
-                    for (JsonNode tc : toolCalls) {
-                        String name = tc.path("function").path("name").asText("");
-                        String args = tc.path("function").path("arguments").asText("");
-                        if (args.length() > 200) args = args.substring(0, 200) + "...";
-                        sb.append("  [R").append(currentRound).append("][I").append(iter).append("] ")
-                                .append(name).append("(").append(args).append(")\n");
-                    }
-                }
-                iter++;
-            }
-        }
-
-        // ===== 3. 重复检测信息 =====
-        boolean hasRepeat = hasRepeatedCalls(messages, 3);
-        sb.append("\n## 重复检测\n");
-        sb.append("连续重复调用: ").append(hasRepeat ? "是（可能存在死循环）" : "否（调用模式正常）").append("\n");
-        sb.append("总迭代次数: ").append(iter).append("\n");
-        sb.append("对话轮次: ").append(round).append("\n");
-
-        // 最近 3 次工具结果（截取末尾部分）
-        sb.append("\n## 最近工具结果\n");
-        int resultCount = 0;
-        for (int i = messages.size() - 1; i >= 0 && resultCount < 3; i--) {
-            Map<String, Object> msg = messages.get(i);
-            if ("tool".equals(msg.get("role"))) {
-                String content = (String) msg.get("content");
-                if (content != null && !content.isEmpty()) {
-                    String truncated = content.length() > 500 ? content.substring(0, 500) + "..." : content;
-                    sb.append(truncated).append("\n---\n");
-                    resultCount++;
-                }
-            }
-        }
-
-        return sb.toString();
+        return toolLoopManager.buildJudgeContext(messages);
     }
 
     /**
@@ -1940,7 +1287,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMapMany(response -> {
                     // 4. 解析 JSON 响应
-                    JudgeResult result = parseJudgeResult(response);
+                    ToolLoopManager.JudgeResult result = parseJudgeResult(response);
                     if (result == null) {
                         log.warn("评委响应解析失败，使用默认拒绝策略: {}", response);
                         return Flux.just(createReasoningSSEEvent(
@@ -2050,28 +1397,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return 是否完整
      */
     private boolean isToolCallsComplete(Map<Integer, ObjectNode> accumulatedToolCalls) {
-        if (accumulatedToolCalls.isEmpty()) {
-            return false;
-        }
-        for (ObjectNode toolCall : accumulatedToolCalls.values()) {
-            JsonNode function = toolCall.path("function");
-            if (function.isMissingNode()) {
-                return false;
-            }
-            JsonNode arguments = function.path("arguments");
-            if (arguments.isMissingNode() || arguments.asText("").isEmpty()) {
-                return false;
-            }
-            // 尝试解析arguments是否为有效JSON
-            String argsText = arguments.asText();
-            try {
-                objectMapper.readTree(argsText);
-            } catch (Exception e) {
-                // 解析失败，可能还不是完整JSON
-                return false;
-            }
-        }
-        return true;
+        return toolLoopManager.isToolCallsComplete(accumulatedToolCalls);
     }
 
     /**
@@ -2080,12 +1406,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return JsonNode数组
      */
     private JsonNode convertAccumulatedToolCallsToArray(Map<Integer, ObjectNode> accumulatedToolCalls) {
-        ArrayNode arrayNode = objectMapper.createArrayNode();
-        // 按index排序
-        accumulatedToolCalls.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(entry -> arrayNode.add(entry.getValue()));
-        return arrayNode;
+        return toolLoopManager.convertAccumulatedToolCallsToArray(accumulatedToolCalls);
     }
 
     /**
@@ -2094,36 +1415,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return SSE格式字符串 "data: {...}"
      */
     private String createReasoningSSEEvent(String reasoningContent) {
-        try {
-            ObjectNode root = objectMapper.createObjectNode();
-            root.put("id", UUID.randomUUID().toString());
-            root.put("object", "chat.completion.chunk");
-            root.put("created", Instant.now().getEpochSecond());
-            root.put("model", deepSeekConfig.getDefaultModel());
-            root.put("system_fingerprint", "fp_" + UUID.randomUUID().toString().substring(0, 8));
-
-            ObjectNode choices = objectMapper.createObjectNode();
-            choices.put("index", 0);
-
-            ObjectNode delta = objectMapper.createObjectNode();
-            delta.putNull("content");
-            // 处理null值，转换为空字符串
-            delta.put("reasoning_content", reasoningContent != null ? reasoningContent : "");
-
-            choices.set("delta", delta);
-            choices.putNull("logprobs");
-            choices.putNull("finish_reason");
-
-            ArrayNode choicesArray = objectMapper.createArrayNode();
-            choicesArray.add(choices);
-            root.set("choices", choicesArray);
-
-            return objectMapper.writeValueAsString(root);
-        } catch (Exception e) {
-            log.error("创建SSE事件失败", e);
-            // 返回一个简单的事件作为备选
-            return "{\"error\": \"无法生成工具调用事件\"}";
-        }
+        return toolLoopManager.createReasoningSSEEvent(reasoningContent);
     }
 
     /**
@@ -2132,30 +1424,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return SSE格式字符串
      */
     private String createToolCallStartEvent(List<String> toolNames) {
-        String msg;
-        if (toolNames.isEmpty()) {
-            msg = "正在调用工具...";
-        } else {
-            msg = "调用 " + String.join(", ", toolNames);
-        }
-        return createReasoningSSEEvent(msg);
+        return toolLoopManager.createToolCallStartEvent(toolNames);
     }
 
     /**
      * 从 tool_calls JSON 数组中提取工具名称
      */
     private List<String> extractToolNames(JsonNode toolCalls) {
-        List<String> names = new java.util.ArrayList<>();
-        if (toolCalls != null && toolCalls.isArray()) {
-            for (JsonNode call : toolCalls) {
-                JsonNode func = call.path("function");
-                String name = func.path("name").asText("");
-                if (!name.isEmpty()) {
-                    names.add(name);
-                }
-            }
-        }
-        return names;
+        return toolLoopManager.extractToolNames(toolCalls);
     }
 
     /**
@@ -2166,14 +1442,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return 格式化后的工具调用结果
      */
     private String formatToolResult(String toolResult, String toolName) {
-        String dashLine = "-".repeat(48);
-        String header = dashLine + "工具调用:" + dashLine;
-        String toolNameLine = (toolName != null && !toolName.isEmpty()) ? "> **" + toolName + "**\n" : "";
-
-        if (toolResult == null || toolResult.isEmpty()) {
-            return "\n\n" + header + "\n" + toolNameLine + "\n\n";
-        }
-        return "\n\n" + header + "\n" + toolNameLine + toolResult + "\n\n";
+        return toolLoopManager.formatToolResult(toolResult, toolName);
     }
 
     /**
@@ -2181,13 +1450,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 在结果内容前插入工具名称行，供前端提取并在缩放条/卡片上展示
      */
     private String createToolResultEvent(String toolName, String toolResult) {
-        String dashLine = "-".repeat(48);
-        String header = dashLine + "工具调用:" + dashLine;
-        String toolNameLine = "> **" + toolName + "**";
-        if (toolResult == null || toolResult.isEmpty()) {
-            return createReasoningSSEEvent("\n\n" + header + "\n" + toolNameLine + "\n\n");
-        }
-        return createReasoningSSEEvent("\n\n" + header + "\n" + toolNameLine + "\n" + toolResult + "\n\n");
+        return toolLoopManager.createToolResultEvent(toolName, toolResult);
     }
 
     /**
@@ -2258,7 +1521,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
                                     // 保存当前的assistant消息（包含思考过程和内容）
                                     String fullResponseSoFar = responseBuilder.toString();
-                                    Map<String, String> extracted = extractContentAndReasoningFromStreamResponse(fullResponseSoFar);
+                                    Map<String, String> extracted = contextBuilder.extractContentAndReasoningFromStreamResponse(fullResponseSoFar);
                                     String content = extracted.get("content");
                                     String reasoning = extracted.get("reasoning");
                                     if (content == null || content.isEmpty()) {
@@ -2703,13 +1966,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // 只有在没有检测到工具调用（shouldContinue为true）且流正常完成时才保存助手消息
                     if (shouldContinue.get()) {
                         String fullResponse = responseBuilder.toString();
-                        Map<String, String> extracted = extractContentAndReasoningFromStreamResponse(fullResponse);
+                        Map<String, String> extracted = contextBuilder.extractContentAndReasoningFromStreamResponse(fullResponse);
                         String content = extracted.get("content");
                         String reasoning = extracted.get("reasoning");
                         if (content == null || content.isEmpty()) {
                             content = contentCollector.toString();
                             if (content.isEmpty()) {
-                                content = cleanSseContent(fullResponse);
+                                content = contextBuilder.cleanSseContent(fullResponse);
                                 log.warn("工具循环中未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
                             }
                         }
@@ -2784,24 +2047,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param askType 事件类型：permission（权限授权）或 clarification（询问用户需求）
      */
     private String createAskUserEvent(String uuid, String question, String askType) {
-        try {
-            ObjectNode event = objectMapper.createObjectNode();
-            event.put("event", "ask_user");
-            event.put("uuid", uuid);
-            event.put("question", question);
-            event.put("askType", askType);
-            return objectMapper.writeValueAsString(event);
-        } catch (Exception e) {
-            log.error("创建 ask_user 事件失败", e);
-            return "{\"event\":\"ask_user\",\"uuid\":\"error\",\"question\":\"创建事件失败\"}";
-        }
+        return toolLoopManager.createAskUserEvent(uuid, question, askType);
     }
 
     /**
      * 创建恢复事件的 SSE 事件（通知前端继续接收流）
      */
     private String createResumeEvent() {
-        return "{\"event\":\"resume\"}";
+        return toolLoopManager.createResumeEvent();
     }
 
     /**

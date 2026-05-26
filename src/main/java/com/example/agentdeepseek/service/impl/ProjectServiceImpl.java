@@ -4,6 +4,7 @@ import com.example.agentdeepseek.model.vo.DirectoryEntry;
 import com.example.agentdeepseek.model.vo.ProjectTreeNode;
 import com.example.agentdeepseek.service.ProjectService;
 import com.example.agentdeepseek.util.FileEncodingDetector;
+import com.example.agentdeepseek.util.ProjectRootContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -156,8 +157,8 @@ public class ProjectServiceImpl implements ProjectService {
             // 如果是绝对路径，直接读取
             Path path = Paths.get(filePath);
             if (!path.isAbsolute()) {
-                // 相对路径，基于项目根目录
-                path = Paths.get(System.getProperty("user.dir"), filePath);
+                // 相对路径，基于项目根目录（优先使用 ProjectRootContext，与工具层保持一致）
+                path = Paths.get(ProjectRootContext.get(), filePath);
             }
             log.debug("读取文件: {}", path);
             return FileEncodingDetector.readString(path);
@@ -175,7 +176,7 @@ public class ProjectServiceImpl implements ProjectService {
         try {
             Path path = Paths.get(filePath);
             if (!path.isAbsolute()) {
-                path = Paths.get(System.getProperty("user.dir"), filePath);
+                path = Paths.get(ProjectRootContext.get(), filePath);
             }
             log.debug("写入文件: {}", path);
             // 确保父目录存在
