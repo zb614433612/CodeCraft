@@ -92,7 +92,7 @@
 
       <!-- 技能卡片列表 -->
       <div v-else class="skill-list">
-        <TransitionGroup name="card-list">
+        <TransitionGroup name="card-list" tag="div">
           <div
             v-for="skill in filteredSkills"
             :key="skill.id"
@@ -964,6 +964,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
 }
 
 /* TransitionGroup */

@@ -3449,7 +3449,7 @@ watch(currentConversationId, (newId) => {
 /* ===== 消息项 ===== */
 .message-item {
   display: flex;
-  margin-bottom: 24px;
+  padding-bottom: 24px;
   gap: 14px;
   animation: msgSlideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -3638,6 +3638,7 @@ watch(currentConversationId, (newId) => {
 }
 .thinking-header {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 5px;
   padding: 8px 14px;
@@ -3651,7 +3652,7 @@ watch(currentConversationId, (newId) => {
 .thinking-title {
   font-weight: 700;
   color: var(--text-1);
-  flex: 1;
+  flex-shrink: 0;
 }
 .thinking-summary {
   font-size: 11px;
@@ -3667,7 +3668,7 @@ watch(currentConversationId, (newId) => {
   gap: 4px;
   margin-right: 8px;
   overflow: hidden;
-  flex-shrink: 1;
+  flex: 1;
   min-width: 0;
 }
 .skill-match-tag {
@@ -3678,7 +3679,8 @@ watch(currentConversationId, (newId) => {
   border-radius: 12px;
   font-size: 11px;
   font-weight: 600;
-  max-width: 180px;
+  max-width: 160px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4638,6 +4640,13 @@ watch(currentConversationId, (newId) => {
 /* 任务下拉优先级标签 */
 [data-theme="dark"] .task-dropdown-priority-high {
   background: rgba(239,68,68,0.12);
+}
+
+/* 发送按钮 disabled — 暗色 */
+[data-theme="dark"] .send-btn:disabled {
+  background: #2a2838 !important;
+  box-shadow: none;
+  color: #525070 !important;
 }
 
 /* 权限按钮 hover */

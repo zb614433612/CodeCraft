@@ -286,4 +286,79 @@ function formatTime(timeStr: string): string {
   font-size: 11px;
   color: #bbb;
 }
+
+/* ===== 暗色模式适配 ===== */
+[data-theme="dark"] .skill-sidebar {
+  color: #a09eb8;
+}
+
+[data-theme="dark"] .skill-title {
+  color: #e4e2f0;
+}
+
+[data-theme="dark"] .refresh-btn {
+  color: #6a6880;
+}
+
+[data-theme="dark"] .refresh-btn:hover {
+  background: #2a2838;
+  color: #a78bfa;
+}
+
+[data-theme="dark"] .loading-text,
+[data-theme="dark"] .empty-text {
+  color: #6a6880;
+}
+
+[data-theme="dark"] .error-text {
+  color: #f87171;
+}
+
+[data-theme="dark"] .skill-item {
+  background: #1a1925;
+  border-color: #2a2838;
+}
+
+[data-theme="dark"] .skill-name {
+  color: #e4e2f0;
+}
+
+[data-theme="dark"] .skill-desc {
+  color: #a09eb8;
+}
+
+[data-theme="dark"] .confidence-high {
+  background: rgba(16, 185, 129, 0.12);
+  color: #4ade80;
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+[data-theme="dark"] .confidence-mid {
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+[data-theme="dark"] .confidence-low {
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+[data-theme="dark"] .skill-count {
+  color: #6a6880;
+}
+
+[data-theme="dark"] .skill-agent {
+  color: #a09eb8;
+  background: #2a2838;
+}
+
+[data-theme="dark"] .skill-tools {
+  color: #6a6880;
+}
+
+[data-theme="dark"] .skill-time {
+  color: #525070;
+}
 </style>
