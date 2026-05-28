@@ -54,6 +54,8 @@ public class MenuServiceImpl implements MenuService {
         if (menu.getIcon() == null) menu.setIcon(existing.getIcon());
         if (menu.getMenuType() == null) menu.setMenuType(existing.getMenuType());
         if (menu.getSortOrder() == null) menu.setSortOrder(existing.getSortOrder());
+        if (menu.getStatus() == null) menu.setStatus(existing.getStatus() != null ? existing.getStatus() : 1);
+        if (menu.getVisible() == null) menu.setVisible(existing.getVisible() != null ? existing.getVisible() : 1);
         menuMapper.update(menu);
         log.info("更新菜单: id={}, name={}", menu.getId(), menu.getName());
     }
@@ -71,7 +73,6 @@ public class MenuServiceImpl implements MenuService {
     @Override
     public List<Menu> getCurrentUserMenus(HttpServletRequest request, String menuType) {
         String role = (String) request.getAttribute("userRole");
-        // 所有角色都通过 role_menu 关联表查询菜单权限
         String roleCode = role != null ? role : "user";
         Role userRole = roleMapper.selectByCode(roleCode);
         if (userRole == null) return new ArrayList<>();
@@ -79,7 +80,7 @@ public class MenuServiceImpl implements MenuService {
         if (menuIds.isEmpty()) return new ArrayList<>();
         List<Menu> allMenus = menuMapper.selectByIds(menuIds);
         return allMenus.stream()
-                .filter(m -> menuType.equals(m.getMenuType()) && m.getStatus() == 1)
+                .filter(m -> menuType.equals(m.getMenuType()) && m.getStatus() != null && m.getStatus() == 1)
                 .sorted(Comparator.comparingInt(Menu::getSortOrder))
                 .collect(Collectors.toList());
     }

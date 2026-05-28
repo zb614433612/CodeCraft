@@ -15,7 +15,7 @@ public class SpaConfig implements WebMvcConfigurer {
     @Override
     public void addViewControllers(ViewControllerRegistry registry) {
         // 匹配前端 SPA 路由（不含 . 的路径，排除 api/、swagger- 等系统路径）
-        registry.addViewController("/{path:[a-zA-Z\\-]+}")
+        registry.addViewController("/{path:[a-zA-Z0-9\\-]+}")
                 .setViewName("forward:/index.html");
     }
 }

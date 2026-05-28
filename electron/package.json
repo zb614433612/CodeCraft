@@ -1,6 +1,6 @@
 {
   "name": "codecraft-desktop",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "CodeCraft 桌面应用（Electron）",
   "main": "main.js",
   "scripts": {
@@ -26,7 +26,7 @@
     ],
     "extraResources": [
       {
-        "from": "../target/codecraft-1.0.4.jar",
+        "from": "../target/codecraft-1.0.5.jar",
         "to": "backend/codecraft.jar"
       },
       {

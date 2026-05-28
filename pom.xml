@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.example</groupId>
     <artifactId>codecraft</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
     <name>CodeCraft</name>
     <description>CodeCraft - AI Coding Assistant</description>
     <url/>
@@ -109,6 +109,46 @@
             <groupId>com.github.albfernandez</groupId>
             <artifactId>juniversalchardet</artifactId>
             <version>2.5.0</version>
+        </dependency>
+
+        <!-- ==================== P2P 远程连接依赖 ==================== -->
+
+        <!-- Netty - 高性能异步网络框架，TCP Server/Client -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-all</artifactId>
+            <version>4.1.107.Final</version>
+        </dependency>
+
+        <!-- Protobuf - 高效二进制序列化，P2P 消息协议 -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>3.25.3</version>
+        </dependency>
+
+        <!-- ZXing - 二维码生成与解析（信令交换） -->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+            <version>3.5.3</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>javase</artifactId>
+            <version>3.5.3</version>
+        </dependency>
+
+        <!-- BouncyCastle - TLS 自签名证书生成与 AES 加密 -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>1.78.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.78.1</version>
         </dependency>
     </dependencies>
 

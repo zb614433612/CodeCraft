@@ -63,7 +63,13 @@ public class AgentConfigServiceImpl implements AgentConfigService {
 
     @Override
     public List<AgentConfig> listByUser(Long userId) {
-        return agentConfigMapper.selectByUser(userId);
+        List<AgentConfig> list = agentConfigMapper.selectByUser(userId);
+        log.info("AgentConfigService.listByUser: userId={}, total={}", userId, list.size());
+        for (AgentConfig a : list) {
+            log.info("  Agent id={}, name={}, enabled={}, userId={}, isBuiltin={}",
+                    a.getId(), a.getName(), a.getEnabled(), a.getUserId(), a.getIsBuiltin());
+        }
+        return list;
     }
 
     @Override

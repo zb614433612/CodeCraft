@@ -15,7 +15,6 @@
         :key="agent.agentId"
         :class="['agent-card', { expanded: expandedAgent === agent.agentId }]"
       >
-        <!-- 卡片头部：状态灯 + 名称 + 展开按钮 -->
         <div class="agent-card-header" @click="toggleExpand(agent.agentId)">
           <span :class="['status-dot', agent.status]">
             {{ statusIcon(agent.status) }}
@@ -26,9 +25,7 @@
           <span class="expand-icon">{{ expandedAgent === agent.agentId ? '▼' : '▶' }}</span>
         </div>
 
-        <!-- 展开详情 -->
         <div v-if="expandedAgent === agent.agentId" class="agent-card-body">
-          <!-- 技能信息 -->
           <div v-if="agent.skills && agent.skills.length > 0" class="agent-section">
             <div class="section-label">技能</div>
             <div class="skill-tags">
@@ -38,7 +35,6 @@
             </div>
           </div>
 
-          <!-- Thinking 事件 -->
           <div v-if="agent.events && agent.events.length > 0" class="agent-section">
             <div class="section-label">执行日志 ({{ agent.events.length }})</div>
             <div class="event-list">
@@ -47,13 +43,10 @@
                 :key="idx"
                 :class="['event-item', event.type]"
               >
-                <!-- thinking 事件 -->
                 <div v-if="event.type === 'thinking'" class="event-thinking">
                   <span class="event-icon">💭</span>
                   <span class="event-text">{{ event.content }}</span>
                 </div>
-
-                <!-- 工具调用事件 -->
                 <div v-else-if="event.type === 'tool_call'" class="event-tool">
                   <span class="event-icon">🔧</span>
                   <span class="event-tool-name">{{ event.toolName }}</span>
@@ -62,8 +55,6 @@
                     {{ event.result }}
                   </span>
                 </div>
-
-                <!-- 技能匹配事件 -->
                 <div v-else-if="event.type === 'skill_match'" class="event-skill">
                   <span class="event-icon">📋</span>
                   <span>匹配技能：</span>
@@ -71,14 +62,10 @@
                     {{ s.name }} ({{ (s.confidence * 100).toFixed(0) }}%)
                   </span>
                 </div>
-
-                <!-- 状态变更事件 -->
                 <div v-else-if="event.type === 'status_change'" class="event-status">
                   <span class="event-icon">{{ statusIcon(event.newStatus) }}</span>
                   <span>状态变更：{{ statusText(event.newStatus) }}</span>
                 </div>
-
-                <!-- 文本消息 -->
                 <div v-else class="event-text-only">
                   <span class="event-text">{{ event.content }}</span>
                 </div>
@@ -86,7 +73,6 @@
             </div>
           </div>
 
-          <!-- 空状态 -->
           <div v-else class="agent-section">
             <div class="section-label">执行日志</div>
             <div class="event-empty">等待事件...</div>
@@ -100,9 +86,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 
-/**
- * 子Agent事件条目
- */
 export interface AgentEvent {
   type: 'thinking' | 'tool_call' | 'skill_match' | 'status_change' | 'text'
   content?: string
@@ -113,9 +96,6 @@ export interface AgentEvent {
   newStatus?: string
 }
 
-/**
- * 子Agent状态数据
- */
 export interface AgentInfo {
   agentId: string
   name: string

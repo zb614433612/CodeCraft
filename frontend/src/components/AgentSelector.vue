@@ -1,5 +1,19 @@
 <template>
-  <div class="agent-panel">
+  <!-- ===== 折叠模式：仅显示头像列表 ===== -->
+  <div v-if="collapsed" class="agent-selector-collapsed">
+    <div
+      v-for="agent in agentList"
+      :key="agent.id"
+      :class="['agent-collapsed-dot', { active: selectedId === agent.id }]"
+      @click="switchAgent(agent)"
+      :title="agent.name"
+    >
+      <span class="agent-collapsed-avatar">{{ agent.avatar || '🤖' }}</span>
+    </div>
+  </div>
+
+  <!-- ===== 正常模式：完整选择器 ===== -->
+  <div v-else class="agent-panel">
     <div class="agent-menu-header">
       <RobotOutlined />
       <span>Agent</span>
@@ -25,6 +39,10 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { RobotOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
 import { listAgentConfigs, updateAgentRuntime, type AgentConfig } from '@/api/agent-config'
+
+const props = defineProps<{
+  collapsed?: boolean
+}>()
 
 const emit = defineEmits<{
   (e: 'change', agentId: number | null | undefined, agent: AgentConfig | null): void
@@ -104,6 +122,45 @@ defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime })
 </script>
 
 <style scoped>
+/* ===== 折叠模式 ===== */
+.agent-selector-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px;
+}
+
+.agent-collapsed-dot {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+}
+.agent-collapsed-dot:hover {
+  border-color: rgba(139, 92, 246, 0.25);
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.12);
+  transform: translateY(-1px);
+}
+.agent-collapsed-dot.active {
+  background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.35);
+}
+.agent-collapsed-dot.active .agent-collapsed-avatar {
+  filter: brightness(1.2);
+}
+
+.agent-collapsed-avatar {
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* ===== 正常模式 ===== */
 .agent-panel { padding: 0; margin: 0 8px 8px; }
 .agent-menu-header {
   display: flex; align-items: center; gap: 6px;
@@ -127,4 +184,34 @@ defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime })
   transition: background .15s;
 }
 .agent-expand-btn:hover { background: #f0f5ff; }
+</style>
+
+<!-- 暗色模式 -->
+<style>
+[data-theme="dark"] .agent-menu-header {
+  color: #6a6880;
+}
+[data-theme="dark"] .agent-menu-item {
+  color: #a09eb8;
+}
+[data-theme="dark"] .agent-menu-item:hover {
+  background: rgba(139,92,246,0.08);
+}
+[data-theme="dark"] .agent-menu-item.active {
+  background: rgba(139,92,246,0.15);
+  color: #a78bfa;
+}
+[data-theme="dark"] .agent-expand-btn {
+  color: #a78bfa;
+}
+[data-theme="dark"] .agent-expand-btn:hover {
+  background: rgba(139,92,246,0.08);
+}
+[data-theme="dark"] .agent-collapsed-dot {
+  border-color: transparent;
+}
+[data-theme="dark"] .agent-collapsed-dot:hover {
+  border-color: rgba(139,92,246,0.35);
+  background: rgba(139,92,246,0.1);
+}
 </style>

@@ -216,3 +216,26 @@ deepseek:
       - "fork_agent"
       - "collect_agent"
       - "inspect_agent"
+
+# ==================== P2P 远程连接配置 ====================
+p2p:
+  # 是否启用 P2P 功能
+  enabled: true
+  # P2P 监听端口（IPv6 TCP）
+  port: 9527
+  # 心跳间隔（秒）
+  heartbeat-interval: 15
+  # 心跳超时（秒），超时判定对端离线
+  heartbeat-timeout: 60
+  # 重连基础延迟（秒），指数退避起点
+  reconnect-base-delay: 1
+  # 重连最大延迟（秒），指数退避上限
+  reconnect-max-delay: 60
+  # 最大消息帧大小（字节），默认 10MB
+  max-frame-length: 10485760
+  # 自签名证书有效期（天）
+  cert-validity-days: 365
+  # 证书存储目录（相对于项目根目录）
+  cert-dir: data/p2p/certs
+  # 在线节点缓存过期时间（分钟）
+  peer-cache-expire-minutes: 5

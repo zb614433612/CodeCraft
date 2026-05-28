@@ -28,6 +28,9 @@ export interface ThinkingModes {
   code_assistant: ThinkingMode
 }
 
+// 主题模式
+export type ThemeMode = 'light' | 'dark' | 'auto'
+
 export const useSettingsStore = defineStore('settings', () => {
   // 各助手的执行模式，默认 manual
   const executionModes = ref<ExecutionModes>({
@@ -43,6 +46,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const thinkingModes = ref<ThinkingModes>({
     code_assistant: 'non-thinking'
   })
+
+  // 主题模式（持久化，刷新不丢失）
+  const theme = ref<ThemeMode>('auto')
 
   // 项目工作目录（持久化，刷新不丢失）
   const projectRoot = ref('')
@@ -98,10 +104,21 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  // 获取主题模式
+  function getTheme(): ThemeMode {
+    return theme.value
+  }
+
+  // 设置主题模式
+  function setTheme(mode: ThemeMode) {
+    theme.value = mode
+  }
+
   return {
     executionModes,
     models,
     thinkingModes,
+    theme,
     projectRoot,
     getMode,
     setMode,
@@ -109,7 +126,9 @@ export const useSettingsStore = defineStore('settings', () => {
     getModel,
     setModel,
     getThinkingMode,
-    setThinkingMode
+    setThinkingMode,
+    getTheme,
+    setTheme
   }
 }, {
   persist: true

@@ -281,6 +281,14 @@ INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_t
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 12;
 
+-- 新增 SETTING 菜单：P2P连接
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(13, 'P2P连接', '/p2p', 'LinkOutlined', NULL, 13, 'SETTING');
+
+-- 管理员分配 P2P连接 菜单
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 13;
+
 -- ============================================================
 -- Agent 后台任务表（用于追踪流式任务状态、支持页面刷新后重连）
 -- ============================================================
@@ -299,3 +307,55 @@ CREATE TABLE IF NOT EXISTS agent_task (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_task_conv_id ON agent_task(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_agent_task_status ON agent_task(status);
+
+-- ============================================================
+-- P2P 聊天记录表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS p2p_chat_message (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    peer_id VARCHAR(64) NOT NULL,
+    sender_name VARCHAR(100) DEFAULT '',
+    content TEXT NOT NULL,
+    direction VARCHAR(10) NOT NULL,
+    message_type VARCHAR(20) DEFAULT 'chat',
+    agent_config_id BIGINT DEFAULT NULL,
+    agent_name VARCHAR(100) DEFAULT NULL,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_p2p_msg_peer ON p2p_chat_message(peer_id);
+CREATE INDEX IF NOT EXISTS idx_p2p_msg_time ON p2p_chat_message(created_at);
+
+-- ============================================================
+-- P2P Agent 授权记录表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS p2p_agent_authorization (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    peer_id VARCHAR(64) NOT NULL COMMENT '对方机器特征码',
+    agent_config_id BIGINT NOT NULL COMMENT '被授权的Agent配置ID',
+    agent_name VARCHAR(100) DEFAULT '' COMMENT 'Agent名称（冗余，P2P两端独立）',
+    agent_description VARCHAR(500) DEFAULT '' COMMENT 'Agent描述（冗余）',
+    agent_avatar VARCHAR(20) DEFAULT '🤖' COMMENT 'Agent头像（冗余）',
+    user_id BIGINT DEFAULT NULL COMMENT '授权用户ID',
+    direction VARCHAR(10) NOT NULL COMMENT '方向：sent=我授权给对方, received=对方授权给我',
+    status VARCHAR(10) NOT NULL DEFAULT 'active' COMMENT 'active / cancelled',
+    created_at DATETIME NOT NULL,
+    cancelled_at DATETIME,
+    INDEX idx_paa_peer_dir (peer_id, direction),
+    INDEX idx_paa_peer_agent (peer_id, agent_config_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_paa_peer_agent_dir ON p2p_agent_authorization(peer_id, agent_config_id, direction);
+
+-- ============================================================
+-- P2P Agent 会话映射表（peerId+agentId → conversationId）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS p2p_agent_conversation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    peer_id VARCHAR(64) NOT NULL COMMENT '调用方机器特征码',
+    agent_config_id BIGINT NOT NULL COMMENT '使用的Agent配置ID',
+    conversation_id BIGINT NOT NULL COMMENT '本机conversation表的会话ID',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    INDEX idx_pac_peer_agent (peer_id, agent_config_id),
+    INDEX idx_pac_conv (conversation_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_pac_peer_agent ON p2p_agent_conversation(peer_id, agent_config_id);

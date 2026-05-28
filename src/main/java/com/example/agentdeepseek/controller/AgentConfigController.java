@@ -29,6 +29,7 @@ public class AgentConfigController {
     @Operation(summary = "获取Agent配置列表")
     public ApiResponse<List<AgentConfig>> list(@RequestParam(required = false) Long userId) {
         List<AgentConfig> list = agentConfigService.listByUser(userId);
+        log.info("Agent列表查询: userId={}, count={}", userId, list.size());
         return ApiResponse.success(list);
     }
 

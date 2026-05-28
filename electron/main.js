@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
-const { spawn } = require('child_process')
+const { spawn, exec } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
@@ -292,6 +292,11 @@ function createWindow() {
 
   mainWindow.loadURL(BACKEND_URL)
 
+  // 清除 HTTP 缓存，避免覆盖安装后旧缓存与新前端资源冲突导致页面白屏
+  mainWindow.webContents.session.clearCache().then(() => {
+    console.log('HTTP 缓存已清除')
+  }).catch(() => {})
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
   })
@@ -320,9 +325,100 @@ ipcMain.handle('dialog:selectDirectory', async () => {
 })
 
 /**
+ * 注册防火墙规则（放行 P2P 端口）
+ * 支持 Windows / macOS / Linux
+ */
+function registerFirewallRules() {
+  const P2P_PORT = 9527
+  const RULE_NAME = 'CodeCraft P2P'
+
+  if (process.platform === 'win32') {
+    const checkCmd = `netsh advfirewall firewall show rule name="${RULE_NAME}"`
+    exec(checkCmd, (err, stdout) => {
+      if (stdout && stdout.includes(RULE_NAME)) {
+        console.log(`防火墙规则 "${RULE_NAME}" 已存在，跳过`)
+        return
+      }
+      const addCmd = `netsh advfirewall firewall add rule name="${RULE_NAME}" dir=in action=allow protocol=TCP localport=${P2P_PORT}`
+      exec(addCmd, (addErr) => {
+        if (addErr) {
+          console.warn('添加防火墙规则失败（可能需要管理员权限）:', addErr.message)
+        } else {
+          console.log(`防火墙规则已添加: TCP ${P2P_PORT} 入站`)
+        }
+      })
+    })
+  } else if (process.platform === 'darwin') {
+    console.log('macOS: P2P 端口防火墙规则将在首次使用时自动提示')
+  } else if (process.platform === 'linux') {
+    const checkCmd = `iptables -C INPUT -p tcp --dport ${P2P_PORT} -j ACCEPT 2>/dev/null`
+    exec(checkCmd, (err) => {
+      if (!err) {
+        console.log(`iptables 规则已存在: TCP ${P2P_PORT}`)
+        return
+      }
+      const addCmd = `iptables -A INPUT -p tcp --dport ${P2P_PORT} -j ACCEPT`
+      exec(addCmd, (addErr) => {
+        if (addErr) {
+          console.warn('添加 iptables 规则失败（可能需要 root 权限）:', addErr.message)
+        } else {
+          console.log(`iptables 规则已添加: TCP ${P2P_PORT}`)
+        }
+      })
+    })
+  }
+}
+
+/**
+ * 移除防火墙规则（应用退出时）
+ */
+function removeFirewallRules() {
+  const RULE_NAME = 'CodeCraft P2P'
+  if (process.platform === 'win32') {
+    exec(`netsh advfirewall firewall delete rule name="${RULE_NAME}"`, (err) => {
+      if (err) console.warn('移除防火墙规则失败:', err.message)
+      else console.log('防火墙规则已移除')
+    })
+  }
+}
+
+/**
+ * IPC handler：获取 P2P 状态（转发到后端 API）
+ */
+ipcMain.handle('p2p:getStatus', async () => {
+  return new Promise((resolve) => {
+    http.get(`${BACKEND_URL}/api/p2p/status`, (res) => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch { resolve(null) }
+      })
+    }).on('error', () => resolve(null))
+  })
+})
+
+/**
+ * IPC handler：获取本机 IPv6 地址
+ */
+ipcMain.handle('p2p:getAddress', async () => {
+  return new Promise((resolve) => {
+    http.get(`${BACKEND_URL}/api/p2p/address`, (res) => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch { resolve(null) }
+      })
+    }).on('error', () => resolve(null))
+  })
+})
+
+/**
  * 应用启动流程
  */
 async function start() {
+  // 注册 P2P 防火墙规则
+  registerFirewallRules()
+
   // 非开发模式：自动启动后端
   if (!DEV_MODE) {
     // 在启动后端之前，先检测 exe 文件是否被替换（覆盖安装），是则清理旧数据
@@ -362,6 +458,7 @@ app.on('activate', () => {
 })
 
 app.on('before-quit', () => {
+  removeFirewallRules()
   if (javaProcess) {
     javaProcess.kill()
     javaProcess = null

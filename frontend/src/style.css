@@ -30,24 +30,23 @@
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
+/* 暗色主题变量（手动切换 + 系统偏好均支持） */
+[data-theme="dark"] {
+  --text: #9ca3af;
+  --text-h: #f3f4f6;
+  --bg: #16171d;
+  --border: #2e303a;
+  --code-bg: #1f2028;
+  --accent: #c084fc;
+  --accent-bg: rgba(192, 132, 252, 0.15);
+  --accent-border: rgba(192, 132, 252, 0.5);
+  --social-bg: rgba(47, 48, 58, 0.5);
+  --shadow:
+    rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+}
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
+[data-theme="dark"] #social .button-icon {
+  filter: invert(1) brightness(2);
 }
 
 html, body {
@@ -311,4 +310,228 @@ code {
     right: 0;
     border-right-color: var(--border);
   }
+}
+
+/* ================================================================
+   暗色模式 — Portal 组件全局覆盖
+   Ant Design 组件通过 Portal 渲染到 body 下，需要全局选择器
+   ================================================================ */
+
+/* --- Select 下拉面板 --- */
+[data-theme="dark"] .ant-select-dropdown {
+  background: #1a1d22 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5) !important;
+}
+[data-theme="dark"] .ant-select-item {
+  color: #c4c8ce !important;
+}
+[data-theme="dark"] .ant-select-item-option-selected {
+  background: #1e2440 !important;
+}
+[data-theme="dark"] .ant-select-item-option-active {
+  background: #252830 !important;
+}
+
+/* --- DatePicker / TimePicker 弹出面板 --- */
+[data-theme="dark"] .ant-picker-dropdown .ant-picker-panel-container {
+  background: #1a1d22 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5) !important;
+}
+[data-theme="dark"] .ant-picker-panel {
+  background: #1a1d22 !important;
+}
+[data-theme="dark"] .ant-picker-header,
+[data-theme="dark"] .ant-picker-content th,
+[data-theme="dark"] .ant-picker-cell {
+  color: #c4c8ce !important;
+}
+[data-theme="dark"] .ant-picker-cell-in-view {
+  color: #e4e6ea !important;
+}
+[data-theme="dark"] .ant-picker-cell:hover .ant-picker-cell-inner {
+  background: #252830 !important;
+}
+[data-theme="dark"] .ant-picker-header button {
+  color: #8b8f98 !important;
+}
+
+/* --- Popconfirm / Popover --- */
+[data-theme="dark"] .ant-popover-inner,
+[data-theme="dark"] .ant-popconfirm .ant-popover-inner {
+  background: #1a1d22 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5) !important;
+}
+[data-theme="dark"] .ant-popover-inner-content,
+[data-theme="dark"] .ant-popconfirm .ant-popover-message {
+  color: #c4c8ce !important;
+}
+[data-theme="dark"] .ant-popover-title {
+  color: #e4e6ea !important;
+  border-bottom-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-popover-arrow::before {
+  background: #1a1d22 !important;
+}
+
+/* --- Dropdown 菜单 --- */
+[data-theme="dark"] .ant-dropdown-menu {
+  background: #1a1d22 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5) !important;
+}
+[data-theme="dark"] .ant-dropdown-menu-item {
+  color: #c4c8ce !important;
+}
+[data-theme="dark"] .ant-dropdown-menu-item:hover {
+  background: #252830 !important;
+}
+[data-theme="dark"] .ant-dropdown-menu-item-danger {
+  color: #ef4444 !important;
+}
+
+/* --- Message 消息提示 --- */
+[data-theme="dark"] .ant-message .ant-message-notice-content {
+  background: #1a1d22 !important;
+  color: #e4e6ea !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* --- Notification 通知 --- */
+[data-theme="dark"] .ant-notification .ant-notification-notice {
+  background: #1a1d22 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5) !important;
+}
+[data-theme="dark"] .ant-notification .ant-notification-notice-message {
+  color: #e4e6ea !important;
+}
+[data-theme="dark"] .ant-notification .ant-notification-notice-description {
+  color: #8b8f98 !important;
+}
+
+/* --- Tooltip --- */
+[data-theme="dark"] .ant-tooltip-inner {
+  background: #252830 !important;
+  color: #e4e6ea !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
+}
+[data-theme="dark"] .ant-tooltip-arrow-content::before {
+  background: #252830 !important;
+}
+
+/* --- Modal 确认框 --- */
+[data-theme="dark"] .ant-modal-confirm .ant-modal-confirm-body .ant-modal-confirm-title {
+  color: #e4e6ea !important;
+}
+[data-theme="dark"] .ant-modal-confirm .ant-modal-confirm-body .ant-modal-confirm-content {
+  color: #8b8f98 !important;
+}
+
+/* --- Drawer 抽屉 --- */
+[data-theme="dark"] .ant-drawer-content {
+  background: #1a1d22 !important;
+}
+[data-theme="dark"] .ant-drawer-header {
+  background: #1a1d22 !important;
+  border-bottom-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-drawer-title {
+  color: #e4e6ea !important;
+}
+
+/* --- InputNumber --- */
+[data-theme="dark"] .ant-input-number {
+  background: #141619 !important;
+  border-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-input-number-input {
+  color: #e4e6ea !important;
+}
+[data-theme="dark"] .ant-input-number-handler {
+  border-color: #2a2d33 !important;
+}
+
+/* --- Switch 开关（未选中态） --- */
+[data-theme="dark"] .ant-switch {
+  background: #3a3d44 !important;
+}
+
+/* --- Tag 标签 --- */
+[data-theme="dark"] .ant-tag {
+  border-color: #2a2d33 !important;
+}
+
+/* --- 表单校验错误 --- */
+[data-theme="dark"] .ant-form-item-explain-error {
+  color: #ef4444 !important;
+}
+
+/* --- 分页 --- */
+[data-theme="dark"] .ant-pagination-item {
+  background: #141619 !important;
+  border-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-pagination-item a {
+  color: #8b8f98 !important;
+}
+[data-theme="dark"] .ant-pagination-item-active {
+  background: #4f7df3 !important;
+  border-color: #4f7df3 !important;
+}
+[data-theme="dark"] .ant-pagination-item-active a {
+  color: #fff !important;
+}
+[data-theme="dark"] .ant-pagination-prev .ant-pagination-item-link,
+[data-theme="dark"] .ant-pagination-next .ant-pagination-item-link {
+  background: #141619 !important;
+  border-color: #2a2d33 !important;
+  color: #8b8f98 !important;
+}
+
+/* --- Empty 空状态 --- */
+[data-theme="dark"] .ant-empty-description {
+  color: #8b8f98 !important;
+}
+
+/* --- Spin 加载 --- */
+[data-theme="dark"] .ant-spin-dot-item {
+  background: #8b5cf6 !important;
+}
+
+/* --- Tabs 标签页 --- */
+[data-theme="dark"] .ant-tabs-nav {
+  background: #1a1d22 !important;
+}
+[data-theme="dark"] .ant-tabs-tab {
+  color: #8b8f98 !important;
+}
+[data-theme="dark"] .ant-tabs-tab:hover {
+  color: #e4e6ea !important;
+}
+[data-theme="dark"] .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #8b5cf6 !important;
+}
+[data-theme="dark"] .ant-tabs-ink-bar {
+  background: #8b5cf6 !important;
+}
+[data-theme="dark"] .ant-tabs-nav::before {
+  border-bottom-color: #2a2d33 !important;
+}
+
+/* --- Collapse 折叠面板 --- */
+[data-theme="dark"] .ant-collapse {
+  background: #1a1d22 !important;
+  border-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-collapse-item {
+  border-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-collapse-header {
+  color: #e4e6ea !important;
+  background: #1a1d22 !important;
+}
+[data-theme="dark"] .ant-collapse-content {
+  background: #1a1d22 !important;
+  border-top-color: #2a2d33 !important;
+}
+[data-theme="dark"] .ant-collapse-content-box {
+  color: #c4c8ce !important;
 }

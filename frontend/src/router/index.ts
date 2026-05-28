@@ -70,6 +70,11 @@ const router = createRouter({
           name: 'agent-config',
           component: () => import('@/views/AgentConfigView.vue')
         },
+        {
+          path: 'p2p',
+          name: 'p2p',
+          component: () => import('@/components/P2pPanel.vue')
+        },
 
       ]
     }

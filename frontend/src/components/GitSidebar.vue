@@ -507,3 +507,89 @@ watch(() => props.projectRoot, (val) => {
 .commit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 </style>
+
+<!-- 暗色模式 — 全局强制覆盖 -->
+<style>
+[data-theme="dark"] .git-sidebar {
+  background: #121418;
+}
+[data-theme="dark"] .git-status-header {
+  background: #1a1d22;
+  border-bottom-color: #2a2d33;
+}
+[data-theme="dark"] .branch-label {
+  color: #e4e6ea;
+}
+[data-theme="dark"] .branch-label.no-repo {
+  color: #8b8f98;
+}
+[data-theme="dark"] .refresh-btn {
+  color: #8b8f98;
+}
+[data-theme="dark"] .refresh-btn:hover:not(:disabled) {
+  color: #5ba0ff;
+}
+[data-theme="dark"] .changes-toolbar {
+  border-bottom-color: #2a2d33;
+}
+[data-theme="dark"] .toolbar-btn {
+  background: #1a1d22;
+  border-color: #2a2d33;
+  color: #c4c8ce;
+}
+[data-theme="dark"] .toolbar-btn:hover {
+  border-color: #4f7df3;
+  color: #4f7df3;
+}
+[data-theme="dark"] .loading-text,
+[data-theme="dark"] .empty-text {
+  color: #8b8f98;
+}
+[data-theme="dark"] .change-item:hover {
+  background: #1e2126;
+}
+[data-theme="dark"] .change-item.selected {
+  background: #1e2440;
+}
+[data-theme="dark"] .change-file {
+  color: #c4c8ce;
+}
+[data-theme="dark"] .change-status.untracked {
+  color: #8b8f98;
+}
+[data-theme="dark"] .diff-preview {
+  border-top-color: #2a2d33;
+}
+[data-theme="dark"] .diff-header {
+  background: #1e2126;
+  color: #8b8f98;
+}
+[data-theme="dark"] .diff-revert-btn {
+  background: #1a1d22;
+}
+[data-theme="dark"] .diff-close {
+  color: #8b8f98;
+}
+[data-theme="dark"] .diff-close:hover {
+  color: #e4e6ea;
+}
+[data-theme="dark"] .diff-text {
+  background: #141619;
+  color: #c4c8ce;
+}
+[data-theme="dark"] .commit-section {
+  background: #1a1d22;
+  border-top-color: #2a2d33;
+}
+[data-theme="dark"] .commit-input {
+  background: #141619;
+  border-color: #2a2d33;
+  color: #e4e6ea;
+}
+[data-theme="dark"] .commit-input:focus {
+  border-color: #4f7df3;
+}
+[data-theme="dark"] .commit-hint {
+  color: #22c55e;
+}
+</style>

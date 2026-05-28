@@ -57,5 +57,6 @@ npm run build
 - **ScheduleTaskView** — 定时任务管理
 - **LogView** — 系统日志查看
 - **ProfileView** — 个人资料
+- **P2pPanel** — P2P 远程协作（设备配对、Agent授权、消息收发）
 
 > 详细的项目运行说明请参见根目录的 [BUILD_AND_RUN.md](../BUILD_AND_RUN.md)
