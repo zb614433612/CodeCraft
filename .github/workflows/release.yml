@@ -74,6 +74,8 @@ jobs:
           cd electron
           npm ci 2>/dev/null || npm install
           npx electron-builder --win
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       - name: 上传产物 (Windows)
         uses: actions/upload-artifact@v4
@@ -159,11 +161,15 @@ jobs:
         run: |
           cd electron
           npm ci 2>/dev/null || npm install
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       - name: Electron 打包 (macOS)
         run: |
           cd electron
           npx electron-builder --mac
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       - name: 上传产物 (macOS)
         uses: actions/upload-artifact@v4
@@ -239,11 +245,15 @@ jobs:
         run: |
           cd electron
           npm ci 2>/dev/null || npm install
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       - name: Electron 打包 (Linux)
         run: |
           cd electron
           npx electron-builder --linux
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       - name: 上传产物 (Linux)
         uses: actions/upload-artifact@v4

@@ -2,6 +2,11 @@
   "name": "codecraft-desktop",
   "version": "1.0.6",
   "description": "CodeCraft 桌面应用（Electron）",
+  "homepage": "https://github.com/zb614433612/CodeCraft",
+  "author": {
+    "name": "CodeCraft",
+    "email": "codecraft@example.com"
+  },
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -57,7 +62,6 @@
     "dmg": {
       "title": "CodeCraft",
       "icon": "icon.icns",
-      "background": "dmg-background.png",
       "contents": [
         {
           "x": 130,
@@ -83,7 +87,8 @@
         "deb"
       ],
       "icon": "icon.png",
-      "category": "Development"
+      "category": "Development",
+      "maintainer": "codecraft@example.com"
     },
     "nsis": {
       "oneClick": false,
