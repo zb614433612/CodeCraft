@@ -54,6 +54,10 @@ public interface P2pAgentConversationMapper {
     @Update("UPDATE p2p_agent_conversation SET updated_at = NOW() WHERE id = #{id}")
     int updateTime(@Param("id") Long id);
 
+    /** 根据 peerId + agentConfigId 删除映射（用于 conversation 被删除后重建） */
+    @Delete("DELETE FROM p2p_agent_conversation WHERE peer_id = #{peerId} AND agent_config_id = #{agentConfigId}")
+    int deleteByPeerAndAgent(@Param("peerId") String peerId, @Param("agentConfigId") Long agentConfigId);
+
     /** 根据 peerId 查询所有映射 */
     @Select("SELECT * FROM p2p_agent_conversation WHERE peer_id = #{peerId}")
     @ResultMap("convMappingResult")

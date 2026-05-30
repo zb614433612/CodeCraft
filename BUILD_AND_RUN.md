@@ -7,6 +7,12 @@
 > 双击安装即可使用，无需阅读本文档。
 >
 > 本文档仅供**开发者**或**需要自行构建**的用户参考。
+> 
+> 🚀 **懒人通道**：如果只是想快速打包，直接使用一键脚本：
+> - Windows：`scripts\build.bat [版本号]`
+> - Mac/Linux：`./scripts/build.sh [版本号]`
+> 
+> 脚本会自动完成版本同步 → Maven构建 → JRE裁剪 → Electron打包。详见 [scripts/](scripts/) 目录。
 
 ## 环境要求
 

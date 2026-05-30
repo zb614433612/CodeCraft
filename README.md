@@ -346,11 +346,30 @@ codecraft/
 │   ├── package.json              # Electron 配置
 │   └── start.sh / start.bat     # 启动脚本
 ├── pom.xml                       # Maven 构建配置
+├── scripts/                      # 自动化脚本（版本同步 / 一键构建）
+├── .github/workflows/            # GitHub Actions CI（自动发布）
 ├── BUILD_AND_RUN.md              # 构建与运行指南
 ├── CHANGELOG.md                   # 版本更新日志
 ├── .gitignore                    # Git 忽略规则
 └── application-local.yml.example # 本地配置模板
 ```
+
+---
+
+## 📚 文档导航
+
+想深入了解 CodeCraft 的架构和开发细节？查看 [docs/](docs/) 目录：
+
+| 文档 | 适合谁 | 说明 |
+|------|--------|------|
+| [架构全景图](docs/ARCHITECTURE.md) | 新人 / AI 协作 | 5 分钟建立全局认知 |
+| [工具系统](docs/TOOL_SYSTEM.md) | 开发者 | 如何新增一个 AI Tool |
+| [核心引擎](docs/DEEPSEEK_SERVICE_IMPL.md) | 资深开发者 | Tool Loop 状态机 + 方法调用拓扑 |
+| [P2P 协作](docs/P2P_SYSTEM.md) | 开发者 | 远程 Agent 调用全链路 |
+| [快照系统](docs/SNAPSHOT_SYSTEM.md) | 开发者 | 代码备份与回滚机制 |
+| [开发速查](docs/DEV_QUICKREF.md) | 日常开发 | 常用命令 / 端口 / 账号 |
+| [发布清单](docs/RELEASE_CHECKLIST.md) | 维护者 | 打包发布 step-by-step |
+| [常见问题](docs/FAQ.md) | 所有人 | 16 条已踩坑 FAQ |
 
 ---
 

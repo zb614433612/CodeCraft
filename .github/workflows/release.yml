@@ -1,0 +1,280 @@
+# ============================================================
+# CodeCraft 自动发布工作流
+# 触发条件：推送 v* 标签（如 v1.0.6）
+# 自动构建 Win/Mac/Linux 三平台产物并创建 GitHub Release
+# ============================================================
+
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 1.0.6，不填则使用 tag）'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ==================== Windows 构建 ====================
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 提取版本号
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "📦 版本: $VER"
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 同步版本号
+        shell: bash
+        run: bash scripts/sync-version.sh
+
+      - name: Maven 构建
+        run: mvn clean package -DskipTests -B
+
+      - name: jlink 裁剪 JRE
+        shell: cmd
+        run: |
+          if not exist "electron\jre\bin\java.exe" (
+            echo 正在裁剪 JRE...
+            "%JAVA_HOME%\bin\jlink.exe" ^
+              --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
+              --strip-debug --compress 2 --no-header-files --no-man-pages ^
+              --output electron\jre
+          ) else (
+            echo 内置 JRE 已存在，跳过
+          )
+
+      - name: Electron 打包 (Windows)
+        run: |
+          cd electron
+          npm install
+          npm run dist:win
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: 上传产物 (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: electron/release/CodeCraft-Setup-*.exe
+          if-no-files-found: error
+
+  # ==================== macOS 构建 ====================
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 提取版本号
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "📦 版本: $VER"
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 同步版本号
+        run: bash scripts/sync-version.sh
+
+      - name: Maven 构建
+        run: mvn clean package -DskipTests -B
+
+      - name: jlink 裁剪 JRE
+        run: |
+          if [ ! -d "electron/jre/bin" ]; then
+            echo "正在裁剪 JRE..."
+            export JAVA_HOME="$JAVA_HOME"
+            "$JAVA_HOME/bin/jlink" \
+              --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+              --strip-debug --compress 2 --no-header-files --no-man-pages \
+              --output electron/jre
+          else
+            echo "内置 JRE 已存在，跳过"
+          fi
+
+      - name: 生成 macOS 图标
+        run: |
+          if [ ! -f "electron/icon.icns" ] || [ "electron/icon.png" -nt "electron/icon.icns" ]; then
+            echo "正在生成 icon.icns..."
+            ICONSET="$(mktemp -d)/icon.iconset"
+            mkdir -p "$ICONSET"
+            sips -z 16 16     electron/icon.png --out "$ICONSET/icon_16x16.png"
+            sips -z 32 32     electron/icon.png --out "$ICONSET/icon_16x16@2x.png"
+            sips -z 32 32     electron/icon.png --out "$ICONSET/icon_32x32.png"
+            sips -z 64 64     electron/icon.png --out "$ICONSET/icon_32x32@2x.png"
+            sips -z 128 128   electron/icon.png --out "$ICONSET/icon_128x128.png"
+            sips -z 256 256   electron/icon.png --out "$ICONSET/icon_128x128@2x.png"
+            sips -z 256 256   electron/icon.png --out "$ICONSET/icon_256x256.png"
+            sips -z 512 512   electron/icon.png --out "$ICONSET/icon_256x256@2x.png"
+            sips -z 512 512   electron/icon.png --out "$ICONSET/icon_512x512.png"
+            sips -z 1024 1024 electron/icon.png --out "$ICONSET/icon_512x512@2x.png"
+            iconutil -c icns "$ICONSET" -o electron/icon.icns
+            rm -rf "$(dirname "$ICONSET")"
+          fi
+
+      - name: Electron 打包 (macOS)
+        run: |
+          cd electron
+          npm install
+          npm run dist:mac
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: 上传产物 (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: electron/release/CodeCraft-*.dmg
+          if-no-files-found: error
+
+  # ==================== Linux 构建 ====================
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 提取版本号
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "📦 版本: $VER"
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 同步版本号
+        run: bash scripts/sync-version.sh
+
+      - name: Maven 构建
+        run: mvn clean package -DskipTests -B
+
+      - name: jlink 裁剪 JRE
+        run: |
+          if [ ! -d "electron/jre/bin" ]; then
+            echo "正在裁剪 JRE..."
+            "$JAVA_HOME/bin/jlink" \
+              --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+              --strip-debug --compress 2 --no-header-files --no-man-pages \
+              --output electron/jre
+          else
+            echo "内置 JRE 已存在，跳过"
+          fi
+
+      - name: Electron 打包 (Linux)
+        run: |
+          cd electron
+          npm install
+          npm run dist:linux
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: 上传产物 (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installer
+          path: |
+            electron/release/CodeCraft-*.AppImage
+            electron/release/CodeCraft-*.deb
+          if-no-files-found: error
+
+  # ==================== 创建 Release ====================
+  create-release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 提取版本号
+        id: version
+        run: |
+          VER="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+
+      - name: 列出产物
+        run: |
+          echo "=== 所有产物 ==="
+          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) -exec ls -lh {} \;
+
+      - name: 创建 GitHub Release 并上传产物
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "CodeCraft v${{ steps.version.outputs.version }}"
+          body: |
+            ## 🚀 CodeCraft v${{ steps.version.outputs.version }}
+
+            ### 📥 下载
+            - **Windows**：下载 `CodeCraft-Setup-${{ steps.version.outputs.version }}.exe` 双击安装
+            - **macOS**：下载 `CodeCraft-${{ steps.version.outputs.version }}.dmg` 拖入 Applications
+            - **Linux**：下载 `.AppImage` 或 `.deb`
+
+            ### 💡 说明
+            - 安装包自带 JRE 运行环境，无需安装 Java
+            - 首次使用请在「配置」页面设置 DeepSeek API Key
+
+            > 📝 完整变更见 [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md)
+          files: |
+            windows-installer/*.exe
+            macos-installer/*.dmg
+            linux-installer/*.AppImage
+            linux-installer/*.deb
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -225,6 +225,13 @@
                       <span>调用 Agent「{{ msg.agentName }}」</span>
                     </div>
                     <div class="agent-call-body">{{ extractAgentMessage(msg.content) }}</div>
+                    <!-- 调用方的loading动画 -->
+                    <div v-if="msg.loading" class="agent-loading-inline">
+                      <div class="agent-loading-dots">
+                        <span></span><span></span><span></span>
+                      </div>
+                      <span class="agent-loading-text">AI 正在思考中...</span>
+                    </div>
                   </template>
 
                   <!-- Agent响应消息 -->
@@ -233,10 +240,7 @@
                       <span class="agent-resp-icon">✨</span>
                       <span>Agent「{{ msg.name }}」响应</span>
                     </div>
-                    <div class="agent-resp-body">{{ truncateContent(msg.content, 400) }}</div>
-                    <a v-if="msg.content && msg.content.length > 400" class="agent-detail-link" href="/code-assistant" target="_blank">
-                      查看完整响应 →
-                    </a>
+                    <div class="agent-resp-body markdown-content" v-html="renderMarkdown(msg.content)"></div>
                   </template>
 
                   <!-- 普通消息 / 系统消息 -->
@@ -370,6 +374,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { renderMarkdown } from '@/utils/markdown'
 import {
   getP2pStatus, getP2pAddress, setP2pName,
   generateQrCode, connectPeer, disconnectPeer, getPeers,
@@ -534,6 +539,23 @@ async function loadHistory(peerId: string) {
         agentName: m.agentName
       })
     }
+    // ★ 刷新/切换页面后恢复loading状态：如果agent_invoke之后没有同Agent的response，说明AI还在执行
+    for (let i = 0; i < chatHistory.value.length; i++) {
+      const msg = chatHistory.value[i]
+      if (msg.messageType === 'agent_invoke') {
+        let hasResponse = false
+        for (let j = i + 1; j < chatHistory.value.length; j++) {
+          const later = chatHistory.value[j]
+          if (later.messageType === 'agent_response' && later.agentName === msg.agentName) {
+            hasResponse = true
+            break
+          }
+        }
+        if (!hasResponse) {
+          (msg as any).loading = true
+        }
+      }
+    }
     scrollChat()
   } catch (e) { /* */ }
 }
@@ -562,15 +584,38 @@ async function pollChat() {
     const msgs = await pollMessages(selectedPeer.value.peerId)
     if (msgs.length > 0) {
       for (const m of msgs) {
-        chatHistory.value.push({
-          from: 'peer',
-          name: m.name || '未知',
-          content: m.content,
-          time: formatTime(),
-          messageType: (m as any).messageType || 'chat',
-          agentConfigId: (m as any).agentConfigId,
-          agentName: (m as any).agentName
-        })
+        const msgType = (m as any).messageType || 'chat'
+        const agentName = (m as any).agentName
+        // ★ 根据后端传来的 direction 判断消息角度 direction='sent'→我发出的
+        const dir = (m as any).direction
+        const from = dir === 'sent' ? 'me' : 'peer'
+
+        // 被调用方收到 agent_invoke 时显示loading
+        if (msgType === 'agent_invoke' && from === 'peer') {
+          chatHistory.value.push({
+            from, name: m.name || '系统',
+            content: m.content, time: formatTime(),
+            messageType: 'agent_invoke',
+            agentConfigId: (m as any).agentConfigId, agentName,
+            loading: true
+          })
+        } else {
+          // 收到 agent_response → 关掉最近一条仍在loading的invoke（不限方向，调用方/被调用方都适用）
+          if (msgType === 'agent_response') {
+            for (let i = chatHistory.value.length - 1; i >= 0; i--) {
+              if (chatHistory.value[i].messageType === 'agent_invoke' && (chatHistory.value[i] as any).loading) {
+                (chatHistory.value[i] as any).loading = false
+                break
+              }
+            }
+          }
+          chatHistory.value.push({
+            from, name: m.name || '未知',
+            content: m.content, time: formatTime(),
+            messageType: msgType,
+            agentConfigId: (m as any).agentConfigId, agentName
+          })
+        }
       }
       scrollChat()
     }
@@ -641,7 +686,8 @@ async function doSendAgentInvoke() {
     from: 'me', name: myName.value || '未知',
     content: `调用 Agent「${agentName}」: ${message}`,
     time: formatTime(), messageType: 'agent_invoke',
-    agentConfigId: selectedAgentId.value, agentName
+    agentConfigId: selectedAgentId.value, agentName,
+    loading: true  // 加载中标记
   })
   scrollChat()
   try { await invokeAgent(selectedPeer.value.peerId, selectedAgentId.value, message) } catch (e) { /* */ }
@@ -676,7 +722,7 @@ onUnmounted(() => {
 })
 </script>
 
-<style scoped>
+<style>
 /* ============================================================
    P2P Panel v3 — 双模式聊天 · Bento卡片 · 暗色增强 · 微交互
    ============================================================ */
@@ -1158,6 +1204,39 @@ onUnmounted(() => {
 .agent-call-icon { font-size: 14px; }
 .agent-call-body { font-size: 13.5px; color: #fff; }
 
+/* Agent调用消息内的loading动画 */
+.agent-loading-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.2);
+}
+.agent-loading-inline .agent-loading-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.agent-loading-inline .agent-loading-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.7);
+  animation: dotBounce 1.4s ease-in-out infinite;
+}
+.agent-loading-inline .agent-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.agent-loading-inline .agent-loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+.agent-loading-inline .agent-loading-text {
+  font-size: 11px;
+  color: rgba(255,255,255,0.7);
+  font-weight: 500;
+}
+@keyframes dotBounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
 /* Agent 响应消息内部 */
 .agent-resp-header {
   display: flex; align-items: center; gap: 6px;
@@ -1170,6 +1249,7 @@ onUnmounted(() => {
   font-size: 13.5px; line-height: 1.6; white-space: pre-wrap;
   word-break: break-word; color: var(--text-1);
 }
+
 .agent-detail-link {
   display: inline-block; margin-top: 8px;
   font-size: 12px; color: var(--accent); text-decoration: none;
@@ -1487,5 +1567,162 @@ onUnmounted(() => {
 [data-theme="dark"] :deep(.ant-btn-default:hover) {
   color: #8b5cf6;
   border-color: #8b5cf6;
+}
+
+/* ===== Markdown 内容排版（完整抄 AI助手 code-message 样式，类名改为 markdown-content） ===== */
+/* ===== 代码块 ===== */
+.markdown-content pre {
+  background: var(--bg-root, #f5f3fa);
+  border-radius: 8px;
+  padding: 14px 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 8px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: hidden;
+  border: 1px solid var(--border, #e8e5f0);
+}
+.markdown-content code {
+  font-family: 'SF Mono', 'Monaco', 'Fira Code', monospace;
+  font-size: 0.9em;
+}
+.markdown-content p code {
+  background: #f0edf6;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--accent, #8b5cf6);
+}
+
+/* ===== highlight.js 主题（浅色） ===== */
+.markdown-content pre code.hljs {
+  background: transparent;
+  color: var(--text-1, #1a1a2e);
+}
+.markdown-content .hljs-keyword { color: #cf222e; }
+.markdown-content .hljs-string { color: #0a3069; }
+.markdown-content .hljs-number { color: #0550ae; }
+.markdown-content .hljs-comment { color: #6e7781; font-style: italic; }
+.markdown-content .hljs-title { color: var(--accent, #8250df); }
+.markdown-content .hljs-built_in { color: #0550ae; }
+.markdown-content .hljs-type { color: #0550ae; }
+.markdown-content .hljs-literal { color: #0550ae; }
+.markdown-content .hljs-attr { color: #0550ae; }
+.markdown-content .hljs-selector-class { color: #0550ae; }
+.markdown-content .hljs-meta { color: var(--accent, #8250df); }
+.markdown-content .hljs-tag { color: #116329; }
+.markdown-content .hljs-name { color: #116329; }
+.markdown-content .hljs-attribute { color: #0550ae; }
+
+/* ===== Diff 高亮（浅色） ===== */
+.markdown-content .hljs-addition {
+  background: #e6ffed;
+  color: #1a7f37;
+  display: inline-block;
+  width: 100%;
+}
+.markdown-content .hljs-deletion {
+  background: #ffebe9;
+  color: #cf222e;
+  display: inline-block;
+  width: 100%;
+}
+.markdown-content .hljs-section { color: var(--accent, #8b5cf6); font-weight: 700; }
+
+/* ===== 列表排版 ===== */
+.markdown-content ol,
+.markdown-content ul {
+  padding-left: 28px;
+  margin: 6px 0;
+  text-align: left;
+}
+.markdown-content li {
+  margin-bottom: 4px;
+  line-height: 1.75;
+  text-align: left;
+}
+.markdown-content li p { margin: 0; display: inline; }
+.markdown-content p {
+  margin: 6px 0;
+  line-height: 1.75;
+  text-align: left;
+}
+.markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4 {
+  margin: 14px 0 6px;
+  color: var(--text-1, #1a1a2e);
+  text-align: left;
+}
+.markdown-content blockquote {
+  margin: 8px 0;
+  padding: 6px 14px;
+  border-left: 3px solid var(--accent, #8b5cf6);
+  color: var(--text-2, #5c5c78);
+  background: var(--bg-root, #f5f3fa);
+  border-radius: 0 6px 6px 0;
+}
+.markdown-content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.markdown-content th, .markdown-content td {
+  border: 1px solid var(--border, #e8e5f0);
+  padding: 6px 10px;
+  text-align: left;
+}
+.markdown-content th {
+  background: #f0edf6;
+  font-weight: 700;
+}
+
+/* ===== 暗色模式适配（完整抄 AI助手） ===== */
+[data-theme="dark"] .markdown-content pre {
+  background: #1a1925;
+  border-color: #2a2838;
+}
+[data-theme="dark"] .markdown-content p code {
+  background: #2a2838;
+  color: #a78bfa;
+}
+[data-theme="dark"] .markdown-content blockquote {
+  background: #1a1925;
+  color: #a09eb8;
+}
+[data-theme="dark"] .markdown-content th { background: #1e1d2c; }
+[data-theme="dark"] .markdown-content td {
+  background: #1a1925;
+  color: #a09eb8;
+}
+[data-theme="dark"] .markdown-content th,
+[data-theme="dark"] .markdown-content td { border-color: #2a2838; }
+[data-theme="dark"] .markdown-content table {
+  background: #1a1925;
+}
+
+/* hljs diff 高亮 — 暗色 */
+[data-theme="dark"] .markdown-content .hljs-addition {
+  background: rgba(16,185,129,0.12);
+  color: #4ade80;
+}
+[data-theme="dark"] .markdown-content .hljs-deletion {
+  background: rgba(239,68,68,0.12);
+  color: #f87171;
+}
+
+/* hljs 语法高亮 — 暗色 */
+[data-theme="dark"] .markdown-content .hljs-keyword { color: #f87171; }
+[data-theme="dark"] .markdown-content .hljs-string { color: #a5d6ff; }
+[data-theme="dark"] .markdown-content .hljs-number { color: #79c0ff; }
+[data-theme="dark"] .markdown-content .hljs-comment { color: #6a6880; }
+[data-theme="dark"] .markdown-content .hljs-built_in { color: #79c0ff; }
+[data-theme="dark"] .markdown-content .hljs-type { color: #79c0ff; }
+[data-theme="dark"] .markdown-content .hljs-literal { color: #79c0ff; }
+[data-theme="dark"] .markdown-content .hljs-attr { color: #79c0ff; }
+[data-theme="dark"] .markdown-content .hljs-tag { color: #7ee787; }
+[data-theme="dark"] .markdown-content .hljs-name { color: #7ee787; }
+[data-theme="dark"] .markdown-content .hljs-attribute { color: #79c0ff; }
+[data-theme="dark"] .markdown-content .hljs-selector-class { color: #79c0ff; }
+[data-theme="dark"] .markdown-content pre code.hljs {
+  color: #e4e2f0;
 }
 </style>

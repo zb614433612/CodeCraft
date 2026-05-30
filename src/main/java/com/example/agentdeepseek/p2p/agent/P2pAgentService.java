@@ -414,17 +414,30 @@ public class P2pAgentService {
     /**
      * 获取或创建 peerId + agentConfigId 对应的会话
      * 实现上下文继承：同一台机器对同一Agent始终复用同一会话
+     * <p>
+     * ★ 如果映射表中的 conversation 已被删除（用户清除了聊天记录），
+     *   则删除旧映射并创建新会话，避免复用已删除的 conversation 导致 AI 响应为空。
+     * </p>
      */
     private Long getOrCreateConversation(String peerId, Long agentConfigId, String agentName, Long userId) {
         P2pAgentConversation mapping = convMappingMapper.findByPeerAndAgent(peerId, agentConfigId);
         if (mapping != null) {
-            convMappingMapper.updateTime(mapping.getId());
-            log.info("[P2P-Agent] Reusing conversation {} for peer={}, agent={}",
-                    mapping.getConversationId(), peerId, agentConfigId);
-            return mapping.getConversationId();
+            // ★ 检查 conversation 是否还存在（用户可能删除了聊天记录）
+            var existingConv = conversationMapper.selectById(mapping.getConversationId());
+            if (existingConv.isPresent()) {
+                convMappingMapper.updateTime(mapping.getId());
+                log.info("[P2P-Agent] Reusing conversation {} for peer={}, agent={}",
+                        mapping.getConversationId(), peerId, agentConfigId);
+                return mapping.getConversationId();
+            } else {
+                // conversation 已被删除，删除旧映射，重新创建
+                log.warn("[P2P-Agent] Conversation {} was deleted, removing mapping and creating new one for peer={}, agent={}",
+                        mapping.getConversationId(), peerId, agentConfigId);
+                convMappingMapper.deleteByPeerAndAgent(peerId, agentConfigId);
+            }
         }
 
-        // 创建新会话（userId 设为 1=admin，确保 AI 助手页面能查到）
+        // 创建新会话
         Conversation conv = new Conversation();
         conv.setName("P2P-" + agentName + "-" + peerId.substring(0, 8));
         conv.setUserId(userId); // 使用调用方传过来的 userId
@@ -609,6 +622,7 @@ public class P2pAgentService {
             ObjectNode payload = MAPPER.createObjectNode();
             payload.put("name", senderName);
             payload.put("content", content);
+            payload.put("direction", direction);
             payload.put("messageType", messageType);
             if (agentConfigId != null) payload.put("agentConfigId", agentConfigId);
             if (agentName != null) payload.put("agentName", agentName);

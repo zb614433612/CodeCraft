@@ -2,6 +2,7 @@ package com.example.agentdeepseek.p2p.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
 import com.example.agentdeepseek.mapper.P2pKnownPeerMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.example.agentdeepseek.model.entity.P2pChatMessage;
 import com.example.agentdeepseek.model.entity.P2pKnownPeer;
 import com.example.agentdeepseek.p2p.agent.P2pAgentService;
@@ -232,21 +233,32 @@ public class P2pController {
         List<MessageFrame> frames = connectionManager.pollMessages(peerId);
         List<Map<String, Object>> messages = frames.stream().map(frame -> {
             Map<String, Object> msg = new HashMap<>();
-            // 解析 JSON  payload：{"name":"...","content":"...","messageType":"...","agentConfigId":...,"agentName":"..."}
-            String payload = frame.getPayloadAsString();
-            String name = extractJsonValue(payload, "name");
-            String content = extractJsonValue(payload, "content");
-            msg.put("name", name != null ? getDisplayName(peerId, name) : "未知");
-            msg.put("content", content != null ? content : payload);
-            // 扩展字段（Agent 消息）
-            String msgType = extractJsonValue(payload, "messageType");
-            msg.put("messageType", msgType != null ? msgType : "chat");
-            String agentConfigIdStr = extractJsonValue(payload, "agentConfigId");
-            if (agentConfigIdStr != null) {
-                try { msg.put("agentConfigId", Long.parseLong(agentConfigIdStr)); } catch (NumberFormatException ignored) {}
+            try {
+                // ★ 用 ObjectMapper 完整解析 JSON（替换原来的 extractJsonValue 字符串查找方式）
+                String payload = frame.getPayloadAsString();
+                JsonNode node = MAPPER.readTree(payload);
+                String name = node.has("name") ? node.get("name").asText() : null;
+                String content = node.has("content") ? node.get("content").asText() : null;
+                msg.put("name", name != null ? getDisplayName(peerId, name) : "未知");
+                msg.put("content", content != null ? content : payload);
+                // 扩展字段
+                String msgType = node.has("messageType") ? node.get("messageType").asText() : "chat";
+                msg.put("messageType", msgType);
+                if (node.has("agentConfigId") && !node.get("agentConfigId").isNull()) {
+                    msg.put("agentConfigId", node.get("agentConfigId").asLong());
+                }
+                if (node.has("agentName") && !node.get("agentName").isNull()) {
+                    msg.put("agentName", node.get("agentName").asText());
+                }
+                // 方向字段（让前端知道是"我"发出的还是对方发出的）
+                if (node.has("direction") && !node.get("direction").isNull()) {
+                    msg.put("direction", node.get("direction").asText());
+                }
+            } catch (Exception e) {
+                log.warn("[P2P] Failed to parse payload for peer {}: {}", peerId, e.getMessage());
+                msg.put("content", frame.getPayloadAsString());
+                msg.put("messageType", "chat");
             }
-            String agentName = extractJsonValue(payload, "agentName");
-            if (agentName != null) msg.put("agentName", agentName);
             return msg;
         }).collect(Collectors.toList());
         return ApiResponse.success(messages);
