@@ -72,7 +72,7 @@ jobs:
       - name: Electron 打包 (Windows)
         run: |
           cd electron
-          npm ci 2>/dev/null || npm install
+          npm install
           npx electron-builder --win
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
