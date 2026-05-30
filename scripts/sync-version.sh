@@ -12,7 +12,8 @@ PKG="$PROJECT_ROOT/electron/package.json"
 
 # -------------------- 提取 pom.xml 版本号 --------------------
 # 匹配 <version>1.2.3</version>（取第一个，即项目版本）
-VERSION=$(grep -oPm1 '<version>\K[^<]+' "$POM" | head -1)
+# 注意：macOS 自带 BSD grep 不支持 -P，用 sed 替代
+VERSION=$(sed -n '/<version>/{s/.*<version>\(.*\)<\/version>.*/\1/p;q}' "$POM")
 
 if [ -z "$VERSION" ]; then
     echo "❌ 无法从 pom.xml 提取版本号"

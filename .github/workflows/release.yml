@@ -81,7 +81,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: electron/release/CodeCraft-Setup-*.exe
+          path: electron/release/CodeCraft*Setup*.exe
           if-no-files-found: error
 
   # ==================== macOS 构建 ====================
@@ -216,6 +216,21 @@ jobs:
             echo "内置 JRE 已存在，跳过"
           fi
 
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfuse2 rpm 2>/dev/null || true
+          echo "✅ 系统依赖已就绪"
+
+      - name: 验证构建产物
+        run: |
+          echo "=== JAR 文件 ==="
+          ls -lh target/*.jar 2>/dev/null || echo "❌ JAR 未找到"
+          echo "=== electron/ 目录 ==="
+          ls -lh electron/ 2>/dev/null || echo "❌ electron/ 不存在"
+          echo "=== JRE ==="
+          ls -lh electron/jre/bin/java 2>/dev/null || echo "⚠️ JRE 未裁剪"
+
       - name: Electron 打包 (Linux)
         run: |
           cd electron
@@ -270,7 +285,7 @@ jobs:
 
             > 📝 完整变更见 [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md)
           files: |
-            windows-installer/*.exe
+            windows-installer/CodeCraft*Setup*.exe
             macos-installer/*.dmg
             linux-installer/*.AppImage
             linux-installer/*.deb
