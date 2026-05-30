@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================
 # sync-version.sh — 版本号同步脚本
-# 从 pom.xml 提取版本号，自动同步到 electron/package.json
+# 用法: sync-version.sh [版本号]
+#   - 有参数：直接使用传入的版本号（CI 环境推荐）
+#   - 无参数：从 pom.xml 自动提取（本地开发用）
 # ============================================================
 set -euo pipefail
 
@@ -10,17 +12,21 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 POM="$PROJECT_ROOT/pom.xml"
 PKG="$PROJECT_ROOT/electron/package.json"
 
-# -------------------- 提取 pom.xml 版本号 --------------------
-# 匹配 <version>1.2.3</version>（取第一个，即项目版本）
-# 注意：macOS 自带 BSD grep 不支持 -P，用 sed 替代
-VERSION=$(sed -n '/<version>/{s/.*<version>\(.*\)<\/version>.*/\1/p;q}' "$POM")
-
-if [ -z "$VERSION" ]; then
-    echo "❌ 无法从 pom.xml 提取版本号"
-    exit 1
+# -------------------- 获取版本号 --------------------
+if [ -n "${1:-}" ]; then
+    # CI 环境：直接使用传入的版本号（最可靠）
+    VERSION="$1"
+    echo "📦 使用传入版本: $VERSION"
+else
+    # 本地开发：从 pom.xml 提取项目版本（跳过 parent 中的 version）
+    # 策略：找 <artifactId>codecraft</artifactId> 后面的 <version>
+    VERSION=$(sed -n '/<artifactId>codecraft<\/artifactId>/{n;s/.*<version>\(.*\)<\/version>.*/\1/p;q;}' "$POM")
+    if [ -z "$VERSION" ]; then
+        echo "❌ 无法从 pom.xml 提取版本号"
+        exit 1
+    fi
+    echo "📦 从 pom.xml 提取版本: $VERSION"
 fi
-
-echo "📦 当前版本: $VERSION"
 
 # -------------------- 更新 package.json --------------------
 # ① 更新顶层的 "version" 字段
