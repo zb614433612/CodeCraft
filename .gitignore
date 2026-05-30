@@ -53,6 +53,9 @@ src/main/resources/static/
 data/
 logs/
 
+### Spring Boot (extracted jar)
+BOOT-INF/
+
 ### Snapshots (auto-generated) ###
 snapshots/
 
