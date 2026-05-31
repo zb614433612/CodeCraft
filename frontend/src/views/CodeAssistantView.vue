@@ -2172,7 +2172,11 @@ const optimizeMessage = async () => {
   isOptimizing.value = true
   try {
     const result = await optimizePrompt(text)
-    inputMessage.value = result
+    // ★ 如果用户在优化期间已发送消息，不要覆盖已清空的输入框
+    //    （否则优化结果会在消息发送完成后"复活"输入框内容）
+    if (!isSending.value) {
+      inputMessage.value = result
+    }
   } catch (e) {
     message.warning('优化失败，请稍后重试')
   } finally {
@@ -2255,6 +2259,10 @@ const sendMessage = async () => {
   }
   messages.value[convId].push(userMsg)
   inputMessage.value = ''
+  // ★ 关键：先让 Vue 完成 DOM 更新（清空输入框），再禁用 textarea
+  //    否则 Ant Design Vue 的 a-textarea 在 disabled 状态下不响应 v-model 变化，
+  //    导致输入框直到流式结束后（isSending=false）才显示为空
+  await nextTick()
   isSending.value = true
   // ★ 重置 currentStreamSessionId，确保新会话的 SSE 流能设置新的真实 sessionId
   // 否则上一次流式残留的值会导致补充需求发到旧的会话
@@ -2435,6 +2443,12 @@ const sendMessage = async () => {
     message.error('发送失败: ' + (error.message || '未知错误'))
   } finally {
     isSending.value = false
+    // ★ 兜底清空输入框：确保消息发送后输入条一定被清空
+    //    （第 2257 行已有 inputMessage.value = ''，但若发送过程中出现异常提前 return，
+    //      或 Vue 响应式更新时序问题导致视图未更新，这里再次清空确保万无一失）
+    if (inputMessage.value !== '') {
+      inputMessage.value = ''
+    }
     stopElapsedTimer()
     streamStatus.value = ''
     stopAbortController.value = null
