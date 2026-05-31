@@ -193,8 +193,9 @@
         :min-item-size="80"
         key-field="id"
         v-slot="{ item: msg, active }"
+        @scroll.passive="handleMessageListScroll"
       >
-        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '']">
+        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [streamingUpdateTick] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '']">
         <div :class="['message-item', msg.role]">
           <div class="message-avatar">
             <div v-if="msg.role === 'user'" class="avatar user-avatar">
@@ -243,8 +244,13 @@
                 </span>
                 <span class="thinking-hint">点击{{ getThinkingVisible(msg.id) ? '收起' : '展开' }}</span>
               </div>
-              <div v-if="getThinkingVisible(msg.id)" class="thinking-content" :data-think-scroll="msg.id">
+              <div v-if="getThinkingVisible(msg.id)" class="thinking-content" :data-think-scroll="msg.id" @scroll.passive="handleThinkScroll">
                 <div class="thinking-text" v-html="formatThinking(msg.thinking, msg.toolResults)" @click="handleToolCardClick"></div>
+                <div v-if="msg.isStreaming && thinkShowScrollBtn" class="think-scroll-btn-wrap">
+                  <div class="think-scroll-btn" @click.stop="thinkScrollToBottom" title="回到底部">
+                    <DownOutlined />
+                  </div>
+                </div>
               </div>
             </div>
             <div class="message-text code-message" v-html="formatMessage(msg.content)" v-if="msg.content"></div>
@@ -253,11 +259,44 @@
         </DynamicScrollerItem>
       </DynamicScroller>
 
+      <!-- 回到底部浮动按钮：流式输出时用户手动上滚后显示 -->
+      <transition name="scroll-btn-fade">
+        <div
+          v-if="showScrollToBottomBtn && currentMessages.length > 0"
+          class="scroll-to-bottom-btn"
+          @click="scrollToBottomManually"
+          title="回到底部"
+        >
+          <DownOutlined />
+        </div>
+      </transition>
+
       <!-- 流式加载指示器 -->
       <div v-if="isSending &amp;&amp; streamStatus" class="stream-indicator">
         <span class="stream-pulse-dot"></span>
         <span class="stream-indicator-text">{{ streamStatus }}</span>
         <span class="stream-elapsed" v-if="elapsedTime > 0">{{ formatElapsed(elapsedTime) }}</span>
+      </div>
+
+      <!-- 补充需求面板（仅在流式输出中且无待审批问题时显示） -->
+      <div v-if="isSending &amp;&amp; !pendingQuestion" class="supplement-panel">
+        <!-- 收起状态：显示「补充需求」按钮 -->
+        <div v-if="!showSupplementInput" class="supplement-trigger" @click="showSupplementInput = true">
+          <span class="supplement-icon">💡</span>
+          <span>补充需求</span>
+        </div>
+        <!-- 展开状态：输入框 + 发送/取消按钮 -->
+        <div v-else class="supplement-input-row">
+          <a-input
+            ref="supplementInputRef"
+            v-model:value="supplementMessage"
+            placeholder="输入补充需求，AI 将在下一轮处理中收到..."
+            @pressEnter="sendSupplement"
+            size="small"
+          />
+          <a-button type="primary" size="small" @click="sendSupplement" :loading="supplementSending">发送</a-button>
+          <a-button size="small" @click="cancelSupplement">取消</a-button>
+        </div>
       </div>
 
       <!-- ask_user 问答面板 -->
@@ -268,7 +307,7 @@
             <span class="ask-user-header-icon">🔒</span>
             需要授权
           </div>
-          <div class="ask-user-question">{{ pendingQuestion.question }}</div>
+          <div class="ask-user-question" v-html="formatQuestion(pendingQuestion.question)"></div>
           <div class="permission-btn-grid">
             <a-button type="primary" class="permission-btn permission-btn-approve" @click="handlePermissionAction('approve')">同意</a-button>
             <a-button type="primary" ghost class="permission-btn permission-btn-approve-all" @click="handlePermissionAction('approve_all')">本轮对话全部同意</a-button>
@@ -295,7 +334,7 @@
             <span class="ask-user-header-icon">💬</span>
             需要确认
           </div>
-          <div class="ask-user-question">{{ pendingQuestion.question }}</div>
+          <div class="ask-user-question" v-html="formatQuestion(pendingQuestion.question)"></div>
           <div class="ask-user-input-row">
             <a-input
               v-model:value="pendingQuestionAnswer"
@@ -469,9 +508,19 @@
             v-model:value="inputMessage"
             placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送）"
             :auto-size="{ minRows: 1, maxRows: 8 }"
+            :disabled="isSending || isOptimizing"
             @keydown.enter.exact.prevent="sendMessage"
             @keydown.shift.enter="handleShiftEnter"
           />
+          <a-button
+            class="optimize-btn"
+            @click="optimizeMessage"
+            :disabled="!inputMessage.trim() || isOptimizing"
+            title="AI 优化提示词"
+          >
+            <template v-if="!isOptimizing">✨</template>
+            <LoadingOutlined v-else spin />
+          </a-button>
           <a-button
             v-if="isSending"
             class="stop-btn"
@@ -492,7 +541,7 @@
         <div class="input-footer">
           <div class="footer-left">
             <div class="mode-selector">
-              <SettingOutlined class="mode-icon" />
+              <span class="mode-emoji">🛡️</span>
               <span class="mode-label">执行</span>
               <a-select
                 :value="agentRuntime.executionMode"
@@ -501,12 +550,12 @@
                 class="mode-select"
                 dropdown-class-name="mode-dropdown"
               >
-                <a-select-option value="manual">手动 - 询问后执行</a-select-option>
-                <a-select-option value="auto">自动 - 直接执行</a-select-option>
+                <a-select-option value="manual">手动</a-select-option>
+                <a-select-option value="auto">自动</a-select-option>
               </a-select>
             </div>
             <div class="mode-selector">
-              <SettingOutlined class="mode-icon" />
+              <span class="mode-emoji">⚡</span>
               <a-select
                 :value="agentRuntime.model"
                 @change="(v: string) => { updateAgentRuntime('model', v) }"
@@ -514,12 +563,12 @@
                 class="model-select"
                 dropdown-class-name="mode-dropdown"
               >
-                <a-select-option value="deepseek-v4-flash">deepseek-v4-flash</a-select-option>
-                <a-select-option value="deepseek-v4-pro">deepseek-v4-pro</a-select-option>
+                <a-select-option value="deepseek-v4-flash">Flash</a-select-option>
+                <a-select-option value="deepseek-v4-pro">Pro</a-select-option>
               </a-select>
             </div>
             <div class="mode-selector">
-              <SettingOutlined class="mode-icon" />
+              <span class="mode-emoji">💡</span>
               <a-select
                 :value="agentRuntime.thinkingMode"
                 @change="(v: string) => { updateAgentRuntime('thinkingMode', v) }"
@@ -528,8 +577,8 @@
                 dropdown-class-name="mode-dropdown"
               >
                 <a-select-option value="non-thinking">关闭思考</a-select-option>
-                <a-select-option value="thinking">思考 (high)</a-select-option>
-                <a-select-option value="thinking_max">深度思考 (max)</a-select-option>
+                <a-select-option value="thinking">思考</a-select-option>
+                <a-select-option value="thinking_max">深度思考</a-select-option>
               </a-select>
             </div>
             <!-- 任务进度触发器 -->
@@ -651,7 +700,7 @@ import { ref, computed, onMounted, nextTick, watch, h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
-import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment } from '@/api/chat'
+import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment, supplementRequest, optimizePrompt } from '@/api/chat'
 import type { SkillMatchInfo } from '@/utils/sse-client'
 import type { AgentStreamEvent } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
@@ -1384,6 +1433,7 @@ const messages = ref<Record<string, ChatMessage[]>>({})
 const currentConversationId = ref<string>('')
 const inputMessage = ref('')
 const isSending = ref(false)
+const isOptimizing = ref(false)
 const isLoadingConversations = ref(false)
 const isLoadingMessages = ref(false)
 const scrollerRef = ref<any>(null)
@@ -1463,6 +1513,11 @@ const showDirBrowser = ref(false)
 const pendingQuestion = ref<{ uuid: string; question: string; askType?: string } | null>(null)
 const pendingQuestionAnswer = ref('')
 const pendingShowCustomInput = ref(false)
+// 补充需求状态
+const showSupplementInput = ref(false)
+const supplementMessage = ref('')
+const supplementSending = ref(false)
+const supplementInputRef = ref<InstanceType<typeof HTMLInputElement> | null>(null)
 const streamStatus = ref('')
 const taskStartTime = ref<number | null>(null)
 const elapsedTime = ref(0)
@@ -1969,6 +2024,45 @@ const onDirSelected = (path: string) => {
   fileTreeLoadPath.value = path
 }
 
+// 发送补充需求
+const sendSupplement = async () => {
+  const msg = supplementMessage.value.trim()
+  if (!msg || supplementSending.value) return
+
+  // ★ 始终优先使用 SSE 流返回的真实 sessionId（currentStreamSessionId）
+  // currentConversationId 在流式过程中可能不是最新的真实 ID：
+  //   - new session: currentConversationId = "local-xxx", 真实 ID 在 currentStreamSessionId
+  //   - existing session: currentConversationId 可能是旧 ID，后端可能创建了新会话返回新 ID
+  const convId = currentStreamSessionId.value
+    ? String(currentStreamSessionId.value)
+    : currentConversationId.value
+  if (!convId || convId.startsWith('local-')) {
+    message.warning('请等待会话建立后再补充需求')
+    return
+  }
+
+  supplementSending.value = true
+  try {
+    const res = await supplementRequest(parseInt(convId), msg)
+    if (res.success) {
+      message.success('补充需求已发送')
+      supplementMessage.value = ''
+      showSupplementInput.value = false
+    } else {
+      message.error(res.error || '发送失败')
+    }
+  } catch (e: any) {
+    message.error('发送失败: ' + (e.message || '未知错误'))
+  } finally {
+    supplementSending.value = false
+  }
+}
+
+const cancelSupplement = () => {
+  supplementMessage.value = ''
+  showSupplementInput.value = false
+}
+
 // ask_user 回答函数（用于 clarification 类型）
 const submitPendingAnswer = async () => {
   if (!pendingQuestion.value || !pendingQuestionAnswer.value.trim()) return
@@ -2031,13 +2125,17 @@ const scheduleMessageUpdate = (convId: string, thinkingMsgId?: string | number) 
   if (updateTimer !== null) return
   updateTimer = window.setTimeout(() => {
     updateTimer = null
-    if (messages.value[convId]) {
-      // 只替换数组引用触发 DynamicScroller 更新，不替换消息对象（避免切断响应式连接导致流式内容不更新）
-      messages.value[convId] = [...messages.value[convId]]
+    if (autoScrollToBottom.value) {
+      // 自动滚动模式：递增节拍器 + 触发 DynamicScroller 更新 + 滚动到底部
+      streamingUpdateTick.value++
+      if (messages.value[convId]) {
+        messages.value[convId] = [...messages.value[convId]]
+      }
+      scrollToBottom()
     }
-    scrollToBottom()
-    // 等 DOM 实际更新后再滚动思考过程容器到底部
-    if (thinkingMsgId !== undefined) {
+    // autoScrollToBottom = false 时：完全冻结，不递增 tick、不替换数组、不滚动
+    // tick 不变 → size-dependencies 不变 → DynamicScroller 不重新测量 → 零跳动
+    if (thinkingMsgId !== undefined && thinkAutoScroll.value) {
       nextTick(() => {
         const el = document.querySelector(`[data-think-scroll="${thinkingMsgId}"]`)
         if (el) el.scrollTop = el.scrollHeight
@@ -2051,15 +2149,34 @@ const flushMessageUpdate = (convId: string, thinkingMsgId?: string | number) => 
     clearTimeout(updateTimer)
     updateTimer = null
   }
-  if (messages.value[convId]) {
-    messages.value[convId] = [...messages.value[convId]]
+  if (autoScrollToBottom.value) {
+    streamingUpdateTick.value++
+    if (messages.value[convId]) {
+      messages.value[convId] = [...messages.value[convId]]
+    }
+    scrollToBottom()
   }
-  scrollToBottom()
-  if (thinkingMsgId !== undefined) {
+  if (thinkingMsgId !== undefined && thinkAutoScroll.value) {
     nextTick(() => {
       const el = document.querySelector(`[data-think-scroll="${thinkingMsgId}"]`)
       if (el) el.scrollTop = el.scrollHeight
     })
+  }
+}
+
+// 优化提示词
+const optimizeMessage = async () => {
+  const text = inputMessage.value.trim()
+  if (!text || isOptimizing.value) return
+
+  isOptimizing.value = true
+  try {
+    const result = await optimizePrompt(text)
+    inputMessage.value = result
+  } catch (e) {
+    message.warning('优化失败，请稍后重试')
+  } finally {
+    isOptimizing.value = false
   }
 }
 
@@ -2082,6 +2199,16 @@ const sendMessage = async () => {
 
   // 发送新消息时清除旧的任务清单
   clearTaskList()
+
+  // 发送新消息时重置自动滚动状态：重新固定到底部
+  autoScrollToBottom.value = true
+  showScrollToBottomBtn.value = false
+  thinkAutoScroll.value = true
+  thinkShowScrollBtn.value = false
+
+  // 关闭补充需求面板
+  showSupplementInput.value = false
+  supplementMessage.value = ''
 
   // 构建最终消息：将附件内容拼接到用户消息前
   let finalMessage = text
@@ -2129,6 +2256,9 @@ const sendMessage = async () => {
   messages.value[convId].push(userMsg)
   inputMessage.value = ''
   isSending.value = true
+  // ★ 重置 currentStreamSessionId，确保新会话的 SSE 流能设置新的真实 sessionId
+  // 否则上一次流式残留的值会导致补充需求发到旧的会话
+  currentStreamSessionId.value = null
   startElapsedTimer()
   streamStatus.value = '正在连接...'
 
@@ -2177,6 +2307,10 @@ const sendMessage = async () => {
       // 这里只保存 realSessionId，确保用户过早停止时 finally 中也能正确迁移。
       if (convId.startsWith('local-') && event.sessionId && !realSessionId) {
         realSessionId = String(event.sessionId)
+      }
+      // ★ 提前设置 currentStreamSessionId，让补充需求按钮能在流式早期就拿到真实会话 ID
+      if (event.sessionId && !currentStreamSessionId.value) {
+        currentStreamSessionId.value = event.sessionId
       }
       if (event.type === 'thinking') {
         streamStatus.value = '思考分析中...'
@@ -2641,6 +2775,14 @@ const formatMessage = (content: string) => {
   return html
 }
 
+// 渲染 ask_user 问题的 markdown（预处理字面量 \n → 真正换行）
+const formatQuestion = (question: string) => {
+  if (!question) return ''
+  // 将字面量 \n 转为真正的换行符（处理 AI 可能产生的双重转义）
+  const normalized = question.replace(/\\n/g, '\n')
+  return formatMessage(normalized)
+}
+
 // HTML 转义辅助函数
 const escapeHtml = (text: string) => {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -2654,8 +2796,21 @@ const handleToolCardClick = (e: MouseEvent) => {
   }
 }
 
+// ===== 自动滚动到底部控制 =====
+// 默认开启自动滚动。流式输出时若用户手动向上滚动，则关闭自动滚动；点击"回到底部"按钮或发送新消息时重置为开启。
+const autoScrollToBottom = ref(true)
+const showScrollToBottomBtn = ref(false)
+// DynamicScroller 大小更新节拍器：每个 scheduleMessageUpdate 周期递增
+// 用于 size-dependencies，让 DynamicScroller 感知 streaming 消息的大小变化
+const streamingUpdateTick = ref(0)
+
+// ===== 思考过程（thinking-content）自动滚动控制 =====
+const thinkAutoScroll = ref(true)
+const thinkShowScrollBtn = ref(false)
+
 // 滚动（双重保障：nextTick + rAF + 延时兜底，适配 DynamicScroller 渲染时机）
 const scrollToBottom = () => {
+  if (!autoScrollToBottom.value) return
   const doScroll = () => {
     if (scrollerRef.value) {
       const el = scrollerRef.value.$el as HTMLElement
@@ -2671,6 +2826,98 @@ const scrollToBottom = () => {
       requestAnimationFrame(() => doScroll())
     })
   })
+}
+
+// 强制刷新 DynamicScroller：递增 tick + 替换数组引用，使最新内容可见并重新计算布局
+const forceRefreshScroller = () => {
+  streamingUpdateTick.value++
+  const convId = currentConversationId.value
+  if (convId && messages.value[convId]) {
+    messages.value[convId] = [...messages.value[convId]]
+  }
+}
+
+// 监听 DynamicScroller 的 scroll 事件，检测用户是否手动滚动离开底部
+let lastScrollHandleTime = 0
+const handleMessageListScroll = () => {
+  // 80ms 防抖：持续滚动时减少状态切换频率，降低跳动
+  const now = Date.now()
+  if (now - lastScrollHandleTime < 80) return
+  lastScrollHandleTime = now
+  
+  const el = scrollerRef.value?.$el as HTMLElement | undefined
+  if (!el) return
+  const threshold = 50 // 距离底部小于 50px 视为在底部
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (distanceToBottom < threshold) {
+    // 用户在底部附近 → 恢复自动滚动，同时触发刷新使最新内容可见
+    if (!autoScrollToBottom.value) {
+      autoScrollToBottom.value = true
+      showScrollToBottomBtn.value = false
+      forceRefreshScroller()
+    }
+  } else {
+    // 用户已离开底部 → 关闭自动滚动，显示回到底部按钮
+    autoScrollToBottom.value = false
+    showScrollToBottomBtn.value = true
+  }
+}
+
+// 用户点击"回到底部"按钮
+const scrollToBottomManually = () => {
+  autoScrollToBottom.value = true
+  showScrollToBottomBtn.value = false
+  // 先刷新让最新内容渲染出来，再滚动到底部
+  forceRefreshScroller()
+  nextTick(() => {
+    const doScroll = () => {
+      if (scrollerRef.value) {
+        const el = scrollerRef.value.$el as HTMLElement
+        if (el) el.scrollTop = el.scrollHeight
+      }
+    }
+    requestAnimationFrame(() => {
+      doScroll()
+      requestAnimationFrame(() => doScroll())
+    })
+  })
+}
+
+// 思考过程回到底部
+const thinkScrollToBottom = () => {
+  thinkAutoScroll.value = true
+  thinkShowScrollBtn.value = false
+  const msgs = currentMessages.value
+  const streamingMsg = msgs.find(m => m.isStreaming)
+  if (!streamingMsg) return
+  nextTick(() => {
+    const el = document.querySelector(`[data-think-scroll="${streamingMsg.id}"]`) as HTMLElement
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+// 监听思考过程 .thinking-content 的 scroll 事件
+let lastThinkScrollTime = 0
+const handleThinkScroll = (e: Event) => {
+  const now = Date.now()
+  if (now - lastThinkScrollTime < 80) return
+  lastThinkScrollTime = now
+  
+  const el = e.target as HTMLElement
+  const msgId = el.dataset.thinkScroll
+  if (!msgId) return
+  const msgs = currentMessages.value
+  const msg = msgs.find(m => m.id === msgId)
+  if (!msg || !msg.isStreaming) return
+  const threshold = 30
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (distanceToBottom < threshold) {
+    thinkAutoScroll.value = true
+    thinkShowScrollBtn.value = false
+  } else {
+    thinkAutoScroll.value = false
+    thinkShowScrollBtn.value = true
+  }
 }
 
 // 监听消息数量变化自动滚动（替代 deep:true 深度监听，避免每次渲染触发全量比较）
@@ -3328,6 +3575,7 @@ watch(currentConversationId, (newId) => {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  position: relative;
 }
 
 /* ===== 文件标签布局 ===== */
@@ -3426,8 +3674,63 @@ watch(currentConversationId, (newId) => {
 .message-list {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 20px 24px;
   background: var(--bg-chat);
+}
+
+/* ===== 回到底部浮动按钮 ===== */
+.scroll-to-bottom-btn {
+  position: absolute;
+  bottom: 20px;
+  right: 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 16px;
+  z-index: 20;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+.scroll-to-bottom-btn:hover {
+  background: var(--accent-lt);
+  border-color: var(--accent);
+  box-shadow: 0 4px 18px var(--accent-glow);
+  transform: translateY(-2px);
+}
+.scroll-to-bottom-btn:active {
+  transform: scale(0.92);
+}
+
+/* 回到底部按钮淡入淡出 */
+.scroll-btn-fade-enter-active {
+  animation: scrollBtnIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.scroll-btn-fade-leave-active {
+  animation: scrollBtnIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) reverse;
+}
+@keyframes scrollBtnIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.85); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 暗色模式适配 */
+[data-theme="dark"] .scroll-to-bottom-btn {
+  background: #1a1925;
+  border-color: #2a2838;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+[data-theme="dark"] .scroll-to-bottom-btn:hover {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: var(--accent);
 }
 
 .message-list-empty {
@@ -3693,6 +3996,47 @@ watch(currentConversationId, (newId) => {
   padding: 10px 14px;
   max-height: 600px;
   overflow-y: auto;
+  overflow-anchor: none;
+}
+/* 思考过程回到底部按钮 — sticky 定位粘在可视底部 */
+.think-scroll-btn-wrap {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 14px 8px;
+  pointer-events: none;
+  background: linear-gradient(to top, var(--bg-card) 60%, transparent);
+}
+.think-scroll-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  transition: all 0.2s ease;
+  pointer-events: auto;
+}
+.think-scroll-btn:hover {
+  background: var(--accent-lt);
+  transform: translateY(-1px);
+}
+[data-theme="dark"] .think-scroll-btn-wrap {
+  background: linear-gradient(to top, #1a1925 60%, transparent);
+}
+[data-theme="dark"] .think-scroll-btn {
+  background: #1a1925;
+  border-color: #2a2838;
+}
+[data-theme="dark"] .think-scroll-btn:hover {
+  background: rgba(139,92,246,0.12);
 }
 .thinking-text {
   font-size: 13px;
@@ -3785,14 +4129,14 @@ watch(currentConversationId, (newId) => {
   width: 42px;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
-  border: 2px dashed var(--border);
+  border: 2px solid var(--border);
   color: var(--text-3);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   transition: all 0.25s;
 }
-.attach-btn:hover {
+.attach-btn:hover:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-lt);
@@ -3801,6 +4145,33 @@ watch(currentConversationId, (newId) => {
   color: var(--text-4);
   border-color: var(--border);
   background: transparent;
+  opacity: 0.5;
+}
+
+/* 优化按钮 */
+.optimize-btn {
+  height: 42px;
+  width: 42px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  border: 2px solid var(--accent);
+  color: var(--accent);
+  background: var(--accent-lt);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  transition: all 0.25s ease;
+}
+.optimize-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px var(--accent-glow);
+  background: var(--accent);
+  color: #fff;
+}
+.optimize-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ===== 输入框包装 ===== */
@@ -3880,7 +4251,8 @@ watch(currentConversationId, (newId) => {
 .footer-left {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .footer-right {
   display: flex;
@@ -3889,53 +4261,75 @@ watch(currentConversationId, (newId) => {
 .context-tokens {
   color: var(--text-3);
   font-size: 11px;
+  font-weight: 500;
 }
 
-/* ===== 模式选择器 ===== */
+/* ===== 模式选择器 / Chip 标签 ===== */
 .mode-selector {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 12px 3px 9px;
-  background: var(--bg-root);
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 20px;
-  height: 28px;
-  transition: all 0.2s;
+  border-radius: var(--radius-xs);
+  height: 30px;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(4px);
 }
 .mode-selector:hover {
   border-color: var(--accent-md);
-  background: var(--bg-card);
+  background: var(--accent-lt);
+  box-shadow: 0 1px 4px rgba(139, 92, 246, 0.08);
 }
 
+.mode-emoji {
+  font-size: 13px;
+  line-height: 1;
+  flex-shrink: 0;
+}
 .mode-icon {
   font-size: 12px;
   color: var(--text-3);
+  flex-shrink: 0;
 }
 .mode-label {
-  font-size: 11px;
-  color: var(--text-3);
+  font-size: 12px;
+  color: var(--text-2);
   white-space: nowrap;
-  font-weight: 500;
+  font-weight: 600;
 }
+
 .mode-select {
-  width: 130px;
+  width: 68px;
 }
 .model-select {
-  width: 150px;
+  width: 90px;
 }
+.mode-select :deep(.ant-select-selection-item),
 .model-select :deep(.ant-select-selection-item) {
   font-size: 12px !important;
+  font-weight: 600 !important;
+  color: var(--text-1) !important;
 }
-.mode-select :deep(.ant-select-selection-item) {
-  font-size: 12px !important;
+.mode-select :deep(.ant-select-selector),
+.model-select :deep(.ant-select-selector) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  min-height: auto !important;
+}
+.mode-select :deep(.ant-select-arrow),
+.model-select :deep(.ant-select-arrow) {
+  color: var(--text-4);
+  font-size: 10px;
 }
 
 /* ===== 任务进度触发器 ===== */
 .task-trigger {
   cursor: pointer;
   position: relative;
-  transition: all 0.2s;
 }
 .task-trigger:hover {
   background: var(--accent-lt);
@@ -3949,7 +4343,7 @@ watch(currentConversationId, (newId) => {
 .task-trigger-icon { font-size: 14px; }
 .task-trigger-text {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-2);
   white-space: nowrap;
 }
@@ -4048,7 +4442,6 @@ watch(currentConversationId, (newId) => {
 .changes-trigger {
   cursor: pointer;
   position: relative;
-  transition: all 0.2s;
 }
 .changes-trigger:hover {
   background: var(--accent-lt);
@@ -4061,7 +4454,7 @@ watch(currentConversationId, (newId) => {
 .changes-trigger-icon { font-size: 14px; }
 .changes-trigger-text {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-2);
   white-space: nowrap;
 }
@@ -4297,6 +4690,8 @@ watch(currentConversationId, (newId) => {
   padding: 20px 22px;
   box-shadow: var(--shadow-md);
   animation: panelSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  text-align: left;
+  align-self: flex-start;
 }
 .ask-user-header {
   font-weight: 700;
@@ -4313,12 +4708,17 @@ watch(currentConversationId, (newId) => {
   color: var(--text-2);
   margin-bottom: 16px;
   line-height: 1.65;
-  white-space: pre-wrap;
   background: var(--bg-root);
   padding: 12px 14px;
   border-radius: var(--radius-sm);
   border-left: 3px solid var(--accent);
 }
+/* markdown 渲染后的块级元素间距优化 */
+.ask-user-question p { margin: 0 0 8px; }
+.ask-user-question p:last-child { margin-bottom: 0; }
+.ask-user-question ul, .ask-user-question ol { margin: 0 0 8px; padding-left: 20px; }
+.ask-user-question ul:last-child, .ask-user-question ol:last-child { margin-bottom: 0; }
+.ask-user-question code { background: var(--bg-hover); padding: 1px 6px; border-radius: 3px; font-size: 13px; }
 .ask-user-input-row {
   display: flex;
   gap: 8px;
@@ -4327,10 +4727,11 @@ watch(currentConversationId, (newId) => {
 
 /* ===== 权限授权按钮 ===== */
 .permission-btn-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 0;
+  justify-content: flex-start;
 }
 .permission-btn {
   height: 40px !important;
@@ -4338,6 +4739,8 @@ watch(currentConversationId, (newId) => {
   border-radius: var(--radius-sm) !important;
   font-weight: 600 !important;
   transition: all 0.25s ease !important;
+  flex: 0 0 auto;
+  min-width: 90px;
 }
 .permission-btn:hover {
   transform: translateY(-1px);
@@ -4400,6 +4803,52 @@ watch(currentConversationId, (newId) => {
 @keyframes customFadeIn {
   from { opacity: 0; transform: translateY(-6px); max-height: 0; }
   to { opacity: 1; transform: translateY(0); max-height: 80px; }
+}
+
+/* ===== 补充需求面板 ===== */
+.supplement-panel {
+  margin: 0 18px 10px;
+  flex-shrink: 0;
+}
+.supplement-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--bg-card);
+  border: 1px dashed var(--accent-md);
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 600;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+.supplement-trigger:hover {
+  background: var(--accent-lt);
+  border-color: var(--accent);
+  border-style: solid;
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px var(--accent-glow);
+}
+.supplement-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.supplement-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--accent-md);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  animation: panelSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.supplement-input-row :deep(.ant-input) {
+  flex: 1;
+  font-size: 13px;
 }
 
 /* ===== 控制台面板（终端 + 运行日志） ===== */
@@ -4678,6 +5127,36 @@ watch(currentConversationId, (newId) => {
   background: rgba(239,68,68,0.12);
   color: #f87171;
   border-color: rgba(239,68,68,0.25);
+}
+
+/* ===== 暗色：发送面板 ===== */
+[data-theme="dark"] .mode-selector {
+  background: #1a1925;
+  border-color: #2a2838;
+}
+[data-theme="dark"] .mode-selector:hover {
+  border-color: rgba(139, 92, 246, 0.35);
+  background: rgba(139, 92, 246, 0.06);
+}
+[data-theme="dark"] .attach-btn {
+  border-color: #2a2838;
+  color: #6a6880;
+}
+[data-theme="dark"] .attach-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+[data-theme="dark"] .input-wrapper :deep(.ant-input) {
+  background: #1a1925;
+  border-color: #2a2838;
+  color: #e4e2f0;
+}
+[data-theme="dark"] .input-wrapper :deep(.ant-input::placeholder) {
+  color: #525070;
+}
+[data-theme="dark"] .input-wrapper :deep(.ant-input:focus) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
 }
 </style>
 

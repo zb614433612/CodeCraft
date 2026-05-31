@@ -235,3 +235,50 @@ export async function chat(
     body: JSON.stringify(requestBody)
   })
 }
+
+// ===== 补充需求 =====
+
+/**
+ * 中途补充需求，发送到正在执行的 ToolLoop 中
+ * @param conversationId 会话ID
+ * @param message 补充的需求内容
+ */
+export async function supplementRequest(conversationId: number, message: string): Promise<{ success: boolean; error?: string; message?: string }> {
+  const { getAuthHeaders } = await import('@/utils/http-client')
+  const authHeader = await getAuthHeaders()
+
+  const response = await fetch('/api/deepseek/supplement', {
+    method: 'POST',
+    headers: { ...authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversationId: String(conversationId), message })
+  })
+  return response.json()
+}
+
+// ===== 提示词优化 =====
+
+/**
+ * 使用 LLM 优化用户消息，使其更清晰明确
+ * @param message 原始用户消息
+ * @returns 优化后的消息，失败时返回原始消息
+ */
+export async function optimizePrompt(message: string): Promise<string> {
+  try {
+    const { getAuthHeaders } = await import('@/utils/http-client')
+    const authHeader = await getAuthHeaders()
+
+    const response = await fetch('/api/prompt/optimize', {
+      method: 'POST',
+      headers: { ...authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message })
+    })
+    const data = await response.json()
+    if (data.success && data.optimized) {
+      return data.optimized
+    }
+    return message
+  } catch (e) {
+    console.warn('提示词优化失败:', e)
+    return message
+  }
+}

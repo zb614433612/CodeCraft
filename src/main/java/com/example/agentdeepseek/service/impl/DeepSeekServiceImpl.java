@@ -15,6 +15,7 @@ import com.example.agentdeepseek.model.entity.Skill;
 
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
+import com.example.agentdeepseek.service.SupplementStore;
 import com.example.agentdeepseek.service.SkillMatcher;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
@@ -101,6 +102,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final PathSecurityChecker pathSecurityChecker;
     private final CompactionService compactionService;
     private final AgentEventBus agentEventBus;
+    private final SupplementStore supplementStore;
 
     @Autowired
     private AgentForkManager agentForkManager;
@@ -155,11 +157,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                OperationDetailGenerator detailGenerator,
                                ToolPermissionRegistry permissionRegistry,
                                PathSecurityChecker pathSecurityChecker,
-                                CompactionService compactionService,
-                                AgentEventBus agentEventBus,
-                                MessagePersister messagePersister,
-                                ContextBuilder contextBuilder,
-                                ToolLoopManager toolLoopManager) {
+                                 CompactionService compactionService,
+                                 AgentEventBus agentEventBus,
+                                 MessagePersister messagePersister,
+                                 ContextBuilder contextBuilder,
+                                 ToolLoopManager toolLoopManager,
+                                 SupplementStore supplementStore) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -180,6 +183,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.messagePersister = messagePersister;
         this.contextBuilder = contextBuilder;
         this.toolLoopManager = toolLoopManager;
+        this.supplementStore = supplementStore;
     }
 
     // ===== 拆分出的组件 =====
@@ -908,6 +912,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     // ===== 后台任务管理 =====
 
     private void cancelRunningTask(Long conversationId) {
+        supplementStore.clear(conversationId);
         toolLoopManager.cancelRunningTask(conversationId, taskSubscriptions, judgeGrantedIterations);
     }
 
@@ -1095,6 +1100,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return 流式响应Flux
      */
     private Flux<String> executeSemiStreamingToolCycle(Long conversationId, Long storageConversationId, Map<String, Object> initialApiRequest) {
+        // ===== 清理旧的补充消息队列（新任务开始时清空） =====
+        supplementStore.clear(conversationId);
+
         // ===== 重置本轮对话的自动批准状态 =====
         // 用户每次发送新消息开始工具循环时，清除上一轮的"本轮对话全部同意"状态
         // "本轮对话"定义为：用户发送一次消息 → LLM完成任务（含多轮工具调用）→ 结束
@@ -1198,26 +1206,83 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      */
     private Flux<String> handleToolCallIteration(Long conversationId, Long storageConversationId, Map<String, Object> initialApiRequest,
                                                  List<Map<String, Object>> messages, int iteration, int maxIterations) {
-        if (iteration >= maxIterations) {
-            int totalGranted = judgeGrantedIterations.getOrDefault(conversationId, 0);
-            if (totalGranted >= MAX_JUDGE_GRANTED_ITERATIONS) {
-                log.warn("评委已累计增加 {} 次迭代，达到上限，强制结束", totalGranted);
-                return Flux.just(createReasoningSSEEvent(
-                        "任务迭代次数已超出评委允许的最大扩展额度（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次），自动终止。"));
+        // ★ 关键：整个方法体包裹在 Flux.defer 中，将补充队列检查从「方法调用时同步执行」
+        // 改为「Flux 被订阅时延迟执行」。原因：
+        //   - 方法在 flatMap 内部被调用时，Flux 尚未被订阅（还在等待 toolCallEvents emit 完成）
+        //   - 补充消息可能在 toolCallEvents emit 期间入队
+        //   - 同步检查会在这个窗口之前执行 → 队列为空 → 补充消息丢失
+        //   - 延迟到订阅时检查 → 补充消息有最大时间窗口入队
+        return Flux.defer(() -> {
+            // ===== 检查补充需求队列（用户中途补充的需求） =====
+            List<String> supplements = new ArrayList<>();
+            String supplement;
+            while ((supplement = supplementStore.poll(conversationId)) != null) {
+                supplements.add(supplement);
             }
-            log.warn("达到最大工具调用迭代次数 {}，调用评委评估", maxIterations);
-            return evaluateWithJudge(conversationId, storageConversationId, initialApiRequest,
-                    messages, iteration, maxIterations);
-        }
+            if (!supplements.isEmpty()) {
+                // 将补充消息作为 user 消息注入到消息列表
+                for (String sup : supplements) {
+                    Map<String, Object> supplementMsg = new HashMap<>();
+                    supplementMsg.put("role", "user");
+                    supplementMsg.put("content", "【用户中途补充需求】\n" + sup
+                            + "\n\n请注意：以上是用户对当前任务的补充需求，请在现有进度的基础上增量调整，不要重新开始。");
+                    messages.add(supplementMsg);
+                    log.info("补充需求已注入到ToolLoop: conversationId={}, supplement={}", conversationId,
+                            sup.length() > 80 ? sup.substring(0, 80) + "..." : sup);
+                }
+                // 发送提示事件告知前端
+                return Flux.just(createReasoningSSEEvent("💡 收到用户补充需求（共 " + supplements.size() + " 条），正在调整执行..."))
+                        .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
+                                messages, iteration, maxIterations));
+            }
 
-        log.debug("半流式工具调用循环迭代 {}，消息数量: {}", iteration + 1, messages.size());
+            if (iteration >= maxIterations) {
+                int totalGranted = judgeGrantedIterations.getOrDefault(conversationId, 0);
+                if (totalGranted >= MAX_JUDGE_GRANTED_ITERATIONS) {
+                    log.warn("评委已累计增加 {} 次迭代，达到上限，强制结束", totalGranted);
+                    return Flux.just(createReasoningSSEEvent(
+                            "任务迭代次数已超出评委允许的最大扩展额度（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次），自动终止。"));
+                }
+                log.warn("达到最大工具调用迭代次数 {}，调用评委评估", maxIterations);
+                return evaluateWithJudge(conversationId, storageConversationId, initialApiRequest,
+                        messages, iteration, maxIterations);
+            }
 
-        // 构建当前迭代的API请求
-        Map<String, Object> apiRequest = new HashMap<>(initialApiRequest);
-        apiRequest.put("messages", messages);
+            log.debug("半流式工具调用循环迭代 {}，消息数量: {}", iteration + 1, messages.size());
 
-        // 始终使用流式请求
-        return handleStreamingPhase(conversationId, storageConversationId, apiRequest, messages, iteration, maxIterations);
+            // 构建当前迭代的API请求
+            Map<String, Object> apiRequest = new HashMap<>(initialApiRequest);
+            apiRequest.put("messages", messages);
+
+            // 始终使用流式请求
+            // ★ 在 Flux 完成后兜底检查补充队列：当 AI 以纯文本回复结束时（没有更多 tool_calls），
+            // handleToolCallIteration 不会再被调用，需要在这里检查是否有在流式期间入队的补充消息。
+            return handleStreamingPhase(conversationId, storageConversationId, apiRequest, messages, iteration, maxIterations)
+                    .concatWith(Flux.defer(() -> {
+                        // 检查补充需求队列
+                        List<String> deferredSupplements = new ArrayList<>();
+                        String s;
+                        while ((s = supplementStore.poll(conversationId)) != null) {
+                            deferredSupplements.add(s);
+                        }
+                        if (!deferredSupplements.isEmpty()) {
+                            for (String sup : deferredSupplements) {
+                                Map<String, Object> supMsg = new HashMap<>();
+                                supMsg.put("role", "user");
+                                supMsg.put("content", "【用户中途补充需求】\n" + sup
+                                        + "\n\n请注意：以上是用户对当前任务的补充需求，请在现有进度的基础上增量调整，不要重新开始。");
+                                messages.add(supMsg);
+                                log.info("补充需求已注入到ToolLoop(concatWith兜底): conversationId={}, supplement={}", conversationId,
+                                        sup.length() > 80 ? sup.substring(0, 80) + "..." : sup);
+                            }
+                            // 发送提示事件并重新进入ToolLoop
+                            return Flux.just(createReasoningSSEEvent("💡 收到用户补充需求（共 " + deferredSupplements.size() + " 条），正在调整执行..."))
+                                    .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
+                                            messages, iteration, maxIterations));
+                        }
+                        return Flux.empty();
+                    }));
+        });
     }
 
     // ===== 循环检测（防原地打转） =====

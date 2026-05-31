@@ -6,6 +6,7 @@ import com.example.agentdeepseek.model.entity.AgentTask;
 import com.example.agentdeepseek.service.AttachmentReaderService;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
+import com.example.agentdeepseek.service.SupplementStore;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -34,13 +35,16 @@ public class DeepSeekController {
     private final DeepSeekService deepSeekService;
     private final PendingQuestionStore pendingQuestionStore;
     private final AttachmentReaderService attachmentReaderService;
+    private final SupplementStore supplementStore;
 
     public DeepSeekController(DeepSeekService deepSeekService,
                               PendingQuestionStore pendingQuestionStore,
-                              AttachmentReaderService attachmentReaderService) {
+                              AttachmentReaderService attachmentReaderService,
+                              SupplementStore supplementStore) {
         this.deepSeekService = deepSeekService;
         this.pendingQuestionStore = pendingQuestionStore;
         this.attachmentReaderService = attachmentReaderService;
+        this.supplementStore = supplementStore;
     }
 
     /**
@@ -112,6 +116,42 @@ public class DeepSeekController {
         pendingQuestionStore.remove(uuid);
         log.info("用户回答了问题: uuid={}, action={}, answer={}", uuid, action, answer);
         return Map.of("success", true);
+    }
+
+    /**
+     * 补充需求（中途注入）
+     * 用户在 AI 执行过程中主动发送补充需求，不走 cancel+rebuild 流程，
+     * 而是将消息注入到正在执行的 ToolLoop 中。
+     */
+    @Operation(summary = "补充需求", description = "在AI执行过程中补充需求，消息会注入到当前ToolLoop的下一轮迭代中")
+    @PostMapping("/supplement")
+    public Map<String, Object> supplement(@RequestBody Map<String, String> body) {
+        String conversationIdStr = body.get("conversationId");
+        String message = body.get("message");
+
+        if (conversationIdStr == null || conversationIdStr.isEmpty() || message == null || message.trim().isEmpty()) {
+            return Map.of("success", false, "error", "缺少必要参数 conversationId 或 message");
+        }
+
+        Long conversationId;
+        try {
+            conversationId = Long.parseLong(conversationIdStr);
+        } catch (NumberFormatException e) {
+            return Map.of("success", false, "error", "conversationId 格式不正确");
+        }
+
+        // 检查是否有正在运行的任务（软检查，仅记日志，不阻塞补充消息入队）
+        // 因为 agent_task 表查询可能存在边界条件（INSERT 延迟/失败但 toolLoop 仍在运行等），
+        // 补充消息放入 SupplementStore 队列后，运行中的 toolLoop 会自动消费，不在运行的会被下次清理。
+        AgentTask task = deepSeekService.getActiveTask(conversationId);
+        if (task == null) {
+            log.warn("getActiveTask 返回 null，但补充消息仍会入队: conversationId={}", conversationId);
+        }
+
+        // 将补充消息放入队列，ToolLoop 下一轮迭代会自动取出
+        supplementStore.offer(conversationId, message.trim());
+        log.info("用户补充需求: conversationId={}, message={}", conversationId, message);
+        return Map.of("success", true, "message", "补充需求已发送，AI 将在下一轮处理中收到");
     }
 
     // ===== 后台任务管理 =====

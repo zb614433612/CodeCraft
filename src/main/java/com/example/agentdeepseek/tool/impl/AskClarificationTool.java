@@ -55,7 +55,9 @@ public class AskClarificationTool implements Tool {
 
         ObjectNode question = objectMapper.createObjectNode();
         question.put("type", "string");
-        question.put("description", "【必填】向用户提出的问题。示例：\"当前有3个API方案（RESTful/GraphQL/WebSocket），请选择一个继续实现\"。建议用选项编号让用户直接回复数字更高效");
+        question.put("description", "【必填】向用户提出的问题，支持 markdown 格式（可使用换行、列表、**粗体**、`代码` 等）。"
+                + " 示例：\"当前有3个API方案：\\n1. RESTful - 简单通用\\n2. GraphQL - 灵活查询\\n3. WebSocket - 实时通信\\n\\n请选择一个继续实现\"。"
+                + " 建议用选项编号让用户直接回复数字更高效");
         properties.set("question", question);
 
         parameters.set("properties", properties);
