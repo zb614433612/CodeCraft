@@ -30,7 +30,8 @@ public class TokenAuthenticationFilter implements Filter {
             "/swagger-ui",
             "/api-docs",
             "/v3/api-docs",
-            "/api/skills"
+            "/api/skills",
+            "/api/p2p/file/"   // 文件/图片获取通过 transferId 鉴权，无需 token
     );
 
 

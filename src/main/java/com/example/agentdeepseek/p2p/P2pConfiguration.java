@@ -4,10 +4,12 @@ import com.example.agentdeepseek.p2p.address.Ipv6AddressCollector;
 import com.example.agentdeepseek.p2p.config.P2pConfig;
 import com.example.agentdeepseek.p2p.connection.P2pConnectionManager;
 import com.example.agentdeepseek.p2p.message.ChatMessageHandler;
+import com.example.agentdeepseek.p2p.message.FileTransferHandler;
 import com.example.agentdeepseek.mapper.P2pKnownPeerMapper;
 import com.example.agentdeepseek.p2p.message.DisconnectNotifyHandler;
 import com.example.agentdeepseek.p2p.message.HandshakeHandler;
 import com.example.agentdeepseek.p2p.service.P2pChatService;
+import com.example.agentdeepseek.p2p.service.FileTransferManager;
 import com.example.agentdeepseek.p2p.security.TlsHelper;
 import com.example.agentdeepseek.p2p.agent.P2pAgentService;
 import com.example.agentdeepseek.p2p.agent.AgentAuthGrantHandler;
@@ -48,13 +50,19 @@ public class P2pConfiguration {
                                                       TlsHelper tlsHelper,
                                                       P2pChatService chatService,
                                                       P2pKnownPeerMapper knownPeerMapper,
-                                                      P2pAgentService agentService) {
+                                                      P2pAgentService agentService,
+                                                      FileTransferManager transferManager) {
         connectionManager = new P2pConnectionManager(config, addressCollector, tlsHelper);
 
         // 注册默认消息处理器
         connectionManager.getMessageRouter().registerHandler(new HandshakeHandler(connectionManager, knownPeerMapper));
         connectionManager.getMessageRouter().registerHandler(new DisconnectNotifyHandler(connectionManager));
         connectionManager.getMessageRouter().registerHandler(new ChatMessageHandler(connectionManager, chatService));
+
+        // 注册文件传输处理器
+        FileTransferHandler fileTransferHandler = new FileTransferHandler(transferManager, chatService, connectionManager);
+        fileTransferHandler.setMyName(connectionManager.getMyName());
+        connectionManager.getMessageRouter().registerHandler(fileTransferHandler);
 
         // 注册 Agent 相关消息处理器
         connectionManager.getMessageRouter().registerHandler(new AgentAuthGrantHandler(agentService));

@@ -48,7 +48,14 @@ public class P2pChatService {
         String[] alters = {
             "ALTER TABLE p2p_chat_message ADD COLUMN message_type VARCHAR(20) DEFAULT 'chat'",
             "ALTER TABLE p2p_chat_message ADD COLUMN agent_config_id BIGINT DEFAULT NULL",
-            "ALTER TABLE p2p_chat_message ADD COLUMN agent_name VARCHAR(100) DEFAULT NULL"
+            "ALTER TABLE p2p_chat_message ADD COLUMN agent_name VARCHAR(100) DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN file_name VARCHAR(255) DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN file_size BIGINT DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN mime_type VARCHAR(100) DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN file_category VARCHAR(20) DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN transfer_id VARCHAR(36) DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN file_status VARCHAR(20) DEFAULT NULL",
+            "ALTER TABLE p2p_chat_message ADD COLUMN local_path VARCHAR(500) DEFAULT NULL"
         };
         for (String sql : alters) {
             try {
@@ -79,6 +86,24 @@ public class P2pChatService {
     }
 
     /**
+     * 保存文件传输消息（带完整文件元信息）
+     */
+    public void saveFileMessage(String peerId, String senderName, String content, String direction,
+                                String messageType, String fileName, Long fileSize, String mimeType,
+                                String fileCategory, String transferId, String fileStatus, String localPath) {
+        P2pChatMessage msg = new P2pChatMessage(peerId, senderName, content, direction,
+                messageType, null, null, LocalDateTime.now());
+        msg.setFileName(fileName);
+        msg.setFileSize(fileSize);
+        msg.setMimeType(mimeType);
+        msg.setFileCategory(fileCategory);
+        msg.setTransferId(transferId);
+        msg.setFileStatus(fileStatus);
+        msg.setLocalPath(localPath);
+        mapper.insert(msg);
+    }
+
+    /**
      * 获取历史消息（分页，最新50条）
      */
     public List<P2pChatMessage> getHistory(String peerId, int offset, int limit) {
@@ -91,5 +116,12 @@ public class P2pChatService {
     public void deleteByPeerId(String peerId) {
         int count = mapper.deleteByPeerId(peerId);
         log.info("[P2P] Deleted {} chat messages for peer: {}", count, peerId);
+    }
+
+    /**
+     * 按 transferId 查找文件消息（用于获取本地存储路径）
+     */
+    public P2pChatMessage findByTransferId(String transferId) {
+        return mapper.findByTransferId(transferId);
     }
 }

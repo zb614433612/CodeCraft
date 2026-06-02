@@ -57,4 +57,8 @@ public interface P2pKnownPeerMapper {
     @Select("SELECT * FROM p2p_known_peer ORDER BY last_connected_at DESC")
     @ResultMap("knownPeerResult")
     List<P2pKnownPeer> findAll();
+
+    /** 彻底删除节点（同时需要手动删除聊天记录） */
+    @Delete("DELETE FROM p2p_known_peer WHERE peer_id = #{peerId}")
+    int deleteByPeerId(@Param("peerId") String peerId);
 }

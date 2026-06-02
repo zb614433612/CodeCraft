@@ -176,7 +176,7 @@ public class P2pConnectionManager {
      */
     public void disconnect(String peerId) {
         cancelReconnect(peerId);
-        clearMessages(peerId);
+        // 断开连接时保留消息队列，方便离线后查看聊天记录
 
         Channel channel = connectionPool.getChannel(peerId).orElse(null);
         connectionPool.remove(peerId);

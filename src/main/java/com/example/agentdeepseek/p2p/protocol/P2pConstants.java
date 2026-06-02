@@ -66,6 +66,29 @@ public final class P2pConstants {
     /** AES GCM IV 长度（96 位 / 12 字节，推荐值） */
     public static final int GCM_IV_LENGTH = 12;
 
+    // ==================== 文件传输 ====================
+
+    /** 接收文件存储目录（相对于项目根目录，与 snapshots/、data/ 同级） */
+    public static final String RECEIVED_DIR = "data/p2p/received";
+
+    /** 文件分块大小：1MB */
+    public static final int FILE_CHUNK_SIZE = 1024 * 1024;
+
+    /** 图片最大大小（走 image 通道）：20MB */
+    public static final long MAX_IMAGE_SIZE = 20L * 1024 * 1024;
+
+    /** 文件最大大小：2GB */
+    public static final long MAX_FILE_SIZE = 2L * 1024 * 1024 * 1024;
+
+    /** CHUNK 帧最小头部：transferIdLen(1) + transferId(36) + chunkIndex(4) = 41 */
+    public static final int CHUNK_HEADER_SIZE = 41;
+
+    /** 传输超时（秒）：传输中超过此时间未收到新块则标记失败 */
+    public static final int TRANSFER_TIMEOUT_SECONDS = 120;
+
+    /** 缩略图最大宽度（像素） */
+    public static final int THUMBNAIL_MAX_WIDTH = 400;
+
     // ==================== Peer 信息 ====================
 
     /** Peer ID 长度（SHA-256 十六进制字符串） */

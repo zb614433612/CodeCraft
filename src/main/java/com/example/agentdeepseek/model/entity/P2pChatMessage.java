@@ -15,6 +15,14 @@ public class P2pChatMessage {
     private String messageType;  // chat / auth_grant / auth_cancel / agent_invoke / agent_response
     private Long agentConfigId;
     private String agentName;
+    // 文件传输相关字段
+    private String fileName;
+    private Long fileSize;
+    private String mimeType;
+    private String fileCategory;   // "image" / "file"
+    private String transferId;
+    private String fileStatus;     // "transferring" / "completed" / "failed"
+    private String localPath;      // 本地文件存储路径
     private LocalDateTime createdAt;
 
     public P2pChatMessage() {}
@@ -51,6 +59,20 @@ public class P2pChatMessage {
     public void setAgentConfigId(Long agentConfigId) { this.agentConfigId = agentConfigId; }
     public String getAgentName() { return agentName; }
     public void setAgentName(String agentName) { this.agentName = agentName; }
+    public String getFileName() { return fileName; }
+    public void setFileName(String fileName) { this.fileName = fileName; }
+    public Long getFileSize() { return fileSize; }
+    public void setFileSize(Long fileSize) { this.fileSize = fileSize; }
+    public String getMimeType() { return mimeType; }
+    public void setMimeType(String mimeType) { this.mimeType = mimeType; }
+    public String getFileCategory() { return fileCategory; }
+    public void setFileCategory(String fileCategory) { this.fileCategory = fileCategory; }
+    public String getTransferId() { return transferId; }
+    public void setTransferId(String transferId) { this.transferId = transferId; }
+    public String getFileStatus() { return fileStatus; }
+    public void setFileStatus(String fileStatus) { this.fileStatus = fileStatus; }
+    public String getLocalPath() { return localPath; }
+    public void setLocalPath(String localPath) { this.localPath = localPath; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }

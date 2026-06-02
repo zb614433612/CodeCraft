@@ -45,6 +45,13 @@ export async function handleUnauthorized(): Promise<void> {
 }
 
 /**
+ * 判断 body 是否为 FormData（FormData 需要浏览器自动设置 Content-Type）
+ */
+function isFormData(body: any): boolean {
+  return typeof FormData !== 'undefined' && body instanceof FormData
+}
+
+/**
  * 带认证和 401 自动跳转的 fetch 包装函数
  * 自动注入 token，遇到 HTTP 401 自动清除登录状态并跳转到登录页
  * 与原生 fetch 接口兼容，返回 Response 对象
@@ -52,13 +59,17 @@ export async function handleUnauthorized(): Promise<void> {
 export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const authHeader = await getAuthHeaders()
 
+  const headers: Record<string, string> = { ...authHeader }
+  // 非 FormData 请求才设置默认 Content-Type
+  if (!isFormData(options.body)) {
+    headers['Content-Type'] = 'application/json'
+  }
+  // 用户自定义 headers 可覆盖默认值
+  Object.assign(headers, options.headers || {})
+
   const response = await fetch(url, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeader,
-      ...(options.headers || {})
-    }
+    headers
   })
 
   if (response.status === 401) {
@@ -81,19 +92,32 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
 
   const authHeader = await getAuthHeaders()
 
+  const defaultHeaders: Record<string, string> = { ...authHeader }
+  // 非 FormData 请求才设置默认 Content-Type
+  if (!isFormData(options.body)) {
+    defaultHeaders['Content-Type'] = 'application/json'
+  }
+  // 用户自定义 headers 可覆盖默认值
+  if (options.headers) {
+    Object.assign(defaultHeaders, options.headers)
+  }
+
   const defaultOptions: RequestInit = {
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeader,
-      ...options.headers
-    },
+    headers: defaultHeaders,
     signal: controller.signal
   }
 
   try {
+    // 显式合并 headers 和 options，避免 options 覆盖导致 token 丢失
+    const mergedHeaders: Record<string, string> = { ...defaultHeaders }
+    if (options.headers) {
+      Object.assign(mergedHeaders, options.headers)
+    }
     const response = await fetch(`/api${url}`, {
-      ...defaultOptions,
-      ...options
+      method: options.method || defaultOptions.method,
+      headers: mergedHeaders,
+      body: options.body,
+      signal: options.signal || defaultOptions.signal
     })
 
     clearTimeout(timeoutId)

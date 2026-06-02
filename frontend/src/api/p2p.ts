@@ -1,4 +1,5 @@
 import { request } from '@/utils/http-client'
+import { getAuthHeaders } from '@/utils/http-client'
 
 export interface P2pStatus {
   running: boolean
@@ -57,6 +58,13 @@ export interface AgentAuthItem {
   avatar?: string
 }
 
+export interface FileTransferProgress {
+  transferId: string
+  totalChunks: number
+  receivedChunks: number
+  status: string
+}
+
 // ==================== API ====================
 
 export async function getP2pStatus() {
@@ -107,6 +115,23 @@ export async function disconnectPeer(peerId: string) {
   const res = await request<{ status: string; peerId: string }>(`/p2p/disconnect/${peerId}`, {
     method: 'POST'
   })
+  return res.data
+}
+
+/** 彻底删除节点（聊天记录 + 节点信息） */
+export async function deletePeer(peerId: string) {
+  const res = await request<{ status: string; peerId: string }>(`/p2p/peer/${peerId}`, {
+    method: 'DELETE'
+  })
+  return res.data
+}
+
+/** 重连离线节点（使用数据库保存的连接信息） */
+export async function reconnectPeer(peerId: string) {
+  const res = await request<{ status: string; peerId: string; address: string; channelActive: boolean }>(
+    `/p2p/reconnect/${peerId}`,
+    { method: 'POST' }
+  )
   return res.data
 }
 
@@ -184,5 +209,44 @@ export async function invokeAgent(peerId: string, agentConfigId: number, message
     `/p2p/agent/invoke/${peerId}`,
     { method: 'POST', body: JSON.stringify({ agentConfigId, message }) }
   )
+  return res.data
+}
+
+// ==================== 文件传输 API ====================
+
+/** 发送文件（FormData上传） */
+export async function sendFile(peerId: string, file: File): Promise<{ status: string; transferId: string; category: string }> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const authHeader = await getAuthHeaders()
+  const res = await request<{ status: string; transferId: string; category: string }>(
+    `/p2p/send-file/${peerId}`,
+    {
+      method: 'POST',
+      body: formData,
+      headers: authHeader  // 显式传入 token，确保 FormData 请求不被过滤
+    }
+  )
+  return res.data
+}
+
+/** 获取文件URL（用于图片src） */
+export function getFileUrl(peerId: string, transferId: string): string {
+  return `/api/p2p/file/${peerId}/${transferId}`
+}
+
+/** 获取缩略图URL */
+export function getThumbnailUrl(peerId: string, transferId: string): string {
+  return `/api/p2p/file/${peerId}/${transferId}/thumbnail`
+}
+
+/** 打开文件所在目录 */
+export async function openFileDir(peerId: string, transferId: string): Promise<void> {
+  await request(`/p2p/file/${peerId}/${transferId}/open-dir`, { method: 'POST' })
+}
+
+/** 查询传输进度 */
+export async function getTransferProgress(peerId: string, transferId: string): Promise<FileTransferProgress> {
+  const res = await request<FileTransferProgress>(`/p2p/file/${peerId}/${transferId}/progress`)
   return res.data
 }

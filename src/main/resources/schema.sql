@@ -320,6 +320,13 @@ CREATE TABLE IF NOT EXISTS p2p_chat_message (
     message_type VARCHAR(20) DEFAULT 'chat',
     agent_config_id BIGINT DEFAULT NULL,
     agent_name VARCHAR(100) DEFAULT NULL,
+    file_name VARCHAR(255) DEFAULT NULL,
+    file_size BIGINT DEFAULT NULL,
+    mime_type VARCHAR(100) DEFAULT NULL,
+    file_category VARCHAR(20) DEFAULT NULL,
+    transfer_id VARCHAR(36) DEFAULT NULL,
+    file_status VARCHAR(20) DEFAULT NULL,
+    local_path VARCHAR(500) DEFAULT NULL,
     created_at DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_p2p_msg_peer ON p2p_chat_message(peer_id);

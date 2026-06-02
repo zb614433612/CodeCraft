@@ -42,7 +42,7 @@
         <div class="side-section side-peers">
           <div class="section-head">
             <span class="section-head-icon">🖥</span>
-            <span>在线节点</span>
+            <span>节点</span>
             <span class="section-badge">{{ peers.length }}</span>
             <button class="btn-icon-only" @click="refreshPeers" title="刷新">🔄</button>
           </div>
@@ -70,10 +70,18 @@
                 <div class="peer-addr">{{ peer.address }}</div>
               </div>
               <span :class="['mini-dot', peer.online ? 'on' : 'off']"></span>
+              <!-- 离线节点：重连按钮 -->
+              <button
+                v-if="!peer.online"
+                class="btn-reconnect-sm"
+                @click.stop="doReconnect(peer)"
+                title="重连"
+              >🔄</button>
+              <!-- 在线节点：断开；离线节点：彻底删除 -->
               <button
                 class="btn-disconnect-sm"
-                @click.stop="doDisconnect(peer.peerId)"
-                title="断开"
+                @click.stop="peer.online ? doDisconnect(peer.peerId) : doDeletePeer(peer.peerId)"
+                :title="peer.online ? '断开' : '删除节点'"
               >×</button>
             </div>
           </div>
@@ -177,7 +185,8 @@
             </div>
 
             <a-button size="small" class="btn-header-action" @click="openAuthModal">🔑 授权管理</a-button>
-            <a-button size="small" class="btn-header-action" danger @click="doDisconnect(selectedPeer.peerId)">断开</a-button>
+            <a-button v-if="selectedPeer.online" size="small" class="btn-header-action" danger @click="doDisconnect(selectedPeer.peerId)">断开</a-button>
+            <a-button v-else size="small" class="btn-header-action" type="primary" @click="doReconnect(selectedPeer)">🔄 重连</a-button>
             <a-button size="small" class="btn-header-action" @click="doClearMessages" v-if="chatHistory.length > 0">清空</a-button>
           </div>
 
@@ -244,7 +253,50 @@
                   </template>
 
                   <!-- 普通消息 / 系统消息 -->
-                  <template v-else>{{ msg.content }}</template>
+                  <template v-else-if="msg.messageType !== 'file_transfer'">{{ msg.content }}</template>
+
+                  <!-- 文件传输消息 -->
+                  <template v-else-if="msg.messageType === 'file_transfer' && msg.fileCategory === 'image'">
+                    <div class="image-bubble-container">
+                      <!-- 发送方本地无文件，显示占位图标避免反复加载404 -->
+                      <div v-if="msg.from === 'me'" class="image-bubble-placeholder">
+                        <span class="image-bubble-placeholder-icon">🖼️</span>
+                        <span class="image-bubble-placeholder-text">图片已发送</span>
+                      </div>
+                      <img
+                        v-else
+                        :src="getThumbnailUrl(selectedPeer.peerId, msg.transferId)"
+                        :alt="msg.fileName"
+                        class="image-bubble-thumb"
+                        @click="openImageViewer(msg)"
+                        @error="onImgError($event, msg)"
+                      />
+                      <div class="image-bubble-footer">
+                        <span class="image-bubble-name">📷 {{ msg.fileName }}</span>
+                        <span class="image-bubble-size">{{ formatFileSize(msg.fileSize) }}</span>
+                      </div>
+                    </div>
+                  </template>
+                  <template v-else-if="msg.messageType === 'file_transfer'">
+                    <div class="file-card">
+                      <span class="file-card-icon">{{ getFileIcon(msg.fileName) }}</span>
+                      <div class="file-card-info">
+                        <span class="file-card-name">{{ msg.fileName }}</span>
+                        <span class="file-card-meta">
+                          {{ formatFileSize(msg.fileSize) }}
+                          <template v-if="msg.fileStatus === 'completed'"> · ✅ 已接收</template>
+                          <template v-else-if="msg.fileStatus === 'transferring'"> · 🔄 传输中</template>
+                          <template v-else-if="msg.fileStatus === 'failed'"> · ❌ 失败</template>
+                        </span>
+                      </div>
+                      <a-button
+                        v-if="msg.fileStatus === 'completed' && msg.from !== 'me'"
+                        size="small"
+                        class="btn-open-dir"
+                        @click="openFileDirectory(msg)"
+                      >📂 打开</a-button>
+                    </div>
+                  </template>
                 </div>
               </div>
 
@@ -257,7 +309,10 @@
           </div>
 
           <!-- ===== 聊天底部：双模式 ===== -->
-          <div class="chat-footer">
+          <div class="chat-footer"
+               @dragover.prevent="onDragOver"
+               @dragleave.prevent="onDragLeave"
+               @drop.prevent="onDrop">
             <!-- 模式切换 Tab -->
             <div class="mode-tabs">
               <button
@@ -270,8 +325,8 @@
               <button
                 :class="['mode-tab', chatMode === 'agent' ? 'active' : '']"
                 @click="switchMode('agent')"
-                :disabled="peerAuthToMe.length === 0"
-                :title="peerAuthToMe.length === 0 ? '对方未授权任何 Agent' : '切换到 Agent 调用模式'"
+                :disabled="!selectedPeer.online || peerAuthToMe.length === 0"
+                :title="!selectedPeer.online ? '对方已离线，无法使用 Agent' : peerAuthToMe.length === 0 ? '对方未授权任何 Agent' : '切换到 Agent 调用模式'"
               >
                 <span class="mode-tab-icon">🤖</span>
                 <span class="mode-tab-label">Agent</span>
@@ -300,26 +355,67 @@
 
             <!-- 输入区 -->
             <div class="input-row">
+              <!-- 文件选择按钮 -->
+              <input
+                ref="fileInputRef"
+                type="file"
+                class="file-input-hidden"
+                @change="onFileSelected"
+              />
+              <a-button
+                class="btn-attach"
+                :disabled="!selectedPeer.online"
+                title="发送图片或文件"
+                @click="openFilePicker"
+              >📎</a-button>
               <a-input
                 v-model:value="chatInput"
-                :placeholder="chatMode === 'agent'
-                  ? (selectedAgentId ? '输入给 Agent 的指令... (Enter 发送)' : '请先选择一个 Agent')
-                  : '输入消息... (Enter 发送)'"
+                :placeholder="!selectedPeer.online
+                  ? '对方已离线，无法发送消息'
+                  : chatMode === 'agent'
+                    ? (selectedAgentId ? '输入给 Agent 的指令... (Enter 发送，支持粘贴图片/拖拽文件)' : '请先选择一个 Agent')
+                    : '输入消息... (Enter 发送，支持粘贴图片/拖拽文件)'"
                 class="chat-input"
-                :disabled="chatMode === 'agent' && !selectedAgentId"
-                @pressEnter="doSend" />
+                :disabled="!selectedPeer.online || (chatMode === 'agent' && !selectedAgentId)"
+                @pressEnter="doSend"
+                @paste="onPaste" />
               <a-button
                 type="primary"
                 @click="doSend"
-                :disabled="!chatInput || (chatMode === 'agent' && !selectedAgentId)"
+                :disabled="!selectedPeer.online || !chatInput || (chatMode === 'agent' && !selectedAgentId) || !!uploadingFile"
+                :loading="!!uploadingFile"
                 class="btn-send"
               >
-                {{ chatMode === 'agent' ? '🚀 发送' : '发送' }}
+                {{ uploadingFile || (chatMode === 'agent' ? '🚀 发送' : '发送') }}
               </a-button>
             </div>
           </div>
         </template>
       </main>
+
+      <!-- ===== 图片查看器弹窗 ===== -->
+      <Teleport to="body">
+        <Transition name="modal-fade">
+          <div v-if="imageViewer.visible" class="image-viewer-overlay" @click.self="closeImageViewer">
+            <div class="image-viewer-body">
+              <button class="image-viewer-close" @click="closeImageViewer">✕</button>
+              <div class="image-viewer-info">{{ imageViewer.fileName }} ({{ formatFileSize(imageViewer.fileSize) }})</div>
+              <div v-if="imageViewer.loading" class="image-viewer-loading">
+                <div class="image-viewer-spinner"></div>
+                <span>加载中...</span>
+              </div>
+              <img
+                v-show="!imageViewer.loading"
+                :src="getFileUrl(imageViewer.peerId, imageViewer.transferId)"
+                :alt="imageViewer.fileName"
+                class="image-viewer-img"
+                @load="imageViewer.loading = false"
+                @error="imageViewer.loading = false"
+              />
+            </div>
+          </div>
+        </Transition>
+      </Teleport>
 
       <!-- ===== Agent 授权管理弹窗 ===== -->
       <Teleport to="body">
@@ -373,13 +469,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { Modal, message } from 'ant-design-vue'
 import { renderMarkdown } from '@/utils/markdown'
 import {
   getP2pStatus, getP2pAddress, setP2pName,
-  generateQrCode, connectPeer, disconnectPeer, getPeers,
+  generateQrCode, connectPeer, disconnectPeer, getPeers, deletePeer, reconnectPeer,
   sendMessage, pollMessages, getHistory, deleteMessages, setRemark,
   grantAgentAuth, cancelAgentAuth, getMyAuthToPeer, getPeerAuthToMe, invokeAgent,
+  sendFile, getFileUrl, getThumbnailUrl, openFileDir, getTransferProgress,
   type P2pStatus, type P2pAddressInfo, type P2pPeer, type AgentAuthItem
 } from '@/api/p2p'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
@@ -394,7 +492,7 @@ const connectionString = ref('')
 const inputConnStr = ref('')
 const peers = ref<P2pPeer[]>([])
 const selectedPeerId = ref('')
-const chatHistory = ref<{ from: string; name: string; content: string; time: string; messageType?: string; agentConfigId?: number; agentName?: string }[]>([])
+const chatHistory = ref<{ from: string; name: string; content: string; time: string; messageType?: string; agentConfigId?: number; agentName?: string; loading?: boolean; fileName?: string; fileSize?: number; mimeType?: string; fileCategory?: string; transferId?: string; fileStatus?: string }[]>([])
 const chatInput = ref('')
 const chatMsgs = ref<HTMLElement | null>(null)
 
@@ -403,6 +501,18 @@ const connectError = ref('')
 const connectSuccess = ref('')
 const toolsOpen = ref(true)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+// ===== 文件传输状态 =====
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const uploadingFile = ref('')
+const imageViewer = reactive({
+  visible: false,
+  peerId: '',
+  transferId: '',
+  fileName: '',
+  fileSize: 0,
+  loading: false
+})
 
 // ===== 聊天模式：'chat' = 人对人，'agent' = 人对Agent =====
 const chatMode = ref<'chat' | 'agent'>('chat')
@@ -442,6 +552,7 @@ function peerAvatarColor(peerId: string): string {
 
 // ==================== 模式切换 ====================
 function switchMode(mode: 'chat' | 'agent') {
+  if (!selectedPeer.value?.online && mode === 'agent') return  // 离线不能切Agent
   chatMode.value = mode
   if (mode === 'chat') {
     selectedAgentId.value = null
@@ -491,12 +602,46 @@ async function doConnect() {
 async function doDisconnect(peerId: string) {
   await disconnectPeer(peerId)
   if (selectedPeerId.value === peerId) {
-    selectedPeerId.value = ''
-    chatHistory.value = []
+    // 断开后保留聊天记录，不清空；节点变为离线状态
     chatMode.value = 'chat'
     selectedAgentId.value = null
   }
   await refreshPeers()
+}
+
+async function doDeletePeer(peerId: string) {
+  Modal.confirm({
+    title: '确认删除',
+    content: '确定要彻底删除该节点吗？聊天记录也将被清除。',
+    okText: '确认删除',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      try {
+        await deletePeer(peerId)
+        if (selectedPeerId.value === peerId) {
+          selectedPeerId.value = ''
+          chatHistory.value = []
+          chatMode.value = 'chat'
+          selectedAgentId.value = null
+        }
+        await refreshPeers()
+        message.success('节点已删除')
+      } catch (e: any) {
+        message.error('删除失败: ' + (e.message || e))
+      }
+    }
+  })
+}
+
+async function doReconnect(peer: P2pPeer) {
+  try {
+    await reconnectPeer(peer.peerId)
+    message.success('重连成功！')
+    await refreshPeers()
+  } catch (e: any) {
+    message.error('重连失败: ' + (e.message || e))
+  }
 }
 
 async function refreshPeers() {
@@ -536,7 +681,13 @@ async function loadHistory(peerId: string) {
         time: formatTime(m.time),
         messageType: m.messageType || 'chat',
         agentConfigId: m.agentConfigId,
-        agentName: m.agentName
+        agentName: m.agentName,
+        fileName: (m as any).fileName,
+        fileSize: (m as any).fileSize,
+        mimeType: (m as any).mimeType,
+        fileCategory: (m as any).fileCategory,
+        transferId: (m as any).transferId,
+        fileStatus: (m as any).fileStatus,
       })
     }
     // ★ 刷新/切换页面后恢复loading状态：如果agent_invoke之后没有同Agent的response，说明AI还在执行
@@ -579,7 +730,7 @@ function formatTime(time?: string) {
 }
 
 async function pollChat() {
-  if (!selectedPeer.value) return
+  if (!selectedPeer.value || !selectedPeer.value.online) return
   try {
     const msgs = await pollMessages(selectedPeer.value.peerId)
     if (msgs.length > 0) {
@@ -589,6 +740,22 @@ async function pollChat() {
         // ★ 根据后端传来的 direction 判断消息角度 direction='sent'→我发出的
         const dir = (m as any).direction
         const from = dir === 'sent' ? 'me' : 'peer'
+
+        // 文件传输消息处理
+        if (msgType === 'file_transfer') {
+          chatHistory.value.push({
+            from, name: m.name || '系统',
+            content: m.content, time: formatTime(),
+            messageType: 'file_transfer',
+            fileName: (m as any).fileName,
+            fileSize: (m as any).fileSize,
+            mimeType: (m as any).mimeType,
+            fileCategory: (m as any).fileCategory,
+            transferId: (m as any).transferId,
+            fileStatus: (m as any).fileStatus || 'completed',
+          } as any)
+          continue
+        }
 
         // 被调用方收到 agent_invoke 时显示loading
         if (msgType === 'agent_invoke' && from === 'peer') {
@@ -661,6 +828,7 @@ async function toggleAgentAuth(agentId: number) {
 
 async function doSend() {
   if (!chatInput.value || !selectedPeer.value) return
+  if (!selectedPeer.value.online) return  // 离线节点不能发送
   if (chatMode.value === 'agent') {
     if (!selectedAgentId.value) return
     await doSendAgentInvoke()
@@ -691,6 +859,148 @@ async function doSendAgentInvoke() {
   })
   scrollChat()
   try { await invokeAgent(selectedPeer.value.peerId, selectedAgentId.value, message) } catch (e) { /* */ }
+}
+
+// ===== 文件传输方法 =====
+
+function openFilePicker() {
+  fileInputRef.value?.click()
+}
+
+async function onFileSelected(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !selectedPeer.value) return
+  await doSendFile(file)
+  input.value = '' // 重置，允许重复选择同一文件
+}
+
+async function onPaste(e: ClipboardEvent) {
+  if (!selectedPeer.value?.online) return
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile()
+      if (file) {
+        e.preventDefault()
+        await doSendFile(file)
+        return
+      }
+    }
+  }
+}
+
+function onDragOver(e: DragEvent) {
+  if (!selectedPeer.value?.online) return
+  const el = e.currentTarget as HTMLElement
+  el.classList.add('drag-over')
+}
+
+function onDragLeave(e: DragEvent) {
+  const el = e.currentTarget as HTMLElement
+  el.classList.remove('drag-over')
+}
+
+async function onDrop(e: DragEvent) {
+  const el = e.currentTarget as HTMLElement
+  el.classList.remove('drag-over')
+  if (!selectedPeer.value?.online) return
+  const files = e.dataTransfer?.files
+  if (files && files.length > 0) {
+    await doSendFile(files[0])
+  }
+}
+
+async function doSendFile(file: File) {
+  if (!selectedPeer.value) return
+  const MAX_SIZE = 2 * 1024 * 1024 * 1024 // 2GB
+  if (file.size > MAX_SIZE) {
+    Modal.warning({ title: '文件过大', content: '最大支持 2GB 的文件' })
+    return
+  }
+
+  uploadingFile.value = '发送中...'
+  try {
+    const result = await sendFile(selectedPeer.value.peerId, file)
+    const isImage = result.category === 'image'
+    const content = `[${isImage ? '图片' : '文件'}] ${file.name}`
+    // 本地聊天记录添加发送的消息
+    chatHistory.value.push({
+      from: 'me', name: myName.value || '未知',
+      content, time: formatTime(),
+      messageType: 'file_transfer',
+      fileName: file.name,
+      fileSize: file.size,
+      mimeType: file.type || 'application/octet-stream',
+      fileCategory: result.category,
+      transferId: result.transferId,
+      fileStatus: 'completed',
+    } as any)
+    scrollChat()
+  } catch (e: any) {
+    Modal.error({ title: '发送失败', content: e.message || '文件传输失败' })
+  } finally {
+    uploadingFile.value = ''
+  }
+}
+
+function openImageViewer(msg: any) {
+  if (!selectedPeer.value) return
+  imageViewer.visible = true
+  imageViewer.peerId = selectedPeer.value.peerId
+  imageViewer.transferId = msg.transferId
+  imageViewer.fileName = msg.fileName
+  imageViewer.fileSize = msg.fileSize || 0
+  imageViewer.loading = true
+}
+
+function closeImageViewer() {
+  imageViewer.visible = false
+}
+
+async function openFileDirectory(msg: any) {
+  if (!selectedPeer.value) return
+  try {
+    await openFileDir(selectedPeer.value.peerId, msg.transferId)
+  } catch (e: any) {
+    Modal.error({ title: '打开失败', content: e.message || '无法打开文件目录' })
+  }
+}
+
+function getFileIcon(fileName: string): string {
+  if (!fileName) return '📄'
+  const ext = fileName.split('.').pop()?.toLowerCase() || ''
+  const iconMap: Record<string, string> = {
+    pdf: '📕', doc: '📘', docx: '📘', xls: '📊', xlsx: '📊', ppt: '📽️', pptx: '📽️',
+    zip: '📦', rar: '🗜️', '7z': '🗜️', tar: '🗜️', gz: '🗜️',
+    mp3: '🎵', wav: '🎵', flac: '🎵', mp4: '🎬', avi: '🎬', mkv: '🎬',
+    jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', webp: '🖼️', bmp: '🖼️', svg: '🖼️',
+    txt: '📄', md: '📝', json: '📋', xml: '📋', yml: '📋', yaml: '📋',
+    html: '🌐', css: '🎨', js: '📜', ts: '📜', java: '☕', py: '🐍',
+    exe: '⚙️', dmg: '💿', apk: '📱',
+  }
+  return iconMap[ext] || '📄'
+}
+
+function formatFileSize(bytes: number | undefined | null): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let size = bytes
+  while (size >= 1024 && i < units.length - 1) {
+    size /= 1024
+    i++
+  }
+  return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i]
+}
+
+function onImgError(e: Event, msg: any) {
+  // 缩略图加载失败时，尝试直接加载原图
+  const img = e.target as HTMLImageElement
+  if (img && selectedPeer.value && msg.transferId) {
+    img.src = getFileUrl(selectedPeer.value.peerId, msg.transferId)
+  }
 }
 
 // ===== 辅助函数 =====
@@ -945,6 +1255,15 @@ onUnmounted(() => {
 }
 .peer-card:hover .btn-disconnect-sm { opacity: 0.7; }
 .peer-card:hover .btn-disconnect-sm:hover { opacity: 1; color: var(--red); background: rgba(239,68,68,0.08); }
+
+.btn-reconnect-sm {
+  background: none; border: none; color: var(--accent); font-size: 13px;
+  cursor: pointer; padding: 0 4px; line-height: 1;
+  opacity: 0; transition: all 0.2s ease;
+  border-radius: 4px;
+}
+.peer-card:hover .btn-reconnect-sm { opacity: 0.7; }
+.peer-card:hover .btn-reconnect-sm:hover { opacity: 1; background: var(--accent-lt); }
 
 /* ----- 工具区 ----- */
 .tools-body { display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
@@ -1724,5 +2043,158 @@ onUnmounted(() => {
 [data-theme="dark"] .markdown-content .hljs-selector-class { color: #79c0ff; }
 [data-theme="dark"] .markdown-content pre code.hljs {
   color: #e4e2f0;
+}
+
+/* ===== 文件选择按钮 ===== */
+.file-input-hidden { display: none; }
+.btn-attach {
+  font-size: 16px; padding: 0 10px; border-radius: var(--radius-sm);
+  transition: all 0.2s ease;
+}
+.btn-attach:not(:disabled):hover {
+  background: var(--accent-lt); border-color: var(--accent-md); color: var(--accent);
+}
+.btn-attach:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ===== 拖拽高亮 ===== */
+.chat-footer.drag-over {
+  background: var(--accent-lt);
+  border-top-color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+  transition: all 0.2s ease;
+}
+
+/* ===== 图片气泡 ===== */
+.image-bubble-container {
+  display: flex; flex-direction: column; gap: 6px;
+  max-width: 280px;
+}
+.image-bubble-placeholder {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 24px 20px; border-radius: 10px;
+  background: rgba(255,255,255,0.1); border: 1px dashed rgba(255,255,255,0.25);
+  min-height: 80px;
+}
+.image-bubble-placeholder-icon { font-size: 36px; opacity: 0.8; }
+.image-bubble-placeholder-text { font-size: 12px; opacity: 0.6; }
+.image-bubble-thumb {
+  width: 100%; max-height: 200px; object-fit: cover;
+  border-radius: 10px; cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+.image-bubble-thumb:hover {
+  transform: scale(1.02);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+}
+.image-bubble-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; padding: 0 4px;
+}
+.image-bubble-name {
+  color: inherit; opacity: 0.8; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+}
+.image-bubble-size { color: inherit; opacity: 0.6; flex-shrink: 0; }
+
+/* 我的图片气泡（右侧发送） */
+.msg-row.me .image-bubble-footer { color: rgba(255,255,255,0.8); }
+
+/* 对方的图片气泡（左侧接收） */
+.msg-row.peer .image-bubble-footer { color: var(--text-2); }
+
+/* ===== 文件卡片 ===== */
+.file-card {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 220px; max-width: 320px;
+}
+.file-card-icon { font-size: 28px; flex-shrink: 0; }
+.file-card-info {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.file-card-name {
+  font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-card-meta { font-size: 11px; opacity: 0.7; }
+.btn-open-dir {
+  flex-shrink: 0; font-size: 11px; font-weight: 600;
+  border-radius: var(--radius-xs);
+}
+
+/* 我的文件气泡 */
+.msg-row.me .file-card-icon,
+.msg-row.me .file-card-name,
+.msg-row.me .file-card-meta { color: #fff; }
+[data-theme="dark"] .msg-row.me .file-card-icon,
+[data-theme="dark"] .msg-row.me .file-card-name,
+[data-theme="dark"] .msg-row.me .file-card-meta { color: #fff; }
+.msg-row.me .btn-open-dir {
+  background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.3); color: #fff;
+}
+.msg-row.me .btn-open-dir:hover {
+  background: rgba(255,255,255,0.35);
+}
+
+/* 对方的文件气泡 */
+.msg-row.peer .file-card-icon { color: var(--text-1); }
+.msg-row.peer .file-card-name { color: var(--text-1); }
+.msg-row.peer .file-card-meta { color: var(--text-3); }
+.msg-row.peer .btn-open-dir {
+  background: var(--accent-lt); border-color: var(--accent-md); color: var(--accent);
+}
+.msg-row.peer .btn-open-dir:hover {
+  background: var(--accent-md);
+}
+
+/* ===== 图片查看器 ===== */
+.image-viewer-overlay {
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(0,0,0,0.9);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.image-viewer-body {
+  position: relative; max-width: 92vw; max-height: 92vh;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.image-viewer-close {
+  position: absolute; top: -40px; right: 0;
+  background: rgba(255,255,255,0.15); border: none; color: #fff;
+  font-size: 22px; width: 36px; height: 36px; border-radius: 50%;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 0.2s;
+}
+.image-viewer-close:hover { background: rgba(255,255,255,0.3); }
+.image-viewer-info {
+  color: rgba(255,255,255,0.7); font-size: 13px;
+}
+.image-viewer-loading {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 60px 40px; color: rgba(255,255,255,0.6);
+}
+.image-viewer-spinner {
+  width: 40px; height: 40px;
+  border: 3px solid rgba(255,255,255,0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.image-viewer-img {
+  max-width: 90vw; max-height: 80vh; object-fit: contain;
+  border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+  cursor: default;
+}
+
+/* ===== 响应式微调 ===== */
+@media (max-width: 768px) {
+  .image-bubble-container { max-width: 200px; }
+  .image-bubble-thumb { max-height: 150px; }
+  .file-card { min-width: 180px; max-width: 260px; }
+  .image-viewer-close { top: -35px; }
 }
 </style>

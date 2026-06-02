@@ -4,7 +4,7 @@
 
 ---
 
-## [1.0.8] - 2026-06-01
+## [1.0.8] - 2026-06-02
 
 ### 🎉 新增功能
 
@@ -13,6 +13,8 @@
   - 文件最大支持 2GB，分块传输（1MB/块），TLS 加密通道
   - 文件完整落盘存储（`data/p2p/received/{peerId}/{transferId}/`），数据库只存元信息
   - 接收方收到图片自动生成缩略图，文件点击直接打开本地目录
+  - `p2p_chat_message` 表新增 7 个文件元信息字段（`file_name`/`file_size`/`mime_type`/`file_category`/`transfer_id`/`file_status`/`local_path`）
+  - 新增 `FileTransferHandler` + `FileTransferManager` 独立管理文件传输协议
 - **输入区增强**：支持拖拽发送、Ctrl+V 粘贴图片、📎按钮选择文件
 - **P2P 节点管理完善**：离线节点支持重连/删除，Agent 模式下对方离线自动禁用
 
@@ -20,6 +22,16 @@
 
 - **P2P 面板多项修复**：reactive 未导入、Token 丢失（FormData 请求 + img 标签）、Desktop HeadlessException、文件名丢失（String.format 的 % 冲突）、发送方图片闪烁
 - **http-client 修复**：FormData 请求自动跳过 Content-Type 设置，headers 显式合并防止 token 丢失
+- **TokenAuthenticationFilter**：修正认证过滤器逻辑
+
+### 📝 文档
+
+- **README.md 精简重构**：去除冗余描述，改为核心功能概览 + 关键特性摘要，阅读体验更简洁
+
+### 🗄️ 数据库变更
+
+- `p2p_chat_message` 表新增 `file_name`/`file_size`/`mime_type`/`file_category`/`transfer_id`/`file_status`/`local_path` 字段
+- `P2pChatService` 新增 `saveFileMessage()` 和 `findByTransferId()` 方法
 
 ---
 
