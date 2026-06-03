@@ -6,12 +6,47 @@
 
 ## [1.0.9] - 2026-06-03
 
+### 🎉 新增功能
+
+- **上下文模式（Context Mode）**：全新的双策略上下文注入系统，支持全量/精简两种模式，大幅优化 Token 消耗
+  - **全量模式（Full）**：所有历史消息完整注入，LLM 拥有完整上下文
+  - **精简模式（Compact）**：非本轮对话的工具调用结果仅保留成功/失败摘要，推理过程（reasoning_content）移除，Token 消耗预计降低 90%+
+  - 精简模式下 LLM 可使用 `query_tool_history` 工具按需查询历史工具调用的完整细节
+  - 配置持久化到服务端 `sys_config` 表，运行时在聊天输入区底部快速切换
+- **QueryToolHistory 新工具**：`query_tool_history` 工具支持按 tool_name、limit、message_id 查询历史工具调用的完整原始结果，精简模式下按需检索，全量模式下也可用于深入排查
+- **上下文 Token 可视化**：聊天输入区底部实时显示当前上下文 Token 总数，精简模式时附紫色「⚡ 精简」标记并应用精确折扣算法
+- **配置页上下文模式管理**：新增"上下文模式"配置卡片，全量/精简双选 radio 按钮 + 详细使用说明
+
+### 🔧 修复优化
+
+- **输入框发送后不清空**：修复 AI 助手消息发送后输入框残留内容的问题（根因：Ant Design Vue `a-textarea` 在 `disabled` 状态下同一渲染周期不响应 `v-model` 变更，改为 `await nextTick()` 后再禁用 + 兜底清空逻辑）
+- **服务端口修正**：修正服务端口为 8084（alignment 统一）
+- **application.yml 配置同步**：v1.0.9 配置项完善
+
+### 🛠️ 技术架构
+
+- **ContextBuilder 重构**：新增 `buildMessagesFromHistory(conversationId, contextMode)` 双模式消息构建方法，`compactHistoryMessages()` 精简核心逻辑（工具结果摘要化 + reasoning 移除 + token 估算），`buildCompactModeInstruction()` 注入智能提示指令
+- **DeepSeekAnalyzer 增强**：集成紧凑上下文模式支持，优化分析器与 ContextBuilder 协作
+- **AgentForkManager 适配**：子 Agent 创建时正确传播上下文模式配置
+- **DeepSeekServiceImpl 重构**：消息构建管线集成 ContextBuilder，统一上下文管理
+- **TokenEstimator**：新增 Token 估算工具类，支持消息列表级 Token 预估
+- **配置层扩展**：`DeepSeekConfig` 新增 `contextMode` 字段，`ChatRequest` 新增 `contextMode` 参数
+
+### 🗄️ 数据库变更
+
+- `sys_config` 表新增 `context_mode` 配置项（full/compact，默认 full）
+
 ### 🏷️ 版本号
 
 - 后端：`1.0.8` → `1.0.9`
 - 前端：`1.0.5` → `1.0.9`
 - Electron：`1.0.8` → `1.0.9`
 - 打包产物：`CodeCraft-Setup-1.0.8.exe` → `CodeCraft-Setup-1.0.9.exe`
+
+### 📝 文档
+
+- `README.md` 更新项目特性描述
+- `BUILD_AND_RUN.md` 版本号同步更新
 
 ---
 
@@ -188,6 +223,8 @@
 ---
 
 
+
+## [1.0.2] - 2026-05-25
 
 ### 🎉 新增功能
 
