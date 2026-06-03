@@ -242,6 +242,144 @@ public class ContextBuilder {
         return result;
     }
 
+    /**
+     * 根据会话ID构建历史消息列表（支持上下文模式）
+     * @param conversationId 会话ID
+     * @param contextMode 上下文模式：full（全量）/ compact（精简）
+     * @return 消息列表
+     */
+    public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, String contextMode) {
+        List<Map<String, Object>> result = buildMessagesFromHistory(conversationId);
+        if ("compact".equals(contextMode)) {
+            int beforeTokens = TokenEstimator.estimateMessages(result);
+            compactHistoryMessages(result);
+            int afterTokens = TokenEstimator.estimateMessages(result);
+            log.info("compact 模式：精简完成, 消息数={}, Token: {} → {} (节省 {}%)",
+                    result.size(), beforeTokens, afterTokens,
+                    beforeTokens > 0 ? (beforeTokens - afterTokens) * 100 / beforeTokens : 0);
+
+            // 精简后仍超限则执行滑动窗口丢弃
+            int maxTokens = deepSeekConfig.getMaxContextTokens();
+            if (afterTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
+                log.warn("compact 精简后仍超限，执行滑动窗口丢弃：{} tokens > {} 上限",
+                        afterTokens, maxTokens);
+                trimToTokenBudget(result, maxTokens);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 精简非本轮对话的消息（compact 模式核心逻辑）
+     * <p>
+     * 规则：
+     * - 找到最后一条 user 消息作为"本轮对话"的起点
+     * - 此前的 assistant 消息移除 reasoning_content
+     * - 此前的 tool 消息 content 替换为"[工具 xxx: 成功/失败]"摘要
+     * - tool_call_id 完整保留（API 格式要求）
+     * </p>
+     */
+    private void compactHistoryMessages(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) return;
+
+        // 1. 从后往前找到最后一条 user 消息的索引（"本轮对话"起点）
+        int lastUserIdx = -1;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if ("user".equals(messages.get(i).get("role"))) {
+                lastUserIdx = i;
+                break;
+            }
+        }
+        if (lastUserIdx <= 0) {
+            log.debug("compact: 没有历史消息需要精简（lastUserIdx={}）", lastUserIdx);
+            return;
+        }
+
+        // 2. 构建 tool_call_id → tool_name 的映射
+        Map<String, String> tcIdToName = new HashMap<>();
+        for (Map<String, Object> msg : messages) {
+            Object tcObj = msg.get("tool_calls");
+            if (tcObj instanceof JsonNode tcNode && tcNode.isArray()) {
+                for (JsonNode tc : tcNode) {
+                    String id = tc.path("id").asText();
+                    String name = tc.path("function").path("name").asText();
+                    if (!id.isEmpty() && !name.isEmpty()) {
+                        tcIdToName.put(id, name);
+                    }
+                }
+            }
+        }
+
+        // 3. 遍历 lastUserIdx 之前的消息并精简
+        int compactedToolCount = 0;
+        int removedReasoningCount = 0;
+        for (int i = 0; i < lastUserIdx; i++) {
+            Map<String, Object> msg = messages.get(i);
+            String role = (String) msg.get("role");
+
+            if ("assistant".equals(role)) {
+                // 移除 reasoning_content（历史思考过程参考价值低、token 消耗大）
+                if (msg.containsKey("reasoning_content")) {
+                    msg.remove("reasoning_content");
+                    removedReasoningCount++;
+                }
+            } else if ("tool".equals(role)) {
+                // 精简 tool content
+                String content = (String) msg.get("content");
+                String toolCallId = (String) msg.get("tool_call_id");
+                String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
+
+                if (content != null) {
+                    // 错误检测：检查标准错误前缀或关键词（仅检查前200字符避免全文误判）
+                    String contentPrefix = content.length() > 200 ? content.substring(0, 200) : content;
+                    boolean isError = contentPrefix.contains("ERROR") ||
+                            contentPrefix.contains("error") ||
+                            contentPrefix.contains("失败") ||
+                            contentPrefix.contains("【缺少参数】") ||
+                            contentPrefix.contains("【未找到】") ||
+                            contentPrefix.contains("【查询失败】") ||
+                            contentPrefix.contains("【无匹配") ||
+                            contentPrefix.contains("【无数据】");
+
+                    if (isError) {
+                        // 提取错误信息前 150 字符
+                        String shortContent = content.length() > 150
+                                ? content.substring(0, 150) + "..."
+                                : content;
+                        msg.put("content", "[工具 " + toolName + " 调用失败: " + shortContent + "]");
+                    } else {
+                        msg.put("content", "[工具 " + toolName + " 调用成功 - 详细结果已精简，使用 query_tool_history 查询]");
+                    }
+                    compactedToolCount++;
+                }
+            }
+        }
+
+        log.info("compact 精简完成: 精简了 {} 条 tool 消息, 移除了 {} 条 reasoning_content",
+                compactedToolCount, removedReasoningCount);
+    }
+
+    /**
+     * 构建 compact 模式的提示词指令
+     * 注入到系统提示词中，告知 LLM 精简机制和查询方式
+     * @param conversationId 当前会话ID，用于替换提示词中的占位符
+     */
+    public String buildCompactModeInstruction(Long conversationId) {
+        String cid = conversationId != null ? conversationId.toString() : "当前会话ID";
+        return "\n\n【上下文精简模式 - 必须遵守】\n"
+                + "当前处于上下文精简模式。为节省 Token，非本轮对话（即最后一条用户消息之前的历史）中的内容已做以下处理：\n"
+                + "1. 工具调用结果（tool 消息）已被替换为 \"[工具 xxx 调用成功/失败]\" 的摘要\n"
+                + "2. 思考过程（reasoning_content）已被移除\n\n"
+                + "如需查看某次工具调用的完整原始结果，请使用 query_tool_history 工具查询：\n"
+                + "  - query_tool_history(conversation_id=" + cid + ", tool_name=\"工具名\")\n"
+                + "    返回最近几次该工具的调用详情\n"
+                + "  - query_tool_history(conversation_id=" + cid + ", limit=10)\n"
+                + "    返回最近10条工具调用详情\n"
+                + "  - query_tool_history(conversation_id=" + cid + ", message_id=<消息ID>)\n"
+                + "    返回指定消息的完整内容\n\n"
+                + "本指令优先级高于其他指令，确保你不会因为缺少历史详情而做出错误判断。";
+    }
+
     // ==================== Token 管理 ====================
 
     /**

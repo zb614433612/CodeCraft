@@ -15,7 +15,9 @@ import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.ToolExecutor;
 import com.example.agentdeepseek.tool.ToolRegistry;
+import com.example.agentdeepseek.tool.impl.DeepSeekAnalyzer;
 import com.example.agentdeepseek.util.ProjectRootContext;
+import com.example.agentdeepseek.util.PromptUtil;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -54,6 +56,8 @@ public class AgentForkManager {
     private final AgentEventBus agentEventBus;
     private final PendingQuestionStore pendingQuestionStore;
     private final ConfigService configService;
+    private final DeepSeekAnalyzer deepSeekAnalyzer;
+    private final ToolLoopManager toolLoopManager;
 
     /** 子Agent结果存储：agentId → CompletableFuture */
     private final ConcurrentHashMap<String, CompletableFuture<SubAgentResult>> agentFutures = new ConcurrentHashMap<>();
@@ -99,7 +103,9 @@ public class AgentForkManager {
             SkillMatcher skillMatcher,
             AgentEventBus agentEventBus,
             PendingQuestionStore pendingQuestionStore,
-            ConfigService configService) {
+            ConfigService configService,
+            DeepSeekAnalyzer deepSeekAnalyzer,
+            ToolLoopManager toolLoopManager) {
         this.deepSeekWebClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.objectMapper = objectMapper;
@@ -111,6 +117,8 @@ public class AgentForkManager {
         this.agentEventBus = agentEventBus;
         this.pendingQuestionStore = pendingQuestionStore;
         this.configService = configService;
+        this.deepSeekAnalyzer = deepSeekAnalyzer;
+        this.toolLoopManager = toolLoopManager;
     }
 
     // ================================================================
@@ -1007,17 +1015,60 @@ public class AgentForkManager {
     }
 
     /**
-     * 子Agent评委评估（简化版）
+     * 子Agent评委评估（复用主Agent评委机制）
+     * <p>
+     * 调用 DeepSeek API 分析子Agent的任务进展，判断是否应继续执行。
+     * API 调用失败时自动降级到本地简化逻辑，确保子Agent不被误杀。
+     * </p>
      */
     private boolean evaluateWithSubJudge(List<Map<String, Object>> messages) {
-        // 简化评估逻辑：检查最近是否有实质进展
-        // 完整版可调用独立的DeepSeek API评委
+        // 1. 加载评委提示词
+        String judgePrompt = PromptUtil.getPrompt("judge_prompt.txt");
+        if (judgePrompt == null || judgePrompt.isEmpty()) {
+            log.warn("子Agent评委提示词加载失败，使用降级逻辑");
+            return evaluateWithSubJudgeFallback(messages);
+        }
+
+        // 2. 构建评委上下文（复用 ToolLoopManager）
+        String judgeContext = toolLoopManager.buildJudgeContext(messages);
+
+        // 3. 调用评委 API（禁用 thinking 以获得更快响应，超时 180s）
+        String response = deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180);
+
+        // 4. 检查是否返回错误
+        if (response.startsWith("错误：")) {
+            log.warn("子Agent评委 API 调用失败，使用降级逻辑: {}", response);
+            return evaluateWithSubJudgeFallback(messages);
+        }
+
+        // 5. 解析评委响应（复用 ToolLoopManager）
+        ToolLoopManager.JudgeResult result = toolLoopManager.parseJudgeResult(response);
+        if (result == null) {
+            log.warn("子Agent评委响应解析失败，使用降级逻辑");
+            return evaluateWithSubJudgeFallback(messages);
+        }
+
+        // 6. 根据判断结果返回
+        if ("extend".equals(result.judgment)) {
+            log.info("子Agent评委评估：extend，理由: {}", result.reason);
+            return true;
+        } else {
+            log.info("子Agent评委评估：reject，理由: {}", result.reason);
+            return false;
+        }
+    }
+
+    /**
+     * 降级评估逻辑：当评委 API 不可用时使用
+     * 检查最近是否有实质进展（工具调用是否成功）
+     */
+    private boolean evaluateWithSubJudgeFallback(List<Map<String, Object>> messages) {
         for (int i = messages.size() - 1; i >= Math.max(0, messages.size() - 6); i--) {
             Map<String, Object> msg = messages.get(i);
             if ("tool".equals(msg.get("role"))) {
                 String content = (String) msg.get("content");
                 if (content != null && !content.contains("错误") && !content.contains("失败")) {
-                    return true; // 最近有成功工具调用，继续
+                    return true;
                 }
             }
         }

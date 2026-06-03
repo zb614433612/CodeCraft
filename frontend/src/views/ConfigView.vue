@@ -136,6 +136,52 @@
           </div>
         </div>
       </div>
+
+      <!-- 上下文模式配置卡片 -->
+      <div class="config-card card-context">
+        <div class="card-header">
+          <div class="card-header-left">
+            <span class="card-icon">🧠</span>
+            <div class="card-header-text">
+              <div class="card-title">上下文模式</div>
+              <div class="card-description">控制历史对话中工具调用结果和思考过程的注入方式</div>
+            </div>
+          </div>
+          <div class="card-badge" :class="contextMode === 'compact' ? 'active' : ''">
+            {{ contextMode === 'compact' ? '精简模式' : '全量模式' }}
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="card-desc">选择上下文注入策略。精简模式可大幅节省 Token，但 LLM 可能需要用 query_tool_history 工具查询历史工具调用详情。</p>
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 16 }" class="config-form">
+            <a-form-item label="注入模式">
+              <a-radio-group v-model:value="contextMode" :disabled="contextSaving" class="context-radio-group">
+                <a-radio value="full" class="context-radio-item">
+                  <span class="context-radio-title">📋 全量模式</span>
+                  <span class="context-radio-desc">所有历史消息完整注入，包括工具调用结果和思考过程。Token 消耗较大，但 LLM 拥有完整上下文。</span>
+                </a-radio>
+                <a-radio value="compact" class="context-radio-item">
+                  <span class="context-radio-title">⚡ 精简模式</span>
+                  <span class="context-radio-desc">非本轮对话的工具调用结果只保留成功/失败摘要，思考过程移除。大幅节省 Token（预计 90%+），需要详情时使用 query_tool_history 工具查询。</span>
+                </a-radio>
+              </a-radio-group>
+            </a-form-item>
+            <a-form-item :wrapper-col="{ offset: 4, span: 16 }">
+              <a-button type="primary" :loading="contextSaving" class="btn-save" @click="handleSaveContextMode">
+                <span v-if="!contextSaving">💾 保存</span>
+              </a-button>
+            </a-form-item>
+          </a-form>
+          <div class="config-hint">
+            <div class="hint-icon">💡</div>
+            <div class="hint-text">
+              <p><b>全量模式</b>：适合短对话、需要 LLM 看到完整历史工具结果的场景。</p>
+              <p><b>精简模式</b>：适合长对话、多轮工具调用的场景。非本轮的工具调用结果和思考过程被精简，Token 消耗降低 90%+。</p>
+              <p>切换后立即生效，下一个对话请求将使用新模式。也支持在聊天输入区底部快速切换（运行时配置优先）。</p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -144,6 +190,9 @@
 import { ref, reactive, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { getConfig, setConfig } from '@/api/config'
+import { useSettingsStore } from '@/store/settings'
+
+const settingsStore = useSettingsStore()
 
 // ===== API Key 配置 =====
 const apiKey = ref('')
@@ -269,9 +318,40 @@ const handleClearChar = async () => {
   }
 }
 
+// ===== 上下文模式配置 =====
+const contextMode = ref('full')
+const contextSaving = ref(false)
+
+const loadContextMode = async () => {
+  try {
+    const res = await getConfig('context_mode')
+    if (res.code === 200 && res.data && res.data.value) {
+      const mode = res.data.value
+      if (mode === 'full' || mode === 'compact') {
+        contextMode.value = mode
+        settingsStore.contextMode = mode
+      }
+    }
+  } catch { /* 静默失败 */ }
+}
+
+const handleSaveContextMode = async () => {
+  contextSaving.value = true
+  try {
+    await setConfig('context_mode', contextMode.value)
+    settingsStore.contextMode = contextMode.value
+    message.success('上下文模式已保存：' + (contextMode.value === 'compact' ? '精简模式' : '全量模式'))
+  } catch (e: any) {
+    message.error(e.message || '保存失败')
+  } finally {
+    contextSaving.value = false
+  }
+}
+
 onMounted(() => {
   loadApiKey()
   loadCharProfile()
+  loadContextMode()
 })
 </script>
 
@@ -687,6 +767,59 @@ onMounted(() => {
 
 [data-theme="dark"] .card-header {
   background: linear-gradient(180deg, rgba(139, 92, 246, 0.06), transparent);
+}
+
+/* ============ 上下文模式卡片 ============ */
+.card-context {
+  animation-delay: 0.2s;
+}
+
+.context-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.context-radio-group :deep(.ant-radio-wrapper) {
+  margin-right: 0;
+  padding: 14px 18px;
+  border: 1px solid var(--border-lt);
+  border-radius: var(--radius-sm);
+  transition: all 0.25s ease;
+  background: var(--bg-input);
+}
+
+.context-radio-group :deep(.ant-radio-wrapper:hover) {
+  border-color: var(--accent-md);
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+.context-radio-group :deep(.ant-radio-wrapper.ant-radio-wrapper-checked) {
+  border-color: var(--accent);
+  background: var(--accent-lt);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.08);
+}
+
+.context-radio-title {
+  display: block;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-1);
+  margin-bottom: 4px;
+}
+
+.context-radio-desc {
+  display: block;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+
+.context-radio-group :deep(.ant-radio) {
+  align-self: flex-start;
+  margin-top: 3px;
 }
 
 /* ============ 响应式 ============ */

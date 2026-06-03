@@ -565,8 +565,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 保存用户消息
         messagePersister.saveUserMessage(storageConversationId, userMessage, request.getTurnId());
 
-        // 构建历史消息（包括本次用户消息）
-        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId);
+        // 确定上下文模式：请求优先 > 系统配置 > 默认 full
+        String contextMode = request.getContextMode();
+        if (contextMode == null || contextMode.isEmpty()) {
+            contextMode = configService.getValue("context_mode");
+        }
+        if (contextMode == null || contextMode.isEmpty()) {
+            contextMode = "full";
+        }
+
+        // 构建历史消息（包括本次用户消息），根据上下文模式精简
+        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId, contextMode);
 
         // 检查是否为首次会话（是否已存在SYSTEM消息）
         boolean hasSystemMessage = historyMessages.stream()
@@ -618,6 +627,18 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 if ("system".equals(msg.get("role"))) {
                     String existing = (String) msg.get("content");
                     msg.put("content", existing + modeInstruction);
+                    break;
+                }
+            }
+        }
+
+        // 注入 compact 模式指令到系统提示词
+        if ("compact".equals(contextMode)) {
+            String compactInstruction = contextBuilder.buildCompactModeInstruction(conversationId);
+            for (Map<String, Object> msg : historyMessages) {
+                if ("system".equals(msg.get("role"))) {
+                    String existing = (String) msg.get("content");
+                    msg.put("content", existing + compactInstruction);
                     break;
                 }
             }
@@ -796,6 +817,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (turnId != null && !turnId.isEmpty()) {
             apiRequest.put("_turnId", turnId);
         }
+        // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
+        apiRequest.put("_contextMode", contextMode);
 
         // 添加工具定义（如果存在），根据提示词中的工具组过滤
         JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(filteredToolNames);
@@ -1111,7 +1134,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // 构建初始消息列表
         List<Map<String, Object>> messages = new ArrayList<>();
-        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId);
+        String contextMode = (String) initialApiRequest.getOrDefault("_contextMode", "full");
+        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId, contextMode);
         for (Map<String, Object> msg : historyMessages) {
             Map<String, Object> mutableMsg = new HashMap<>(msg);
             messages.add(mutableMsg);
@@ -1347,8 +1371,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             return Flux.just(createReasoningSSEEvent("评委提示词加载失败，任务自动终止。"));
         }
 
-        // 3. 调用评委 API（非流式，超时 120s，因为 thinking 模式可能耗时较长）
-        return Mono.fromCallable(() -> deepSeekAnalyzer.analyze(judgePrompt, judgeContext, 120))
+        // 3. 调用评委 API（非流式，超时 180s，禁用 thinking 模式以获得更快的确定性响应）
+        return Mono.fromCallable(() -> deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180))
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMapMany(response -> {
                     // 4. 解析 JSON 响应

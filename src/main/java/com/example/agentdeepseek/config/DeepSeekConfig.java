@@ -45,6 +45,12 @@ public class DeepSeekConfig {
     private String thinkingMode = "thinking";
 
     /**
+     * 上下文模式：full（全量注入）/ compact（精简历史工具调用和思考过程）
+     * 默认 full，运行时可通过 sys_config 表 context_mode 键动态覆盖
+     */
+    private String contextMode = "full";
+
+    /**
      * 提示词文件与工具组映射
      * key: prompt 文件名, value: 工具名称列表
      */

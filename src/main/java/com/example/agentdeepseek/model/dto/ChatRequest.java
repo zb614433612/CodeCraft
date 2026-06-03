@@ -47,4 +47,7 @@ public class ChatRequest {
 
     @Schema(description = "Agent配置ID（可选），指定使用的自定义Agent配置", example = "1")
     private Long agentConfigId;
+
+    @Schema(description = "上下文模式（可选）：full（全量注入）/ compact（精简历史工具调用和思考过程），为空则使用服务端默认配置", example = "compact")
+    private String contextMode;
 }

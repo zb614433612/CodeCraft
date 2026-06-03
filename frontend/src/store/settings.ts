@@ -18,6 +18,11 @@ export type Model = 'deepseek-v4-pro' | 'deepseek-v4-flash'
 // thinking_max -> thinking.type=enabled + reasoning_effort=max
 export type ThinkingMode = 'non-thinking' | 'thinking' | 'thinking_max'
 
+// 上下文模式类型
+// full     -> 全量注入，所有历史消息完整保留
+// compact  -> 精简模式，非本轮对话的工具调用结果只保留成功/失败摘要，思考过程移除
+export type ContextMode = 'full' | 'compact'
+
 // 各助手的模型配置
 export interface Models {
   code_assistant: Model
@@ -52,6 +57,9 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // 项目工作目录（持久化，刷新不丢失）
   const projectRoot = ref('')
+
+  // 上下文模式（持久化，刷新不丢失），默认 full
+  const contextMode = ref<ContextMode>('full')
 
   // 获取指定助手的执行模式
   function getMode(agentType: string): ExecutionMode {
@@ -120,6 +128,7 @@ export const useSettingsStore = defineStore('settings', () => {
     thinkingModes,
     theme,
     projectRoot,
+    contextMode,
     getMode,
     setMode,
     toggleMode,

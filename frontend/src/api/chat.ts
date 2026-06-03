@@ -15,6 +15,7 @@ export interface ChatRequest {
   thinkingMode?: string
   turnId?: string
   agentConfigId?: number
+  contextMode?: string
 }
 
 // 流式聊天的额外选项
@@ -26,6 +27,7 @@ export interface StreamChatOptions {
   thinkingMode?: string
   turnId?: string
   agentConfigId?: number
+  contextMode?: string
 }
 
 // 聊天响应数据（非流式，用于创建会话等）
@@ -101,6 +103,9 @@ export async function* streamChat(
   }
   if (options?.agentConfigId !== undefined) {
     requestBody.agentConfigId = options.agentConfigId
+  }
+  if (options?.contextMode) {
+    requestBody.contextMode = options.contextMode
   }
 
   try {

@@ -581,6 +581,20 @@
                 <a-select-option value="thinking_max">深度思考</a-select-option>
               </a-select>
             </div>
+            <div class="mode-selector">
+              <span class="mode-emoji">🧠</span>
+              <span class="mode-label">上下文</span>
+              <a-select
+                :value="settingsStore.contextMode"
+                @change="(v: string) => { settingsStore.contextMode = v as 'full' | 'compact'; saveContextModeToServer(v) }"
+                size="small"
+                class="model-select"
+                dropdown-class-name="mode-dropdown"
+              >
+                <a-select-option value="full">📋 全量</a-select-option>
+                <a-select-option value="compact">⚡ 精简</a-select-option>
+              </a-select>
+            </div>
             <!-- 任务进度触发器 -->
             <div class="mode-selector task-trigger" @click="toggleTaskDropdown" :class="{ active: showTaskDropdown, loading: isSending }">
               <span class="mode-icon task-trigger-icon">
@@ -602,7 +616,10 @@
             </div>
           </div>
           <div class="footer-right" v-if="currentMessages.length > 0">
-            <span class="context-tokens">上下文 Token: {{ formatTokenCount(totalContextTokens) }}</span>
+            <span class="context-tokens">
+              上下文 Token: {{ formatTokenCount(totalContextTokens) }}
+              <span v-if="settingsStore.contextMode === 'compact'" class="context-mode-badge" title="精简模式：非本轮工具调用和思考过程已精简">⚡ 精简</span>
+            </span>
           </div>
         </div>
         <!-- 任务清单下拉面板 -->
@@ -701,6 +718,7 @@ import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
 import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment, supplementRequest, optimizePrompt } from '@/api/chat'
+import { setConfig } from '@/api/config'
 import type { SkillMatchInfo } from '@/utils/sse-client'
 import type { AgentStreamEvent } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
@@ -1597,7 +1615,45 @@ const onFileSelect = (_path: string, _isDirectory: boolean) => {
 const currentMessages = computed(() => messages.value[currentConversationId.value] || [])
 
 const totalContextTokens = computed(() => {
-  return currentMessages.value.reduce((sum, msg) => sum + (msg.tokenCount || 0), 0)
+  const msgs = currentMessages.value
+  if (msgs.length === 0) return 0
+
+  // full 模式：直接累加所有消息的 tokenCount
+  if (settingsStore.contextMode !== 'compact') {
+    return msgs.reduce((sum, msg) => sum + (msg.tokenCount || 0), 0)
+  }
+
+  // compact 模式：找到最后一条 user 消息作为"本轮对话"起点
+  let lastUserIdx = -1
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') {
+      lastUserIdx = i
+      break
+    }
+  }
+
+  let total = 0
+  for (let i = 0; i < msgs.length; i++) {
+    const msg = msgs[i]
+    if (i >= lastUserIdx) {
+      // 本轮对话：完整计入
+      total += msg.tokenCount || 0
+    } else {
+      // 非本轮对话：应用精简折扣
+      if (msg.role === 'assistant') {
+        // assistant 消息：reasoning 已移除，tokenCount 中 reasoning 部分去掉
+        // 粗略按 content 占比 20% 估算（reasoning 通常占大头）
+        total += Math.round((msg.tokenCount || 0) * 0.2)
+      } else if (msg.role === 'tool' || (msg as any).role === 'tool') {
+        // tool 消息：被精简为 ~30 token 的摘要
+        total += 30
+      } else {
+        // user/system 消息：完整保留
+        total += msg.tokenCount || 0
+      }
+    }
+  }
+  return total
 })
 
 const SAVED_CONV_KEY = 'code_assistant_last_conv_id'
@@ -1922,6 +1978,11 @@ const handleModelChange = (val: string) => {
 }
 const handleThinkingModeChange = (val: string) => {
   settingsStore.setThinkingMode('code_assistant', val as 'non-thinking' | 'thinking' | 'thinking_max')
+}
+
+// 上下文模式切换 — 同步更新 settingsStore + 持久化到服务端
+const saveContextModeToServer = (mode: string) => {
+  setConfig('context_mode', mode).catch(() => { /* 静默失败，settingsStore 已更新 */ })
 }
 
 // 停止流式响应（只停止当前Agent的流式，其他Agent的后台流式不受影响）
@@ -2307,7 +2368,8 @@ const sendMessage = async () => {
       model: agentRuntime.value.model,
       thinkingMode: agentRuntime.value.thinkingMode,
       turnId,
-      agentConfigId: currentAgentConfigId.value
+      agentConfigId: currentAgentConfigId.value,
+      contextMode: settingsStore.contextMode
     }, abortCtrl)) {
       // 每个事件都检查 sessionId —— 后端在第一个 SSE 事件中就返回了真实会话 ID，
       // 但不在流式过程中迁移 convId（避免数组引用变动导致内容重复），
@@ -4276,6 +4338,16 @@ watch(currentConversationId, (newId) => {
   color: var(--text-3);
   font-size: 11px;
   font-weight: 500;
+}
+.context-mode-badge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(139, 92, 246, 0.12);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.25);
 }
 
 /* ===== 模式选择器 / Chip 标签 ===== */

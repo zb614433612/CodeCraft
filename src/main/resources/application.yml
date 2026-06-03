@@ -216,6 +216,7 @@ deepseek:
       - "fork_agent"
       - "collect_agent"
       - "inspect_agent"
+      - "query_tool_history"
 
 # ==================== P2P 远程连接配置 ====================
 p2p:
