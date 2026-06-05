@@ -76,6 +76,16 @@ const fetchAgents = async () => {
         const defaultAgent = agentList.value.find(a => a.isDefault)
         const target = defaultAgent || agentList.value[0]
         switchAgent(target)
+      } else if (selectedId.value !== undefined) {
+        // ★ 已选中 agent 时也刷新 runtime，确保从 DB 同步最新值
+        const fresh = agentList.value.find(a => a.id === selectedId.value)
+        if (fresh) {
+          currentAgent = fresh
+          runtime.model = fresh.modelName || 'deepseek-v4-flash'
+          runtime.thinkingMode = fresh.thinkingMode || 'non-thinking'
+          runtime.executionMode = fresh.executionMode || 'manual'
+          runtime.workDir = fresh.workDir || ''
+        }
       }
     }
   } catch (e) {

@@ -67,10 +67,21 @@ public class GitCommandExecutor {
 
         ProcessBuilder pb = new ProcessBuilder(cmdArray);
         pb.directory(workDir.toFile());
-        pb.redirectErrorStream(true);
+        // ★ 不要 redirectErrorStream — stderr（autocrlf warning 等）必须单独丢弃
+        pb.redirectErrorStream(false);
         // 禁止 git 分页器，防止进程挂起
         pb.environment().put("GIT_PAGER", "cat");
         pb.environment().put("PAGER", "cat");
+
+        // ★ 注入 HOME 环境变量，让 git 子进程能找到 ~/.gitconfig 全局配置
+        //   ProcessBuilder 默认不继承父进程的环境变量，导致 core.autocrlf=true
+        //   配置缺失。git diff 会因 CRLF/LF 差异把所有文件都标记为"已修改"(786个)
+        String userHome = System.getProperty("user.home");
+        if (userHome != null) {
+            pb.environment().put("HOME", userHome);
+            // Windows 上 git 也用 USERPROFILE 定位 .gitconfig
+            pb.environment().put("USERPROFILE", userHome);
+        }
 
         // 如果有 Token，通过 GIT_ASKPASS 注入（跨平台脚本）
         if (token != null && !token.isEmpty()) {
@@ -81,10 +92,9 @@ public class GitCommandExecutor {
         try {
             Process process = pb.start();
 
-            // 【修复管道死锁】在 waitFor 之前启动异步线程读取 stdout，
-            // 防止输出量过大时管道缓冲区写满导致子进程阻塞（经典 Java 子进程死锁）
+            // ★ 异步读取 stdout（正常输出）和 stderr（warning/error，丢弃）
             StringBuilder outputBuilder = new StringBuilder();
-            Thread readerThread = new Thread(() -> {
+            Thread stdoutReader = new Thread(() -> {
                 try {
                     String line;
                     try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -94,16 +104,35 @@ public class GitCommandExecutor {
                         }
                     }
                 } catch (IOException e) {
-                    log.warn("读取 git 输出流时异常", e);
+                    log.warn("读取 git stdout 时异常", e);
                 }
             });
-            readerThread.setDaemon(true);
-            readerThread.start();
+            stdoutReader.setDaemon(true);
+            stdoutReader.start();
+
+            // 单独消费 stderr，防止管道堵塞
+            StringBuilder stderrBuilder = new StringBuilder();
+            Thread stderrReader = new Thread(() -> {
+                try {
+                    String line;
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+                        while ((line = br.readLine()) != null) {
+                            if (stderrBuilder.length() > 0) stderrBuilder.append("\n");
+                            stderrBuilder.append(line);
+                        }
+                    }
+                } catch (IOException e) {
+                    // ignore
+                }
+            });
+            stderrReader.setDaemon(true);
+            stderrReader.start();
 
             boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
             // 等待读取线程消费完剩余数据
-            readerThread.join(5000);
+            stdoutReader.join(5000);
+            stderrReader.join(3000);
 
             if (!finished) {
                 process.destroyForcibly();
@@ -111,12 +140,15 @@ public class GitCommandExecutor {
             }
 
             String output = outputBuilder.toString();
+            String stderr = stderrBuilder.toString();
             int exitCode = process.exitValue();
 
             if (exitCode != 0) {
-                return new GitResult(false, output.isBlank() ? "命令执行失败（exit=" + exitCode + "）" : output);
+                String errMsg = output.isBlank() ? stderr : (output + (stderr.isBlank() ? "" : "\n" + stderr));
+                return new GitResult(false, errMsg.isBlank() ? "命令执行失败（exit=" + exitCode + "）" : errMsg);
             }
 
+            // 即使 exitCode=0，stderr 有内容也不混入 output
             return new GitResult(true, output);
         } catch (IOException e) {
             log.error("git 命令执行失败", e);
@@ -163,4 +195,104 @@ public class GitCommandExecutor {
      * Git 命令执行结果
      */
     public record GitResult(boolean success, String output) {}
+
+    /**
+     * 执行 git 命令并将字符串通过 stdin 传入（如 git apply --reverse）
+     */
+    public GitResult executeWithStdin(String projectRoot, String stdinInput, String... args) {
+        Path workDir = Paths.get(projectRoot).normalize();
+        if (!workDir.toFile().isDirectory()) {
+            return new GitResult(false, "项目目录不存在: " + workDir);
+        }
+
+        String[] cmdArray = new String[args.length + 1];
+        cmdArray[0] = "git";
+        System.arraycopy(args, 0, cmdArray, 1, args.length);
+
+        ProcessBuilder pb = new ProcessBuilder(cmdArray);
+        pb.directory(workDir.toFile());
+        pb.redirectErrorStream(false);
+        pb.environment().put("GIT_PAGER", "cat");
+        pb.environment().put("PAGER", "cat");
+
+        // ★ 注入 HOME/USERPROFILE，让 git 子进程能找到全局 .gitconfig
+        String userHome = System.getProperty("user.home");
+        if (userHome != null) {
+            pb.environment().put("HOME", userHome);
+            pb.environment().put("USERPROFILE", userHome);
+        }
+
+        try {
+            Process process = pb.start();
+
+            // 写入 stdin
+            try (OutputStream os = process.getOutputStream();
+                 Writer writer = new OutputStreamWriter(os, "UTF-8")) {
+                writer.write(stdinInput);
+                writer.flush();
+            }
+
+            // 读取 stdout（正常输出）
+            StringBuilder outputBuilder = new StringBuilder();
+            Thread stdoutReader = new Thread(() -> {
+                try {
+                    String line;
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                        while ((line = br.readLine()) != null) {
+                            if (outputBuilder.length() > 0) outputBuilder.append("\n");
+                            outputBuilder.append(line);
+                        }
+                    }
+                } catch (IOException e) {
+                    log.warn("读取 git stdout 时异常", e);
+                }
+            });
+            stdoutReader.setDaemon(true);
+            stdoutReader.start();
+
+            // 单独消费 stderr，防止管道堵塞
+            StringBuilder stderrBuilder = new StringBuilder();
+            Thread stderrReader = new Thread(() -> {
+                try {
+                    String line;
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+                        while ((line = br.readLine()) != null) {
+                            if (stderrBuilder.length() > 0) stderrBuilder.append("\n");
+                            stderrBuilder.append(line);
+                        }
+                    }
+                } catch (IOException e) {
+                    // ignore
+                }
+            });
+            stderrReader.setDaemon(true);
+            stderrReader.start();
+
+            boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            stdoutReader.join(5000);
+            stderrReader.join(3000);
+
+            if (!finished) {
+                process.destroyForcibly();
+                return new GitResult(false, "git 命令超时（" + TIMEOUT_SECONDS + " 秒）");
+            }
+
+            String output = outputBuilder.toString();
+            String stderr = stderrBuilder.toString();
+            int exitCode = process.exitValue();
+
+            if (exitCode != 0) {
+                String errMsg = output.isBlank() ? stderr : (output + (stderr.isBlank() ? "" : "\n" + stderr));
+                return new GitResult(false, errMsg.isBlank() ? "命令执行失败（exit=" + exitCode + "）" : errMsg);
+            }
+
+            return new GitResult(true, output);
+        } catch (IOException e) {
+            log.error("git 命令执行失败", e);
+            return new GitResult(false, "git 命令执行失败: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new GitResult(false, "git 命令被中断");
+        }
+    }
 }

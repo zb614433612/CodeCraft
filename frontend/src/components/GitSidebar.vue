@@ -33,22 +33,10 @@
             />
           </label>
           <span :class="['change-status', change.status]">{{ statusLabel(change) }}</span>
-          <span class="change-file" @click="showDiff(change.file)" @dblclick="handleDblClick(change)">{{ change.file }}</span>
+          <span class="change-file" @dblclick="handleDblClick(change)" :title="change.file">
+            {{ fileDisplayName(change.file) }}
+          </span>
         </div>
-      </div>
-
-      <!-- Diff 预览 -->
-      <div v-if="diffContent !== null" class="diff-preview">
-        <div class="diff-header">
-          <span>Diff: {{ diffFile }}</span>
-          <div class="diff-header-actions">
-            <button class="diff-revert-btn" @click="handleRestoreFile(diffFile)" title="撤销此文件的改动">
-              <UndoOutlined /> 撤销
-            </button>
-            <button class="diff-close" @click="diffContent = null">✕</button>
-          </div>
-        </div>
-        <pre class="diff-text">{{ diffContent }}</pre>
       </div>
 
       <!-- 提交区 -->
@@ -79,7 +67,6 @@ import { message } from 'ant-design-vue'
 import { BranchesOutlined, ReloadOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import {
   getGitStatus,
-  getGitDiff,
   gitAdd,
   gitCommit,
   gitRestore,
@@ -96,9 +83,6 @@ const isRepo = ref(false)
 const branch = ref('')
 const changes = ref<GitChange[]>([])
 const loading = ref(false)
-const selectedFile = ref<string | null>(null)
-const diffContent = ref<string | null>(null)
-const diffFile = ref('')
 const commitMessage = ref('')
 const stagedFiles = ref<Set<string>>(new Set())
 
@@ -116,6 +100,12 @@ const statusLabel = (change: GitChange) => {
   return change.workingStatus || 'M'
 }
 
+/** 提取文件名最后一段显示（目录/目录/文件名 → 文件名） */
+const fileDisplayName = (fullPath: string): string => {
+  const idx = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'))
+  return idx >= 0 ? fullPath.substring(idx + 1) : fullPath
+}
+
 const refreshStatus = async () => {
   if (!props.projectRoot) return
   loading.value = true
@@ -123,7 +113,6 @@ const refreshStatus = async () => {
   isRepo.value = false
   branch.value = ''
   changes.value = []
-  diffContent.value = null
   try {
     const status = await getGitStatus(props.projectRoot)
     isRepo.value = status.isRepo
@@ -139,17 +128,6 @@ const refreshStatus = async () => {
 
 const handleDblClick = (change: GitChange) => {
   emit('fileDblclick', change.file, props.projectRoot)
-}
-
-const showDiff = async (file: string) => {
-  selectedFile.value = file
-  diffFile.value = file
-  try {
-    const result = await getGitDiff(props.projectRoot, file)
-    diffContent.value = result.success ? result.diff : '获取 diff 失败: ' + (result.error || '')
-  } catch (e: any) {
-    diffContent.value = '获取 diff 失败: ' + (e.message || '')
-  }
 }
 
 const toggleStage = async (change: GitChange) => {
@@ -224,7 +202,6 @@ const handleRestoreFile = async (file: string) => {
     const result = await gitRestore(props.projectRoot, file)
     if (result.success) {
       message.success('已撤销: ' + file)
-      diffContent.value = null
       await refreshStatus()
     } else {
       message.error('撤销失败: ' + (result.error || ''))
@@ -251,7 +228,6 @@ const handleCommit = async () => {
       message.success('提交成功')
       commitMessage.value = ''
       stagedFiles.value.clear()
-      diffContent.value = null
       await refreshStatus()
     } else {
       message.error('提交失败: ' + (result.error || ''))
@@ -391,73 +367,7 @@ watch(() => props.projectRoot, (val) => {
   white-space: nowrap;
   font-size: 11px;
   color: #333;
-}
-
-/* Diff 预览 */
-.diff-preview {
-  border-top: 1px solid #e8e8e8;
-  max-height: 200px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-.diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 10px;
-  background: #f5f5f5;
-  font-size: 11px;
-  color: #666;
-  flex-shrink: 0;
-}
-.diff-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.diff-revert-btn {
-  border: 1px solid #ff4d4f;
-  background: white;
-  color: #ff4d4f;
-  cursor: pointer;
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  font-family: inherit;
-  transition: all 0.15s;
-}
-.diff-revert-btn:hover {
-  background: #ff4d4f;
-  color: white;
-}
-
-.diff-close {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: #999;
-  font-size: 12px;
-  padding: 0 4px;
-}
-.diff-close:hover { color: #333; }
-
-.diff-text {
-  margin: 0;
-  padding: 6px 10px;
-  font-size: 10px;
-  line-height: 1.4;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  flex: 1;
-  background: #fafbfc;
-  font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+  text-align: left;
 }
 
 /* 提交区 */
@@ -505,6 +415,14 @@ watch(() => props.projectRoot, (val) => {
 }
 .commit-btn:hover:not(:disabled) { background: #4096ff; }
 .commit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 自定义滚动条 */
+.changes-section::-webkit-scrollbar,
+.change-list::-webkit-scrollbar { width: 4px; }
+.changes-section::-webkit-scrollbar-thumb,
+.change-list::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+.changes-section::-webkit-scrollbar-track,
+.change-list::-webkit-scrollbar-track { background: transparent; }
 
 </style>
 
@@ -557,26 +475,6 @@ watch(() => props.projectRoot, (val) => {
 [data-theme="dark"] .change-status.untracked {
   color: #8b8f98;
 }
-[data-theme="dark"] .diff-preview {
-  border-top-color: #2a2d33;
-}
-[data-theme="dark"] .diff-header {
-  background: #1e2126;
-  color: #8b8f98;
-}
-[data-theme="dark"] .diff-revert-btn {
-  background: #1a1d22;
-}
-[data-theme="dark"] .diff-close {
-  color: #8b8f98;
-}
-[data-theme="dark"] .diff-close:hover {
-  color: #e4e6ea;
-}
-[data-theme="dark"] .diff-text {
-  background: #141619;
-  color: #c4c8ce;
-}
 [data-theme="dark"] .commit-section {
   background: #1a1d22;
   border-top-color: #2a2d33;
@@ -591,5 +489,10 @@ watch(() => props.projectRoot, (val) => {
 }
 [data-theme="dark"] .commit-hint {
   color: #22c55e;
+}
+/* 暗色滚动条 */
+[data-theme="dark"] .changes-section::-webkit-scrollbar-thumb,
+[data-theme="dark"] .change-list::-webkit-scrollbar-thumb {
+  background: #3a3850;
 }
 </style>

@@ -300,6 +300,9 @@ function statusText(status: string | undefined): string {
   flex-direction: column;
   gap: 3px;
 }
+.event-list::-webkit-scrollbar { width: 4px; }
+.event-list::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+.event-list::-webkit-scrollbar-track { background: transparent; }
 
 .event-item {
   font-size: 12px;
@@ -362,5 +365,59 @@ function statusText(status: string | undefined): string {
   color: #bbb;
   text-align: center;
   padding: 8px;
+}
+
+/* ===== 暗色模式适配 ===== */
+[data-theme="dark"] .agent-info-panel {
+  background: #1a1925;
+  border-color: #2a2838;
+}
+[data-theme="dark"] .info-header {
+  color: #e4e2f0;
+}
+[data-theme="dark"] .info-label {
+  color: #a09eb8;
+}
+[data-theme="dark"] .info-value {
+  color: #e4e2f0;
+}
+[data-theme="dark"] .section-label {
+  color: #6a6880;
+}
+[data-theme="dark"] .skill-tag {
+  background: rgba(16, 185, 129, 0.12);
+  color: #4ade80;
+  border-color: rgba(16, 185, 129, 0.25);
+}
+[data-theme="dark"] .event-item.thinking {
+  background: #1a1925;
+  color: #a09eb8;
+}
+[data-theme="dark"] .event-item.tool_call {
+  background: rgba(139, 92, 246, 0.08);
+  color: #e4e2f0;
+}
+[data-theme="dark"] .event-item.skill_match {
+  background: rgba(245, 158, 11, 0.08);
+  color: #a09eb8;
+}
+[data-theme="dark"] .event-item.status_change {
+  background: rgba(16, 185, 129, 0.08);
+}
+[data-theme="dark"] .event-tool-name {
+  color: #a78bfa;
+}
+[data-theme="dark"] .event-file {
+  color: #6a6880;
+}
+[data-theme="dark"] .event-result.success {
+  color: #4ade80;
+}
+[data-theme="dark"] .event-empty {
+  color: #525070;
+}
+/* 暗色滚动条 */
+[data-theme="dark"] .event-list::-webkit-scrollbar-thumb {
+  background: #3a3850;
 }
 </style>

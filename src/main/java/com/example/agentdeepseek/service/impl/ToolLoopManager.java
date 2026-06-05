@@ -335,12 +335,23 @@ public class ToolLoopManager {
      * 创建 ask_user 事件的 SSE 事件
      */
     public String createAskUserEvent(String uuid, String question, String askType) {
+        return createAskUserEvent(uuid, question, askType, null, null, null);
+    }
+
+    /**
+     * 创建 ask_user 事件的 SSE 事件（带工具详情，用于 edit_file/write_file 等）
+     */
+    public String createAskUserEvent(String uuid, String question, String askType,
+                                      String toolName, String filePath, String fullDetail) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
             root.put("event", "ask_user");
             root.put("uuid", uuid);
             root.put("question", question);
             root.put("askType", askType != null ? askType : "clarification");
+            if (toolName != null) root.put("toolName", toolName);
+            if (filePath != null) root.put("filePath", filePath);
+            if (fullDetail != null) root.put("fullDetail", fullDetail);
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
             log.error("创建ask_user事件失败", e);

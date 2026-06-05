@@ -658,4 +658,11 @@ onMounted(() => {
   border-color: #2a2d33 !important;
   color: #e4e6ea !important;
 }
+/* 暗色滚动条 */
+[data-theme="dark"] .profile-page::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
+[data-theme="dark"] .profile-page::-webkit-scrollbar-thumb:hover {
+  background: #4a4860;
+}
 </style>

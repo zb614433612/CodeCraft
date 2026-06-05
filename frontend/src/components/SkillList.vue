@@ -361,4 +361,12 @@ function formatTime(timeStr: string): string {
 [data-theme="dark"] .skill-time {
   color: #525070;
 }
+
+/* ===== 滚动条适配 ===== */
+.skill-sidebar::-webkit-scrollbar { width: 4px; }
+.skill-sidebar::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+.skill-sidebar::-webkit-scrollbar-track { background: transparent; }
+[data-theme="dark"] .skill-sidebar::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
 </style>

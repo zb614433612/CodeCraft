@@ -18,7 +18,7 @@ export type StreamChatEvent = {
   sessionId?: number
 } | {
   type: 'ask_user'
-  data: { uuid: string; question: string; askType?: string }
+  data: { uuid: string; question: string; askType?: string; toolName?: string; filePath?: string; fullDetail?: string }
   sessionId?: number
 } | {
   type: 'skill_match'
@@ -71,7 +71,7 @@ export class SseParser {
       }
       // 处理 ask_user 事件
       if (parsed.event === 'ask_user') {
-        return { type: 'ask_user', data: { uuid: parsed.uuid, question: parsed.question, askType: parsed.askType }, sessionId: this.sessionId }
+        return { type: 'ask_user', data: { uuid: parsed.uuid, question: parsed.question, askType: parsed.askType, toolName: parsed.toolName, filePath: parsed.filePath, fullDetail: parsed.fullDetail }, sessionId: this.sessionId }
       }
       // 处理 skill_match 事件
       if (parsed.event === 'skill_match') {

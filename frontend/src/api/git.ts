@@ -45,6 +45,12 @@ export interface GitAuthResult {
   success?: boolean
   error?: string
 }
+
+export interface GitShowResult {
+  success: boolean
+  content?: string
+  error?: string
+}
 /**
  * 获取 Git 仓库状态
  */
@@ -139,10 +145,30 @@ export async function gitRestore(projectRoot: string, file: string): Promise<{ s
   return res.json()
 }
 
+/**
+ * 按块还原文件改动（git apply --reverse）
+ */
+export async function gitRestoreHunks(projectRoot: string, file: string, hunks: string): Promise<{ success: boolean; error?: string; output?: string }> {
+  const res = await authFetch('/api/git/restore-hunks', {
+    method: 'POST',
+    body: JSON.stringify({ projectRoot, file, hunks })
+  })
+  return res.json()
+}
+
 export async function gitInit(projectRoot: string, remoteUrl?: string, token?: string): Promise<{ success: boolean; error?: string }> {
   const res = await authFetch('/api/git/init', {
     method: 'POST',
     body: JSON.stringify({ projectRoot, remoteUrl, token })
   })
+  return res.json()
+}
+
+/**
+ * 获取 HEAD 版本文件内容（git show HEAD:file）
+ */
+export async function gitShowFile(projectRoot: string, file: string): Promise<GitShowResult> {
+  const params = new URLSearchParams({ projectRoot, file })
+  const res = await authFetch(`/api/git/show?${params}`)
   return res.json()
 }

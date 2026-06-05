@@ -1717,6 +1717,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         // 从工具调用参数生成审批摘要文本
                                         StringBuilder summarySb = new StringBuilder();
                                         boolean isAuto = "auto".equals(currentExecutionMode);
+                                        String firstToolName = null;
+                                        String firstFilePath = null;
+                                        String firstFullDetail = null;
                                         for (int i = 0; i < completeToolCalls.size(); i++) {
                                             JsonNode tc = completeToolCalls.get(i);
                                             String tcToolName = tc.path("function").path("name").asText();
@@ -1732,6 +1735,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                 JsonNode args = objectMapper.readTree(argsStr);
                                                 String detail = detailGenerator.generate(tcToolName, args);
                                                 if (detail != null) {
+                                                    if (firstToolName == null) {
+                                                        firstToolName = tcToolName;
+                                                        firstFilePath = args.path("file_path").asText("");
+                                                        firstFullDetail = detail;
+                                                    }
                                                     // 取第一行实质内容（去掉 markdown 区块引用标记和首尾空白）
                                                     String firstLine = detail.lines()
                                                             .map(String::trim)
@@ -1754,7 +1762,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         pendingQuestionStore.put(uuid, pq);
                                         // 持久化待审批问题到任务记录（支持页面刷新后重连展示）
                                         updatePendingQuestion(conversationId, uuid, question);
-                                        approvalEvents.add(createAskUserEvent(uuid, question, "permission"));
+                                        approvalEvents.add(createAskUserEvent(uuid, question, "permission",
+                                                firstToolName, firstFilePath, firstFullDetail));
 
                                         return Flux.fromIterable(approvalEvents)
                                                 .concatWith(Mono.fromFuture(pq.getFuture())
@@ -2136,7 +2145,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param askType 事件类型：permission（权限授权）或 clarification（询问用户需求）
      */
     private String createAskUserEvent(String uuid, String question, String askType) {
-        return toolLoopManager.createAskUserEvent(uuid, question, askType);
+        return createAskUserEvent(uuid, question, askType, null, null, null);
+    }
+
+    private String createAskUserEvent(String uuid, String question, String askType,
+                                       String toolName, String filePath, String fullDetail) {
+        return toolLoopManager.createAskUserEvent(uuid, question, askType, toolName, filePath, fullDetail);
     }
 
     /**

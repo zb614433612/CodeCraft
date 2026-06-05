@@ -1015,6 +1015,16 @@ onMounted(async () => {
 [data-theme="dark"] :deep(.ant-date-picker input) {
   color: #e4e6ea;
 }
+
+/* ===== 滚动条适配 ===== */
+.schedule-container::-webkit-scrollbar { width: 6px; }
+.schedule-container::-webkit-scrollbar-track { background: transparent; }
+.schedule-container::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+.card-body::-webkit-scrollbar { width: 5px; }
+.card-body::-webkit-scrollbar-track { background: transparent; }
+.card-body::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+[data-theme="dark"] .schedule-container::-webkit-scrollbar-thumb { background: #3a3850; }
+[data-theme="dark"] .card-body::-webkit-scrollbar-thumb { background: #3a3850; }
 </style>
 
 <!-- 暗色模式 — 表格全局强制覆盖（非 scoped，直接对抗 CSS-in-JS） -->

@@ -858,4 +858,12 @@ onMounted(() => {
     display: none;
   }
 }
+
+/* ===== 滚动条适配 ===== */
+.config-page::-webkit-scrollbar { width: 6px; }
+.config-page::-webkit-scrollbar-track { background: transparent; }
+.config-page::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+.config-page::-webkit-scrollbar-thumb:hover { background: #c4bce0; }
+[data-theme="dark"] .config-page::-webkit-scrollbar-thumb { background: #3a3850; }
+[data-theme="dark"] .config-page::-webkit-scrollbar-thumb:hover { background: #4a4860; }
 </style>

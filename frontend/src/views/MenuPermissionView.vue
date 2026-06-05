@@ -1252,6 +1252,19 @@ onMounted(() => {
 [data-theme="dark"] :deep(.ant-modal-content) {
   background: #1a1d22;
 }
+/* 暗色滚动条 */
+[data-theme="dark"] .menu-permission::-webkit-scrollbar-thumb,
+[data-theme="dark"] .panel-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .menu-checkbox-area::-webkit-scrollbar-thumb,
+[data-theme="dark"] .modal-body::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
+[data-theme="dark"] .menu-permission::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .panel-body::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .menu-checkbox-area::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .modal-body::-webkit-scrollbar-thumb:hover {
+  background: #4a4860;
+}
 </style>
 
 <!-- 暗色模式 — 表格全局强制覆盖 -->

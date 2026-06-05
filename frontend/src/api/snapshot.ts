@@ -130,3 +130,17 @@ export async function rollbackAllFiles(sessionId: number): Promise<boolean> {
     return false
   }
 }
+
+/**
+ * 获取快照中的文件原始内容（用于 diff 对比）
+ */
+export async function getSnapshotFileContent(sessionId: number, filePath: string): Promise<string | null> {
+  try {
+    const res = await authFetch(`/api/snapshots/file-content?sessionId=${sessionId}&filePath=${encodeURIComponent(filePath)}`)
+    const data = await res.json()
+    return data.success ? (data.data ?? null) : null
+  } catch (e) {
+    console.warn('获取快照文件内容失败:', e)
+    return null
+  }
+}

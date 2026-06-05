@@ -50,34 +50,28 @@ public class GitController {
         GitCommandExecutor.GitResult branchResult = gitExecutor.execute(projectRoot, "rev-parse", "--abbrev-ref", "HEAD");
         result.put("branch", branchResult.success() ? branchResult.output().trim() : "未知");
 
-        // 变更文件列表
-        GitCommandExecutor.GitResult statusResult = gitExecutor.execute(projectRoot,
-                "status", "--porcelain");
+        // ===== 变更文件列表 =====
+        // 两步：
+        //   1. git diff --name-only HEAD → 已跟踪文件的真正内容差异
+        //      （忽略纯换行符差异，HOME 已注入子进程使得 autocrlf 生效）
+        //   2. git status --porcelain → 仅提取 ?? 行 → 未跟踪文件
+        //      （自动遵守 .gitignore，无需手写排除规则）
         List<Map<String, String>> changes = new ArrayList<>();
-        if (statusResult.success() && !statusResult.output().isBlank()) {
-            for (String line : statusResult.output().split("\n")) {
-                if (line.length() < 3) continue;
-                Map<String, String> change = new LinkedHashMap<>();
-                String statusStr = line.substring(0, 2).trim();
-                String file = line.substring(3);
-                change.put("file", file);
-                if (line.startsWith("??")) {
-                    change.put("status", "untracked");
-                    change.put("label", "未跟踪");
-                } else if (!statusStr.isEmpty()) {
-                    change.put("status", "staged");
-                    change.put("label", "已暂存");
-                    change.put("stagedStatus", line.substring(0, 1).trim());
-                    change.put("workingStatus", line.substring(1, 2).trim());
-                } else {
-                    change.put("status", "modified");
-                    change.put("label", "已修改");
-                    change.put("workingStatus", line.substring(1, 2).trim());
-                }
-                changes.add(change);
+        java.util.Set<String> seen = new java.util.HashSet<>();
+
+        // 1. 已跟踪文件的修改/新增/删除（git diff 内建 autocrlf 规范化）
+        appendTrackedChanges(changes, seen, projectRoot);
+
+        // 2. 未跟踪文件（仅取 git status --porcelain 的 ?? 行）
+        appendUntrackedFiles(changes, seen, projectRoot);
+
+        result.put("changes", changes);
+        log.info("[Git] 仓库状态: {} 个变更文件", changes.size());
+        if (!changes.isEmpty()) {
+            for (Map<String, String> c : changes) {
+                log.info("[Git]   {} [{}]", c.get("file"), c.get("label"));
             }
         }
-        result.put("changes", changes);
 
         // 是否有 Token
         result.put("hasToken", gitAuthStore.hasToken(projectRoot));
@@ -103,6 +97,9 @@ public class GitController {
         if (staged) {
             args.add("--cached");
         }
+        // 始终以 HEAD 为基准做对比（git diff [--cached] HEAD -- file）
+        // 这样 diff 展示的是工作区/暂存区 vs 最新提交，而非工作区 vs 暂存区
+        args.add("HEAD");
         if (!file.isEmpty()) {
             args.add("--");
             args.add(file);
@@ -111,8 +108,9 @@ public class GitController {
         GitCommandExecutor.GitResult diffResult = gitExecutor.execute(
                 projectRoot, args.toArray(new String[0]));
 
+        // stderr 已在 GitCommandExecutor 中分离，output 不含 warning
         result.put("success", diffResult.success());
-        result.put("diff", diffResult.success() ? diffResult.output() : diffResult.output());
+        result.put("diff", diffResult.output());
         return result;
     }
 
@@ -264,6 +262,54 @@ public class GitController {
         return result;
     }
 
+    @Operation(summary = "获取HEAD版本文件", description = "获取指定文件在HEAD提交中的原始内容 (git show HEAD:file)")
+    @GetMapping("/show")
+    public Map<String, Object> showFile(
+            @RequestParam String projectRoot,
+            @RequestParam String file) {
+        Map<String, Object> result = new LinkedHashMap<>();
+
+        GitCommandExecutor.GitResult showResult = gitExecutor.execute(projectRoot,
+                "show", "HEAD:" + file);
+
+        result.put("success", showResult.success());
+        if (showResult.success()) {
+            result.put("content", showResult.output());
+        } else {
+            result.put("error", showResult.output());
+        }
+        return result;
+    }
+
+    @Operation(summary = "按块还原文件改动", description = "还原指定文件中选中的 diff hunks (git apply --reverse)")
+    @PostMapping("/restore-hunks")
+    public Map<String, Object> restoreHunks(@RequestBody Map<String, String> body) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        String projectRoot = body.get("projectRoot");
+        String file = body.get("file");
+        String hunks = body.get("hunks");
+
+        if (projectRoot == null || file == null || hunks == null || hunks.isEmpty()) {
+            result.put("success", false);
+            result.put("error", "缺少必要参数 projectRoot、file 或 hunks");
+            return result;
+        }
+
+        // 格式化 hunk patch（确保以 --- / +++ 文件头开始）
+        String fullPatch = "--- a/" + file + "\n+++ b/" + file + "\n" + hunks;
+
+        GitCommandExecutor.GitResult applyResult = gitExecutor.executeWithStdin(
+                projectRoot, fullPatch, "apply", "--reverse", "--unidiff-zero");
+
+        result.put("success", applyResult.success());
+        if (!applyResult.success()) {
+            result.put("error", applyResult.output());
+        } else {
+            result.put("output", "已按块还原: " + file);
+        }
+        return result;
+    }
+
     @Operation(summary = "初始化 Git 仓库")
     @PostMapping("/init")
     public Map<String, Object> initRepo(@RequestBody Map<String, Object> body) {
@@ -312,5 +358,73 @@ public class GitController {
 
         result.put("success", true);
         return result;
+    }
+
+    /** 使用 git diff --name-only HEAD 获取已跟踪文件的真正内容差异 */
+    private void appendTrackedChanges(List<Map<String, String>> changes,
+                                       java.util.Set<String> seen,
+                                       String projectRoot) {
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot,
+                "diff", "--name-only", "HEAD");
+
+        if (!r.success() || r.output().isBlank()) return;
+
+        for (String file : r.output().split("\n")) {
+            file = file.trim();
+            if (file.isBlank()) continue;
+            if (isExcludedPath(file)) continue;  // 过滤构建产物
+            if (!seen.add(file)) continue;
+            Map<String, String> c = new LinkedHashMap<>();
+            c.put("file", file);
+            c.put("status", "modified");
+            c.put("label", "已修改");
+            changes.add(c);
+        }
+    }
+
+    /** 从 git status --porcelain 中仅提取 ?? 行（未跟踪文件） */
+    private void appendUntrackedFiles(List<Map<String, String>> changes,
+                                       java.util.Set<String> seen,
+                                       String projectRoot) {
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot,
+                "ls-files", "--others", "--exclude-standard");
+
+        if (!r.success() || r.output().isBlank()) return;
+
+        // ls-files --others --exclude-standard 每行直接是文件名，无需解析 ?? 前缀
+        for (String file : r.output().split("\n")) {
+            file = file.trim();
+            if (file.isBlank()) continue;
+            if (isExcludedPath(file)) continue;  // 过滤构建产物/快照等
+            if (!seen.add(file)) continue;
+            Map<String, String> c = new LinkedHashMap<>();
+            c.put("file", file);
+            c.put("status", "untracked");
+            c.put("label", "未跟踪");
+            changes.add(c);
+        }
+    }
+
+    /** 硬编码排除常见构建产物 / 自动生成目录 / 临时文件 / 纯目录 */
+    private static boolean isExcludedPath(String path) {
+        // 纯目录（以 / 或 \ 结尾）— 不显示
+        if (path.endsWith("/") || path.endsWith("\\")) return true;
+        // 目录前缀匹配
+        String[] excludedDirs = {
+            "target/", "node_modules/", "dist/", "build/",
+            "snapshots/", "data/", "logs/", ".git/",
+            "BOOT-INF/", "__pycache__/", ".idea/", ".vscode/",
+            "electron/release/", "electron/node_modules/", "electron/jre/",
+            "frontend/dist/", "frontend/node_modules/", "frontend/node/",
+            "src/main/resources/static/",
+            "ylcode/", "snapshots/", "script/",
+            "temp_diff", "temp_untracked"
+        };
+        for (String dir : excludedDirs) {
+            if (path.startsWith(dir)) return true;
+        }
+        // 文件/扩展名匹配
+        return path.endsWith(".class") || path.endsWith(".jar")
+            || path.endsWith(".pyc") || path.startsWith("~");
     }
 }

@@ -207,6 +207,9 @@ onMounted(() => {
   border-radius: 4px;
   background: #fafafa;
 }
+.dir-list::-webkit-scrollbar { width: 4px; }
+.dir-list::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+.dir-list::-webkit-scrollbar-track { background: transparent; }
 .dir-loading,
 .dir-error,
 .dir-empty {
@@ -280,5 +283,48 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
+}
+
+/* ===== 暗色模式适配 ===== */
+[data-theme="dark"] .dir-browser {
+  color: #a09eb8;
+}
+[data-theme="dark"] .dir-current-path {
+  color: #6a6880;
+}
+[data-theme="dark"] .dir-list {
+  border-color: #2a2838;
+  background: #1a1925;
+}
+[data-theme="dark"] .dir-loading,
+[data-theme="dark"] .dir-empty {
+  color: #6a6880;
+}
+[data-theme="dark"] .dir-error {
+  color: #f87171;
+}
+[data-theme="dark"] .dir-item {
+  border-color: #2a2838;
+}
+[data-theme="dark"] .dir-item:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+[data-theme="dark"] .dir-item.selected {
+  background: rgba(139, 92, 246, 0.15);
+}
+[data-theme="dark"] .dir-item-name {
+  color: #e4e2f0;
+}
+[data-theme="dark"] .dir-item-arrow {
+  color: #6a6880;
+}
+[data-theme="dark"] .dir-item-arrow:hover {
+  color: #a78bfa;
+}
+[data-theme="dark"] .dir-footer-path {
+  color: #6a6880;
+}
+[data-theme="dark"] .dir-list::-webkit-scrollbar-thumb {
+  background: #3a3850;
 }
 </style>

@@ -88,7 +88,7 @@ watch(() => props.rootPath, (newPath) => {
     tree.value = null
     error.value = ''
   }
-})
+}, { immediate: true })
 
 defineExpose({ fetchTree })
 
@@ -104,7 +104,8 @@ const onDblClick = (path: string, isDirectory: boolean) => {
 
 <style scoped>
 .file-tree {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   font-size: 13px;
 }
@@ -113,13 +114,13 @@ const onDblClick = (path: string, isDirectory: boolean) => {
   align-items: center;
   gap: 4px;
   padding: 6px 8px;
-  border-bottom: 1px solid #eef2f7;
-  background: #f8fafc;
+  border-bottom: 1px solid var(--border, #eef2f7);
+  background: var(--bg-card, #f8fafc);
 }
 .ft-current-path {
   flex: 1;
   font-size: 11px;
-  color: #8c8c8c;
+  color: var(--text-3, #8c8c8c);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -127,12 +128,12 @@ const onDblClick = (path: string, isDirectory: boolean) => {
 .ft-reload {
   cursor: pointer;
   font-size: 14px;
-  color: #8c8c8c;
+  color: var(--text-3, #8c8c8c);
   flex-shrink: 0;
   transition: color 0.2s, transform 0.2s;
 }
-.ft-reload:hover { color: #1890ff; }
-.ft-reload.loading { animation: spin 1s linear infinite; color: #1890ff; }
+.ft-reload:hover { color: var(--accent, #1890ff); }
+.ft-reload.loading { animation: spin 1s linear infinite; color: var(--accent, #1890ff); }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .ft-loading {
   display: flex;
@@ -140,7 +141,7 @@ const onDblClick = (path: string, isDirectory: boolean) => {
   justify-content: center;
   gap: 8px;
   padding: 30px 12px;
-  color: #8c8c8c;
+  color: var(--text-3, #8c8c8c);
 }
 .ft-error {
   padding: 20px 12px;
@@ -151,10 +152,32 @@ const onDblClick = (path: string, isDirectory: boolean) => {
 .ft-empty {
   padding: 30px 12px;
   text-align: center;
-  color: #bbb;
+  color: var(--text-3, #bbb);
   font-size: 12px;
 }
 .ft-tree {
   padding: 4px 0;
+}
+
+/* 暗色模式适配 */
+[data-theme="dark"] .ft-header {
+  border-color: #2a2838;
+  background: #1a1925;
+}
+[data-theme="dark"] .ft-current-path {
+  color: #9696aa;
+}
+[data-theme="dark"] .ft-reload {
+  color: #9696aa;
+}
+[data-theme="dark"] .ft-reload:hover,
+[data-theme="dark"] .ft-reload.loading {
+  color: #a78bfa;
+}
+[data-theme="dark"] .ft-loading {
+  color: #9696aa;
+}
+[data-theme="dark"] .ft-empty {
+  color: #6b6b80;
 }
 </style>

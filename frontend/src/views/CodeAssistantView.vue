@@ -3,28 +3,20 @@
     <!-- 侧边栏: 会话列表 / 文件树 -->
     <aside class="sidebar" :class="{ collapsed }">
       <div class="sidebar-header">
-        <div class="sidebar-tabs">
+        <!-- 有子Agent时显示tab栏，否则显示简洁标题 -->
+        <div v-if="agentInfos.length > 0" class="sidebar-tabs">
           <button
             :class="['tab-btn', { active: sidebarTab === 'conversation' }]"
             @click="sidebarTab = 'conversation'"
           ><span class="tab-full">会话</span><span class="tab-short">会话</span></button>
           <button
-            :class="['tab-btn', { active: sidebarTab === 'files' }]"
-            @click="sidebarTab = 'files'"
-          ><span class="tab-full">文件</span><span class="tab-short">文件</span></button>
-          <button
-            :class="['tab-btn', { active: sidebarTab === 'git' }]"
-            @click="sidebarTab = 'git'"
-          ><span class="tab-full">Git</span><span class="tab-short">Git</span></button>
-          <button
-            :class="['tab-btn', { active: sidebarTab === 'skills' }]"
-            @click="sidebarTab = 'skills'"
-          ><span class="tab-full">技能</span><span class="tab-short">技能</span></button>
-          <button
-            v-if="agentInfos.length > 0"
             :class="['tab-btn', { active: sidebarTab === 'agents' }]"
             @click="sidebarTab = 'agents'"
           ><span class="tab-full">子Agent</span><span class="tab-short">Agent</span></button>
+        </div>
+        <div v-else class="sidebar-title">
+          <span class="sidebar-title-icon">💬</span>
+          <span class="sidebar-title-text">会话</span>
         </div>
         <div class="sidebar-collapse-btn" @click="toggleCollapsed">
           <MenuFoldOutlined v-if="!collapsed" />
@@ -87,57 +79,42 @@
         </div>
       </div>
 
-      <!-- Git 面板 -->
-      <div v-show="sidebarTab === 'git'" class="git-panel">
-        <GitSidebar :project-root="settingsStore.projectRoot || ''" @file-dblclick="onGitFileDblClick" />
-      </div>
-
-      <!-- 技能面板 -->
-      <div v-show="sidebarTab === 'skills'" class="skill-panel">
-        <SkillList :agent-config-id="currentAgentConfigId" />
-      </div>
-
       <!-- 子Agent面板 -->
       <div v-show="sidebarTab === 'agents'" class="agent-panel-wrapper">
         <AgentPanel :agents="agentInfos" :collapsed="collapsed" />
-      </div>
-
-      <!-- 文件树 -->
-      <div v-show="sidebarTab === 'files'" class="filetree-panel">
-        <div class="project-root-bar">
-          <span class="project-root-label">工作目录</span>
-          <div class="project-root-row">
-            <a-input
-              :value="agentRuntime.workDir"
-              placeholder="点击右侧按钮选择目录"
-              size="small"
-              class="project-root-input"
-              readonly
-            />
-            <a-button size="small" type="primary" @click="selectProjectRoot" class="project-root-btn">
-              <FolderOpenOutlined />
-            </a-button>
-          </div>
-        </div>
-        <FileTree :root-path="fileTreeLoadPath" @select="onFileSelect" @dblclick="onFileDblClick" />
-        <DirectoryBrowser :visible="showDirBrowser" @select="onDirSelected" @close="showDirBrowser = false" />
       </div>
     </aside>
 
     <!-- 主聊天区域（标签页系统） -->
     <main class="chat-main">
+      <SplitLayout
+        :direction="splitState.direction"
+        :has-split="splitState.enabled && splitState.secondary !== null"
+        :split-ratio="splitState.splitRatio"
+        :drag-state="splitDrag"
+        @ratio-change="onSplitRatioChange"
+      >
+        <template #primary>
       <!-- 标签栏 -->
-      <div class="tab-bar" v-if="tabs.length > 0">
+      <div class="tab-bar" v-if="primaryTabs.length > 0">
         <div class="tab-items">
           <div
-            v-for="tab in tabs"
+            v-for="tab in primaryTabs"
             :key="tab.id"
-            :class="['tab-item', { active: activeTabId === tab.id, dirty: tab.isDirty }]"
+            :class="['tab-item', { active: activeTabId === tab.id, dirty: tab.isDirty, dragging: splitDrag.dragging && splitDrag.tabId === tab.id }]"
+            draggable="false"
             @click="activeTabId = tab.id"
             @mousedown.middle.prevent="closeTab(tab.id)"
+            @mousedown.left="(e: MouseEvent) => onTabDragStart(e, tab)"
           >
             <span class="tab-title">{{ tab.title }}</span>
             <span v-if="tab.isDirty" class="tab-dirty-dot">●</span>
+            <span
+              v-if="tab.type !== 'chat' && !splitState.enabled"
+              class="tab-split-btn"
+              @click.stop="splitTabRight(tab)"
+              title="向右分屏"
+            >⊞</span>
             <span v-if="tab.type !== 'chat'" class="tab-close" @click.stop="closeTab(tab.id)">×</span>
           </div>
         </div>
@@ -301,8 +278,8 @@
 
       <!-- ask_user 问答面板 -->
       <div v-if="pendingQuestion" class="ask-user-panel">
-        <!-- 权限授权面板（askType=permission）：显示4个按钮，grid两列布局 -->
-        <div v-if="pendingQuestion.askType === 'permission'">
+        <!-- 权限授权面板（askType=permission） -->
+        <div v-if="pendingQuestion.askType === 'permission'" class="permission-panel">
           <div class="ask-user-header">
             <span class="ask-user-header-icon">🔒</span>
             需要授权
@@ -352,11 +329,12 @@
         <template v-else-if="activeTab?.type === 'file'">
           <div class="file-tab-layout">
             <div class="file-tab-editor">
-              <FileEditor
+               <FileEditor
                 :key="activeTab.id"
                 :file-path="activeTab.filePath || ''"
                 :content="activeTab.content || ''"
                 :original-content="activeTab.originalContent"
+                :highlight-lines="activeTab.highlightLines"
                 @save="onFileSaved"
                 @content-change="onFileContentChange"
               />
@@ -376,7 +354,15 @@
               </div>
             </div>
             <div class="diff-tab-body">
-              <DiffView :content="activeTab.diffContent || ''" :title="'Diff: ' + (activeTab.filePath || '')" />
+              <DiffView
+                :head-content="activeTab.headContent || ''"
+                :current-content="activeTab.currentContent || ''"
+                :title="'Diff: ' + (activeTab.filePath || '')"
+                :file-path="activeTab.filePath"
+                :project-root="agentRuntime.workDir"
+                @hunks-restored="onHunksRestored"
+                @restore-all="handleRevertFile"
+              />
             </div>
           </div>
         </template>
@@ -662,6 +648,7 @@
               v-for="file in sessionChanges.files"
               :key="file.relativePath"
               :class="['changes-panel-item', { 'is-rolled': file.rolledBack }]"
+              @click="handleChangesFileClick(file)"
             >
               <div class="changes-file-row">
                 <div class="changes-file-info">
@@ -708,12 +695,97 @@
           </div>
         </div>
       </footer>
+        </template>
+
+        <!-- ===== 副面板（分屏时显示） ===== -->
+        <template #secondary>
+          <template v-if="splitState.enabled && splitState.secondary">
+            <!-- 副面板标签栏 -->
+            <div class="tab-bar">
+              <div class="tab-items">
+                <div
+                  v-for="tab in splitState.secondary.paneTabs"
+                  :key="tab.id"
+                  :class="['tab-item', { active: splitState.secondary.activeTabId === tab.id, dirty: tab.isDirty }]"
+                  draggable="false"
+                  @click="splitState.secondary.activeTabId = tab.id; activeTabId = tab.id"
+                  @mousedown.middle.prevent="closeTab(tab.id)"
+                  @mousedown.left="(e: MouseEvent) => onTabDragStart(e, tab)"
+                >
+                  <span class="tab-title">{{ tab.title }}</span>
+                  <span v-if="tab.isDirty" class="tab-dirty-dot">●</span>
+                  <span class="tab-unsplit-btn" @click.stop="mergeTabBack(tab)" title="合并回主面板">⊟</span>
+                  <span class="tab-close" @click.stop="closeTab(tab.id)">×</span>
+                </div>
+              </div>
+            </div>
+            <!-- 副面板内容 -->
+            <div class="tab-content">
+              <template v-if="getSecondaryActiveTab()?.type === 'file'">
+                <div class="file-tab-layout">
+                  <div class="file-tab-editor">
+                    <FileEditor
+                      :key="getSecondaryActiveTab()!.id"
+                      :file-path="getSecondaryActiveTab()!.filePath || ''"
+                      :content="getSecondaryActiveTab()!.content || ''"
+                      :original-content="getSecondaryActiveTab()!.originalContent"
+                      :highlight-lines="getSecondaryActiveTab()?.highlightLines"
+                      @save="onFileSaved"
+                      @content-change="onFileContentChange"
+                    />
+                  </div>
+                </div>
+              </template>
+              <template v-else-if="getSecondaryActiveTab()?.type === 'diff'">
+                <div class="diff-tab-content">
+                  <div class="diff-tab-header">
+                    <span class="diff-tab-title">差异对比: {{ getSecondaryActiveTab()!.filePath }}</span>
+                    <div class="diff-tab-actions">
+                      <a-button size="small" danger @click="handleRevertFile(getSecondaryActiveTab()!.filePath || '')">
+                        <UndoOutlined /> 撤销此文件改动
+                      </a-button>
+                    </div>
+                  </div>
+                  <div class="diff-tab-body">
+                    <DiffView
+                      :head-content="getSecondaryActiveTab()!.headContent || ''"
+                      :current-content="getSecondaryActiveTab()!.currentContent || ''"
+                      :title="'Diff: ' + (getSecondaryActiveTab()!.filePath || '')"
+                      :file-path="getSecondaryActiveTab()!.filePath"
+                      :project-root="agentRuntime.workDir"
+                      @hunks-restored="onHunksRestored"
+                      @restore-all="handleRevertFile"
+                    />
+                  </div>
+                </div>
+              </template>
+              <div v-else class="file-tab-layout">
+                <div class="file-tab-empty">选择一个文件开始编辑</div>
+              </div>
+            </div>
+          </template>
+        </template>
+      </SplitLayout>
     </main>
+
+    <!-- 右侧工具栏（文件 / Git / 技能） -->
+    <RightToolbar
+      :project-root="agentRuntime.workDir"
+      :work-dir="agentRuntime.workDir"
+      :file-tree-load-path="fileTreeLoadPath"
+      :agent-config-id="currentAgentConfigId"
+      @select-project-root="selectProjectRoot"
+      @file-select="onFileSelect"
+      @file-dbl-click="onFileDblClick"
+      @git-file-dbl-click="onGitFileDblClick"
+    />
+    <!-- 目录浏览器（在右侧工具栏文件面板中也会用到） -->
+    <DirectoryBrowser :visible="showDirBrowser" @select="onDirSelected" @close="showDirBrowser = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch, h } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch, h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
@@ -722,7 +794,7 @@ import { setConfig } from '@/api/config'
 import type { SkillMatchInfo } from '@/utils/sse-client'
 import type { AgentStreamEvent } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
-import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, type SessionChanges } from '@/api/snapshot'
+import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, getSnapshotFileContent, type SessionChanges } from '@/api/snapshot'
 import { useSettingsStore } from '@/store/settings'
 import { renderMarkdown } from '@/utils/markdown'
 import { estimateTokenCount, formatTokenCount } from '@/utils/tokenCalculator'
@@ -754,11 +826,13 @@ import DiffView from '@/components/DiffView.vue'
 import SkillList from '@/components/SkillList.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import type { AgentInfo } from '@/components/AgentPanel.vue'
+import RightToolbar from '@/components/RightToolbar.vue'
+import SplitLayout from '@/components/SplitLayout.vue'
 import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput, execCommand } from '@/api/project'
-import { getGitDiff, gitRestore } from '@/api/git'
+import { getGitDiff, gitRestore, gitShowFile } from '@/api/git'
 import AgentSelector from '@/components/AgentSelector.vue'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
@@ -869,6 +943,13 @@ const onAgentChange = (agentId: number | null | undefined, agent: any) => {
   // 第四步：更新当前 Agent
   currentAgentConfigId.value = agentId ?? null
   currentAgentWorkDir.value = agent?.workDir || ''
+  // ★ 同步 settingsStore.projectRoot → 确保 Git 工具栏等所有组件使用一致的工作目录
+  if (agent?.workDir) {
+    settingsStore.projectRoot = agent.workDir
+  }
+  if (agent?.workDir) {
+    fileTreeLoadPath.value = agent.workDir
+  }
 
   // 第五步：恢复目标 Agent 的快照 或 重新加载
   // ★ 关键：messages 不清空！后台流式还在写入旧会话的数据
@@ -967,7 +1048,7 @@ let consolePollTimer: ReturnType<typeof setInterval> | null = null
 let runElapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const handleBuild = async () => {
-  const projectRoot = settingsStore.projectRoot
+  const projectRoot = agentRuntime.value.workDir
   if (!projectRoot) {
     message.warning('请先设置工作目录')
     return
@@ -994,7 +1075,7 @@ const handleBuild = async () => {
 }
 
 const handleRun = async () => {
-  const projectRoot = settingsStore.projectRoot
+  const projectRoot = agentRuntime.value.workDir
   if (!projectRoot) {
     message.warning('请先设置工作目录')
     return
@@ -1090,11 +1171,11 @@ const terminalPanelRef = ref<HTMLElement | null>(null)
 const terminalCwd = ref('')
 
 const displayCwd = computed(() => {
-  return terminalCwd.value || settingsStore.projectRoot || '未设置工作目录'
+  return terminalCwd.value || agentRuntime.value.workDir || '未设置工作目录'
 })
 
 const formatTerminalPrompt = () => {
-  const cwd = terminalCwd.value || settingsStore.projectRoot || '.'
+  const cwd = terminalCwd.value || agentRuntime.value.workDir || '.'
   return cwd.replace(/\\/g, '/') + ' $'
 }
 
@@ -1113,10 +1194,12 @@ const clearActiveConsole = () => {
   }
 }
 
-// 确保 terminalCwd 跟随 projectRoot 实时变化
-watch(() => settingsStore.projectRoot, (val) => {
+// 确保 terminalCwd 和 settingsStore 跟随 workDir 实时变化
+watch(() => agentRuntime.value.workDir, (val) => {
   if (val) {
     terminalCwd.value = val
+    settingsStore.projectRoot = val
+    fileTreeLoadPath.value = val
   }
 }, { immediate: true })
 
@@ -1163,11 +1246,11 @@ const handleTerminalKeydown = (e: KeyboardEvent) => {
  * 支持: cd ..  cd .  cd ~  cd D:  cd /d D:  cd path\to\dir
  */
 const handleCdCommand = (target: string) => {
-  const current = terminalCwd.value || settingsStore.projectRoot || ''
+  const current = terminalCwd.value || agentRuntime.value.workDir || ''
 
   if (!target || target === '~') {
-    // cd 或 cd ~ → 回到 projectRoot
-    terminalCwd.value = settingsStore.projectRoot || current
+    // cd 或 cd ~ → 回到 workDir
+    terminalCwd.value = agentRuntime.value.workDir || current
   } else if (target === '.') {
     // cd . → 不变
     // no-op
@@ -1193,11 +1276,12 @@ const executeTerminalCommand = async () => {
   if (!cmd) return
 
   // 确保 cwd 已初始化
-  if (!terminalCwd.value && settingsStore.projectRoot) {
-    terminalCwd.value = settingsStore.projectRoot
+  const workDir = agentRuntime.value.workDir
+  if (!terminalCwd.value && workDir) {
+    terminalCwd.value = workDir
   }
 
-  const projectRoot = settingsStore.projectRoot
+  const projectRoot = workDir
   if (!projectRoot) {
     message.warning('请先设置工作目录')
     return
@@ -1317,7 +1401,275 @@ interface EditorTab {
   originalContent?: string
   isDirty?: boolean
   diffContent?: string
+  headContent?: string       // Git HEAD 版本（diff 左侧）
+  currentContent?: string    // 当前工作区版本（diff 右侧）
+  highlightLines?: { line: number; type: 'remove' | 'add'; content?: string }[]  // 行高亮标记
   language?: string
+}
+
+// ===== 分屏系统 =====
+interface SplitPaneData {
+  id: string
+  paneTabs: EditorTab[]          // 此面板中的 tabs
+  activeTabId: string            // 当前 active tab
+}
+interface SplitState {
+  enabled: boolean               // 是否分屏
+  direction: 'h' | 'v'          // h=左右分屏, v=上下分屏
+  splitRatio: number             // 主面板占比 (0.25 ~ 0.75)
+  primary: SplitPaneData
+  secondary: SplitPaneData | null
+}
+// 拖拽分屏状态
+interface SplitDragState {
+  dragging: boolean
+  tabId: string | null
+  startX: number
+  startY: number
+  currentX: number
+  currentY: number
+  // 分屏预览区域：'left'|'right'|'top'|'bottom'|null
+  dropZone: string | null
+}
+
+const splitState = ref<SplitState>({
+  enabled: false,
+  direction: 'v',
+  splitRatio: 0.5,
+  primary: { id: 'main', paneTabs: [], activeTabId: 'chat' },
+  secondary: null
+})
+const splitDrag = reactive<SplitDragState>({
+  dragging: false,
+  tabId: null,
+  startX: 0,
+  startY: 0,
+  currentX: 0,
+  currentY: 0,
+  dropZone: null
+})
+
+// 同步主 tabs 到分屏主面板
+const syncPrimaryPane = () => {
+  splitState.value.primary.paneTabs = [...tabs.value]
+  splitState.value.primary.activeTabId = activeTabId.value
+}
+// 从所有分屏面板收集 tabs 回主列表
+const collectAllTabs = (): EditorTab[] => {
+  const all = [...splitState.value.primary.paneTabs]
+  if (splitState.value.secondary) {
+    for (const t of splitState.value.secondary.paneTabs) {
+      if (!all.find(x => x.id === t.id)) all.push(t)
+    }
+  }
+  return all
+}
+
+// 当前活跃面板引用（computed）
+const activePane = computed(() => {
+  if (!splitState.value.enabled) return splitState.value.primary
+  // 判断 activeTabId 在哪个面板
+  if (splitState.value.primary.paneTabs.find(t => t.id === activeTabId.value)) {
+    return splitState.value.primary
+  }
+  if (splitState.value.secondary?.paneTabs.find(t => t.id === activeTabId.value)) {
+    return splitState.value.secondary
+  }
+  return splitState.value.primary
+})
+
+// 主面板显示的 tabs：分屏时用面板自己的，未分屏用全局
+const primaryTabs = computed(() => {
+  if (splitState.value.enabled) {
+    return splitState.value.primary.paneTabs
+  }
+  return tabs.value
+})
+
+// 获取副面板当前 active tab
+const getSecondaryActiveTab = (): EditorTab | undefined => {
+  const s = splitState.value.secondary
+  if (!s) return undefined
+  return s.paneTabs.find(t => t.id === s.activeTabId)
+}
+
+// ===== 分屏操作 =====
+
+// 向右分屏（按钮触发）
+const splitTabRight = (tab: EditorTab) => {
+  performSplit(tab, 'h')
+}
+// 向下分屏（拖拽触发）
+const splitTabDown = (tab: EditorTab) => {
+  performSplit(tab, 'v')
+}
+
+const performSplit = (tab: EditorTab, direction: 'h' | 'v') => {
+  if (tab.type === 'chat') return // 聊天标签不能分屏
+  if (splitState.value.enabled) return // 已经分屏了
+
+  syncPrimaryPane()
+  // 从主面板移除该 tab
+  const idx = splitState.value.primary.paneTabs.findIndex(t => t.id === tab.id)
+  if (idx === -1) return
+  splitState.value.primary.paneTabs.splice(idx, 1)
+  // 如果移除的是 active，切换到聊天
+  if (splitState.value.primary.activeTabId === tab.id) {
+    splitState.value.primary.activeTabId = 'chat'
+    activeTabId.value = 'chat'
+  }
+
+  // 创建副面板
+  splitState.value.secondary = {
+    id: 'secondary',
+    paneTabs: [tab],
+    activeTabId: tab.id
+  }
+  splitState.value.direction = direction
+  splitState.value.splitRatio = 0.5
+  splitState.value.enabled = true
+
+  // 更新主 tabs 列表
+  tabs.value = collectAllTabs()
+}
+
+// 取消分屏（按钮触发）
+const unsplitTab = (tab: EditorTab) => {
+  if (!splitState.value.enabled || !splitState.value.secondary) return
+  // 把副面板的 tabs 移回主面板
+  const secondary = splitState.value.secondary
+  for (const t of secondary.paneTabs) {
+    if (!splitState.value.primary.paneTabs.find(x => x.id === t.id)) {
+      splitState.value.primary.paneTabs.push(t)
+    }
+  }
+  splitState.value.secondary = null
+  splitState.value.enabled = false
+  splitState.value.primary.activeTabId = tab.id
+  activeTabId.value = tab.id
+  tabs.value = collectAllTabs()
+}
+
+// ===== Tab 拖拽分屏 / 合并逻辑 =====
+
+const onTabDragStart = (e: MouseEvent, tab: EditorTab) => {
+  if (tab.type === 'chat') return // 聊天标签不能拖拽
+  splitDrag.dragging = true
+  splitDrag.tabId = tab.id
+  splitDrag.startX = e.clientX
+  splitDrag.startY = e.clientY
+  splitDrag.currentX = e.clientX
+  splitDrag.currentY = e.clientY
+  splitDrag.dropZone = null
+  document.addEventListener('mousemove', onGlobalDragMove)
+  document.addEventListener('mouseup', onGlobalDragUp)
+  e.preventDefault()
+}
+
+/** 获取 split-container 的 DOM rect（用于 dropZone 计算，覆盖整个聊天区域） */
+const getSplitContainerRect = (): DOMRect | null => {
+  const container = document.querySelector('.split-container') as HTMLElement | null
+  if (!container) return null
+  return container.getBoundingClientRect()
+}
+
+const onGlobalDragMove = (e: MouseEvent) => {
+  if (!splitDrag.dragging) return
+  splitDrag.currentX = e.clientX
+  splitDrag.currentY = e.clientY
+
+  // 用 .split-container 的 rect 计算 dropZone（覆盖 tab-bar + 消息 + 控制台 + 输入框）
+  const rect = getSplitContainerRect()
+  if (!rect) {
+    splitDrag.dropZone = null
+    return
+  }
+
+  // 只有鼠标在 container 内才计算 dropZone；外部不展示提示
+  const inContainer =
+    e.clientX >= rect.left && e.clientX <= rect.right &&
+    e.clientY >= rect.top && e.clientY <= rect.bottom
+  if (!inContainer) {
+    splitDrag.dropZone = null
+    return
+  }
+
+  const xRel = (e.clientX - rect.left) / rect.width
+  const yRel = (e.clientY - rect.top) / rect.height
+
+  if (xRel < 0.25) splitDrag.dropZone = 'left'
+  else if (xRel > 0.75) splitDrag.dropZone = 'right'
+  else if (yRel < 0.25) splitDrag.dropZone = 'top'
+  else if (yRel > 0.75) splitDrag.dropZone = 'bottom'
+  else splitDrag.dropZone = null
+}
+
+const onGlobalDragUp = () => {
+  if (!splitDrag.dragging) { resetSplitDrag(); return }
+
+  const tabId = splitDrag.tabId
+  const zone = splitDrag.dropZone
+
+  // 有有效 dropZone 时才执行操作
+  if (tabId && zone) {
+    // ★ 未分屏时用 tabs.value（primary.paneTabs 未同步），已分屏时用 collectAllTabs()
+    const allTabs = splitState.value.enabled ? collectAllTabs() : tabs.value
+    const tab = allTabs.find(t => t.id === tabId)
+    if (tab) {
+      if (splitState.value.enabled && splitState.value.secondary) {
+        // 已分屏状态：拖拽 → 判断是合并还是移动
+        const isFromSecondary = splitState.value.secondary.paneTabs.some(t => t.id === tabId)
+        if (isFromSecondary) {
+          // 从副面板拖拽到主面板 → 合并该 tab 回主面板
+          mergeTabBack(tab)
+        }
+        // 主面板的 tab 在已分屏时不再次分屏（忽略）
+      } else {
+        // 未分屏状态：拖拽 → 执行分屏
+        const direction = (zone === 'left' || zone === 'right') ? 'h' : 'v'
+        performSplit(tab, direction)
+      }
+    }
+  }
+  resetSplitDrag()
+}
+
+/** 将副面板中的 tab 合并回主面板 */
+const mergeTabBack = (tab: EditorTab) => {
+  if (!splitState.value.enabled || !splitState.value.secondary) return
+
+  const secondary = splitState.value.secondary
+  // 从副面板移除
+  const idx = secondary.paneTabs.findIndex(t => t.id === tab.id)
+  if (idx === -1) return
+  secondary.paneTabs.splice(idx, 1)
+
+  // 加入主面板
+  if (!splitState.value.primary.paneTabs.find(t => t.id === tab.id)) {
+    splitState.value.primary.paneTabs.push(tab)
+  }
+  splitState.value.primary.activeTabId = tab.id
+  activeTabId.value = tab.id
+
+  // 如果副面板空了，取消分屏
+  if (secondary.paneTabs.length === 0) {
+    splitState.value.secondary = null
+    splitState.value.enabled = false
+  }
+  tabs.value = collectAllTabs()
+}
+
+const resetSplitDrag = () => {
+  splitDrag.dragging = false
+  splitDrag.tabId = null
+  splitDrag.dropZone = null
+  document.removeEventListener('mousemove', onGlobalDragMove)
+  document.removeEventListener('mouseup', onGlobalDragUp)
+}
+
+// 分隔条拖拽调整分屏比例
+const onSplitRatioChange = (ratio: number) => {
+  splitState.value.splitRatio = ratio
 }
 
 const tabs = ref<EditorTab[]>([
@@ -1358,6 +1710,10 @@ const onFileDblClick = async (path: string, isDirectory: boolean) => {
         isDirty: false
       })
       activeTabId.value = tabId
+      // 分屏模式下同步到主面板
+      if (splitState.value.enabled) {
+        syncPrimaryPane()
+      }
     }
   } catch (e: any) {
     console.error('打开文件失败:', e)
@@ -1369,9 +1725,29 @@ const closeTab = (tabId: string) => {
   const idx = tabs.value.findIndex(t => t.id === tabId)
   if (idx === -1 || tabs.value[idx].type === 'chat') return
   tabs.value.splice(idx, 1)
+
+  // 分屏模式下也同步从面板移除
+  if (splitState.value.enabled) {
+    const priIdx = splitState.value.primary.paneTabs.findIndex(t => t.id === tabId)
+    if (priIdx !== -1) splitState.value.primary.paneTabs.splice(priIdx, 1)
+    const secIdx = splitState.value.secondary?.paneTabs.findIndex(t => t.id === tabId)
+    if (secIdx !== undefined && secIdx !== -1) {
+      splitState.value.secondary!.paneTabs.splice(secIdx, 1)
+      // 副面板空了则自动取消分屏
+      if (splitState.value.secondary!.paneTabs.length === 0) {
+        splitState.value.secondary = null
+        splitState.value.enabled = false
+        splitState.value.primary.activeTabId = 'chat'
+      }
+    }
+    tabs.value = collectAllTabs()
+  }
+
   if (activeTabId.value === tabId) {
-    const newIdx = Math.min(idx, tabs.value.length - 1)
-    activeTabId.value = tabs.value[newIdx]?.id || 'chat'
+    const allTabs = splitState.value.enabled ? collectAllTabs() : tabs.value
+    const closedIdx = allTabs.findIndex(t => t.id === tabId)
+    const newIdx = Math.min(closedIdx, allTabs.length - 1)
+    activeTabId.value = allTabs[newIdx]?.id || 'chat'
   }
 }
 
@@ -1399,9 +1775,40 @@ const onGitFileDblClick = (filePath: string, projectRoot: string) => {
   openDiffTab(filePath, projectRoot)
 }
 
+// 部分 hunks 恢复后刷新 diff
+const onHunksRestored = async (filePath: string) => {
+  const projectRoot = agentRuntime.value.workDir
+  if (!projectRoot) return
+  const tabId = `diff-${filePath}`
+  const tab = tabs.value.find(t => t.id === tabId)
+  if (!tab) return
+
+  // 构建绝对路径
+  const isAbsPath = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
+  const absFilePath = isAbsPath
+    ? filePath
+    : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
+
+  // 重新获取 HEAD 版本 + 工作区文件 + diff
+  const [showResult, fileResult, diffResult] = await Promise.all([
+    gitShowFile(projectRoot, filePath).catch(() => ({ success: false, content: '' })),
+    readProjectFile(absFilePath).catch(() => ({ code: 0, data: null })),
+    getGitDiff(projectRoot, filePath).catch(() => ({ success: false, diff: '' }))
+  ])
+
+  tab.headContent = showResult.success ? (showResult.content || '') : ''
+  tab.currentContent = fileResult.code === 200 && fileResult.data !== null ? fileResult.data : ''
+  tab.diffContent = diffResult.diff
+
+  // 如果 diff 为空且两边内容相同 → 关闭 tab
+  if (!diffResult.success && tab.headContent === tab.currentContent) {
+    closeTab(tabId)
+  }
+}
+
 // 撤销文件改动
 const handleRevertFile = async (filePath: string) => {
-  const projectRoot = settingsStore.projectRoot
+  const projectRoot = agentRuntime.value.workDir
   if (!projectRoot) return
   try {
     const result = await gitRestore(projectRoot, filePath)
@@ -1425,22 +1832,44 @@ const handleRevertFile = async (filePath: string) => {
 const openDiffTab = async (filePath: string, projectRoot: string) => {
   const tabId = `diff-${filePath}`
   const existing = tabs.value.find(t => t.id === tabId)
-  if (existing) {
-    activeTabId.value = tabId
-    return
-  }
+
+  // 构建绝对文件路径（readProjectFile 需要绝对路径）
+  const isAbsPath = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
+  const absFilePath = isAbsPath
+    ? filePath
+    : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
+
   try {
-    const result = await getGitDiff(projectRoot, filePath)
-    if (result.success) {
-      tabs.value.push({
-        id: tabId,
-        type: 'diff',
-        title: filePath,
-        filePath: filePath,
-        diffContent: result.diff
-      })
+    // 并行获取 HEAD 版本内容和当前工作区内容
+    const [showResult, fileResult, diffResult] = await Promise.all([
+      gitShowFile(projectRoot, filePath).catch(() => ({ success: false, content: '' })),
+      readProjectFile(absFilePath).catch(() => ({ code: 0, data: null })),
+      getGitDiff(projectRoot, filePath).catch(() => ({ success: false, diff: '' }))
+    ])
+
+    const headContent = showResult.success ? (showResult.content || '') : ''
+    const currentContent = fileResult.code === 200 && fileResult.data !== null ? fileResult.data : ''
+
+    if (existing) {
+      // 已存在的 tab：刷新版本内容
+      existing.headContent = headContent
+      existing.currentContent = currentContent
+      existing.diffContent = diffResult.diff
+      existing.title = filePath
       activeTabId.value = tabId
+      return
     }
+
+    tabs.value.push({
+      id: tabId,
+      type: 'diff',
+      title: filePath,
+      filePath: filePath,
+      headContent: headContent,
+      currentContent: currentContent,
+      diffContent: diffResult.diff
+    })
+    activeTabId.value = tabId
   } catch (e: any) {
     console.error('获取 diff 失败:', e)
   }
@@ -1456,7 +1885,7 @@ const isLoadingConversations = ref(false)
 const isLoadingMessages = ref(false)
 const scrollerRef = ref<any>(null)
 const collapsed = ref(false)
-const sidebarTab = ref<'conversation' | 'files' | 'git' | 'skills' | 'agents'>('conversation')
+const sidebarTab = ref<'conversation' | 'agents'>('conversation')
 
 // ===== 多Agent后台流式 =====
 interface BackgroundStream {
@@ -1528,7 +1957,7 @@ const stopAbortController = ref<AbortController | null>(null)
 // 当用户点击「应用」时更新此值，触发文件树加载
 const fileTreeLoadPath = ref('')
 const showDirBrowser = ref(false)
-const pendingQuestion = ref<{ uuid: string; question: string; askType?: string } | null>(null)
+const pendingQuestion = ref<{ uuid: string; question: string; askType?: string; toolName?: string; filePath?: string; fullDetail?: string } | null>(null)
 const pendingQuestionAnswer = ref('')
 const pendingShowCustomInput = ref(false)
 // 补充需求状态
@@ -1803,6 +2232,152 @@ const handleRollbackFile = async (relativePath: string) => {
   })
 }
 
+// 点击改动面板中的文件 → 获取快照原始内容 + 当前内容 → 构建 diff 预览 → 分屏打开
+const handleChangesFileClick = async (file: { relativePath: string; wasNewFile: boolean }) => {
+  const sid = parseInt(currentConversationId.value)
+  if (isNaN(sid)) return
+
+  const workDir = agentRuntime.value.workDir
+  if (!workDir) {
+    message.warning('请先设置工作目录')
+    return
+  }
+
+  const relativePath = file.relativePath
+  const absPath = /^[a-zA-Z]:[/\\]/.test(relativePath) || relativePath.startsWith('/')
+    ? relativePath
+    : workDir.replace(/[/\\]$/, '') + '/' + relativePath.replace(/\\/g, '/')
+
+  try {
+    // 1. 读取当前文件内容
+    const currRes = await readProjectFile(absPath)
+    const currentContent = (currRes.code === 200 && currRes.data !== null) ? currRes.data : ''
+    const currLines = currentContent.split('\n')
+
+    // 2. 获取快照中的原始内容（wasNewFile 的文件也能拿到初始版本内容）
+    const originalContent = await getSnapshotFileContent(sid, relativePath)
+
+    // 3. 构建预览内容和行高亮
+    const highlightLines: { line: number; type: 'remove' | 'add' }[] = []
+    let previewContent: string
+
+    if (!originalContent) {
+      // 真正无法获取原始内容（快照不存在或备份文件丢失）→ 全部绿色兜底
+      previewContent = currentContent
+      for (let i = 0; i < currLines.length; i++) {
+        highlightLines.push({ line: i + 1, type: 'add' })
+      }
+    } else {
+      // 有原始内容 → 逐行 LCS 匹配，建立对应关系
+      const origLines = originalContent.split('\n')
+      const usedOrig = new Set<number>()
+
+      // 收集 green add 行（当前文件中有、原始文件中没有的）
+      const greenMap = new Map<number, string>() // 原始行号(近似) → 当前行内容
+      const redSet = new Set<number>()           // 原始行号 → 删除
+
+      // 先标记：当前文件中匹配到的原始行
+      let greenIdx = 0
+      for (let ci = 0; ci < currLines.length; ci++) {
+        const cl = currLines[ci]
+        let matched = false
+        for (let oi = greenIdx; oi < origLines.length; oi++) {
+          if (!usedOrig.has(oi) && origLines[oi] === cl) {
+            usedOrig.add(oi)
+            greenIdx = oi + 1
+            matched = true
+            break
+          }
+        }
+        if (!matched) {
+          // 未匹配 → 绿色新增行，放在最近的已匹配原始行之后
+          const key = greenIdx > 0 ? greenIdx : 1
+          const existing = greenMap.get(key)
+          greenMap.set(key, existing ? existing + '\n' + cl : cl)
+        }
+      }
+
+      // 未匹配的原始行 → 红色删除
+      for (let oi = 0; oi < origLines.length; oi++) {
+        if (!usedOrig.has(oi)) {
+          redSet.add(oi + 1)
+        }
+      }
+
+      // 构建预览内容：原始文件内容，remove 行保留并标红，add 行紧跟其后标绿
+      const previewLines: string[] = []
+      const highlightLinesLocal: typeof highlightLines = []
+
+      for (let oi = 0; oi < origLines.length; oi++) {
+        const ln = oi + 1
+        previewLines.push(origLines[oi])
+        if (redSet.has(ln)) {
+          highlightLinesLocal.push({ line: previewLines.length, type: 'remove' })
+        }
+        // 该行之后紧跟的绿色新增行
+        const greenText = greenMap.get(ln)
+        if (greenText) {
+          const greenLines = greenText.split('\n')
+          for (const gl of greenLines) {
+            previewLines.push(gl)
+            highlightLinesLocal.push({ line: previewLines.length, type: 'add' })
+          }
+        }
+      }
+
+      // 原始文件结束后仍有未放置的绿色行 → 追加到末尾
+      for (const [key, greenText] of greenMap) {
+        if (key > origLines.length) {
+          const greenLines = greenText.split('\n')
+          for (const gl of greenLines) {
+            previewLines.push(gl)
+            highlightLinesLocal.push({ line: previewLines.length, type: 'add' })
+          }
+        }
+      }
+
+      previewContent = previewLines.join('\n')
+      highlightLines.push(...highlightLinesLocal)
+      console.log('[CHANGES-CLICK] remove:', highlightLines.filter(h => h.type === 'remove').length,
+        'add:', highlightLines.filter(h => h.type === 'add').length,
+        '预览总行数:', previewLines.length)
+    }
+
+    // 4. 构建 tab 并打开分屏
+    const tabId = `changes-${Date.now()}-${relativePath.replace(/[/\\:]/g, '_')}`
+    const tab: EditorTab = {
+      id: tabId,
+      type: 'file',
+      title: relativePath.split(/[/\\]/).pop() || relativePath,
+      filePath: absPath,
+      content: previewContent,
+      originalContent: previewContent,
+      isDirty: false,
+      highlightLines
+    }
+
+    if (!splitState.value.enabled) {
+      syncPrimaryPane()
+      splitState.value.secondary = {
+        id: 'secondary',
+        paneTabs: [tab],
+        activeTabId: tab.id
+      }
+      splitState.value.direction = 'h'
+      splitState.value.splitRatio = 0.5
+      splitState.value.enabled = true
+    } else if (splitState.value.secondary) {
+      splitState.value.secondary.paneTabs.push(tab)
+      splitState.value.secondary.activeTabId = tab.id
+    }
+    tabs.value = collectAllTabs()
+    activeTabId.value = 'chat'
+  } catch (e) {
+    console.warn('打开文件 diff 预览失败:', e)
+    message.error('打开文件预览失败')
+  }
+}
+
 const handleRollbackAll = async () => {
   const sid = parseInt(currentConversationId.value)
   if (isNaN(sid)) return
@@ -1827,9 +2402,12 @@ const handleRollbackAll = async () => {
 }
 
 // 监听消息加载完成后滚动到底部
+// 使用 nextTick 确保 Vue 完成 DOM 更新（DynamicScroller 的 v-if 条件已生效）后再滚动
 watch(isLoadingMessages, (loading) => {
   if (!loading) {
-    scrollToBottom()
+    nextTick(() => {
+      scrollToBottom()
+    })
   }
 })
 
@@ -2079,9 +2657,9 @@ const onDirSelected = (path: string) => {
   if (agentSelectorRef.value) {
     agentSelectorRef.value.runtime.workDir = path
     agentSelectorRef.value.saveRuntime()
-  } else {
-    settingsStore.projectRoot = path
   }
+  // ★ 始终同步 settingsStore 和 fileTree，无论 agentSelectorRef 是否已初始化
+  settingsStore.projectRoot = path
   fileTreeLoadPath.value = path
 }
 
@@ -2134,6 +2712,7 @@ const submitPendingAnswer = async () => {
     pendingQuestion.value = null
     pendingQuestionAnswer.value = ''
     pendingShowCustomInput.value = false
+    cleanupPermissionPanel()
     message.success('回答已发送')
   } catch (e: any) {
     message.error('回答发送失败: ' + (e.message || '未知错误'))
@@ -2142,6 +2721,14 @@ const submitPendingAnswer = async () => {
 
 // 处理权限授权按钮（4种 action）
 const permissionLock = ref(false)
+
+// ★ 判断当前授权是否是 edit_file / write_file
+const isPermissionFileTool = computed(() => {
+  const q = pendingQuestion.value
+  if (!q) return false
+  return q.toolName === 'edit_file' || q.toolName === 'write_file'
+})
+
 const handlePermissionAction = async (action: string) => {
   if (permissionLock.value || !pendingQuestion.value) return
   const q = pendingQuestion.value
@@ -2177,7 +2764,184 @@ const handlePermissionAction = async (action: string) => {
   } finally {
     permissionLock.value = false
   }
+  // ★ 清理：关闭文件 tab + 取消分屏
+  cleanupPermissionPanel()
 }
+
+// ★ 授权面板文件操作：对 edit_file / write_file 自动打开差异对比
+const permissionFileTabId = ref<string | null>(null)  // 记录授权面板打开的文件 tab
+
+const cleanupPermissionPanel = () => {
+  // 关闭授权面板打开的文件 tab
+  if (permissionFileTabId.value) {
+    closeTab(permissionFileTabId.value)
+    permissionFileTabId.value = null
+  }
+  // 如果副面板只剩下空壳，取消分屏
+  if (splitState.value.enabled && splitState.value.secondary) {
+    const secTabs = splitState.value.secondary.paneTabs
+    if (secTabs.length === 0) {
+      splitState.value.secondary = null
+      splitState.value.enabled = false
+    }
+  }
+}
+
+// ★ 监听授权面板：对 edit_file / write_file 自动分屏打开文件
+watch(() => pendingQuestion.value, async (q) => {
+  if (!q || q.askType !== 'permission') return
+  const tool = q.toolName
+  const filePath = q.filePath
+  if (!filePath || (tool !== 'edit_file' && tool !== 'write_file')) return
+  // 自动分屏并打开文件
+  const projectRoot = agentRuntime.value.workDir
+  if (!projectRoot) return
+  const isAbs = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
+  const absPath = isAbs ? filePath : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
+  try {
+    const res = await readProjectFile(absPath)
+    const tabId = `permission-${Date.now()}-${filePath.replace(/[/\\:]/g, '_')}`
+    permissionFileTabId.value = tabId
+
+    const detail = q.fullDetail || ''
+    const highlightLines: { line: number; type: 'remove' | 'add'; content?: string }[] = []
+    let fileContent: string
+
+    // ── 分支1：文件已存在（edit_file / write_file 覆盖已有文件）──
+    if (res.code === 200 && res.data !== null) {
+      const currLines = (res.data || '').split('\n')
+
+      // 1. 解析 fullDetail 中所有 +/- 行
+      interface DiffLine { type: 'remove' | 'add'; text: string }
+      const parsedDiff: DiffLine[] = []
+      const changes = detail.match(/^[-+].*/gm)
+      if (changes) {
+        for (const ch of changes) {
+          const text = ch.substring(1)
+          if (!text) continue
+          parsedDiff.push({ type: ch.startsWith('-') ? 'remove' : 'add', text })
+        }
+      }
+      console.log('[PERM-HL] edit_file 变更行:', parsedDiff.length)
+
+      // 2. 按 diff 顺序建立 remove→add 对应关系
+      interface RemoveInfo { line: number; addTexts: string[] }
+      const removeInfos: RemoveInfo[] = []
+      let curInfo: RemoveInfo | null = null
+      for (const dl of parsedDiff) {
+        if (dl.type === 'remove') {
+          let ln = -1
+          for (let li = 0; li < currLines.length; li++) {
+            if (currLines[li] === dl.text || currLines[li].trim() === dl.text.trim()) {
+              ln = li + 1
+              break
+            }
+          }
+          curInfo = { line: ln, addTexts: [] }
+          removeInfos.push(curInfo)
+        } else if (curInfo) {
+          curInfo.addTexts.push(dl.text)
+        } else {
+          // add 行没有前置 remove → 创建虚拟 remove（line=-1 表示追加末尾）
+          curInfo = { line: -1, addTexts: [dl.text] }
+          removeInfos.push(curInfo)
+        }
+      }
+
+      // 3. 建立原文件行号 → RemoveInfo 映射
+      const removeMap = new Map<number, RemoveInfo>()
+      for (const ri of removeInfos) {
+        if (ri.line > 0) removeMap.set(ri.line, ri)
+      }
+
+      // 4. 构建预览内容：遍历原文件，每个 remove 行之后紧跟绿色 add 行
+      const previewLines: string[] = []
+      const highlightLinesLocal: typeof highlightLines = []
+
+      for (let i = 0; i < currLines.length; i++) {
+        const ln = i + 1
+        const ri = removeMap.get(ln)
+        if (ri) {
+          // 原文件行标记为红色删除
+          previewLines.push(currLines[i])
+          highlightLinesLocal.push({ line: previewLines.length, type: 'remove' })
+          // 绿色新增行紧跟其后
+          for (const addText of ri.addTexts) {
+            previewLines.push(addText)
+            highlightLinesLocal.push({ line: previewLines.length, type: 'add' })
+          }
+        } else {
+          previewLines.push(currLines[i])
+        }
+      }
+
+      // 5. 处理 line=-1 的孤儿块（没有对应 remove 的 add 行）→ 追加到末尾
+      for (const ri of removeInfos) {
+        if (ri.line < 0) {
+          for (const addText of ri.addTexts) {
+            previewLines.push(addText)
+            highlightLinesLocal.push({ line: previewLines.length, type: 'add' })
+          }
+        }
+      }
+
+      fileContent = previewLines.join('\n')
+      highlightLines.push(...highlightLinesLocal)
+      console.log('[PERM-HL] remove:', highlightLines.filter(h => h.type === 'remove').length,
+        'add:', highlightLines.filter(h => h.type === 'add').length,
+        '预览总行数:', previewLines.length)
+    } else if (tool === 'write_file') {
+      // ── 分支2：write_file 创建新文件（文件还不存在）──
+      // write_file 的 fullDetail 就是新文件内容（不带 +/- 前缀，是纯文本）
+      const rawDetail = (detail || '').trim()
+      if (rawDetail) {
+        fileContent = rawDetail
+        const lines = rawDetail.split('\n')
+        for (let i = 0; i < lines.length; i++) {
+          // ★ 不传 content：避免 renderBlocks 中与文件行重复；行号对上行号区即可
+          highlightLines.push({ line: i + 1, type: 'add' })
+        }
+      } else {
+        console.warn('[PERM-HL] write_file fullDetail 为空，无法生成虚拟预览')
+        return
+      }
+      console.log('[PERM-HL] write_file 新文件虚拟预览:', highlightLines.length, '行（全部绿色）')
+    } else {
+      // 文件不存在且不是 write_file → 跳过
+      return
+    }
+
+    // ── 公共：构建 tab → 分屏打开 ──
+    const tab: EditorTab = {
+      id: tabId,
+      type: 'file',
+      title: filePath.split(/[/\\]/).pop() || filePath,
+      filePath: absPath,
+      content: fileContent,
+      originalContent: fileContent,
+      isDirty: false,
+      highlightLines
+    }
+    if (!splitState.value.enabled) {
+      syncPrimaryPane()
+      splitState.value.secondary = {
+        id: 'secondary',
+        paneTabs: [tab],
+        activeTabId: tab.id
+      }
+      splitState.value.direction = 'h'
+      splitState.value.splitRatio = 0.5
+      splitState.value.enabled = true
+    } else if (splitState.value.secondary) {
+      splitState.value.secondary.paneTabs.push(tab)
+      splitState.value.secondary.activeTabId = tab.id
+    }
+    tabs.value = collectAllTabs()
+    activeTabId.value = 'chat'
+  } catch (e) {
+    console.warn('授权面板打开文件失败:', e)
+  }
+})
 
 // 节流渲染：将流式更新聚合并限制在每 150ms 一次，避免高频 chunk 导致卡死
 let updateTimer: number | null = null
@@ -2442,7 +3206,7 @@ const sendMessage = async () => {
         }
       } else if (event.type === 'ask_user') {
         try {
-          pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification' }
+          pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification', toolName: event.data.toolName, filePath: event.data.filePath, fullDetail: event.data.fullDetail }
           pendingQuestionAnswer.value = ''
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
@@ -2635,7 +3399,7 @@ const reconnectToTaskStream = async (convId: number) => {
         scheduleMessageUpdate(stringConvId)
       } else if (event.type === 'ask_user') {
         streamStatus.value = '等待用户授权...'
-        pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification' }
+        pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification', toolName: event.data.toolName, filePath: event.data.filePath, fullDetail: event.data.fullDetail }
         pendingQuestionAnswer.value = ''
       } else if (event.type === 'resume') {
         streamStatus.value = '继续执行中...'
@@ -2884,9 +3648,17 @@ const streamingUpdateTick = ref(0)
 const thinkAutoScroll = ref(true)
 const thinkShowScrollBtn = ref(false)
 
-// 滚动（双重保障：nextTick + rAF + 延时兜底，适配 DynamicScroller 渲染时机）
+// 滚动到底部（多层保障：nextTick + rAF + setTimeout 兜底，适配 DynamicScroller 首次挂载及虚拟渲染时机）
+// DynamicScroller 是虚拟滚动组件，首次挂载时需要异步测量每个 item 大小，
+// 仅靠 nextTick + rAF 无法保证 scrollHeight 已更新为最终值，因此增加延时重试。
+let scrollToBottomTimer: ReturnType<typeof setTimeout> | null = null
 const scrollToBottom = () => {
   if (!autoScrollToBottom.value) return
+  // 清除上一次未完成的延时滚动，避免重复触发
+  if (scrollToBottomTimer !== null) {
+    clearTimeout(scrollToBottomTimer)
+    scrollToBottomTimer = null
+  }
   const doScroll = () => {
     if (scrollerRef.value) {
       const el = scrollerRef.value.$el as HTMLElement
@@ -2899,7 +3671,25 @@ const scrollToBottom = () => {
     requestAnimationFrame(() => {
       doScroll()
       // DynamicScroller 虚拟渲染可能需要额外一帧才能算出正确 scrollHeight
-      requestAnimationFrame(() => doScroll())
+      requestAnimationFrame(() => {
+        doScroll()
+        // ★ 兜底重试：DynamicScroller 首次挂载时内部异步测量 item 大小，
+        //   可能超过 2 帧的等待时间，通过 setTimeout 在更长间隔后重试
+        scrollToBottomTimer = setTimeout(() => {
+          // 先强制刷新让 DynamicScroller 重新测量布局
+          forceRefreshScroller()
+          nextTick(() => {
+            requestAnimationFrame(() => {
+              doScroll()
+              // 再次兜底：极慢渲染场景下再等一轮
+              scrollToBottomTimer = setTimeout(() => {
+                doScroll()
+                scrollToBottomTimer = null
+              }, 200)
+            })
+          })
+        }, 150)
+      })
     })
   })
 }
@@ -3018,6 +3808,12 @@ onMounted(() => {
       showChangesPanel.value = false
     }
   })
+})
+
+onUnmounted(() => {
+  // 清理拖拽事件
+  document.removeEventListener('mousemove', onGlobalDragMove)
+  document.removeEventListener('mouseup', onGlobalDragUp)
 })
 
 // 当首次加载完会话列表且选中了会话后，检查活跃任务
@@ -3201,6 +3997,41 @@ watch(currentConversationId, (newId) => {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+/* 简洁标题（无子Agent时） */
+.sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+}
+
+.sidebar-title-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.sidebar-title-text {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+/* 折叠后标题适配 */
+.collapsed .sidebar-title {
+  justify-content: center;
+  padding: 0;
+}
+.collapsed .sidebar-title-text {
+  display: none;
+}
+.collapsed .sidebar-title-icon {
+  font-size: 22px;
 }
 
 .sidebar-tabs {
@@ -3636,6 +4467,65 @@ watch(currentConversationId, (newId) => {
   color: #fff;
 }
 
+/* 分屏按钮 */
+.tab-split-btn {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-4);
+  padding: 2px 4px;
+  border-radius: var(--radius-xs);
+  transition: all 0.15s;
+  flex-shrink: 0;
+  margin-left: 2px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+.tab-split-btn:hover {
+  background: var(--accent-lt);
+  color: var(--accent);
+}
+.tab-unsplit-btn {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--accent);
+  padding: 2px 4px;
+  border-radius: var(--radius-xs);
+  transition: all 0.15s;
+  flex-shrink: 0;
+  margin-left: 2px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  background: var(--accent-lt);
+}
+.tab-unsplit-btn:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+/* 拖拽中的 tab 样式 */
+.tab-item.dragging {
+  opacity: 0.4;
+}
+
+/* 文件编辑空状态 */
+.file-tab-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3, #999);
+  font-size: 15px;
+  user-select: none;
+}
+
 /* ===== 标签内容区 ===== */
 .tab-content {
   flex: 1;
@@ -3754,6 +4644,9 @@ watch(currentConversationId, (newId) => {
   padding: 20px 24px;
   background: var(--bg-chat);
 }
+.message-list::-webkit-scrollbar { width: 5px; }
+.message-list::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+.message-list::-webkit-scrollbar-track { background: transparent; }
 
 /* ===== 回到底部浮动按钮 ===== */
 .scroll-to-bottom-btn {
@@ -4074,6 +4967,9 @@ watch(currentConversationId, (newId) => {
   overflow-y: auto;
   overflow-anchor: none;
 }
+.thinking-content::-webkit-scrollbar { width: 4px; }
+.thinking-content::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+.thinking-content::-webkit-scrollbar-track { background: transparent; }
 /* 思考过程回到底部按钮 — sticky 定位粘在可视底部 */
 .think-scroll-btn-wrap {
   position: sticky;
@@ -4597,6 +5493,7 @@ watch(currentConversationId, (newId) => {
 .changes-panel-item {
   border-bottom: 1px solid var(--border);
   transition: background 0.15s;
+  cursor: pointer;
 }
 .changes-panel-item:last-child { border-bottom: none; }
 .changes-panel-item:hover { background: var(--bg-hover); }
@@ -4810,6 +5707,12 @@ watch(currentConversationId, (newId) => {
   gap: 8px;
 }
 .ask-user-input-row .a-input { flex: 1; }
+
+/* ===== 权限面板 ===== */
+.permission-panel {
+  display: flex;
+  flex-direction: column;
+}
 
 /* ===== 权限授权按钮 ===== */
 .permission-btn-grid {
@@ -5243,6 +6146,72 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .input-wrapper :deep(.ant-input:focus) {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
+}
+
+/* ===== 暗色模式 - 滚动条适配 ===== */
+[data-theme="dark"] .conversation-list::-webkit-scrollbar-thumb,
+[data-theme="dark"] .filetree-panel::-webkit-scrollbar-thumb,
+[data-theme="dark"] .git-panel::-webkit-scrollbar-thumb,
+[data-theme="dark"] .skill-panel::-webkit-scrollbar-thumb,
+[data-theme="dark"] .agent-panel-wrapper::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
+[data-theme="dark"] .tab-bar::-webkit-scrollbar-thumb,
+[data-theme="dark"] .tab-items::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
+/* 暗色分屏按钮 */
+[data-theme="dark"] .tab-split-btn:hover {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+}
+[data-theme="dark"] .tab-unsplit-btn {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+}
+[data-theme="dark"] .tab-unsplit-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+}
+[data-theme="dark"] .file-tab-empty {
+  color: #6b6b80;
+}
+[data-theme="dark"] .message-list::-webkit-scrollbar {
+  width: 5px;
+}
+[data-theme="dark"] .message-list::-webkit-scrollbar-thumb {
+  background: #3a3850;
+  border-radius: 3px;
+}
+[data-theme="dark"] .message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+[data-theme="dark"] .thinking-content::-webkit-scrollbar {
+  width: 4px;
+}
+[data-theme="dark"] .thinking-content::-webkit-scrollbar-thumb {
+  background: #3a3850;
+  border-radius: 2px;
+}
+[data-theme="dark"] .thinking-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+[data-theme="dark"] .diff-tab-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .task-dropdown-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .changes-panel-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .console-log-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .terminal-output::-webkit-scrollbar-thumb,
+[data-theme="dark"] .tool-result-body::-webkit-scrollbar-thumb {
+  background: #3a3850;
+  border-radius: 2px;
+}
+[data-theme="dark"] .diff-tab-body::-webkit-scrollbar,
+[data-theme="dark"] .task-dropdown-body::-webkit-scrollbar,
+[data-theme="dark"] .changes-panel-body::-webkit-scrollbar,
+[data-theme="dark"] .console-log-body::-webkit-scrollbar,
+[data-theme="dark"] .terminal-output::-webkit-scrollbar,
+[data-theme="dark"] .tool-result-body::-webkit-scrollbar {
+  width: 4px;
 }
 </style>
 

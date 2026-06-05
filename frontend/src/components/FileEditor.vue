@@ -18,7 +18,11 @@
     <div class="fe-body">
       <div class="fe-gutter" ref="gutterRef">
         <div class="fe-gutter-inner">
-          <div v-for="n in lineCount" :key="n" class="fe-line-num">{{ n }}</div>
+          <div
+            v-for="n in lineCount"
+            :key="n"
+            :class="['fe-line-num', getHighlightClass(n)]"
+          >{{ n }}</div>
         </div>
       </div>
       <div class="fe-editor-wrapper">
@@ -57,6 +61,8 @@ const props = defineProps<{
   filePath: string
   content: string
   originalContent?: string
+  /** 高亮标记：红/绿行号，add 类型可附带 content */
+  highlightLines?: { line: number; type: 'remove' | 'add'; content?: string }[]
 }>()
 
 const emit = defineEmits<{
@@ -76,10 +82,10 @@ const cursorColumn = ref(1)
 // 本地编辑的内容
 const editContent = ref(props.content)
 
-// 同步 props.content 变化到 editContent
+// 同步 props.content 变化到 editContent（规范化换行符）
 watch(() => props.content, (val) => {
   if (val !== undefined && val !== null) {
-    editContent.value = val
+    editContent.value = val.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   }
 })
 
@@ -91,7 +97,8 @@ const isDirty = computed(() => {
 
 const lineCount = computed(() => {
   if (!editContent.value) return 1
-  return editContent.value.split('\n').length
+  // ★ 规范化换行符，与 highlightedCode 保持一致
+  return editContent.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').length
 })
 
 const totalLines = computed(() => lineCount.value)
@@ -137,28 +144,64 @@ const languageLabel = computed(() => {
   return labelMap[languageId.value] || languageId.value.toUpperCase() || 'Text'
 })
 
-// 语法高亮渲染
+// ★ 行高亮集
+const diffRemoveSet = computed(() => {
+  const set = new Set<number>()
+  if (props.highlightLines) {
+    for (const h of props.highlightLines) {
+      if (h.type === 'remove') set.add(h.line)
+    }
+  }
+  return set
+})
+const diffAddSet = computed(() => {
+  const set = new Set<number>()
+  if (props.highlightLines) {
+    for (const h of props.highlightLines) {
+      if (h.type === 'add') set.add(h.line)
+    }
+  }
+  return set
+})
+const getHighlightClass = (lineNum: number): string => {
+  if (diffRemoveSet.value.has(lineNum)) return 'fe-line-remove'
+  if (diffAddSet.value.has(lineNum)) return 'fe-line-add'
+  return ''
+}
+
+// 语法高亮渲染（逐行高亮 + 行级红绿标记）
 const highlightedCode = computed(() => {
   const code = editContent.value || ''
   if (!code) return ''
   try {
     const lang = languageId.value
-    const isAutoDetect = lang === 'plaintext'
-    let result: string
-    if (isAutoDetect) {
-      const auto = hljs.highlightAuto(code)
-      result = auto.value
-    } else {
-      if (hljs.getLanguage(lang)) {
-        result = hljs.highlight(code, { language: lang }).value
-      } else {
-        result = hljs.highlightAuto(code).value
+    const normalizedCode = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const lines = normalizedCode.split('\n')
+    const result = lines.map((line, i) => {
+      const lineNum = i + 1
+      let hlClass = ''
+      if (diffRemoveSet.value.has(lineNum)) hlClass = ' fe-line-remove'
+      else if (diffAddSet.value.has(lineNum)) hlClass = ' fe-line-add'
+
+      if (line === '') {
+        return `<span class="fe-code-line${hlClass}">&nbsp;</span>`
       }
-    }
-    // 在行末添加换行标记保证空行也被渲染
+      let html: string
+      try {
+        if (lang === 'plaintext') {
+          html = escapeHtml(line)
+        } else {
+          html = hljs.highlight(line, { language: lang }).value
+        }
+      } catch {
+        html = escapeHtml(line)
+      }
+      html = html.replace(/\r?\n/g, '')
+      if (!html) html = '&nbsp;'
+      return `<span class="fe-code-line${hlClass}">${html}</span>`
+    }).join('')
     return result
   } catch {
-    // 高亮失败时转义输出
     return escapeHtml(code)
   }
 })
@@ -170,7 +213,7 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
 }
 
-// 滚动同步：textarea、highlight 层、行号区保持同步
+// 滚动同步：textarea → highlight + gutter
 const syncScroll = () => {
   const textarea = textareaRef.value
   const highlight = highlightRef.value
@@ -187,7 +230,8 @@ const syncScroll = () => {
 
 const handleInput = (_e: Event) => {
   const target = _e.target as HTMLTextAreaElement
-  editContent.value = target.value
+  // ★ 规范化换行符，确保与高亮层一致
+  editContent.value = target.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   emit('contentChange', props.filePath, editContent.value)
   updateCursor()
 }
@@ -208,7 +252,6 @@ const handleTab = () => {
 }
 
 const handleKeyDown = () => {
-  // 在下次 tick 同步 scroll，确保 textarea 已更新滚动位置
   nextTick(() => syncScroll())
 }
 
@@ -338,19 +381,20 @@ const handleSave = async () => {
   text-align: right;
   padding: 0 10px 0 0;
   font-size: 12px;
-  line-height: 19.5px;
+  line-height: 20px;
   color: #858585;
-  min-height: 19.5px;
+  min-height: 20px;
   font-family: inherit;
   direction: ltr;
 }
 
-/* 叠加层编辑器 - 双绝对定位同步滚动 */
+/* 叠加层编辑器 - 绝对定位，textarea 驱动滚动 */
 .fe-editor-wrapper {
   flex: 1;
   position: relative;
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 .fe-highlight-layer {
   position: absolute;
@@ -361,13 +405,15 @@ const handleSave = async () => {
   margin: 0;
   padding: 8px 12px;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 20px;
   font-family: inherit;
   white-space: pre;
   tab-size: 2;
   background: #1e1e1e;
-  overflow: scroll;
+  overflow: hidden;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
   border: none;
   text-align: left;
   box-sizing: border-box;
@@ -404,11 +450,11 @@ const handleSave = async () => {
   resize: none;
   padding: 8px 12px;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 20px;
   font-family: inherit;
   tab-size: 2;
   white-space: pre;
-  overflow: scroll;
+  overflow: auto;
   background: transparent;
   color: transparent;
   caret-color: #aeafad;
@@ -422,12 +468,7 @@ const handleSave = async () => {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeSpeed;
 }
-.fe-textarea::selection {
-  background: #264f78;
-}
-.fe-textarea::-moz-selection {
-  background: #264f78;
-}
+/* ::selection 移入下方非 scoped 块以避免 scoped 属性选择器导致伪元素失效 */
 
 /* 底部状态栏 */
 .fe-footer {
@@ -446,7 +487,22 @@ const handleSave = async () => {
 </style>
 
 <style>
-/* 全局 hljs 暗色主题覆盖 - 确保高亮层中的代码有颜色 */
+/* ===== 全局样式（v-html 动态内容必须用非 scoped 样式） ===== */
+
+/* 行号区的红绿标记（template 元素，scoped 也 OK，但放这里统一管理） */
+.fe-line-num.fe-line-remove { background: rgba(255, 77, 79, 0.25); color: #ff4d4f; }
+.fe-line-num.fe-line-add { background: rgba(82, 196, 26, 0.2); color: #52c41a; }
+
+/* 代码区行级红绿标记（v-html 动态内容，须在全局样式中） */
+.fe-code-line {
+  display: block;
+  min-height: 20px;
+  line-height: 20px;
+}
+.fe-code-line.fe-line-remove { background: rgba(255, 77, 79, 0.25); }
+.fe-code-line.fe-line-add { background: rgba(82, 196, 26, 0.2); }
+
+/* hljs 暗色主题 */
 .fe-highlight-layer .hljs {
   background: transparent !important;
   color: #d4d4d4;
@@ -489,4 +545,84 @@ const handleSave = async () => {
 .fe-highlight-layer .hljs-params { color: #9cdcfe; }
 .fe-highlight-layer .hljs-section { color: #dcdcaa; font-weight: bold; }
 .fe-highlight-layer .hljs-quote { color: #6a9955; font-style: italic; }
+
+/* ===== 亮色模式覆盖 ===== */
+[data-theme="light"] .file-editor {
+  background: #ffffff;
+  color: #1e1e1e;
+}
+[data-theme="light"] .fe-textarea { color: transparent; caret-color: #333333; }
+[data-theme="light"] .fe-header {
+  background: #f3f3f3;
+  border-bottom-color: #e0e0e0;
+}
+[data-theme="light"] .fe-file-path { color: #333333; }
+[data-theme="light"] .fe-lang-badge {
+  background: #e8e8e8;
+  color: #666666;
+  border-color: #d0d0d0;
+}
+[data-theme="light"] .fe-gutter {
+  background: #fafafa;
+  border-right-color: #e0e0e0;
+}
+[data-theme="light"] .fe-line-num { color: #999999; }
+[data-theme="light"] .fe-highlight-layer {
+  background: #ffffff;
+}
+[data-theme="light"] .fe-highlight-layer .hljs {
+  color: #1e1e1e;
+}
+[data-theme="light"] .fe-highlight-layer .hljs-keyword { color: #0000ff; }
+[data-theme="light"] .fe-highlight-layer .hljs-string { color: #a31515; }
+[data-theme="light"] .fe-highlight-layer .hljs-number { color: #098658; }
+[data-theme="light"] .fe-highlight-layer .hljs-comment { color: #008000; }
+[data-theme="light"] .fe-highlight-layer .hljs-built_in { color: #267f99; }
+[data-theme="light"] .fe-highlight-layer .hljs-type { color: #267f99; }
+[data-theme="light"] .fe-highlight-layer .hljs-literal { color: #0000ff; }
+[data-theme="light"] .fe-highlight-layer .hljs-attr { color: #0451a5; }
+[data-theme="light"] .fe-highlight-layer .hljs-attribute { color: #0451a5; }
+[data-theme="light"] .fe-highlight-layer .hljs-title { color: #795e26; }
+[data-theme="light"] .fe-highlight-layer .hljs-title.function_ { color: #795e26; }
+[data-theme="light"] .fe-highlight-layer .hljs-title.class_ { color: #267f99; }
+[data-theme="light"] .fe-highlight-layer .hljs-property { color: #0451a5; }
+[data-theme="light"] .fe-highlight-layer .hljs-selector-tag { color: #800000; }
+[data-theme="light"] .fe-highlight-layer .hljs-selector-class { color: #800000; }
+[data-theme="light"] .fe-highlight-layer .hljs-selector-id { color: #800000; }
+[data-theme="light"] .fe-highlight-layer .hljs-tag { color: #800000; }
+[data-theme="light"] .fe-highlight-layer .hljs-name { color: #800000; }
+[data-theme="light"] .fe-highlight-layer .hljs-variable { color: #001080; }
+[data-theme="light"] .fe-highlight-layer .hljs-template-variable { color: #001080; }
+[data-theme="light"] .fe-highlight-layer .hljs-template-tag { color: #800000; }
+[data-theme="light"] .fe-highlight-layer .hljs-deletion { background: #fee; }
+[data-theme="light"] .fe-highlight-layer .hljs-addition { background: #efe; }
+[data-theme="light"] .fe-highlight-layer .hljs-meta { color: #1e1e1e; }
+[data-theme="light"] .fe-highlight-layer .hljs-meta .hljs-keyword { color: #0000ff; }
+[data-theme="light"] .fe-highlight-layer .hljs-doctag { color: #008000; }
+[data-theme="light"] .fe-highlight-layer .hljs-regexp { color: #811f3f; }
+[data-theme="light"] .fe-highlight-layer .hljs-link { color: #0000ff; }
+[data-theme="light"] .fe-highlight-layer .hljs-symbol { color: #0000ff; }
+[data-theme="light"] .fe-highlight-layer .hljs-bullet { color: #0451a5; }
+[data-theme="light"] .fe-highlight-layer .hljs-code { color: #1e1e1e; }
+[data-theme="light"] .fe-highlight-layer .hljs-emphasis { font-style: italic; }
+[data-theme="light"] .fe-highlight-layer .hljs-strong { font-weight: bold; }
+[data-theme="light"] .fe-highlight-layer .hljs-formula { color: #1e1e1e; }
+[data-theme="light"] .fe-highlight-layer .hljs-params { color: #001080; }
+[data-theme="light"] .fe-highlight-layer .hljs-section { color: #795e26; }
+[data-theme="light"] .fe-highlight-layer .hljs-quote { color: #008000; }
+[data-theme="light"] .fe-file-icon { color: #0078d4; }
+[data-theme="light"] .fe-line-num.fe-line-remove { background: rgba(255, 77, 79, 0.15); }
+[data-theme="light"] .fe-line-num.fe-line-add { background: rgba(82, 196, 26, 0.12); }
+[data-theme="light"] .fe-code-line.fe-line-remove { background: rgba(255, 77, 79, 0.10); }
+[data-theme="light"] .fe-code-line.fe-line-add { background: rgba(82, 196, 26, 0.10); }
+/* ★ 暗色模式（默认）textarea 选中：半透明背景让底层高亮文字透出，text 设为 transparent 避免和 pre 层叠加产生重影 */
+.fe-textarea::selection { background: rgba(38, 79, 120, 0.35); color: transparent; -webkit-text-fill-color: transparent; }
+/* 高亮层兜底：即使被选中也不显示背景（避免和textarea selection叠加） */
+.fe-highlight-layer::selection,
+.fe-highlight-layer *::selection { background: transparent; color: inherit; }
+
+[data-theme="light"] .fe-textarea::selection { background: rgba(173, 214, 255, 0.35); color: transparent; -webkit-text-fill-color: transparent; }
+[data-theme="light"] .fe-highlight-layer::selection,
+[data-theme="light"] .fe-highlight-layer *::selection { background: transparent; color: inherit; }
+[data-theme="light"] .fe-footer { background: #0078d4; }
 </style>

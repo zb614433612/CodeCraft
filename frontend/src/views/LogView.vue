@@ -781,14 +781,20 @@ onMounted(() => {
   background: transparent;
 }
 .log-scroller::-webkit-scrollbar-thumb {
-  background: #3a3f50;
+  background: #dcd8ea;
   border-radius: 3px;
 }
 .log-scroller::-webkit-scrollbar-thumb:hover {
-  background: #4a5065;
+  background: #c4bce0;
 }
 
 /* ===== 暗色模式 ===== */
+[data-theme="dark"] .log-scroller::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
+[data-theme="dark"] .log-scroller::-webkit-scrollbar-thumb:hover {
+  background: #4a4860;
+}
 [data-theme="dark"] .log-container {
   background: #121418;
 }

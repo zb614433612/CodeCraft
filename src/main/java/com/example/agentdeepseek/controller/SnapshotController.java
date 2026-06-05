@@ -97,4 +97,17 @@ public class SnapshotController {
         boolean success = snapshotService.rollbackSession(sessionId);
         return Map.of("success", success);
     }
+
+    @GetMapping("/file-content")
+    @Operation(summary = "获取快照中的文件原始内容", description = "返回指定文件在快照中的原始内容，用于diff对比")
+    public Map<String, Object> getFileContent(@RequestParam Long sessionId, @RequestParam String filePath) {
+        if (sessionId == null || filePath == null || filePath.isEmpty()) {
+            return Map.of("success", false, "message", "sessionId 和 filePath 不能为空");
+        }
+        String content = snapshotService.getSnapshotFileContent(sessionId, filePath);
+        return Map.of(
+                "success", true,
+                "data", content
+        );
+    }
 }

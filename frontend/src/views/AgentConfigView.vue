@@ -1370,6 +1370,14 @@ onMounted(() => {
 }
 [data-theme="dark"] .agent-content::-webkit-scrollbar-thumb { background: #3a3850; }
 [data-theme="dark"] .modal-body::-webkit-scrollbar-thumb { background: #3a3850; }
+/* 页面主容器 + emoji 选择器滚动条 */
+.agent-page::-webkit-scrollbar { width: 5px; }
+.agent-page::-webkit-scrollbar-track { background: transparent; }
+.agent-page::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+.emoji-grid::-webkit-scrollbar { width: 4px; }
+.emoji-grid::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+[data-theme="dark"] .agent-page::-webkit-scrollbar-thumb { background: #3a3850; }
+[data-theme="dark"] .emoji-grid::-webkit-scrollbar-thumb { background: #3a3850; }
 [data-theme="dark"] .agent-card.is-default {
   background: linear-gradient(135deg, rgba(59,130,246,0.06), rgba(30,29,45,0.5));
 }

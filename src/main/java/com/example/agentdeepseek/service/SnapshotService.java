@@ -786,4 +786,44 @@ public class SnapshotService {
         if (bytes < 1024 * 1024) return (bytes / 1024) + " KB";
         return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
     }
+
+    /**
+     * 读取指定文件在会话中最早的快照内容（用于 diff 对比）
+     * @param sessionId 会话 ID
+     * @param relativePath 文件相对路径
+     * @return 原始内容字符串，如果是新建文件则返回 null
+     */
+    public String getSnapshotFileContent(Long sessionId, String relativePath) {
+        if (sessionId == null || relativePath == null) return null;
+
+        List<SnapshotSummary> summaries = listSnapshots(sessionId);
+        SnapshotSummary earliest = null;
+        FileEntry earliestEntry = null;
+        for (SnapshotSummary ss : summaries) {
+            SnapshotMetadata meta = readMetadata(ss.getSnapshotId());
+            if (meta == null) continue;
+            for (FileEntry fe : meta.getFiles()) {
+                if (fe.getRelativePath().equals(relativePath) && !fe.isRolledBack()) {
+                    if (earliest == null) {
+                        earliest = ss;
+                        earliestEntry = fe;
+                    }
+                    break;
+                }
+            }
+        }
+        if (earliest == null || earliestEntry == null) {
+            return null;
+        }
+        // 即使文件是最早快照中的新建文件，备份目录中也有其初始内容，可用于 diff 对比
+        try {
+            Path sourcePath = getSnapshotFilesDir(earliest.getSnapshotId()).resolve(relativePath);
+            if (Files.exists(sourcePath)) {
+                return FileEncodingDetector.readString(sourcePath);
+            }
+        } catch (IOException e) {
+            log.warn("读取快照文件失败: {}", relativePath, e);
+        }
+        return null;
+    }
 }
