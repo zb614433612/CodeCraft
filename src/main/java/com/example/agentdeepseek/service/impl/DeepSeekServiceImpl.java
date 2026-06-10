@@ -20,6 +20,7 @@ import com.example.agentdeepseek.service.SkillMatcher;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
 import com.example.agentdeepseek.service.ConfigService;
+import com.example.agentdeepseek.service.AttachmentStore;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.PermissionContext;
@@ -103,6 +104,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final CompactionService compactionService;
     private final AgentEventBus agentEventBus;
     private final SupplementStore supplementStore;
+    private final AttachmentStore attachmentStore;
 
     @Autowired
     private AgentForkManager agentForkManager;
@@ -161,8 +163,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                  AgentEventBus agentEventBus,
                                  MessagePersister messagePersister,
                                  ContextBuilder contextBuilder,
-                                 ToolLoopManager toolLoopManager,
-                                 SupplementStore supplementStore) {
+                                  ToolLoopManager toolLoopManager,
+                                  SupplementStore supplementStore,
+                                  AttachmentStore attachmentStore) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -184,6 +187,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.contextBuilder = contextBuilder;
         this.toolLoopManager = toolLoopManager;
         this.supplementStore = supplementStore;
+        this.attachmentStore = attachmentStore;
     }
 
     // ===== 拆分出的组件 =====
@@ -721,10 +725,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         skillsSection.append("## 技能使用规则（必须遵守）\n\n");
                         skillsSection.append("以下规则优先级高于系统提示词中的其他指令：\n\n");
                         skillsSection.append("1. 检查下方匹配到的技能列表，如果用户需求与某个技能的描述匹配，严格按照该技能的「使用说明」执行。\n");
-                        skillsSection.append("2. 技能使用完毕后（无论成功或失败），必须调用 report_skill_result 反馈：\n");
+                        skillsSection.append("2. 技能使用完毕后（无论成功或失败），必须调用 skill action=report 反馈：\n");
                         skillsSection.append("   - skill_id：技能列表中【技能名】后面标注的 ID（数字）\n");
                         skillsSection.append("   - success：true（操作成功/用户满意）或 false（未达预期/出错）\n");
-                        skillsSection.append("3. 即使用户直接对结果表示满意或不满，也必须调用 report_skill_result，遗漏会导致技能置信度无法更新。\n");
+                        skillsSection.append("3. 即使用户直接对结果表示满意或不满，也必须调用 skill action=report，遗漏会导致技能置信度无法更新。\n");
                         skillsSection.append("4. 置信度由系统自动计算（贝叶斯平滑公式），≥80% 优先注入，<10% 自动淘汰。\n");
                         skillsSection.append("5. 持续反馈能让好技能进化、低效技能自然淘汰，形成正向循环。\n");
                         skillsSection.append("\n---\n");
@@ -752,6 +756,36 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 }
             } catch (Exception e) {
                 log.warn("加载技能失败", e);
+            }
+        }
+
+        // 注入附件提示：告知 LLM 用户上传了哪些附件，可按需调用 chat_attachment 工具读取
+        List<String> attachmentIds = request.getAttachmentIds();
+        log.info("【附件诊断】request.attachmentIds = {}", attachmentIds);
+        if (attachmentIds != null && !attachmentIds.isEmpty()) {
+            StringBuilder attSection = new StringBuilder();
+            attSection.append("\n\n---\n");
+            attSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
+            for (String attId : attachmentIds) {
+                AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attId);
+                if (meta != null) {
+                    attSection.append("- attachment_id: ").append(attId)
+                            .append(", 文件名: ").append(meta.getFileName())
+                            .append(", 类型: ").append(meta.getType())
+                            .append(", 大小: ").append(formatFileSize(meta.getSize())).append("\n");
+                }
+            }
+            attSection.append("---\n");
+
+            // 注入到最后一条用户消息的内容开头
+            for (int i = historyMessages.size() - 1; i >= 0; i--) {
+                Map<String, Object> msg = historyMessages.get(i);
+                if ("user".equals(msg.get("role"))) {
+                    String existing = (String) msg.get("content");
+                    msg.put("content", attSection.toString() + existing);
+                    log.info("附件提示注入: 共 {} 个附件", attachmentIds.size());
+                    break;
+                }
             }
         }
 
@@ -816,6 +850,23 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String turnId = request.getTurnId();
         if (turnId != null && !turnId.isEmpty()) {
             apiRequest.put("_turnId", turnId);
+        }
+        // 保存附件提示到 API 请求中（内部使用，供后续 toolLoop 重建消息时复用）
+        if (attachmentIds != null && !attachmentIds.isEmpty()) {
+            StringBuilder attSection = new StringBuilder();
+            attSection.append("\n\n---\n");
+            attSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
+            for (String attId : attachmentIds) {
+                AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attId);
+                if (meta != null) {
+                    attSection.append("- attachment_id: ").append(attId)
+                            .append(", 文件名: ").append(meta.getFileName())
+                            .append(", 类型: ").append(meta.getType())
+                            .append(", 大小: ").append(formatFileSize(meta.getSize())).append("\n");
+                }
+            }
+            attSection.append("---\n");
+            apiRequest.put("_attachmentSection", attSection.toString());
         }
         // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
         apiRequest.put("_contextMode", contextMode);
@@ -1139,6 +1190,22 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         for (Map<String, Object> msg : historyMessages) {
             Map<String, Object> mutableMsg = new HashMap<>(msg);
             messages.add(mutableMsg);
+        }
+
+        // 注入附件提示到用户消息（工具循环中同样需要，因为从DB重建的消息不含临时注入的附件提示）
+        String attachmentSection = (String) initialApiRequest.get("_attachmentSection");
+        if (attachmentSection != null) {
+            for (int i = messages.size() - 1; i >= 0; i--) {
+                Map<String, Object> msg = messages.get(i);
+                if ("user".equals(msg.get("role"))) {
+                    String existing = (String) msg.get("content");
+                    if (!existing.contains("[系统提示] 用户上传了以下附件")) {
+                        msg.put("content", attachmentSection + existing);
+                        log.info("附件提示注入(toolLoop): 已注入附件提示到用户消息");
+                    }
+                    break;
+                }
+            }
         }
 
         // 注入技能匹配内容到用户消息（工具循环中同样需要）
@@ -1517,6 +1584,16 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
+     * 创建工具调用开始的SSE事件（含操作摘要）
+     * @param toolNames 工具名称列表
+     * @param operationSummaries 操作摘要列表
+     * @return SSE格式字符串（JSON事件）
+     */
+    private String createToolCallStartEvent(List<String> toolNames, List<String> operationSummaries) {
+        return toolLoopManager.createToolCallStartEvent(toolNames, operationSummaries);
+    }
+
+    /**
      * 从 tool_calls JSON 数组中提取工具名称
      */
     private List<String> extractToolNames(JsonNode toolCalls) {
@@ -1549,6 +1626,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                               List<Map<String, Object>> messages, int iteration, int maxIterations) {
         apiRequest.put("stream", true);
 
+        // ===== 性能诊断：记录请求发起时间 =====
+        final long requestStartNanos = System.nanoTime();
+        final AtomicBoolean firstChunkLogged = new AtomicBoolean(false);
+
         // 收集原始响应块，用于调试和保存
         StringBuilder responseBuilder = new StringBuilder();
         // 收集文本内容，用于工具调用前的部分消息
@@ -1562,6 +1643,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);
         requestBody.keySet().removeIf(k -> k.startsWith("_"));
+        // 性能诊断：记录请求体大小
+        int requestBodySize = requestBody.toString().length();
+        log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
+                conversationId, iteration, requestBodySize);
+
         return webClient.post()
                 .uri("/v1/chat/completions")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -1570,6 +1656,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 .retrieve()
                 .bodyToFlux(String.class)
                 .doOnNext(chunk -> {
+                    // 性能诊断：首字节到达时间
+                    if (firstChunkLogged.compareAndSet(false, true)) {
+                        long ttfbMs = (System.nanoTime() - requestStartNanos) / 1_000_000;
+                        log.info("[Perf] conversationId={}, iteration={}, LLM首字节到达, TTFB={}ms",
+                                conversationId, iteration, ttfbMs);
+                    }
                     // 收集响应块
                     responseBuilder.append(chunk);
                 })
@@ -1632,21 +1724,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                 reasoning != null ? reasoning.length() : 0);
                                     }
 
-                                    // 发送工具调用开始事件
+                                    // 从工具调用参数生成操作摘要
                                     List<String> invokingToolNames = extractToolNames(completeToolCalls);
-                                    String toolCallStartEvent = createToolCallStartEvent(invokingToolNames);
-                                    log.debug("发送工具调用开始事件: {}", invokingToolNames);
-
-                                    // 提取执行上下文
-                                    String currentProjectRoot = (String) apiRequest.get("_projectRoot");
-                                    String currentExecutionMode = (String) apiRequest.get("_executionMode");
-                                    String agentType = (String) apiRequest.get("_agentType");
-                                    Long userId = (Long) apiRequest.get("_userId");
-                                    String currentTurnId = (String) apiRequest.get("_turnId");
-                                    Long currentAgentConfigId = (Long) apiRequest.get("_agentConfigId");
-                                    String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
-
-                                    // 从工具调用参数生成操作摘要（在所有模式下都注入 thinking 流）
+                                    List<String> operationSummaries = new ArrayList<>();
                                     List<String> operationSummaryEvents = new ArrayList<>();
                                     for (int i = 0; i < completeToolCalls.size(); i++) {
                                         JsonNode tc = completeToolCalls.get(i);
@@ -1657,6 +1737,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                 JsonNode args = objectMapper.readTree(argsStr);
                                                 String summary = detailGenerator.generate(tcToolName, args);
                                                 if (summary != null) {
+                                                    operationSummaries.add(summary);
                                                     operationSummaryEvents.add(createReasoningSSEEvent(summary));
                                                 }
                                             } catch (Exception e) {
@@ -1664,6 +1745,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             }
                                         }
                                     }
+
+                                    // 发送工具调用开始事件（JSON格式，包含操作摘要，前端渲染加载动画）
+                                    String toolCallStartEvent = createToolCallStartEvent(invokingToolNames, operationSummaries);
+                                    log.debug("发送工具调用开始事件: {}，摘要数: {}", invokingToolNames, operationSummaries.size());
+
+                                    // 提取执行上下文
+                                    String currentProjectRoot = (String) apiRequest.get("_projectRoot");
+                                    String currentExecutionMode = (String) apiRequest.get("_executionMode");
+                                    String agentType = (String) apiRequest.get("_agentType");
+                                    Long userId = (Long) apiRequest.get("_userId");
+                                    String currentTurnId = (String) apiRequest.get("_turnId");
+                                    Long currentAgentConfigId = (Long) apiRequest.get("_agentConfigId");
+                                    String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
 
                                     // ===== 权限预检：判断是否需要弹窗审批 =====
                                     // 层面一（manual）：affectsData=true
@@ -1934,87 +2028,98 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                 );
                                     }
 
-                                    // ---- 自动模式：直接执行工具 ----
-                                    if (currentProjectRoot != null && !currentProjectRoot.isEmpty()) {
-                                        ProjectRootContext.set(currentProjectRoot);
-                                    }
-                                    ToolContext.set(currentExecutionMode, conversationId,
-                                            agentType, userId);
-                                    if (currentTurnId != null) {
-                                        ToolContext.setTurnId(currentTurnId);
-                                    }
-                                    if (currentAgentConfigId != null) {
-                                        ToolContext.setAgentConfigId(currentAgentConfigId);
-                                    }
-                                    PermissionContext.set(pendingQuestionStore, objectMapper);
+                                    // ---- 自动模式：异步执行工具（先发加载事件，工具执行完再发结果） ----
+                                    // ★ 核心优化：把工具调用开始事件+操作摘要作为 preEvents 先发，
+                                    //    工具执行通过 Mono.fromCallable 异步化，让前端在工具执行期间显示加载动画
 
-                                    List<ToolExecutor.ToolCallResult> toolResults;
-                                    try {
-                                        toolResults = toolExecutor.executeToolCalls(completeToolCalls);
-                                    } finally {
-                                        PermissionContext.clear();
-                                        ProjectRootContext.clear();
-                                        ToolContext.clear();
-                                    }
-                                    log.debug("工具调用执行完成，结果数量: {}", toolResults.size());
-
-                                    // 检查是否有 ask_user 问题
-                                    ToolExecutor.ToolCallResult askUserResult = findAskUserResult(toolResults);
-                                    if (askUserResult != null) {
-                                        Flux<String> preEvents = Flux.empty();
-                                        Flux<String> summaryFlux = Flux.just(toolCallStartEvent);
-                                        for (String se : operationSummaryEvents) {
-                                            summaryFlux = summaryFlux.concatWith(Flux.just(se));
-                                        }
-                                        return Flux.concat(preEvents, summaryFlux)
-                                                .concatWith(
-                                                        handleAskUserFlow(askUserResult, toolResults, completeToolCalls,
-                                                                messages, toolCallStartEvent, collectedContentStr, reasoning,
-                                                                conversationId, storageConversationId, apiRequest, iteration, maxIterations));
-                                    }
-
-                                    // 将工具调用消息添加到消息列表，包含之前收集的文本内容
-                                    Map<String, Object> toolCallMessage = new HashMap<>();
-                                    toolCallMessage.put("role", "assistant");
-                                    if (!collectedContentStr.isEmpty()) {
-                                        toolCallMessage.put("content", collectedContentStr);
-                                    }
-                                    toolCallMessage.put("tool_calls", completeToolCalls);
-                                    if (reasoning != null && !reasoning.isEmpty()) {
-                                        toolCallMessage.put("reasoning_content", reasoning);
-                                    }
-                                    messages.add(toolCallMessage);
-
-                                    // 创建工具结果事件流
-                                    List<String> toolResultEvents = new ArrayList<>();
-                                    for (ToolExecutor.ToolCallResult toolResult : toolResults) {
-                                        String toolResultEvent = createToolResultEvent(toolResult.getToolName(), toolResult.getContent());
-                                        toolResultEvents.add(toolResultEvent);
-                                        log.debug("创建工具结果事件，内容长度: {}", toolResult.getContent() != null ? toolResult.getContent().length() : 0);
-                                    }
-
-                                    // 将工具结果消息添加到消息列表，并保存工具消息到数据库
-                                    List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(toolResults);
-                                    for (ObjectNode toolMessage : toolMessages) {
-                                        messages.add(objectMapper.convertValue(toolMessage, Map.class));
-                                        String toolContent = toolMessage.path("content").asText("");
-                                        String toolName = toolMessage.path("tool_name").asText("");
-                                        String formattedToolContent = formatToolResult(toolContent, toolName);
-                                        saveToolMessage(storageConversationId, formattedToolContent);
-                                    }
-
-                                    // 创建事件流：刷新缓冲+工具调用开始事件+操作摘要+工具结果事件+下一轮迭代
-                                    Flux<String> toolCallEvents = Flux.just(toolCallStartEvent);
+                                    // preEvents：工具调用开始（JSON事件）+ 操作摘要（thinking事件）
+                                    Flux<String> preEvents = Flux.just(toolCallStartEvent);
                                     for (String summaryEvent : operationSummaryEvents) {
-                                        toolCallEvents = toolCallEvents.concatWith(Flux.just(summaryEvent));
-                                    }
-                                    for (String toolResultEvent : toolResultEvents) {
-                                        toolCallEvents = toolCallEvents.concatWith(Flux.just(toolResultEvent));
+                                        preEvents = preEvents.concatWith(Flux.just(summaryEvent));
                                     }
 
-                                    // 继续下一轮迭代（使用非流式）
-                                    Flux<String> nextIteration = handleToolCallIteration(conversationId, storageConversationId, apiRequest, messages, iteration + 1, maxIterations);
-                                    return Flux.concat(toolCallEvents, nextIteration);
+                                    // 异步执行工具（在 boundedElastic 线程池中，避免阻塞 Netty 线程）
+                                    Mono<List<ToolExecutor.ToolCallResult>> toolExecutionMono = Mono.fromCallable(() -> {
+                                        if (currentProjectRoot != null && !currentProjectRoot.isEmpty()) {
+                                            ProjectRootContext.set(currentProjectRoot);
+                                        }
+                                        ToolContext.set(currentExecutionMode, conversationId, agentType, userId);
+                                        if (currentTurnId != null) {
+                                            ToolContext.setTurnId(currentTurnId);
+                                        }
+                                        if (currentAgentConfigId != null) {
+                                            ToolContext.setAgentConfigId(currentAgentConfigId);
+                                        }
+                                        PermissionContext.set(pendingQuestionStore, objectMapper);
+                                        try {
+                                            return toolExecutor.executeToolCalls(completeToolCalls);
+                                        } finally {
+                                            PermissionContext.clear();
+                                            ProjectRootContext.clear();
+                                            ToolContext.clear();
+                                        }
+                                    }).subscribeOn(Schedulers.boundedElastic());
+
+                                    // postEvents：处理工具结果（含 askUser 检查、消息持久化、工具结果事件）
+                                    Flux<String> postEvents = toolExecutionMono.flatMapMany(toolResults -> {
+                                        log.debug("工具调用执行完成，结果数量: {}", toolResults.size());
+
+                                        // 检查是否有 ask_user 问题
+                                        ToolExecutor.ToolCallResult askUserResult = findAskUserResult(toolResults);
+                                        if (askUserResult != null) {
+                                            // 先发送所有工具的结果事件（含 ask_user），让前端 pending 卡片更新为完成状态，
+                                            // 然后再发送 ask_user 问题让用户确认
+                                            List<String> allResultEvents = new ArrayList<>();
+                                            for (ToolExecutor.ToolCallResult tr : toolResults) {
+                                                allResultEvents.add(createToolResultEvent(tr.getToolName(), tr.getContent()));
+                                            }
+                                            return Flux.fromIterable(allResultEvents)
+                                                    .concatWith(handleAskUserFlow(askUserResult, toolResults, completeToolCalls,
+                                                            messages, toolCallStartEvent, collectedContentStr, reasoning,
+                                                            conversationId, storageConversationId, apiRequest, iteration, maxIterations));
+                                        }
+
+                                        // 将工具调用消息添加到消息列表
+                                        Map<String, Object> toolCallMessage = new HashMap<>();
+                                        toolCallMessage.put("role", "assistant");
+                                        if (!collectedContentStr.isEmpty()) {
+                                            toolCallMessage.put("content", collectedContentStr);
+                                        }
+                                        toolCallMessage.put("tool_calls", completeToolCalls);
+                                        if (reasoning != null && !reasoning.isEmpty()) {
+                                            toolCallMessage.put("reasoning_content", reasoning);
+                                        }
+                                        messages.add(toolCallMessage);
+
+                                        // 创建工具结果事件流
+                                        List<String> toolResultEvents = new ArrayList<>();
+                                        for (ToolExecutor.ToolCallResult toolResult : toolResults) {
+                                            String toolResultEvent = createToolResultEvent(toolResult.getToolName(), toolResult.getContent());
+                                            toolResultEvents.add(toolResultEvent);
+                                            log.debug("创建工具结果事件，内容长度: {}", toolResult.getContent() != null ? toolResult.getContent().length() : 0);
+                                        }
+
+                                        // 将工具结果消息添加到消息列表并保存
+                                        List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(toolResults);
+                                        for (ObjectNode toolMessage : toolMessages) {
+                                            messages.add(objectMapper.convertValue(toolMessage, Map.class));
+                                            String toolContent = toolMessage.path("content").asText("");
+                                            String toolName = toolMessage.path("tool_name").asText("");
+                                            String formattedToolContent = formatToolResult(toolContent, toolName);
+                                            saveToolMessage(storageConversationId, formattedToolContent);
+                                        }
+
+                                        // 工具结果事件 + 下一轮迭代
+                                        Flux<String> resultFlux = Flux.fromIterable(toolResultEvents);
+                                        Flux<String> nextIteration = handleToolCallIteration(
+                                                conversationId, storageConversationId, apiRequest,
+                                                messages, iteration + 1, maxIterations);
+                                        return Flux.concat(resultFlux, nextIteration);
+                                    });
+
+                                    // preEvents 先发出（前端收到后显示加载动画），
+                                    // 然后 postEvents 在工具执行完成后发出（更新为完成状态）
+                                    return Flux.concat(preEvents, postEvents);
                                 } else {
                                     // 数据还不完整，继续累积，不转发事件
                                     log.debug("工具调用数据还不完整，继续累积");
@@ -2301,6 +2406,16 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (value != null && !value.asText().trim().isEmpty()) {
             sb.append("  ").append(label).append(": ").append(value.asText().trim()).append("\n");
         }
+    }
+
+    /**
+     * 格式化文件大小
+     */
+    private String formatFileSize(long bytes) {
+        if (bytes < 1024) return bytes + "B";
+        if (bytes < 1024 * 1024) return String.format("%.1fKB", bytes / 1024.0);
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.1fMB", bytes / (1024.0 * 1024));
+        return String.format("%.1fGB", bytes / (1024.0 * 1024 * 1024));
     }
 
 }

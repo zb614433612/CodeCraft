@@ -14,7 +14,7 @@ import java.util.Map;
  * <p>
  * 第一层（必需层）：状态、摘要、文件清单、编译结果、关键决策
  * 第二层（可选层）：试错记录、意外发现、技术债务
- * 第三层（按需层）：完整diff、thinking日志、工具调用历史（通过 inspect_agent 获取）
+ * 第三层（按需层）：完整diff、thinking日志、工具调用历史（通过 agent action=inspect 获取）
  */
 @Data
 @NoArgsConstructor
@@ -66,13 +66,13 @@ public class SubAgentResult {
 
     // ==================== 第三层：引用（按需获取） ====================
 
-    /** 子Agent的完整消息历史（用于inspect_agent查询） */
+    /** 子Agent的完整消息历史（用于 agent action=inspect 查询） */
     private String fullMessagesJson;
 
-    /** 子Agent的文件变更diff（用于inspect_agent查询） */
+    /** 子Agent的文件变更diff（用于 agent action=inspect 查询） */
     private String fullDiff;
 
-    /** 子Agent的完整工具调用日志（用于inspect_agent查询） */
+    /** 子Agent的完整工具调用日志（用于 agent action=inspect 查询） */
     private String toolCallLog;
 
     // ==================== 工厂方法 ====================

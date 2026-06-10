@@ -69,7 +69,7 @@ public class AgentForkManager {
     private final ConcurrentHashMap<Long, Set<String>> pendingAgentsByConversation = new ConcurrentHashMap<>();
 
     /** 子Agent最大并发数 */
-    private static final int MAX_CONCURRENT_AGENTS = 5;
+    private static final int MAX_CONCURRENT_AGENTS = 20;
 
     /** 子Agent默认最大迭代次数 */
     private static final int DEFAULT_MAX_ITERATIONS = 30;
@@ -77,13 +77,18 @@ public class AgentForkManager {
     /** 评委累计扩展上限 */
     private static final int MAX_JUDGE_GRANTED = 100;
 
-    /** 子Agent运行线程池（独立于主Agent线程池，避免互相影响） */
+    /** 子Agent运行线程池（独立于主Agent线程池，避免互相影响）
+     *  <p>
+     *  corePoolSize = MAX_CONCURRENT_AGENTS 确保所有子Agent立即获得线程并行执行，
+     *  不再因队列缓冲导致串行化。使用 SynchronousQueue 避免任务排队。
+     *  </p>
+     */
     private final ExecutorService agentExecutor = new ThreadPoolExecutor(
-            2,                              // corePoolSize
-            MAX_CONCURRENT_AGENTS,          // maximumPoolSize
+            MAX_CONCURRENT_AGENTS,          // corePoolSize（=20，确保所有子Agent并行启动）
+            MAX_CONCURRENT_AGENTS,          // maximumPoolSize（=20，与core一致，无扩容延迟）
             30L,                            // keepAliveTime
             TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(20),
+            new SynchronousQueue<>(),       // 无缓冲队列：core线程满后直接拒绝 → 触发CallerRunsPolicy
             r -> {
                 Thread t = new Thread(r, "sub-agent-");
                 t.setDaemon(true);
@@ -191,6 +196,9 @@ public class AgentForkManager {
         // 先获取父线程的项目工作目录，子线程需要继承
         String parentProjectRoot = ProjectRootContext.get();
         agentExecutor.submit(() -> {
+            // 设置线程名以区分不同子Agent
+            String originalThreadName = Thread.currentThread().getName();
+            Thread.currentThread().setName("sub-agent-" + agentId);
             try {
                 // 设置线程级上下文（子Agent需要这些信息来通过权限检查和发送事件）
                 ToolContext.set(mode != null ? mode : "auto", parentConversationId,
@@ -216,6 +224,7 @@ public class AgentForkManager {
                 ToolContext.clear();
                 PermissionContext.clear();
                 ProjectRootContext.clear();
+                Thread.currentThread().setName(originalThreadName);
             }
         });
 
@@ -258,7 +267,7 @@ public class AgentForkManager {
 
     /**
      * 非阻塞收集子Agent结果：如果已完成则直接返回，否则返回 null
-     * 用于 collect_agent 工具，避免阻塞主Agent的工具循环
+     * 用于 agent action=collect 工具，避免阻塞主Agent的工具循环
      */
     public SubAgentResult collectAgentIfReady(String agentId) {
         CompletableFuture<SubAgentResult> future = agentFutures.get(agentId);
@@ -292,18 +301,52 @@ public class AgentForkManager {
     public List<SubAgentResult> collectPendingAgents(Long conversationId, long perAgentTimeoutSec) {
         Set<String> pending = pendingAgentsByConversation.get(conversationId);
         if (pending == null || pending.isEmpty()) return List.of();
+        return batchCollectAgents(new ArrayList<>(pending), perAgentTimeoutSec);
+    }
 
-        List<String> agentIds = new ArrayList<>(pending);
-        List<SubAgentResult> results = new ArrayList<>();
+    /**
+     * 批量收集子Agent执行结果（并行阻塞等待所有子Agent完成）
+     * <p>
+     * 用于 agent action=batch_collect 工具，一次性收集所有指定子Agent的结果，
+     * 避免父Agent逐个 collect 导致的 LLM 轮次浪费。
+     * 每个子Agent在独立线程上并行等待，超时不互相影响。
+     *
+     * @param agentIds     要收集的子Agent ID列表
+     * @param timeoutSec   每个子Agent的超时秒数
+     * @return 每个子Agent的结果列表（顺序与输入一致）
+     */
+    public List<SubAgentResult> batchCollectAgents(List<String> agentIds, long timeoutSec) {
+        if (agentIds.isEmpty()) return List.of();
+
+        // 并行提交每个子Agent的收集任务
+        List<CompletableFuture<SubAgentResult>> futures = new ArrayList<>();
         for (String agentId : agentIds) {
-            try {
-                results.add(collectAgent(agentId, perAgentTimeoutSec));
-            } catch (Exception e) {
-                log.warn("收集子Agent结果异常: agentId={}", agentId, e);
-                results.add(SubAgentResult.failed(agentId, e.getMessage()));
-            }
+            CompletableFuture<SubAgentResult> collector = CompletableFuture.supplyAsync(
+                    () -> collectAgent(agentId, timeoutSec), agentExecutor);
+            futures.add(collector);
         }
-        return results;
+
+        // 并行等待所有子Agent完成（每个子Agent内部有 timeoutSec 超时保护）
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(timeoutSec + 30, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            log.warn("batchCollectAgents 整体超时: agentIds={}, timeout={}s",
+                    agentIds, timeoutSec + 30);
+        } catch (Exception e) {
+            log.warn("batchCollectAgents 等待异常", e);
+        }
+
+        // 收集所有结果（此时每个 future 应已完成或超时）
+        return futures.stream()
+                .map(f -> {
+                    try {
+                        return f.getNow(SubAgentResult.failed("unknown", "future not completed"));
+                    } catch (Exception e) {
+                        return SubAgentResult.failed("unknown", e.getMessage());
+                    }
+                })
+                .toList();
     }
 
     /**
@@ -500,7 +543,7 @@ public class AgentForkManager {
             // 处理工具调用：子Agent直接通过 ToolRegistry 执行工具，跳过 ToolExecutor 的权限拦截
             // 但保留高危工具的手动授权检查，通过 ask_user 弹窗管理权限
             JsonNode originalToolCalls = toolCalls.deepCopy();
-            Set<String> highRiskTools = Set.of("delete_file", "write_file", "edit_file", "execute_sql", "run_command");
+            Set<String> highRiskTools = Set.of("file_writer", "execute_sql", "command");
             List<ToolExecutor.ToolCallResult> toolResults = new ArrayList<>();
             for (JsonNode tc : toolCalls) {
                 String tcId = tc.path("id").asText();
@@ -740,7 +783,7 @@ public class AgentForkManager {
         String workDir = ProjectRootContext.get();
         sb.append("## 工作目录\n");
         sb.append("当前项目根目录：").append(workDir).append("\n");
-        sb.append("所有文件操作（read_file/write_file/edit_file/glob_files/grep_search 等）和命令执行（run_command/run_server）都基于此目录。\n");
+        sb.append("所有文件操作（file_explorer/file_writer 等）和命令执行（command）都基于此目录。\n");
         sb.append("使用相对路径时以此目录为基准，例如 \"src/main/java/App.java\" 表示 \"").append(workDir).append("/src/main/java/App.java\"。\n\n");
 
         // 注入技能（如果指定了skills）
@@ -907,43 +950,31 @@ public class AgentForkManager {
 
     /**
      * 从工具结果中提取文件变更信息
-     * 支持：write_file（写入成功：路径）、edit_file（编辑成功：路径 / 编辑成功（宽松匹配）：路径）
-     *       delete_file（删除成功：路径 / 已删除：路径 / 路径 已删除）
+     * 支持：file_writer（写入成功：路径 / 编辑成功：路径 / 文件已删除：路径）
      */
     private void extractFileChanges(String toolName, String content,
-                                    List<String> modifiedFiles, List<String> createdFiles) {
+                                     List<String> modifiedFiles, List<String> createdFiles) {
         if (content == null || content.isBlank()) return;
-        // write_file：写入成功：/path/to/file
-        if ("write_file".equals(toolName) && content.contains("写入成功")) {
+        if (!"file_writer".equals(toolName)) return;
+
+        // file_writer action=write：✅ 写入成功：/path/to/file
+        if (content.contains("写入成功")) {
             String path = extractPathAfterPrefix(content, "写入成功：");
-            if (path != null) {
-                createdFiles.add(normalizePath(path));
-            }
+            if (path != null) { createdFiles.add(normalizePath(path)); }
             return;
         }
-        // edit_file：编辑成功：/path/to/file 或 编辑成功（宽松匹配）：/path/to/file
-        if ("edit_file".equals(toolName) && content.contains("编辑成功")) {
+        // file_writer action=edit：✅ 编辑成功：/path/to/file
+        if (content.contains("编辑成功")) {
             String path = extractPathAfterPrefix(content, "编辑成功：");
-            if (path == null) {
-                path = extractPathAfterPrefix(content, "编辑成功（宽松匹配）：");
-            }
-            if (path != null) {
-                modifiedFiles.add(normalizePath(path));
-            }
+            if (path == null) path = extractPathAfterPrefix(content, "编辑成功（宽松匹配）：");
+            if (path != null) { modifiedFiles.add(normalizePath(path)); }
             return;
         }
-        // delete_file：删除成功：/path/to/file 或 已删除：/path/to/file
-        if ("delete_file".equals(toolName)) {
-            String path = extractPathAfterPrefix(content, "删除成功：");
-            if (path == null) {
-                path = extractPathAfterPrefix(content, "已删除：");
-            }
-            if (path != null) {
-                // 注意：此处不回传 deletedFiles，因为 SubAgentResult 没有 deletedFiles 收集参数
-                // 统一添加到 modifiedFiles 标记为删除
-                modifiedFiles.add("[已删除] " + normalizePath(path));
-            }
-            return;
+        // file_writer action=delete：✅ 文件已删除：/path/to/file
+        if (content.contains("文件已删除") || content.contains("目录已删除")) {
+            String path = extractPathAfterPrefix(content, "文件已删除：");
+            if (path == null) path = extractPathAfterPrefix(content, "目录已删除：");
+            if (path != null) { modifiedFiles.add("[已删除] " + normalizePath(path)); }
         }
     }
 

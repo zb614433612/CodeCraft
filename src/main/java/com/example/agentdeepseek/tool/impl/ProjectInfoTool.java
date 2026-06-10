@@ -42,7 +42,7 @@ public class ProjectInfoTool implements Tool {
     @Override
     public String getDescription() {
         return "【适用场景】查看项目模块层次结构、依赖列表（含版本），了解项目组织方式和第三方库。对 Maven 项目解析 pom.xml，对 npm 项目解析 package.json。"
-                + "【与 read_project_tree 的区别】本工具输出项目逻辑结构（模块、依赖），read_project_tree 输出文件系统物理结构。分析项目架构时两者配合使用效果最佳。"
+                + "【与 file_explorer 的区别】本工具输出项目逻辑结构（模块、依赖），file_explorer(action=tree) 输出文件系统物理结构。分析项目架构时两者配合使用效果最佳。"
                 + "【使用方式】必传 scope 参数选择查询范围：structure（仅模块层次）、dependencies（仅依赖列表）、all（两者）。可选 path 指定目录、filter 按依赖范围过滤。"
                 + "【注意】仅解析直接依赖，不解析传递依赖。仅支持识别 Maven（pom.xml）和 npm（package.json）项目。";
     }

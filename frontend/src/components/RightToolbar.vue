@@ -308,7 +308,7 @@ onBeforeUnmount(() => {
 
 .drawer-panel-content {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   min-height: 0;

@@ -43,18 +43,41 @@ public class OperationDetailGenerator {
     public String generate(String toolName, JsonNode arguments) {
         if (arguments == null) return null;
         return switch (toolName) {
-            case "write_file" -> generateWriteFile(arguments);
-            case "edit_file" -> generateEditFile(arguments);
-            case "delete_file" -> generateDeleteFile(arguments);
-            case "run_command" -> generateRunCommand(arguments, "💻 执行命令");
-            case "run_server" -> generateRunCommand(arguments, "🚀 启动服务");
+            case "command" -> generateCommand(arguments);
+            case "file_writer" -> generateFileWriter(arguments);
             case "execute_sql" -> generateExecuteSql(arguments);
-            case "service_control" -> generateServiceControl(arguments);
-            case "git_add" -> generateGitAdd(arguments);
-            case "git_commit" -> generateGitCommit(arguments);
-            case "git_push" -> generateGitPush(arguments);
+            case "git_submit" -> generateGitSubmit(arguments);
             default -> null;
         };
+    }
+
+    /**
+     * command 网关：根据 action 参数分发到 exec/start/logs/stop/list 处理器
+     */
+    private static String generateCommand(JsonNode args) {
+        String action = args.path("action").asText("");
+        return switch (action) {
+            case "exec" -> generateRunCommand(args, "💻 执行命令");
+            case "start" -> generateRunCommand(args, "🚀 启动服务");
+            case "stop", "logs", "list" -> generateServiceControl(args);
+            default -> null;
+        };
+    }
+
+    /**
+     * file_writer 网关：根据参数特征分发到 write / edit / delete 处理器
+     */
+    private static String generateFileWriter(JsonNode args) {
+        // edit: 有 old_text 参数
+        if (args.has("old_text") && !args.path("old_text").asText("").isEmpty()) {
+            return generateEditFile(args);
+        }
+        // delete: 只有 path 参数，没有 file_path 也没有 content
+        if (!args.has("file_path") && !args.has("content") && args.has("path")) {
+            return generateDeleteFile(args);
+        }
+        // write: 默认（有 file_path + content）
+        return generateWriteFile(args);
     }
 
     private static String generateWriteFile(JsonNode args) {
@@ -194,6 +217,16 @@ public class OperationDetailGenerator {
             }
         }
         return sb.toString();
+    }
+
+    private static String generateGitSubmit(JsonNode args) {
+        String action = args.path("action").asText("");
+        return switch (action) {
+            case "add" -> generateGitAdd(args);
+            case "commit" -> generateGitCommit(args);
+            case "push" -> generateGitPush(args);
+            default -> null;
+        };
     }
 
     private static String generateGitAdd(JsonNode args) {

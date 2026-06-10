@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 编辑文件工具（EditFileTool）的后处理配置
+ * 文件编辑工具（FileWriterTool action=edit）的后处理配置
  * 涵盖编辑后自动格式化和自动诊断
  */
 @Configuration

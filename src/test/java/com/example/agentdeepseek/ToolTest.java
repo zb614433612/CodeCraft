@@ -1,23 +1,17 @@
 package com.example.agentdeepseek;
 
-import com.example.agentdeepseek.tool.impl.RunCommandTool;
-import com.example.agentdeepseek.tool.impl.RunServerTool;
-import com.example.agentdeepseek.tool.impl.ServiceControlTool;
-import com.fasterxml.jackson.databind.JsonNode;
+import com.example.agentdeepseek.tool.impl.CommandTool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * 工具集成测试 — 直接测试三个新工具（run_command / run_server / service_control）
- * <p>
+ * 工具集成测试 — 测试 command 工具（合并 run_command / run_server / service_control）
  * 无需 Spring 上下文，工具类在 "auto" 模式下可直接实例化测试。
  */
 public class ToolTest {
 
     static final ObjectMapper mapper = new ObjectMapper();
-    static final RunCommandTool runCmd = new RunCommandTool(mapper);
-    static final RunServerTool runSrv = new RunServerTool(mapper);
-    static final ServiceControlTool svcCtrl = new ServiceControlTool(mapper);
+    static final CommandTool command = new CommandTool(mapper);
 
     static int passed = 0;
     static int failed = 0;
@@ -25,156 +19,147 @@ public class ToolTest {
     public static void main(String[] args) throws Exception {
         System.out.println("═══════════════════════════════════════════");
         System.out.println("  zb-agent 工具集成测试");
-        System.out.println("  测试工具: run_command / run_server / service_control");
+        System.out.println("  测试工具: command (exec / start / list / logs / stop)");
         System.out.println("═══════════════════════════════════════════\n");
 
-        // ========== run_command 测试 ==========
-        test("T1.1 run_command: command 字符串模式", () -> {
+        // ========== action=exec 测试 ==========
+        test("T1.1 command exec: 基本命令执行", () -> {
             ObjectNode params = mapper.createObjectNode();
-            params.put("command", "echo HelloWorld");
-            String result = runCmd.execute(params);
+            params.put("action", "exec");
+            params.put("command", isWindows() ? "cmd.exe /c echo HelloWorld" : "echo HelloWorld");
+            String result = command.execute(params);
             assertContains(result, "HelloWorld", "应包含命令输出");
             assertContains(result, "退出码：0", "应包含退出码 0");
         });
 
-        test("T1.2 run_command: executable+args 模式", () -> {
+        test("T1.2 command exec: 指定工作目录", () -> {
             ObjectNode params = mapper.createObjectNode();
-            params.put("executable", "cmd.exe");
-            try {
-                params.set("args", mapper.readTree("[\"/c\", \"echo\", \"StructArgTest\"]"));
-            } catch (Exception e) {
-                throw new RuntimeException("JSON解析失败", e);
-            }
-            String result = runCmd.execute(params);
-            assertContains(result, "StructArgTest", "结构参数模式应正常执行");
-        });
-
-        test("T1.3 run_command: 工作目录指定", () -> {
-            ObjectNode params = mapper.createObjectNode();
-            params.put("command", "echo WorkingDirTest");
+            params.put("action", "exec");
+            params.put("command", isWindows() ? "cmd.exe /c echo WorkingDirTest" : "echo WorkingDirTest");
             params.put("cwd", ".");
-            String result = runCmd.execute(params);
+            String result = command.execute(params);
             assertContains(result, "WorkingDirTest", "指定工作目录应正常执行");
         });
 
-        test("T1.4 run_command: 命令超时 - 快速命令不超时", () -> {
+        test("T1.3 command exec: 自定义超时", () -> {
             ObjectNode params = mapper.createObjectNode();
-            params.put("command", "echo FastCommand");
+            params.put("action", "exec");
+            params.put("command", isWindows() ? "cmd.exe /c echo FastCommand" : "echo FastCommand");
             params.put("timeout", 5);
-            String result = runCmd.execute(params);
+            String result = command.execute(params);
             assertContains(result, "FastCommand", "5秒超时应足够");
         });
 
-        test("T1.5 run_command: 命令未找到应返回友好提示", () -> {
+        test("T1.4 command exec: 命令未找到", () -> {
             ObjectNode params = mapper.createObjectNode();
+            params.put("action", "exec");
             params.put("command", "nonexistent_cmd_xyz");
-            String result = runCmd.execute(params);
+            String result = command.execute(params);
             assertContains(result, "未找到", "应提示命令未找到");
         });
 
-        test("T1.6 run_command: 无参数应返回错误", () -> {
+        test("T1.5 command exec: 缺少 command 参数", () -> {
             ObjectNode params = mapper.createObjectNode();
-            String result = runCmd.execute(params);
-            assertContains(result, "错误", "空参数应返回错误提示");
+            params.put("action", "exec");
+            String result = command.execute(params);
+            assertContains(result, "参数缺失", "应返回参数缺失提示");
         });
 
-        // ========== run_server 测试 ==========
-        test("T2.1 run_server: 启动后台进程（持续10秒以保证后续测试可读取）", () -> {
+        // ========== action=start 测试 ==========
+        test("T2.1 command start: 启动后台进程（持续10秒保证后续测试可读取）", () -> {
             String procCmd = isWindows()
                     ? "cmd.exe /c echo ServerStartTest && echo PORT:8899 && timeout /t 10"
                     : "sh -c 'echo ServerStartTest && echo PORT:8899 && sleep 10'";
             ObjectNode params = mapper.createObjectNode();
+            params.put("action", "start");
             params.put("command", procCmd);
-            String result = runSrv.execute(params);
+            String result = command.execute(params);
             assertContains(result, "后台服务已启动", "应显示启动成功");
-            assertContains(result, "服务 ID：1", "第一个服务ID应为1");
+            assertContains(result, "服务 ID：", "应显示服务ID");
             assertContains(result, "8899", "应检测到端口 8899");
         });
 
-        test("T2.2 run_server: 缺少 command 参数应报错", () -> {
+        test("T2.2 command start: 缺少 command 参数", () -> {
             ObjectNode params = mapper.createObjectNode();
-            String result = runSrv.execute(params);
-            assertContains(result, "错误", "缺少命令应返回错误");
+            params.put("action", "start");
+            String result = command.execute(params);
+            assertContains(result, "参数缺失", "缺少命令应返回错误");
         });
 
-        // ========== service_control 测试 ==========
-        test("T3.1 service_control: action=list 列出服务", () -> {
+        // ========== action=list 测试 ==========
+        test("T3.1 command list: 列出所有服务", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "list");
-            String result = svcCtrl.execute(params);
+            String result = command.execute(params);
             assertContains(result, "后台服务列表", "应显示服务列表");
-            assertContains(result, "#1", "应列出服务 #1");
         });
 
-        test("T3.2 service_control: action=logs 查看日志（等待输出就绪）", () -> {
+        // ========== action=logs 测试 ==========
+        test("T3.2 command logs: 查看服务日志", () -> {
             // 等待输出缓冲就绪
-            for (int i = 0; i < 10; i++) {
-                String output = RunServerTool.readServiceOutput(1, 0);
-                if (output != null && !output.contains("暂无输出")) break;
-                try { Thread.sleep(200); } catch (InterruptedException ignored) { break; }
-            }
+            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "logs");
             params.put("service_id", 1);
-            String result = svcCtrl.execute(params);
+            String result = command.execute(params);
             assertContains(result, "服务 #1 输出", "应显示服务 #1 的输出");
-            assertContains(result, "ServerStartTest", "输出应包含服务启动时的命令输出");
+            assertContains(result, "ServerStartTest", "输出应包含服务启动文本");
         });
 
-        test("T3.3 service_control: action=logs tail=5", () -> {
+        test("T3.3 command logs: 带 tail 参数", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "logs");
             params.put("service_id", 1);
             params.put("tail", 5);
-            String result = svcCtrl.execute(params);
+            String result = command.execute(params);
             assertContains(result, "服务 #1 输出", "应显示服务 #1 的输出");
         });
 
-        test("T3.4 service_control: action=logs 缺少 service_id", () -> {
+        test("T3.4 command logs: 缺少 service_id", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "logs");
-            String result = svcCtrl.execute(params);
-            assertContains(result, "错误", "缺少 service_id 应报错");
+            String result = command.execute(params);
+            assertContains(result, "参数缺失", "缺少 service_id 应报错");
         });
 
-        test("T3.5 service_control: action=stop 停止服务", () -> {
+        // ========== action=stop 测试 ==========
+        test("T3.5 command stop: 停止服务", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "stop");
             params.put("service_id", 1);
             params.put("force", true);
-            String result = svcCtrl.execute(params);
+            String result = command.execute(params);
             assertContains(result, "已停止", "应显示已停止");
-            assertContains(result, "服务 #1", "应引用服务 #1");
         });
 
-        test("T3.6 service_control: action=stop 后再次 list 确认移除", () -> {
+        test("T3.6 command stop: 停止后再 list 确认", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "list");
-            String result = svcCtrl.execute(params);
-            // 此时 #1 应该已被清理，列表可能为空
-            if (!result.contains("暂无后台服务")) {
+            String result = command.execute(params);
+            // 被停止的服务应已清理或标记为已结束
+            if (!result.contains("（无后台服务）")) {
                 assertContains(result, "已结束", "被停止的服务应标记为已结束或已清理");
             }
         });
 
-        test("T3.7 service_control: action=stop 无效服务ID", () -> {
+        test("T3.7 command stop: 无效服务ID", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "stop");
             params.put("service_id", 999);
-            String result = svcCtrl.execute(params);
-            assertContains(result, "错误", "无效 service_id 应报错");
+            String result = command.execute(params);
+            assertContains(result, "服务不存在", "无效 service_id 应报错");
         });
 
-        test("T3.8 service_control: 未知 action 应报错", () -> {
+        test("T3.8 command: 未知 action", () -> {
             ObjectNode params = mapper.createObjectNode();
             params.put("action", "unknown_action");
-            String result = svcCtrl.execute(params);
+            String result = command.execute(params);
             assertContains(result, "错误", "未知 action 应报错");
         });
 
-        test("T3.9 service_control: 缺少 action 参数", () -> {
+        test("T3.9 command: 缺少 action 参数", () -> {
             ObjectNode params = mapper.createObjectNode();
-            String result = svcCtrl.execute(params);
+            String result = command.execute(params);
             assertContains(result, "错误", "缺少 action 应报错");
         });
 

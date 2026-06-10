@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 工具执行器
@@ -156,6 +157,22 @@ public class ToolExecutor {
                 "错误：未知工具 \"" + toolName + "\"，请检查工具名称是否正确");
         }
 
+        // ================================================================
+        // 🔧 智能补齐：检测缺失的 action 参数并自动修复
+        // ================================================================
+        ActionFixResult actionFix = fixMissingAction(toolName, arguments);
+        if (actionFix != null) {
+            if (actionFix.isAutoFixed()) {
+                // 智能补齐成功，使用修复后的参数
+                arguments = actionFix.getFixedArguments();
+                log.info("🔧 智能补齐 action={} for tool={}, 推断依据: {}",
+                        actionFix.getInferredAction(), toolName, actionFix.getReason());
+            } else {
+                // 无法自动补齐，返回精确的修复指导
+                return new ToolCallResult(toolCallId, toolName, actionFix.getGuidanceMessage());
+            }
+        }
+
         try {
             String displayArgs = detailGenerator.generate(toolName, arguments);
             boolean isRestricted = permissionRegistry.requiresDataApproval(toolName);
@@ -199,9 +216,7 @@ public class ToolExecutor {
     }
 
     private boolean isFileModifyingTool(String toolName) {
-        return "write_file".equals(toolName)
-                || "edit_file".equals(toolName)
-                || "delete_file".equals(toolName);
+        return "file_writer".equals(toolName);
     }
 
     /**
@@ -290,5 +305,329 @@ public class ToolExecutor {
             toolsArray.add(toolNode);
         }
         return toolsArray;
+    }
+
+    // ============================================================
+    // 🔧 智能补齐：缺失 action 参数的自动修复
+    // ============================================================
+
+    /**
+     * 需要 action 参数的工具集合
+     */
+    private static final Set<String> ACTION_REQUIRED_TOOLS = Set.of(
+            "file_explorer", "file_writer", "command",
+            "git_query", "git_submit", "git_branch",
+            "agent", "skill", "task_manager",
+            "chat_attachment", "schedule_task"
+    );
+
+    /**
+     * 智能补齐缺失 action 参数的结果
+     */
+    private static class ActionFixResult {
+        private final boolean autoFixed;
+        private final String inferredAction;
+        private final String reason;
+        private final JsonNode fixedArguments;
+        private final String guidanceMessage;
+
+        private ActionFixResult(boolean autoFixed, String inferredAction, String reason,
+                                JsonNode fixedArguments, String guidanceMessage) {
+            this.autoFixed = autoFixed;
+            this.inferredAction = inferredAction;
+            this.reason = reason;
+            this.fixedArguments = fixedArguments;
+            this.guidanceMessage = guidanceMessage;
+        }
+
+        boolean isAutoFixed() { return autoFixed; }
+        String getInferredAction() { return inferredAction; }
+        String getReason() { return reason; }
+        JsonNode getFixedArguments() { return fixedArguments; }
+        String getGuidanceMessage() { return guidanceMessage; }
+    }
+
+    /**
+     * 检测并修复缺失的 action 参数。
+     * 返回 null 表示不需要修复（已有 action 或该工具不需要 action）。
+     * 返回 ActionFixResult(true) 表示已自动补齐。
+     * 返回 ActionFixResult(false) 表示无法自动补齐，附带修复指导。
+     */
+    private ActionFixResult fixMissingAction(String toolName, JsonNode arguments) {
+        // 不需要 action 的工具直接跳过
+        if (!ACTION_REQUIRED_TOOLS.contains(toolName)) {
+            return null;
+        }
+
+        // 已有 action 参数，无需修复
+        if (arguments.has("action") && !arguments.path("action").asText("").isEmpty()) {
+            return null;
+        }
+
+        // 尝试推断 action
+        String inferred = inferAction(toolName, arguments);
+
+        if (inferred != null) {
+            // 可以安全推断，自动补齐
+            ObjectNode fixedArgs = arguments.deepCopy();
+            fixedArgs.put("action", inferred);
+            String reason = buildInferReason(toolName, arguments, inferred);
+            return new ActionFixResult(true, inferred, reason, fixedArgs, null);
+        } else {
+            // 无法推断，返回精确的修复指导
+            String guidance = buildActionGuidance(toolName, arguments);
+            return new ActionFixResult(false, null, null, null, guidance);
+        }
+    }
+
+    /**
+     * 根据已有参数推断 action 值
+     */
+    private String inferAction(String toolName, JsonNode args) {
+        return switch (toolName) {
+            case "file_explorer" -> inferFileExplorerAction(args);
+            case "file_writer" -> inferFileWriterAction(args);
+            case "command" -> inferCommandAction(args);
+            case "git_query" -> inferGitQueryAction(args);
+            case "git_submit" -> inferGitSubmitAction(args);
+            case "git_branch" -> inferGitBranchAction(args);
+            case "agent" -> inferAgentAction(args);
+            case "skill" -> inferSkillAction(args);
+            case "task_manager" -> inferTaskManagerAction(args);
+            case "chat_attachment" -> inferChatAttachmentAction(args);
+            case "schedule_task" -> inferScheduleTaskAction(args);
+            default -> null;
+        };
+    }
+
+    private String inferFileExplorerAction(JsonNode args) {
+        boolean hasFilePath = isNonEmpty(args, "file_path");
+        boolean hasPattern = isNonEmpty(args, "pattern");
+        boolean hasDepth = args.has("depth") || args.has("show_file_count");
+        boolean hasInclude = isNonEmpty(args, "include");
+        boolean hasContextLines = args.has("context_lines");
+        boolean hasMaxResults = args.has("max_results");
+
+        if (hasFilePath && !hasPattern) return "read";
+        if (hasPattern && hasInclude) return "grep";
+        if (hasPattern && hasContextLines) return "grep";
+        if (hasPattern && hasMaxResults) return "grep";
+        if (hasPattern) return "glob";  // 仅有 pattern 默认 glob
+        if (hasDepth) return "tree";
+        return null; // 无法确定
+    }
+
+    private String inferFileWriterAction(JsonNode args) {
+        boolean hasContent = isNonEmpty(args, "content");
+        boolean hasOldText = isNonEmpty(args, "old_text");
+        boolean hasForce = args.has("force");
+        boolean hasPath = isNonEmpty(args, "path");
+
+        if (hasContent) return "write";
+        if (hasOldText) return "edit";
+        if (hasForce && hasPath) return "write"; // force + path 暗示 write
+        // delete 比较危险，不自动推断
+        return null;
+    }
+
+    private String inferCommandAction(JsonNode args) {
+        boolean hasCommand = isNonEmpty(args, "command");
+        boolean hasServiceId = args.has("service_id");
+        boolean hasWaitFor = isNonEmpty(args, "wait_for");
+        boolean hasTail = args.has("tail");
+
+        if (hasServiceId && hasTail) return "logs";
+        if (hasServiceId) return "logs"; // 默认 logs
+        if (hasCommand && hasWaitFor) return "start";
+        if (hasCommand) return "exec";
+        return null;
+    }
+
+    private String inferGitQueryAction(JsonNode args) {
+        boolean hasFile = isNonEmpty(args, "file");
+        boolean hasMaxCount = args.has("max_count");
+        boolean hasGraph = args.has("graph");
+        boolean hasStaged = args.has("staged");
+
+        if (hasFile && hasStaged) return "diff";
+        if (hasFile) return "diff";
+        if (hasMaxCount || hasGraph) return "log";
+        // 无特殊参数默认 status（查看状态）
+        return "status";
+    }
+
+    private String inferGitSubmitAction(JsonNode args) {
+        boolean hasMessage = isNonEmpty(args, "message");
+        boolean hasPath = isNonEmpty(args, "path");
+        boolean hasBranch = isNonEmpty(args, "branch");
+        boolean hasSetUpstream = args.has("set_upstream");
+
+        if (hasMessage) return "commit";
+        if (hasBranch || hasSetUpstream) return "push";
+        if (hasPath) return "add";
+        return null;
+    }
+
+    private String inferGitBranchAction(JsonNode args) {
+        boolean hasName = isNonEmpty(args, "name");
+        boolean hasAll = args.has("all");
+        boolean hasForce = args.has("force");
+
+        if (hasAll) return "list";
+        if (hasName && hasForce) return "delete";
+        if (hasName) return "switch"; // 最常用的非 list 操作
+        // 无参数默认 list
+        return "list";
+    }
+
+    private String inferAgentAction(JsonNode args) {
+        boolean hasInstructions = isNonEmpty(args, "instructions");
+        boolean hasTools = args.has("tools");
+        boolean hasScope = isNonEmpty(args, "scope");
+        boolean hasAgentId = isNonEmpty(args, "agent_id");
+        boolean hasTimeout = args.has("timeout");
+
+        if (hasInstructions || hasTools) return "fork";
+        if ((hasAgentId && hasTimeout) || (hasAgentId && hasScope)) return "collect";
+        if (hasScope) return "inspect";
+        if (hasAgentId) return "collect"; // 最常用
+        return null;
+    }
+
+    private String inferSkillAction(JsonNode args) {
+        boolean hasName = isNonEmpty(args, "name");
+        boolean hasSkillId = args.has("skill_id");
+        boolean hasSuccess = args.has("success");
+        boolean hasTriggerWords = args.has("trigger_words");
+
+        if (hasSuccess) return "report";
+        if (hasName && hasTriggerWords) return "create";
+        if (hasName) return "create";
+        if (hasSkillId && !hasSuccess) return "update";
+        // 无参数默认 list
+        if (!hasName && !hasSkillId) return "list";
+        return null;
+    }
+
+    private String inferTaskManagerAction(JsonNode args) {
+        boolean hasTasks = args.has("tasks");
+        boolean hasTaskIds = args.has("task_ids");
+        boolean hasTaskId = isNonEmpty(args, "task_id");
+
+        if (hasTasks) return "create";
+        if (hasTaskIds) return "batch_complete";
+        if (hasTaskId) return "complete";
+        // 无参数默认 list（查看全部任务）
+        return "list";
+    }
+
+    private String inferChatAttachmentAction(JsonNode args) {
+        boolean hasAttachmentId = isNonEmpty(args, "attachment_id");
+        boolean hasFilePath = isNonEmpty(args, "file_path");
+
+        if (hasAttachmentId) return "read_by_attachment";
+        if (hasFilePath) return "read_by_path";
+        return null;
+    }
+
+    private String inferScheduleTaskAction(JsonNode args) {
+        boolean hasName = isNonEmpty(args, "name");
+        boolean hasId = args.has("id");
+        boolean hasEnabled = args.has("enabled");
+        boolean hasNaturalTime = isNonEmpty(args, "natural_time");
+        boolean hasCronExpr = isNonEmpty(args, "cron_expression");
+        boolean hasExecuteTime = isNonEmpty(args, "execute_time");
+
+        if (hasEnabled && hasId) return "toggle";
+        if (hasName && (hasNaturalTime || hasCronExpr || hasExecuteTime)) return "create";
+        if (hasName) return "create";
+        if (hasId) return "update";
+        // 无参数默认 list
+        return "list";
+    }
+
+    private boolean isNonEmpty(JsonNode node, String key) {
+        if (!node.has(key) || node.get(key).isNull()) return false;
+        return !node.path(key).asText("").isEmpty();
+    }
+
+    private String buildInferReason(String toolName, JsonNode args, String inferredAction) {
+        // 提取关键参数名用于日志
+        List<String> keys = new ArrayList<>();
+        args.fieldNames().forEachRemaining(keys::add);
+        List<String> keyParams = keys.stream()
+                .filter(k -> !k.equals("action"))
+                .limit(3)
+                .toList();
+        return toolName + " 缺少 action，根据参数 " + String.join(", ", keyParams)
+                + " 自动推断为 " + inferredAction;
+    }
+
+    /**
+     * 构建无法自动补齐时的精确修复指导
+     */
+    private String buildActionGuidance(String toolName, JsonNode args) {
+        String actionOptions = getActionOptions(toolName);
+        String argsJson = args.toString();
+        if (argsJson.length() > 300) argsJson = argsJson.substring(0, 300) + "...";
+
+        return "🔧【自动修复提示】工具 '" + toolName + "' 缺少必填参数 'action'。\n"
+                + "你的参数: " + argsJson + "\n"
+                + "可选的 action 值: " + actionOptions + "\n\n"
+                + "请根据你的意图选择一个 action 并重新调用。正确示例：\n"
+                + buildCorrectExample(toolName) + "\n\n"
+                + "💡 提示：系统已尝试自动推断但信息不足，请明确指定 action。\n"
+                + "如果你想执行最常见的操作，建议 action=\"" + getDefaultAction(toolName) + "\"。";
+    }
+
+    private String getActionOptions(String toolName) {
+        return switch (toolName) {
+            case "file_explorer" -> "read / glob / grep / tree";
+            case "file_writer" -> "write / edit / delete";
+            case "command" -> "exec / start / list / logs / stop";
+            case "git_query" -> "status / diff / log";
+            case "git_submit" -> "add / commit / push";
+            case "git_branch" -> "list / create / switch / delete";
+            case "agent" -> "fork / collect / inspect";
+            case "skill" -> "create / update / delete / list / report";
+            case "task_manager" -> "create / complete / batch_complete / batch_reopen / list";
+            case "chat_attachment" -> "read_by_path / read_by_attachment";
+            case "schedule_task" -> "create / list / update / delete / toggle";
+            default -> "（未知）";
+        };
+    }
+
+    private String getDefaultAction(String toolName) {
+        return switch (toolName) {
+            case "file_explorer" -> "read";
+            case "file_writer" -> "write";
+            case "command" -> "exec";
+            case "git_query" -> "status";
+            case "git_submit" -> "add";
+            case "git_branch" -> "list";
+            case "agent" -> "fork";
+            case "skill" -> "list";
+            case "task_manager" -> "list";
+            case "chat_attachment" -> "read_by_path";
+            case "schedule_task" -> "list";
+            default -> "";
+        };
+    }
+
+    private String buildCorrectExample(String toolName) {
+        return switch (toolName) {
+            case "file_explorer" -> "{ \"action\": \"read\", \"file_path\": \"src/main/App.java\" }";
+            case "file_writer" -> "{ \"action\": \"write\", \"file_path\": \"src/main/NewFile.java\", \"content\": \"...\" }";
+            case "command" -> "{ \"action\": \"exec\", \"command\": \"mvn clean compile\" }";
+            case "git_query" -> "{ \"action\": \"status\" }";
+            case "git_submit" -> "{ \"action\": \"add\", \"path\": \"src/main/App.java\" }";
+            case "git_branch" -> "{ \"action\": \"list\" }";
+            case "agent" -> "{ \"action\": \"fork\", \"agent_id\": \"sub-1\", \"name\": \"子Agent\", \"instructions\": \"...\", \"tools\": [\"file_explorer\"] }";
+            case "skill" -> "{ \"action\": \"list\" }";
+            case "task_manager" -> "{ \"action\": \"list\" }";
+            case "chat_attachment" -> "{ \"action\": \"read_by_path\", \"file_path\": \"E:\\\\docs\\\\report.pdf\" }";
+            case "schedule_task" -> "{ \"action\": \"list\" }";
+            default -> "{ \"action\": \"...\" }";
+        };
     }
 }

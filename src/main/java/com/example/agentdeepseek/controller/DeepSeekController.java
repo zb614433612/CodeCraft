@@ -4,6 +4,7 @@ import com.example.agentdeepseek.model.dto.ChatRequest;
 import com.example.agentdeepseek.model.dto.PendingQuestion;
 import com.example.agentdeepseek.model.entity.AgentTask;
 import com.example.agentdeepseek.service.AttachmentReaderService;
+import com.example.agentdeepseek.service.AttachmentStore;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import com.example.agentdeepseek.service.SupplementStore;
@@ -35,15 +36,18 @@ public class DeepSeekController {
     private final DeepSeekService deepSeekService;
     private final PendingQuestionStore pendingQuestionStore;
     private final AttachmentReaderService attachmentReaderService;
+    private final AttachmentStore attachmentStore;
     private final SupplementStore supplementStore;
 
     public DeepSeekController(DeepSeekService deepSeekService,
-                              PendingQuestionStore pendingQuestionStore,
-                              AttachmentReaderService attachmentReaderService,
-                              SupplementStore supplementStore) {
+                               PendingQuestionStore pendingQuestionStore,
+                               AttachmentReaderService attachmentReaderService,
+                               AttachmentStore attachmentStore,
+                               SupplementStore supplementStore) {
         this.deepSeekService = deepSeekService;
         this.pendingQuestionStore = pendingQuestionStore;
         this.attachmentReaderService = attachmentReaderService;
+        this.attachmentStore = attachmentStore;
         this.supplementStore = supplementStore;
     }
 
@@ -206,27 +210,34 @@ public class DeepSeekController {
 
     /**
      * 上传附件文件
-     * 接收文件并读取文本内容，返回给前端用于拼接到用户消息中
+     * 接收文件并暂存到临时目录，返回 attachmentId 和元数据。
+     * LLM 通过 chat_attachment 工具按需读取内容（支持PDF/Word/Excel）。
      */
-    @Operation(summary = "上传附件", description = "上传文件并读取文本内容，支持文本/代码/图片文件")
+    @Operation(summary = "上传附件", description = "上传文件并暂存，返回附件ID。LLM可通过 chat_attachment 工具读取内容（支持PDF/Word/Excel）")
     @PostMapping("/upload")
     public Map<String, Object> uploadAttachment(@RequestParam("file") MultipartFile file) {
         log.info("收到附件上传: fileName={}, size={}", file.getOriginalFilename(), file.getSize());
 
-        AttachmentReaderService.AttachmentResult result = attachmentReaderService.read(file);
+        try {
+            String attachmentId = attachmentStore.store(file);
+            AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attachmentId);
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("success", result.isSuccess());
-        response.put("fileName", result.getFileName());
-        response.put("extension", result.getExtension());
-        response.put("size", result.getSize());
-        response.put("content", result.getContent());
-        response.put("image", result.isImage());
-        response.put("language", result.getLanguage());
-        if (result.getError() != null) {
-            response.put("error", result.getError());
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("attachmentId", attachmentId);
+            response.put("fileName", meta.getFileName());
+            response.put("extension", meta.getExtension());
+            response.put("size", meta.getSize());
+            response.put("type", meta.getType());
+            return response;
+
+        } catch (Exception e) {
+            log.error("附件上传失败: {}", file.getOriginalFilename(), e);
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("fileName", file.getOriginalFilename());
+            response.put("error", "上传失败: " + e.getMessage());
+            return response;
         }
-
-        return response;
     }
 }

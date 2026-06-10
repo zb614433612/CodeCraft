@@ -471,7 +471,7 @@
             :key="att.id"
             :class="['attachment-tag', { 'attachment-error': att.error }]"
           >
-            <span class="attachment-icon">{{ att.image ? '🖼️' : '📄' }}</span>
+            <span class="attachment-icon">{{ getAttachmentIcon(att.type) }}</span>
             <span class="attachment-name" :title="att.fileName">{{ att.fileName }}</span>
             <span class="attachment-size">{{ formatFileSize(att.size) }}</span>
             <span v-if="att.uploading" class="attachment-uploading">
@@ -853,7 +853,13 @@ interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   thinking?: string
-  toolResults?: { at: number; content: string }[]
+  toolResults?: {
+    at: number
+    content: string
+    toolName?: string         // 工具名称
+    pending?: boolean          // 是否正在执行（加载中），true 时 content 为空
+    operationSummary?: string  // 操作摘要（如 "📄 创建文件: xxx"）
+  }[]
   matchedSkills?: { name: string; confidence: number; triggerWords: string }[]
   timestamp: number
   isStreaming?: boolean
@@ -865,11 +871,11 @@ interface ChatMessage {
 // ===== 附件系统 =====
 interface AttachedFile {
   id: string
+  attachmentId: string
   fileName: string
-  content: string
   size: number
-  image: boolean
-  language: string
+  type: string      // text/pdf/word/excel/image
+  extension: string
   uploading: boolean
   error?: string
 }
@@ -991,11 +997,11 @@ const handleFileSelected = async (event: Event) => {
   const attId = `att-${Date.now()}`
   const attFile: AttachedFile = {
     id: attId,
+    attachmentId: '',
     fileName: file.name,
-    content: '',
     size: file.size,
-    image: false,
-    language: '',
+    type: '',
+    extension: '',
     uploading: true
   }
   attachedFiles.value.push(attFile)
@@ -1005,9 +1011,9 @@ const handleFileSelected = async (event: Event) => {
     if (result.success) {
       const found = attachedFiles.value.find(a => a.id === attId)
       if (found) {
-        found.content = result.content
-        found.image = result.image
-        found.language = result.language
+        found.attachmentId = result.attachmentId
+        found.type = result.type
+        found.extension = result.extension
         found.uploading = false
       }
     } else {
@@ -1031,6 +1037,16 @@ const handleFileSelected = async (event: Event) => {
 
 const removeAttachment = (id: string) => {
   attachedFiles.value = attachedFiles.value.filter(a => a.id !== id)
+}
+
+const getAttachmentIcon = (type: string) => {
+  return {
+    pdf: '📕',
+    word: '📘',
+    excel: '📊',
+    image: '🖼️',
+    text: '📄'
+  }[type] || '📎'
 }
 
 const formatFileSize = (bytes: number): string => {
@@ -2463,7 +2479,10 @@ const handleAgentEvent = (event: AgentStreamEvent) => {
   }
 
   if (eventType === 'agent_tool_call') {
-    agent.events.push({ type: 'tool_call' as const, toolName: tool_name || '', filePath: file_path || '', result: result || '' })
+    const toolResult = result || ''
+    const toolNameVal = tool_name || ''
+    const actionStr = toolNameVal ? extractActionFromToolContent(toolResult, toolNameVal) : ''
+    agent.events.push({ type: 'tool_call' as const, toolName: toolNameVal, action: actionStr, filePath: file_path || '', result: toolResult })
     return
   }
 
@@ -2722,11 +2741,11 @@ const submitPendingAnswer = async () => {
 // 处理权限授权按钮（4种 action）
 const permissionLock = ref(false)
 
-// ★ 判断当前授权是否是 edit_file / write_file
+// ★ 判断当前授权是否是 file_writer
 const isPermissionFileTool = computed(() => {
   const q = pendingQuestion.value
   if (!q) return false
-  return q.toolName === 'edit_file' || q.toolName === 'write_file'
+  return q.toolName === 'file_writer'
 })
 
 const handlePermissionAction = async (action: string) => {
@@ -2768,7 +2787,7 @@ const handlePermissionAction = async (action: string) => {
   cleanupPermissionPanel()
 }
 
-// ★ 授权面板文件操作：对 edit_file / write_file 自动打开差异对比
+// ★ 授权面板文件操作：对 file_writer 自动打开差异对比
 const permissionFileTabId = ref<string | null>(null)  // 记录授权面板打开的文件 tab
 
 const cleanupPermissionPanel = () => {
@@ -2787,12 +2806,12 @@ const cleanupPermissionPanel = () => {
   }
 }
 
-// ★ 监听授权面板：对 edit_file / write_file 自动分屏打开文件
+// ★ 监听授权面板：对 file_writer 自动分屏打开文件
 watch(() => pendingQuestion.value, async (q) => {
   if (!q || q.askType !== 'permission') return
   const tool = q.toolName
   const filePath = q.filePath
-  if (!filePath || (tool !== 'edit_file' && tool !== 'write_file')) return
+  if (!filePath || tool !== 'file_writer') return
   // 自动分屏并打开文件
   const projectRoot = agentRuntime.value.workDir
   if (!projectRoot) return
@@ -2807,7 +2826,7 @@ watch(() => pendingQuestion.value, async (q) => {
     const highlightLines: { line: number; type: 'remove' | 'add'; content?: string }[] = []
     let fileContent: string
 
-    // ── 分支1：文件已存在（edit_file / write_file 覆盖已有文件）──
+    // ── 分支1：文件已存在（file_writer 编辑已有文件）──
     if (res.code === 200 && res.data !== null) {
       const currLines = (res.data || '').split('\n')
 
@@ -2822,7 +2841,7 @@ watch(() => pendingQuestion.value, async (q) => {
           parsedDiff.push({ type: ch.startsWith('-') ? 'remove' : 'add', text })
         }
       }
-      console.log('[PERM-HL] edit_file 变更行:', parsedDiff.length)
+      console.log('[PERM-HL] file_writer 变更行:', parsedDiff.length)
 
       // 2. 按 diff 顺序建立 remove→add 对应关系
       interface RemoveInfo { line: number; addTexts: string[] }
@@ -2890,9 +2909,9 @@ watch(() => pendingQuestion.value, async (q) => {
       console.log('[PERM-HL] remove:', highlightLines.filter(h => h.type === 'remove').length,
         'add:', highlightLines.filter(h => h.type === 'add').length,
         '预览总行数:', previewLines.length)
-    } else if (tool === 'write_file') {
-      // ── 分支2：write_file 创建新文件（文件还不存在）──
-      // write_file 的 fullDetail 就是新文件内容（不带 +/- 前缀，是纯文本）
+    } else if (tool === 'file_writer') {
+      // ── 分支2：file_writer 创建新文件（文件还不存在）──
+      // file_writer action=write 的 fullDetail 就是新文件内容（不带 +/- 前缀，是纯文本）
       const rawDetail = (detail || '').trim()
       if (rawDetail) {
         fileContent = rawDetail
@@ -2902,12 +2921,12 @@ watch(() => pendingQuestion.value, async (q) => {
           highlightLines.push({ line: i + 1, type: 'add' })
         }
       } else {
-        console.warn('[PERM-HL] write_file fullDetail 为空，无法生成虚拟预览')
+        console.warn('[PERM-HL] file_writer fullDetail 为空，无法生成虚拟预览')
         return
       }
-      console.log('[PERM-HL] write_file 新文件虚拟预览:', highlightLines.length, '行（全部绿色）')
+      console.log('[PERM-HL] file_writer 新文件虚拟预览:', highlightLines.length, '行（全部绿色）')
     } else {
-      // 文件不存在且不是 write_file → 跳过
+      // 文件不存在且不是 file_writer → 跳过
       return
     }
 
@@ -3039,19 +3058,16 @@ const sendMessage = async () => {
   showSupplementInput.value = false
   supplementMessage.value = ''
 
-  // 构建最终消息：将附件内容拼接到用户消息前
+  // 构建最终消息：附件不再拼接到消息中，由 LLM 通过 chat_attachment 工具读取
   let finalMessage = text
+
+  // 收集附件ID列表，传给后端
+  const attachmentIds: string[] = []
   if (attachedFiles.value.length > 0) {
-    const attachmentBlocks: string[] = []
     for (const att of attachedFiles.value) {
-      if (att.content) {
-        attachmentBlocks.push(`--- 附件: ${att.fileName} ---\n${att.content}\n--- 附件结束 ---`)
-      } else if (att.image) {
-        attachmentBlocks.push(`[用户上传了图片: ${att.fileName}（${formatFileSize(att.size)}）]`)
+      if (att.attachmentId && !att.error) {
+        attachmentIds.push(att.attachmentId)
       }
-    }
-    if (attachmentBlocks.length > 0) {
-      finalMessage = attachmentBlocks.join('\n\n') + '\n\n' + text
     }
   }
 
@@ -3133,7 +3149,8 @@ const sendMessage = async () => {
       thinkingMode: agentRuntime.value.thinkingMode,
       turnId,
       agentConfigId: currentAgentConfigId.value,
-      contextMode: settingsStore.contextMode
+      contextMode: settingsStore.contextMode,
+      attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined
     }, abortCtrl)) {
       // 每个事件都检查 sessionId —— 后端在第一个 SSE 事件中就返回了真实会话 ID，
       // 但不在流式过程中迁移 convId（避免数组引用变动导致内容重复），
@@ -3157,10 +3174,25 @@ const sendMessage = async () => {
             ? event.data.substring(contentStart + 1).trim()
             : ''
           if (toolContent) {
-            assistantMsg.toolResults!.push({
-              at: thinkingContent.length,
-              content: toolContent
-            })
+            // 解析工具名（从 "> **toolName**" 格式中提取）
+            const toolNameMatch = toolContent.match(/^>\s*\*\*(.+?)\*\*/)
+            const resolvedToolName = toolNameMatch ? toolNameMatch[1].trim() : undefined
+            // 查找是否有对应的 pending 条目（通过工具名匹配），有则更新，无则新增
+            const pendingIdx = assistantMsg.toolResults!.findIndex(
+              tr => tr.pending && tr.toolName && resolvedToolName && tr.toolName === resolvedToolName
+            )
+            if (pendingIdx !== -1) {
+              // 更新 pending 条目为完成状态
+              assistantMsg.toolResults![pendingIdx].content = toolContent
+              assistantMsg.toolResults![pendingIdx].pending = false
+            } else {
+              // 无匹配的 pending 条目，新增
+              assistantMsg.toolResults!.push({
+                at: thinkingContent.length,
+                content: toolContent,
+                toolName: resolvedToolName
+              })
+            }
             // 解析 task_manager 工具的任务清单
             console.log('[TaskList] toolContent:', toolContent.substring(0, 200))
             parseTaskManagerResult(toolContent)
@@ -3170,6 +3202,22 @@ const sendMessage = async () => {
         }
         assistantMsg.thinking = thinkingContent
         // 节流刷新（携带思考消息ID，更新 DOM 后自动滚动到底部）
+        scheduleMessageUpdate(convId, assistantMsg.id)
+      } else if (event.type === 'tool_call_start') {
+        // 工具调用开始事件：创建 pending 条目，显示加载动画
+        streamStatus.value = '执行工具中...'
+        const tcData = event.data as { tools: string[]; summaries: string[] }
+        const tools = tcData.tools || []
+        const summaries = tcData.summaries || []
+        for (let i = 0; i < tools.length; i++) {
+          assistantMsg.toolResults!.push({
+            at: thinkingContent.length,
+            content: '',
+            toolName: tools[i],
+            pending: true,
+            operationSummary: summaries[i] || ''
+          })
+        }
         scheduleMessageUpdate(convId, assistantMsg.id)
       } else if (event.type === 'content') {
         streamStatus.value = '正在生成回答...'
@@ -3499,7 +3547,376 @@ function parseToolNameLine(content: string): { toolName: string; cleanContent: s
 }
 
 /**
- * 渲染技能使用卡片（report_skill_result 工具结果专用）
+ * 从工具调用结果内容中提取具体操作类型（如 read/glob/write/edit 等）
+ * 解析结果内容前几行中的关键信息
+ *
+ * 后端各工具输出格式速查：
+ *
+ * file_explorer read(文件):  `路径: ...\n编码: ...\n类型: 文件\n行数: ...`
+ * file_explorer read(目录):  `路径: ...\n类型: 目录\n条目数: ...`
+ * file_explorer glob:        `搜索模式：xxx\n...\n匹配结果：共 N 个文件\n`
+ * file_explorer grep(纯文本):`搜索模式：xxx（纯文本）\n...\n匹配结果：共 N 个\n`
+ * file_explorer grep(正则):  `搜索模式：xxx（正则）\n...\n匹配结果：共 N 个\n`
+ * file_explorer grep(默认):  `搜索模式：xxx\n...\n匹配结果：共 N 个\n`  ← 没括号后缀！
+ * file_explorer tree:        `项目目录：...\n────────────────\n【概览树】`
+ * file_explorer tree(空):    `（空目录）`
+ *
+ * file_writer write:         `✅ 写入成功：...\n大小：...`
+ * file_writer edit:          `✅ 编辑成功：...\n匹配位置：第 N~M 行`
+ * file_writer delete(文件):  `✅ 文件已删除：...`
+ * file_writer delete(目录):  `✅ 目录已删除：...`
+ *
+ * command exec:              `执行命令：xxx`
+ * command start:             `后台服务已启动`
+ * command logs:              `服务 #N 输出（共 N 行）：`
+ * command list:              `后台服务列表：`
+ * command stop:              `服务 #N 已停止`
+ *
+ * task_manager create:       `✅ 任务清单已创建（共 N 项）：`
+ * task_manager complete:     `✅ 任务 T1 已完成！`
+ * task_manager batch_complete:`✅ 批量完成任务：T1, T2`
+ * task_manager list:         `📋 任务进度列表（共 N 项）：`
+ *
+ * 错误格式：`【缺少参数】...` / `【目录不存在】...` / `❌ 错误：...`
+ */
+function extractActionFromToolContent(content: string, toolName: string): string {
+  const firstLines = content.split('\n').slice(0, 5).join('\n')
+  const isError = /^【[^】]+】|^❌\s*错误/.test(firstLines)
+
+  // ============ 按工具类型分类 ============
+  switch (toolName) {
+    // ======== file_explorer ========
+    case 'file_explorer': {
+      // 优先识别错误类型，从错误内容推断意图
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { read: '读取', glob: '搜索文件', grep: '搜索内容', tree: '目录树' }
+          return map[act] || act
+        }
+        // 常见参数缺失错误
+        if (/action=glob 需要 pattern/.test(firstLines)) return '搜索文件'
+        if (/action=grep 需要 pattern/.test(firstLines)) return '搜索内容'
+        if (/需要 action/.test(firstLines)) return '操作'
+        if (/【目录不存在】|【不是目录】/.test(firstLines)) return '操作'
+        if (/【路径越界】|【路径不存在】/.test(firstLines)) return '操作'
+        if (/【include 语法错误】/.test(firstLines)) return '搜索内容'
+        if (/【glob 语法错误】/.test(firstLines)) return '搜索文件'
+        if (/【正则表达式语法错误】/.test(firstLines)) return '搜索内容'
+        if (/【搜索异常】/.test(firstLines)) return '搜索文件'
+        if (/【读取异常】/.test(firstLines)) return '读取'
+        // 未知 action 错误
+        if (/未知的 action/.test(firstLines)) {
+          const actMatch = content.match(/支持 ([a-z/ ]+)/)
+          if (actMatch) return actMatch[1].split('/')[0]
+          return '操作'
+        }
+        return '操作'
+      }
+
+      // read → 路径: xxx\n编码: xxx\n类型: 文件/目录
+      if (/^路径:/.test(firstLines) && /类型: (文件|目录)/.test(firstLines)) return '读取'
+      if (/^路径:/.test(firstLines) && /条目数/.test(firstLines)) return '读取目录'
+      if (/提示：文件为空|起始行.*超出|文件不存在/.test(firstLines)) return '读取'
+
+      // grep → 搜索模式：xxx（带纯文本/正则后缀）或 搜索模式：xxx（默认isRegex=true无后缀）
+      // 关键区分：grep 的匹配结果行是「共 N 个」不带"文件"二字
+      if (/搜索模式：/.test(firstLines)) {
+        // 单独处理正则/纯文本后缀的（这些一定是grep）
+        if (/搜索模式：.*[（(]纯文本[）)]/.test(firstLines)) return '搜索内容'
+        if (/搜索模式：.*[（(]正则[）)]/.test(firstLines)) return '搜索内容'
+        if (/搜索模式：.*[（(]忽略大小写[）)]/.test(firstLines)) return '搜索内容'
+        // 用匹配结果行区分：glob 说「共 N 个文件」，grep 说「共 N 个」
+        if (/匹配结果：共 \d+ 个文件/.test(firstLines)) return '搜索文件'
+        if (/匹配结果：共 \d+ 个/.test(firstLines)) return '搜索内容'
+        // 没有匹配结果行时，看后续有没有文件路径列表（glob特征）
+        const allContentLines = content.split('\n').slice(0, 10).join('\n')
+        if (/────────────────────────────────────────[\s\S]*  \d/.test(allContentLines)) return '搜索文件'
+        return '搜索内容'
+      }
+
+      // tree → 项目目录：... 或（空目录）
+      if (/^项目目录：/.test(firstLines) || /【概览树】/.test(firstLines)) return '目录树'
+      if (/^（空目录）/.test(firstLines)) return '目录树'
+
+      // 兜底
+      const actionMatch = content.match(/action=(\w+)/)
+      if (actionMatch) {
+        const act = actionMatch[1]
+        const map: Record<string, string> = { read: '读取', glob: '搜索文件', grep: '搜索内容', tree: '目录树' }
+        return map[act] || act
+      }
+      return '操作'
+    }
+
+    // ======== file_writer ========
+    case 'file_writer': {
+      if (isError) {
+        if (/action=delete/.test(content)) return '删除'
+        if (/action=edit/.test(content)) return '编辑'
+        if (/action=write/.test(content)) return '写入'
+        if (/需要 file_path/.test(firstLines)) return '操作'
+        if (/需要 old_text/.test(firstLines)) return '编辑'
+        if (/需要 force/.test(firstLines)) return '写入'
+        if (/【安全限制】/.test(firstLines)) return '删除'
+        if (/【文件不存在】/.test(firstLines)) {
+          if (/edit/.test(firstLines)) return '编辑'
+          return '删除'
+        }
+        if (/【匹配失败】|【匹配冲突】/.test(firstLines)) return '编辑'
+        if (/【写入失败】/.test(firstLines)) return '写入'
+        if (/【编辑失败】/.test(firstLines)) return '编辑'
+        if (/【删除失败】|【部分失败】/.test(firstLines)) return '删除'
+        if (/【删除确认】/.test(firstLines)) return '删除'
+        if (/【路径类型错误】/.test(firstLines)) return '编辑'
+        if (/【权限不足】/.test(firstLines)) return '编辑'
+        if (/【并发写入冲突】/.test(firstLines)) return '写入'
+        return '操作'
+      }
+      // write → ✅ 写入成功：...
+      if (/✅.*写入成功/.test(firstLines)) return '写入'
+      // edit → ✅ 编辑成功：...
+      if (/✅.*编辑成功/.test(firstLines)) return '编辑'
+      // delete → ✅ 文件已删除 / ✅ 目录已删除
+      if (/✅.*已删除/.test(firstLines)) return '删除'
+      if (/文件已删除|目录已删除/.test(firstLines)) return '删除'
+      // 兜底
+      const actionMatch = content.match(/action=(\w+)/)
+      if (actionMatch) {
+        const act = actionMatch[1]
+        const map: Record<string, string> = { write: '写入', edit: '编辑', delete: '删除' }
+        return map[act] || act
+      }
+      return '操作'
+    }
+
+    // ======== command ========
+    case 'command': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { exec: '执行命令', start: '启动服务', logs: '查看日志', list: '列出服务', stop: '停止服务' }
+          return map[act] || act
+        }
+        if (/【参数缺失】|【参数错误】/.test(firstLines)) return '参数错误'
+        if (/【并发限制】/.test(firstLines)) return '启动服务'
+        if (/【启动失败】/.test(firstLines)) return '启动服务'
+        if (/【命令未找到】|【执行异常】|【执行中断】/.test(firstLines)) return '执行命令'
+        return '执行'
+      }
+      if (/^执行命令：/.test(firstLines)) return '执行命令'
+      if (/后台服务已启动/.test(firstLines)) return '启动服务'
+      if (/服务 #\d+ 输出/.test(firstLines)) return '查看日志'
+      if (/（服务运行中，暂无输出）/ .test(firstLines)) return '查看日志'
+      if (/（服务已结束，无输出）/.test(firstLines)) return '查看日志'
+      if (/^后台服务列表：/.test(firstLines)) return '列出服务'
+      if (/（无后台服务）/.test(firstLines)) return '列出服务'
+      if (/服务 #\d+ 已停止/.test(firstLines)) return '停止服务'
+      if (/不存在.*服务/.test(firstLines)) return '停止服务'
+      // 兜底
+      const cmdMatch = content.match(/action=(\w+)/)
+      if (cmdMatch) {
+        const act = cmdMatch[1]
+        const map: Record<string, string> = { exec: '执行命令', start: '启动服务', logs: '查看日志', list: '列出服务', stop: '停止服务' }
+        return map[act] || act
+      }
+      return '执行'
+    }
+
+    // ======== execute_sql ========
+    case 'execute_sql': {
+      if (isError) {
+        if (/SQL 过长/.test(firstLines)) return 'SQL'
+        if (/多语句禁止/.test(firstLines)) return 'SQL'
+        if (/SQL 类型未知/.test(firstLines)) return 'SQL'
+        if (/SQL 执行异常/.test(firstLines)) return 'SQL'
+        return 'SQL'
+      }
+      if (/查询完成|SELECT/.test(firstLines)) return 'SQL查询'
+      if (/执行成功，影响/.test(firstLines)) {
+        // 从 SQL 内容判断是 INSERT/UPDATE/DELETE
+        const sqlMatch = content.match(/sql=([^\n]+)/)
+        if (sqlMatch) {
+          const sql = sqlMatch[1].toUpperCase()
+          if (/^INSERT/.test(sql)) return 'SQL插入'
+          if (/^UPDATE/.test(sql)) return 'SQL更新'
+          if (/^DELETE/.test(sql)) return 'SQL删除'
+          if (/^CREATE|^DROP|^ALTER|^TRUNCATE/.test(sql)) return 'DDL变更'
+        }
+        return 'SQL写操作'
+      }
+      return 'SQL'
+    }
+
+    // ======== git_submit ========
+    case 'git_submit': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { add: '暂存', commit: '提交', push: '推送' }
+          return map[act] || act
+        }
+        return 'Git'
+      }
+      if (/📌|暂存/.test(firstLines)) return '暂存'
+      if (/📦|提交|commit/.test(firstLines)) return '提交'
+      if (/⬆️|推送|push/.test(firstLines)) return '推送'
+      const gsMatch = content.match(/action=(\w+)/)
+      if (gsMatch) {
+        const act = gsMatch[1]
+        const map: Record<string, string> = { add: '暂存', commit: '提交', push: '推送' }
+        return map[act] || act
+      }
+      return 'Git'
+    }
+
+    // ======== git_query ========
+    case 'git_query': {
+      if (isError) return '查询'
+      if (/状态|Status|status/.test(firstLines)) return '状态'
+      if (/差异|diff|Diff/.test(firstLines)) return '差异'
+      if (/历史|log|提交|commit/.test(firstLines)) return '日志'
+      return '查询'
+    }
+
+    // ======== git_branch ========
+    case 'git_branch': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { create: '创建分支', switch: '切换分支', delete: '删除分支', list: '列出分支' }
+          return map[act] || act
+        }
+        return '分支管理'
+      }
+      if (/创建分支/.test(firstLines)) return '创建分支'
+      if (/切换分支/.test(firstLines)) return '切换分支'
+      if (/删除分支/.test(firstLines)) return '删除分支'
+      const gbMatch = content.match(/action=(\w+)/)
+      if (gbMatch) {
+        const act = gbMatch[1]
+        const map: Record<string, string> = { create: '创建分支', switch: '切换分支', delete: '删除分支', list: '列出分支' }
+        return map[act] || act
+      }
+      return '分支管理'
+    }
+
+    // ======== task_manager ========
+    case 'task_manager': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { create: '创建任务', complete: '完成任务', batch_complete: '完成任务', batch_reopen: '重开任务', reopen: '重开任务', list: '列出任务' }
+          return map[act] || act
+        }
+        if (/需要 task_id/.test(firstLines)) return '完成任务'
+        if (/需要 task_ids/.test(firstLines)) return '完成任务'
+        if (/需要 tasks/.test(firstLines)) return '创建任务'
+        if (/无任务记录/.test(firstLines)) return '列出任务'
+        return '任务管理'
+      }
+      // 先检查精确匹配的批量完成任务（避免被"创建任务"误匹配）
+      if (/批量完成任务/.test(firstLines)) return '完成任务'
+      if (/任务.*已完成/.test(firstLines)) return '完成任务'
+      if (/已经标记为完成/.test(firstLines)) return '完成任务'
+      if (/已是完成状态/.test(firstLines)) return '完成任务'
+      // 创建任务
+      if (/任务清单已创建/.test(firstLines)) return '创建任务'
+      if (/创建了.*个任务/.test(firstLines)) return '创建任务'
+      // 重开任务
+      if (/已重新打开/.test(firstLines)) return '重开任务'
+      if (/reopen/.test(firstLines)) return '重开任务'
+      // 列表
+      if (/任务进度列表|任务列表/.test(firstLines)) return '列出任务'
+      if (/进度.*已完成/.test(firstLines)) return '列出任务'
+      // 兜底
+      const tmMatch = content.match(/action=(\w+)/)
+      if (tmMatch) {
+        const act = tmMatch[1]
+        const map: Record<string, string> = { create: '创建任务', complete: '完成任务', batch_complete: '完成任务', batch_reopen: '重开任务', reopen: '重开任务', list: '列出任务' }
+        return map[act] || act
+      }
+      return '任务管理'
+    }
+
+    // ======== 其他单操作工具 ========
+    case 'web_search': return '搜索'
+    case 'web_fetch':  return '获取网页'
+    case 'http_request': return 'API请求'
+    case 'check_network': return '网络检测'
+    case 'ask_clarification': return '提问'
+    case 'project_info': return '项目信息'
+    case 'query_tool_history': return '查询历史'
+
+    case 'skill': {
+      if (isError) return '技能管理'
+      if (/执行结果：成功/.test(firstLines)) return '技能完成'
+      if (/执行结果：失败/.test(firstLines)) return '技能失败'
+      return '技能管理'
+    }
+
+    case 'agent': {
+      // agent 工具的 content 是执行结果文本（非调用参数），不含 "action=fork" 等字样。
+      // 且 content 尾部可能含 instructions 中的 "action=collect"（系统提示词），
+      // 因此只取前 5 行做第一行特征匹配，简单可靠。
+      const line1 = content.split('\n')[0] || ''
+      if (isError) {
+        if (/创建|fork/i.test(line1)) return '创建子任务'
+        if (/收集|collect/i.test(line1)) return '收集结果'
+        return '子Agent'
+      }
+      // fork 第一行："✅ 子Agent「XXX」(ID: xxx) 已创建并在后台运行"
+      if (/已创建.*后台运行|已在后台运行/.test(line1)) return '创建子任务'
+      // collect 第一行："✅ 子Agent「XXX」执行完毕"
+      if (/执行完毕/.test(line1)) return '收集结果'
+      // inspect 第一行：可能含 "详情" 等
+      if (/详情|inspect/i.test(line1)) return '查看详情'
+      return '子Agent'
+    }
+
+    // ======== schedule_task ========
+    case 'schedule_task': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { create: '创建定时任务', list: '查看列表', update: '修改任务', delete: '删除任务', toggle: '启停任务' }
+          return map[act] || act
+        }
+        if (/【缺少参数】/.test(firstLines)) return '参数错误'
+        if (/【不支持的操作】/.test(firstLines)) return '参数错误'
+        if (/【任务不存在】/.test(firstLines)) return '查改任务'
+        if (/【无法识别时间描述】/.test(firstLines)) return '创建任务'
+        if (/【Cron 格式错误】/.test(firstLines)) return '创建任务'
+        if (/【时间格式错误】/.test(firstLines)) return '创建任务'
+        if (/【创建失败】/.test(firstLines)) return '创建任务'
+        if (/【查询失败】/.test(firstLines)) return '查看列表'
+        if (/【更新失败】/.test(firstLines)) return '修改任务'
+        if (/【删除失败】/.test(firstLines)) return '删除任务'
+        if (/【操作失败】/.test(firstLines)) return '启停任务'
+        return '定时任务'
+      }
+      if (/定时任务创建成功/.test(firstLines)) return '创建任务'
+      if (/定时任务列表/.test(firstLines)) return '查看列表'
+      if (/定时任务.*已更新/.test(firstLines)) return '修改任务'
+      if (/已删除定时任务/.test(firstLines)) return '删除任务'
+      if (/🟢\s*已启用/.test(firstLines)) return '启用任务'
+      if (/🔴\s*已禁用/.test(firstLines)) return '禁用任务'
+      // 兜底
+      const stMatch = content.match(/action=(\w+)/)
+      if (stMatch) {
+        const act = stMatch[1]
+        const map: Record<string, string> = { create: '创建任务', list: '查看列表', update: '修改任务', delete: '删除任务', toggle: '启停任务' }
+        return map[act] || act
+      }
+      return '定时任务'
+    }
+
+    default: return '操作'
+  }
+}
+
+/**
+ * 渲染技能使用卡片（skill action=report 工具结果专用）
  * 解析格式：
  *   技能「名称」(ID:N) 执行结果：成功/失败
  *   当前置信度：XX%（共使用 N 次，成功 N / 失败 N）
@@ -3529,10 +3946,10 @@ function renderSkillUsageCard(content: string): string | null {
   </div>`
 }
 
-const formatThinking = (thinking: string | undefined, toolResults?: { at: number; content: string }[]) => {
+const formatThinking = (thinking: string | undefined, toolResults?: { at: number; content: string; toolName?: string; pending?: boolean; operationSummary?: string }[]) => {
   if (!thinking && (!toolResults || toolResults.length === 0)) return ''
   thinking = thinking || ''
-  const cacheKey = thinking + '|' + JSON.stringify(toolResults?.map(t => ({ at: t.at, len: t.content.length })))
+  const cacheKey = thinking + '|' + JSON.stringify(toolResults?.map(t => ({ at: t.at, len: t.content.length, pending: t.pending, tn: t.toolName })))
   const cached = thinkingCache.get(cacheKey)
   if (cached !== undefined) return cached
 
@@ -3549,12 +3966,37 @@ const formatThinking = (thinking: string | undefined, toolResults?: { at: number
             parts.push(`<div class="thinking-text-block">${renderMarkdown(textSegment)}</div>`)
           }
         }
+        // ★ pending 条目：工具正在执行中，显示加载动画
+        if (tr.pending) {
+          const toolLabel = tr.toolName || '工具'
+          const summaryText = tr.operationSummary || `正在调用 ${toolLabel}...`
+          // 提取操作摘要的第一行（去掉 markdown 标记后截取前80字符）
+          const cleanSummary = summaryText.replace(/^>\s*/, '').replace(/[*`]/g, '').substring(0, 80)
+          parts.push(`<div class="tool-result-card tool-result-pending">
+            <div class="tool-result-header">
+              <span class="tr-toggle tr-toggle-spin">⏳</span>
+              <span class="tr-icon tr-icon-pending">
+                <span class="tr-pending-dot"></span>
+              </span>
+              <span class="tr-label">${escapeHtml(toolLabel)} · 执行中...</span>
+              <span class="tr-summary">${escapeHtml(cleanSummary)}</span>
+            </div>
+            <div class="tool-result-body tool-result-loading">
+              <div class="tool-loading-bar">
+                <div class="tool-loading-bar-inner"></div>
+              </div>
+              <div class="tool-loading-hint">工具执行中，请稍候...</div>
+            </div>
+          </div>`)
+          lastPos = tr.at
+          continue
+        }
         // 工具调用结果卡片（含工具名称解析）
         const { toolName, cleanContent } = parseToolNameLine(tr.content)
         const displayContent = cleanContent || tr.content
 
-        // 技能使用卡片：report_skill_result 特殊渲染
-        if (toolName === 'report_skill_result') {
+        // 技能使用卡片：skill action=report 特殊渲染
+        if (toolName === 'skill') {
           const skillUsageHtml = renderSkillUsageCard(displayContent)
           if (skillUsageHtml) {
             parts.push(skillUsageHtml)
@@ -3564,9 +4006,15 @@ const formatThinking = (thinking: string | undefined, toolResults?: { at: number
         }
 
         const escaped = escapeHtml(displayContent)
-        const isError = /^错误[：:]|【参数(?:缺失|错误)】|【权限(?:不足|拒绝)】|【会话上下文丢失】|\bCannot\b/i.test(displayContent.substring(0, 300))
+        // ⚠️ 只检查第一行！工具报错永远在第一行，避免读取文件内容中的「错误关键词」导致误判
+        const firstLineOfResult = displayContent.split('\n')[0]
+        const isError = /^(错误[：:]|【[^】]+】|❌\s*错误)/.test(firstLineOfResult) || /\bCannot\b/.test(firstLineOfResult)
         const firstLine = displayContent.split('\n')[0].substring(0, 80)
-        const labelText = isError ? ('执行出错' + (toolName ? ' ' + toolName : '')) : ('工具' + (toolName || '') + '执行')
+        // 提取操作类型并构建更有信息的标签
+        const actionLabel = toolName ? extractActionFromToolContent(displayContent, toolName) : ''
+        const labelText = isError
+          ? ('执行出错' + (toolName ? ' ' + toolName : ''))
+          : (toolName ? (toolName + ' · ' + actionLabel) : '工具执行')
         parts.push(`<div class="tool-result-card tool-result-collapsed ${isError ? 'tool-result-error' : ''}">
           <div class="tool-result-header">
             <span class="tr-toggle">▶</span>
@@ -6237,6 +6685,8 @@ watch(currentConversationId, (newId) => {
 }
 .tool-result-card.tool-result-collapsed .tool-result-body { display: none; }
 .tool-result-card.tool-result-collapsed .tr-toggle { transform: rotate(0deg); }
+/* pending 卡片始终展开，不响应折叠 */
+.tool-result-pending .tool-result-body { display: block !important; }
 
 .tool-result-header {
   display: flex;
@@ -6299,6 +6749,79 @@ watch(currentConversationId, (newId) => {
   word-break: break-all;
 }
 .tool-result-error .tool-result-body pre { color: #991b1b; }
+
+/* ===== 工具调用加载中（pending）卡片 ===== */
+.tool-result-pending {
+  border-color: #a78bfa !important;
+  background: #faf5ff !important;
+  animation: tool-card-pulse 2s ease-in-out infinite;
+}
+@keyframes tool-card-pulse {
+  0%, 100% { border-color: #a78bfa; }
+  50% { border-color: #c4b5fd; }
+}
+.tool-result-pending .tool-result-header {
+  background: #f3e8ff;
+  border-bottom-color: #a78bfa;
+  cursor: default;
+}
+.tool-result-pending .tool-result-header:hover {
+  background: #f3e8ff;
+}
+.tr-toggle-spin {
+  animation: tr-spin 1.5s linear infinite;
+  display: inline-block;
+}
+@keyframes tr-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.tr-icon-pending {
+  background: #ede9fe;
+  color: #7c3aed;
+  position: relative;
+  overflow: hidden;
+}
+.tr-pending-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: #7c3aed;
+  border-radius: 50%;
+  animation: pending-dot-bounce 1.2s ease-in-out infinite;
+}
+@keyframes pending-dot-bounce {
+  0%, 100% { transform: scale(0.6); opacity: 0.4; }
+  50% { transform: scale(1.2); opacity: 1; }
+}
+.tool-result-loading {
+  padding: 10px 12px;
+}
+.tool-loading-bar {
+  height: 3px;
+  background: #e9d5ff;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.tool-loading-bar-inner {
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, #a78bfa, #7c3aed, #a78bfa);
+  background-size: 200% 100%;
+  border-radius: 2px;
+  animation: loading-bar-slide 1.8s ease-in-out infinite;
+}
+@keyframes loading-bar-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+.tool-loading-hint {
+  font-size: 11px;
+  color: #7c3aed;
+  font-weight: 500;
+  text-align: center;
+}
 
 /* ===== 技能使用卡片 ===== */
 .skill-usage-card { border-radius: 8px; overflow: hidden; font-size: 12px; }
@@ -6680,6 +7203,26 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .tool-result-card.tool-result-error {
   background: #1f1215;
   border-color: #dc2626;
+}
+[data-theme="dark"] .tool-result-pending {
+  background: #1a1525 !important;
+  border-color: #7c3aed !important;
+}
+[data-theme="dark"] .tool-result-pending .tool-result-header {
+  background: #1e1830;
+  border-bottom-color: #7c3aed;
+}
+[data-theme="dark"] .tool-result-pending .tool-result-header:hover {
+  background: #1e1830;
+}
+[data-theme="dark"] .tr-icon-pending {
+  background: rgba(124,58,237,0.15);
+}
+[data-theme="dark"] .tool-loading-bar {
+  background: #2a2040;
+}
+[data-theme="dark"] .tool-loading-hint {
+  color: #a78bfa;
 }
 [data-theme="dark"] .tr-toggle {
   color: #6a6880;

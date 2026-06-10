@@ -17,4 +17,6 @@ public interface ScheduleTaskService {
     void enableTask(Long id);
 
     void disableTask(Long id);
+
+    ScheduleTask getTaskById(Long id);
 }

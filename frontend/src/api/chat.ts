@@ -16,6 +16,7 @@ export interface ChatRequest {
   turnId?: string
   agentConfigId?: number
   contextMode?: string
+  attachmentIds?: string[]
 }
 
 // 流式聊天的额外选项
@@ -28,6 +29,7 @@ export interface StreamChatOptions {
   turnId?: string
   agentConfigId?: number
   contextMode?: string
+  attachmentIds?: string[]
 }
 
 // 聊天响应数据（非流式，用于创建会话等）
@@ -106,6 +108,9 @@ export async function* streamChat(
   }
   if (options?.contextMode) {
     requestBody.contextMode = options.contextMode
+  }
+  if (options?.attachmentIds) {
+    requestBody.attachmentIds = options.attachmentIds
   }
 
   try {
@@ -195,17 +200,17 @@ export async function cancelTask(conversationId: number): Promise<boolean> {
 
 export interface FileUploadResult {
   success: boolean
+  attachmentId: string
   fileName: string
   extension: string
   size: number
-  content: string
-  image: boolean
-  language: string
+  type: string  // text/pdf/word/excel/image
   error?: string
 }
 
 /**
- * 上传附件文件，后端读取文本内容后返回
+ * 上传附件文件，后端暂存并返回附件ID
+ * LLM 可通过 chat_attachment 工具读取内容（支持PDF/Word/Excel）
  * @param file 要上传的文件
  */
 export async function uploadAttachment(file: File): Promise<FileUploadResult> {

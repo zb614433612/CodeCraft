@@ -41,7 +41,7 @@
 |------|-----------|-------|-------|----------|-----------|
 | 底层模型 | **DeepSeek** | Claude/GPT | 多模型 | Claude/GPT | OpenAI |
 | 形态 | **桌面应用 + CLI** | VS Code 插件 | 终端 CLI | 终端 TUI | 终端 CLI |
-| 多 Agent 并行 | ✅ 最多5并发 | ❌ | ❌ | ❌ | ✅ |
+| 多 Agent 并行 | ✅ 最多20并发 | ❌ | ❌ | ❌ | ✅ |
 | 快照回滚 | ✅ 内置 | ❌ | ❌ | ❌ | ❌ |
 | 技能系统 | ✅ 贝叶斯置信度 | ❌ | ❌ | ❌ | ❌ |
 | P2P 远程协作 | ✅ Netty+TLS | ❌ | ❌ | ❌ | ❌ |
@@ -52,10 +52,10 @@
 ## ✨ 核心功能
 
 ### 🧠 多 Agent 并行协作（Multi-Agent System）
-可创建不同角色的 AI Agent（Coding Agent、Code Reviewer、Software Architect 等），每个 Agent 独立配置系统提示词（System Prompt）、工具集和模型参数。主 Agent 执行复杂任务时，自动进行 **Task Decomposition（任务拆解）**，召唤多个子 Agent 后台并行执行，最多 5 个并发协作——典型的多 Agent 框架（Multi-Agent Framework）架构。
+可创建不同角色的 AI Agent（Coding Agent、Code Reviewer、Software Architect 等），每个 Agent 独立配置系统提示词（System Prompt）、工具集和模型参数。主 Agent 执行复杂任务时，自动进行 **Task Decomposition（任务拆解）**，召唤多个子 Agent 后台并行执行，最多 20 个并发协作——典型的多 Agent 框架（Multi-Agent Framework）架构。
 
 ### 🛡️ 三层安全防护（Human-in-the-Loop）
-工具执行采用渐进式安全策略：Manual 模式下数据操作和路径敏感操作弹窗授权，Auto 模式下高危工具（delete_file / execute_sql 等）仍需人工确认。支持"本轮对话全部同意"一键放行，在 Autonomous Agent 自动化和 Human-in-the-Loop 人工管控之间取得最佳平衡。
+工具执行采用渐进式安全策略：Manual 模式下数据操作和路径敏感操作弹窗授权，Auto 模式下高危工具（file_writer action=delete / execute_sql 等）仍需人工确认。支持"本轮对话全部同意"一键放行，在 Autonomous Agent 自动化和 Human-in-the-Loop 人工管控之间取得最佳平衡。
 
 ### 📸 代码快照回滚（Snapshot / Undo System）
 AI 修改文件前自动创建快照备份，支持按消息、按文件、按会话三种粒度回滚，500MB 配额自动清理。类似 Aider 的 undo 机制，但更细粒度。

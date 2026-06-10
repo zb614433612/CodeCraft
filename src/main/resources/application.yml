@@ -160,8 +160,9 @@ web-fetch:
 deepseek:
   # DeepSeek API基础URL
   base-url: https://api.deepseek.com
-  # API密钥——由 application-local.yml 覆盖
-  api-key: ${DEEPSEEK_API_KEY:__MUST_CONFIGURE_API_KEY__}
+  # API密钥——现在通过前端「配置」页面设置，存储在数据库 sys_config 表中
+  # 不再从环境变量或配置文件读取，此处保留空值供 Spring 属性绑定使用
+  api-key:
   # 默认模型
   default-model: deepseek-v4-pro
   # 思考模式：non-thinking / thinking / thinking_max
@@ -188,35 +189,23 @@ deepseek:
     "code_agent_prompt.txt":
       - "web_search"
       - "web_fetch"
-      - "read_file"
-      - "write_file"
-      - "edit_file"
-      - "glob_files"
-      - "grep_search"
-      - "read_project_tree"
+      - "file_explorer"
+      - "file_writer"
       - "project_info"
-      - "run_command"
-      - "run_server"
+      - "command"
       - "ask_clarification"
       - "task_manager"
       - "check_network"
       - "execute_sql"
-      - "delete_file"
       - "http_request"
-      - "service_control"
-      - "git_status"
-      - "git_diff"
-      - "git_log"
-      - "git_add"
-      - "git_commit"
+      - "git_query"
+      - "git_submit"
       - "git_branch"
-      - "git_push"
-      - "manage_skill"
-      - "report_skill_result"
-      - "fork_agent"
-      - "collect_agent"
-      - "inspect_agent"
+      - "agent"
+      - "skill"
       - "query_tool_history"
+      - "chat_attachment"
+      - "schedule_task"
 
 # ==================== P2P 远程连接配置 ====================
 p2p:
@@ -240,3 +229,15 @@ p2p:
   cert-dir: data/p2p/certs
   # 在线节点缓存过期时间（分钟）
   peer-cache-expire-minutes: 5
+
+# ==================== ChatAttachment 附件解析配置 ====================
+chat-attachment:
+  # 上传暂存配置
+  store:
+    temp-dir: ""                                # 临时目录（留空使用系统临时目录/codecraft-attachments）
+    expire-minutes: 30                          # 过期时间（分钟）
+  # 解析限制
+  parse:
+    pdf-max-pages: 50                           # PDF 最大解析页数
+    excel-max-rows: 500                         # Excel 最大行数
+    content-max-length: 30000                   # 单文件最大输出字符数

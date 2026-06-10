@@ -113,6 +113,11 @@ public class DeepSeekAnalyzer {
             if (thinkingMode != null && !thinkingMode.isEmpty()) {
                 request.put("thinking_mode", thinkingMode);
             }
+        } else {
+            // 【修复】显式禁用 thinking，避免模型默认启用导致 content 为空
+            // deepseek-v4-pro 等模型默认启用 thinking，不传 thinking_mode 时
+            // API 返回 content="" + reasoning_content="思考文本"，导致评委提取 JSON 失败
+            request.put("thinking_mode", "non-thinking");
         }
 
         int maxRetries = 2;
@@ -246,18 +251,70 @@ public class DeepSeekAnalyzer {
         }
 
         // 尝试从文本中定位 { ... } JSON 对象
-        int braceStart = text.indexOf('{');
-        if (braceStart >= 0) {
-            int braceEnd = text.lastIndexOf('}');
-            if (braceEnd > braceStart) {
-                String candidate = text.substring(braceStart, braceEnd + 1).trim();
-                if (isValidJson(candidate)) {
-                    return candidate;
+        // 使用括号匹配算法，避免首尾 { 和 } 跨越多个 JSON 块导致提取失败
+        // 例如推理文本中可能出现 "应该返回 {"key": "value"}，而不是 {"wrong": ...}" → 需精确匹配
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '{') {
+                int end = findMatchingBrace(text, i);
+                if (end > i) {
+                    String candidate = text.substring(i, end + 1).trim();
+                    if (isValidJson(candidate)) {
+                        return candidate;
+                    }
                 }
             }
         }
 
         return null;
+    }
+
+    /**
+     * 从文本中定位与 start 位置的 '{' 匹配的 '}' 位置
+     * 使用栈计数器处理嵌套的 { } 对和字符串字面量
+     *
+     * @param text  文本
+     * @param start '{' 的位置
+     * @return 匹配的 '}' 位置，未找到返回 -1
+     */
+    private int findMatchingBrace(String text, int start) {
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+
+        for (int i = start; i < text.length(); i++) {
+            char c = text.charAt(i);
+
+            // 处理字符串转义
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (c == '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (c == '"') {
+                inString = true;
+                continue;
+            }
+
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
     }
 
     /**

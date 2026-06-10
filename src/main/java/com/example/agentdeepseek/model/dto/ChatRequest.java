@@ -5,6 +5,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 /**
  * 聊天请求DTO
  * 用于接收用户聊天消息
@@ -50,4 +52,7 @@ public class ChatRequest {
 
     @Schema(description = "上下文模式（可选）：full（全量注入）/ compact（精简历史工具调用和思考过程），为空则使用服务端默认配置", example = "compact")
     private String contextMode;
+
+    @Schema(description = "附件ID列表（前端上传后返回的ID），LLM可通过 chat_attachment 工具读取", example = "[\"a1b2c3\", \"d4e5f6\"]")
+    private List<String> attachmentIds;
 }

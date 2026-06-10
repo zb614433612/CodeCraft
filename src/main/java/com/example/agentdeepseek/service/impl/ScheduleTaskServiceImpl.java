@@ -24,7 +24,7 @@ public class ScheduleTaskServiceImpl implements ScheduleTaskService {
     @Override
     public ScheduleTask createTask(ScheduleTask task) {
         if (task.getStatus() == null) task.setStatus("ENABLED");
-        if (task.getMaxExecuteCount() == null) task.setMaxExecuteCount(0);
+        if (task.getMaxExecuteCount() == null) task.setMaxExecuteCount(100);
         if (task.getExecuteCount() == null) task.setExecuteCount(0);
         taskMapper.insert(task);
         log.info("创建定时任务: id={}, name={}, agentType={}", task.getId(), task.getName(), task.getAgentType());
@@ -53,5 +53,10 @@ public class ScheduleTaskServiceImpl implements ScheduleTaskService {
     public void disableTask(Long id) {
         taskMapper.updateStatus(id, "DISABLED");
         log.info("禁用定时任务: id={}", id);
+    }
+
+    @Override
+    public ScheduleTask getTaskById(Long id) {
+        return taskMapper.selectById(id);
     }
 }

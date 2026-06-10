@@ -35,7 +35,7 @@ public class GitBranchTool implements Tool {
     @Override
     public String getDescription() {
         return "【适用场景】管理本地 Git 分支：查看所有分支、创建功能/修复分支、在不同分支间切换、清理已合并的旧分支\n"
-                + "【与 git_push 区别】git_branch 管理本地分支，git_push 是将本地提交推送到远程仓库\n"
+                + "【与 git_submit 区别】git_branch 管理本地分支，git_submit(action=push) 是将本地提交推送到远程仓库\n"
                 + "【使用方式】action=list 列所有分支（默认）；action=create name=\"feature/xxx\" 创建新分支；action=switch name=\"develop\" 切换分支；action=delete name=\"old-branch\" 删除（force=true 强制删除未合并的分支）";
     }
 
@@ -124,7 +124,7 @@ public class GitBranchTool implements Tool {
 
         GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, "switch", name);
         if (!result.success()) {
-            return "【Git 错误】切换分支失败。常见原因：①目标分支不存在（先用 action=list 确认分支名）；②工作区有未提交变更冲突（先用 git_status 查看，必要时 stash）。Git 返回信息：" + result.output();
+            return "【Git 错误】切换分支失败。常见原因：①目标分支不存在（先用 action=list 确认分支名）；②工作区有未提交变更冲突（先用 git_query action=status 查看，必要时 stash）。Git 返回信息：" + result.output();
         }
         log.info("Git 分支切换成功: {}", name);
         return "已切换到分支 '" + name + "'\n" + result.output();

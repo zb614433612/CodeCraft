@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.example</groupId>
     <artifactId>codecraft</artifactId>
-    <version>1.1.0</version>
+    <version>1.1.1</version>
     <name>CodeCraft</name>
     <description>CodeCraft - AI Coding Assistant</description>
     <url/>
@@ -150,6 +150,24 @@
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>1.78.1</version>
         </dependency>
+
+        <!-- ==================== ChatAttachment 附件解析依赖 ==================== -->
+
+        <!-- PDFBox - PDF 解析 -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.2</version>
+        </dependency>
+
+        <!-- POI - Word/Excel 解析 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.2.5</version>
+        </dependency>
+
+
     </dependencies>
 
     <build>

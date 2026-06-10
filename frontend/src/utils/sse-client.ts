@@ -12,6 +12,12 @@ export interface SkillMatchInfo {
   description: string
 }
 
+/** 工具调用开始事件数据（后端 tool_call_start JSON事件） */
+export interface ToolCallStartData {
+  tools: string[]
+  summaries: string[]
+}
+
 export type StreamChatEvent = {
   type: 'thinking' | 'content' | 'complete' | 'resume'
   data: string
@@ -27,6 +33,10 @@ export type StreamChatEvent = {
 } | {
   type: 'agent_event'
   data: AgentStreamEvent
+  sessionId?: number
+} | {
+  type: 'tool_call_start'
+  data: ToolCallStartData
   sessionId?: number
 } | {
   type: 'error'
@@ -72,6 +82,14 @@ export class SseParser {
       // 处理 ask_user 事件
       if (parsed.event === 'ask_user') {
         return { type: 'ask_user', data: { uuid: parsed.uuid, question: parsed.question, askType: parsed.askType, toolName: parsed.toolName, filePath: parsed.filePath, fullDetail: parsed.fullDetail }, sessionId: this.sessionId }
+      }
+      // 处理 tool_call_start 事件（工具调用开始，前端显示加载动画）
+      if (parsed.event === 'tool_call_start') {
+        return {
+          type: 'tool_call_start',
+          data: { tools: parsed.tools || [], summaries: parsed.summaries || [] },
+          sessionId: this.sessionId
+        }
       }
       // 处理 skill_match 事件
       if (parsed.event === 'skill_match') {

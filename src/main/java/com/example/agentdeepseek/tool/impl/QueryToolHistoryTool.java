@@ -68,7 +68,7 @@ public class QueryToolHistoryTool implements Tool {
         ObjectNode toolName = objectMapper.createObjectNode();
         toolName.put("type", "string");
         toolName.put("description", "【可选】工具名称过滤。只返回匹配该名称的工具调用结果。"
-                + "示例：read_file、run_command、write_file。不传则返回所有工具");
+                + "示例：file_explorer、command、file_writer。不传则返回所有工具");
         properties.set("tool_name", toolName);
 
         // message_id

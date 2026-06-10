@@ -50,7 +50,9 @@
                 <div v-else-if="event.type === 'tool_call'" class="event-tool">
                   <span class="event-icon">🔧</span>
                   <span class="event-tool-name">{{ event.toolName }}</span>
+                  <span v-if="event.action" class="event-action">{{ event.action }}</span>
                   <span v-if="event.filePath" class="event-file">{{ event.filePath }}</span>
+                  <span v-else-if="!event.action && !event.filePath" class="event-file">（执行中...）</span>
                   <span :class="['event-result', event.result === 'OK' ? 'success' : '']">
                     {{ event.result }}
                   </span>
@@ -90,6 +92,7 @@ export interface AgentEvent {
   type: 'thinking' | 'tool_call' | 'skill_match' | 'status_change' | 'text'
   content?: string
   toolName?: string
+  action?: string
   filePath?: string
   result?: string
   skills?: Array<{ name: string; confidence: number }>
@@ -347,6 +350,17 @@ function statusText(status: string | undefined): string {
   font-size: 11px;
 }
 
+.event-action {
+  display: inline-block;
+  color: #52c41a;
+  margin-left: 4px;
+  font-size: 11px;
+  background: #f6ffed;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
 .event-result {
   margin-left: 4px;
   font-size: 11px;
@@ -409,6 +423,10 @@ function statusText(status: string | undefined): string {
 }
 [data-theme="dark"] .event-file {
   color: #6a6880;
+}
+[data-theme="dark"] .event-action {
+  background: rgba(82, 196, 26, 0.15);
+  color: #4ade80;
 }
 [data-theme="dark"] .event-result.success {
   color: #4ade80;

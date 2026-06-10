@@ -12,29 +12,30 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 技能管理工具（三合一）
- * 一个工具搞定技能的创建、编辑、删除、查看
+ * 技能管理工具 — 合并 manage_skill + report_skill_result
+ * 通过 action 参数区分操作，覆盖技能 CRUD 和结果反馈五大能力。
  */
 @Slf4j
 @Component
-@ToolPermission(category = OperationCategory.SKILL, affectsData = true, description = "管理技能")
-public class ManageSkillTool implements Tool {
+@ToolPermission(category = OperationCategory.SKILL, affectsData = true, description = "技能管理（创建/编辑/删除/查看/反馈）")
+public class SkillTool implements Tool {
 
     private static final double MERGE_THRESHOLD = 0.85;
 
     private final ObjectMapper objectMapper;
     private final SkillService skillService;
     private final ToolRegistry toolRegistry;
-    private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+    private final JdbcTemplate jdbcTemplate;
 
-    public ManageSkillTool(ObjectMapper objectMapper, SkillService skillService, ToolRegistry toolRegistry,
-                           org.springframework.jdbc.core.JdbcTemplate jdbcTemplate) {
+    public SkillTool(ObjectMapper objectMapper, SkillService skillService, ToolRegistry toolRegistry,
+                     JdbcTemplate jdbcTemplate) {
         this.objectMapper = objectMapper;
         this.skillService = skillService;
         this.toolRegistry = toolRegistry;
@@ -42,17 +43,25 @@ public class ManageSkillTool implements Tool {
     }
 
     @Override
-    public String getName() {
-        return "manage_skill";
-    }
+    public String getName() { return "skill"; }
 
     @Override
     public String getDescription() {
-        return "管理技能。支持创建/编辑/删除/查看，一个工具全搞定。"
-                + "【适用场景】当用户多次执行相同流程时创建新技能；技能描述或步骤需要调整时编辑；技能过时或冗余时删除；需要确认当前已有哪些技能时查看列表。"
-                + "【使用方式】通过 action 参数指定操作类型：create=创建技能，update=编辑已有技能，delete=删除技能，list=查看技能列表。"
-                + "【注意】创建技能时推荐提供 trigger_words（触发词）数组，系统会根据触发词自动将技能匹配给用户问题。"
-                + "每次技能使用后必须调用 report_skill_result 反馈执行结果，系统据此自动调整技能置信度，置信度低于 0.1 的技能自动淘汰。";
+        return "【适用场景】技能管理一站式工具，通过 action 参数选择操作模式。\n"
+                + "【action 说明】\n"
+                + "  create — 创建新技能\n"
+                + "  update — 编辑已有技能\n"
+                + "  delete — 删除技能\n"
+                + "  list   — 查看技能列表\n"
+                + "  report — 反馈技能执行结果（成功/失败），系统据此自动调整置信度\n"
+                + "【典型工作流】\n"
+                + "  1) list 查看已有技能\n"
+                + "  2) create 创建新技能（提供 name/description/tool_names/instructions/trigger_words）\n"
+                + "  3) 技能使用完毕后调用 report 反馈结果\n"
+                + "【注意事项】\n"
+                + "  1) create 时强烈建议提供 trigger_words（触发词）数组，系统据此自动匹配\n"
+                + "  2) 每次技能使用后必须调用 action=report，漏报会导致置信度无法更新\n"
+                + "  3) 置信度低于 0.1 的技能自动淘汰不再参与匹配";
     }
 
     @Override
@@ -65,17 +74,17 @@ public class ManageSkillTool implements Tool {
         // === action（必填） ===
         ObjectNode action = objectMapper.createObjectNode();
         action.put("type", "string");
-        action.put("description", "【必填】操作类型：create=创建新技能, update=编辑已有技能, delete=删除技能, list=查看技能列表。"
-                + "各操作所需参数不同，详见各参数字段说明中的【create/update/delete 时必填】标记。");
+        action.put("description", "【必填】操作类型。create=创建技能；update=编辑技能；delete=删除技能；list=查看技能列表；report=反馈执行结果。"
+                + "各操作所需参数不同，详见各参数字段说明。");
         ArrayNode enumValues = objectMapper.createArrayNode();
-        enumValues.add("create").add("update").add("delete").add("list");
+        enumValues.add("create").add("update").add("delete").add("list").add("report");
         action.set("enum", enumValues);
         properties.set("action", action);
 
-        // === skill_id（update/delete 时必填） ===
+        // === skill_id（update/delete/report 时必填） ===
         ObjectNode skillId = objectMapper.createObjectNode();
         skillId.put("type", "number");
-        skillId.put("description", "【update/delete 时必填，create/list 时忽略】技能 ID（数字）。"
+        skillId.put("description", "【update/delete/report 时必填，create/list 时忽略】技能 ID（数字）。"
                 + "从 create 返回结果中获取，或先 action=list 查看已有技能列表从中找到目标技能的 ID。");
         properties.set("skill_id", skillId);
 
@@ -83,16 +92,14 @@ public class ManageSkillTool implements Tool {
         ObjectNode name = objectMapper.createObjectNode();
         name.put("type", "string");
         name.put("description", "【create 时必填，update 时可选】技能名称，用简洁的中文短语概括。"
-                + "例如：「天气查询技能」「Git代码提交」「数据库问题排查」「前端构建部署」。"
-                + "名称应准确描述该技能解决的问题，方便用户和系统识别。");
+                + "例如：「天气查询技能」「Git代码提交」「数据库问题排查」。");
         properties.set("name", name);
 
         // === description ===
         ObjectNode description = objectMapper.createObjectNode();
         description.put("type", "string");
-        description.put("description", "【create 时必填，update 时可选】技能描述，用一两句话写清【何时触发】和【解决什么问题】。"
-                + "例如：「当用户询问天气、温度、降水等气象信息时触发，自动搜索目标城市的实时天气和预报数据」。"
-                + "良好的描述能提高 BM25 匹配精度，让系统更准确地将用户问题路由到正确的技能。");
+        description.put("description", "【create 时必填，update 时可选】技能描述，写清【何时触发】和【解决什么问题】。"
+                + "例如：「当用户询问天气、温度等气象信息时触发，自动搜索目标城市的实时天气和预报数据」。");
         properties.set("description", description);
 
         // === tool_names ===
@@ -101,18 +108,15 @@ public class ManageSkillTool implements Tool {
         ObjectNode items = objectMapper.createObjectNode();
         items.put("type", "string");
         toolNames.set("items", items);
-        toolNames.put("description", "【create 时必填，update 时可选】该技能执行时需要用到的工具名称列表（字符串数组）。"
-                + "例如 [\"web_search\", \"web_fetch\"]，或 [\"execute_sql\", \"read_file\"]。"
-                + "必须是当前助手中已注册存在的工具。系统会自动将这些工具注入到本轮对话中供你使用。");
+        toolNames.put("description", "【create 时必填，update 时可选】该技能需要用到的工具名称列表。"
+                + "例如 [\"web_search\", \"web_fetch\"]。必须是当前已注册的工具名。");
         properties.set("tool_names", toolNames);
 
         // === instructions ===
         ObjectNode instructions = objectMapper.createObjectNode();
         instructions.put("type", "string");
-        instructions.put("description", "【create 时必填，update 时可选】详细的执行步骤与决策逻辑。"
-                + "用「第 N 步：」或数字编号组织层次，写清：何时触发、调用哪个工具、传什么参数、如何判断成功/失败、失败后怎么处理。"
-                + "例如：「第1步：调用 web_search 搜索[城市名+天气]，参数 searchTerm 使用用户提及的城市；"
-                + "第2步：若搜索结果为空，用 web_fetch 抓取中央气象台页面；第3步：提取温度、降水概率、风力等关键信息返回给用户」。"
+        instructions.put("description", "【create 时必填，update 时可选】详细执行步骤与决策逻辑。"
+                + "用「第 N 步：」组织层次，写清：何时触发、调用哪个工具、传什么参数、如何判断成功/失败。"
                 + "越详细的指令，技能执行成功率越高，置信度积累越快。");
         properties.set("instructions", instructions);
 
@@ -122,14 +126,19 @@ public class ManageSkillTool implements Tool {
         ObjectNode twItems = objectMapper.createObjectNode();
         twItems.put("type", "string");
         triggerWords.set("items", twItems);
-        triggerWords.put("description", "【强烈推荐提供】触发词/同义词列表（字符串数组）。"
-                + "用户消息中包含这些词时，系统自动匹配并注入此技能，每个命中词为该技能 +3 分。"
-                + "应覆盖用户可能说的各种说法（同义词、简称、英文、口语等），越多越全则匹配越精准。"
-                + "示例——天气技能：[\"天气\",\"气温\",\"温度\",\"预报\",\"下雨\",\"台风\",\"降雨\",\"降雪\",\"湿度\",\"晴\",\"阴\",\"多云\"]。"
-                + "示例——Git技能：[\"提交\",\"commit\",\"推送\",\"push\",\"拉取\",\"pull\",\"分支\",\"branch\",\"合并\",\"merge\",\"PR\"]。"
-                + "示例——数据库技能：[\"数据库\",\"SQL\",\"慢查询\",\"连接池\",\"死锁\",\"索引\",\"分库分表\"]。"
-                + "不提供触发词时，技能仅依赖名称和描述的 BM25 文本匹配，召回率会显著降低。");
+        triggerWords.put("description", "【create 时强烈建议提供】触发词/同义词列表。"
+                + "用户消息中包含这些词时，系统自动匹配并注入此技能。"
+                + "示例：[\"天气\",\"气温\",\"温度\",\"预报\",\"下雨\"]。"
+                + "不提供触发词时，技能仅依赖名称和描述匹配，召回率会显著降低。");
         properties.set("trigger_words", triggerWords);
+
+        // === success（仅 report 时有效） ===
+        ObjectNode success = objectMapper.createObjectNode();
+        success.put("type", "boolean");
+        success.put("description", "【report 时必填】技能执行是否成功（布尔值 true/false）。"
+                + "true=目标达成/用户满意（置信度上升），false=未达预期/出错（置信度下降）。"
+                + "系统使用贝叶斯平滑公式：confidence = (successCount + 1) / (usageCount + 3)。");
+        properties.set("success", success);
 
         parameters.set("properties", properties);
         ArrayNode required = objectMapper.createArrayNode();
@@ -143,8 +152,7 @@ public class ManageSkillTool implements Tool {
     public String execute(JsonNode arguments) {
         String action = arguments.path("action").asText();
         if (action.isEmpty()) {
-            return "【参数缺失】必填参数 action 未提供。可选值：create（创建）、update（编辑）、delete（删除）、list（查看）。"
-                    + "例如 {\"action\":\"list\"} 查看所有技能，{\"action\":\"create\",\"name\":\"天气技能\",...} 创建新技能。";
+            return "【参数缺失】必填参数 action 未提供。可选值：create、update、delete、list、report。";
         }
 
         Long userId = ToolContext.getUserId();
@@ -154,10 +162,10 @@ public class ManageSkillTool implements Tool {
             case "create" -> handleCreate(arguments, userId, agentConfigId);
             case "update" -> handleUpdate(arguments, userId);
             case "delete" -> handleDelete(arguments, userId);
-            case "list" -> handleList(userId, agentConfigId);
+            case "list"   -> handleList(userId, agentConfigId);
+            case "report" -> handleReport(arguments, userId);
             default -> "【无效操作】action=\"" + action + "\" 不是有效操作。"
-                    + "可选值：create（创建技能）、update（编辑技能）、delete（删除技能）、list（查看技能列表）。"
-                    + "请检查拼写后重试。";
+                    + "可选值：create、update、delete、list、report。";
         };
     }
 
@@ -173,7 +181,7 @@ public class ManageSkillTool implements Tool {
         JsonNode triggerWordsNode = args.path("trigger_words");
 
         if (name.isEmpty() || description.isEmpty() || instructions.isEmpty() || !toolNamesNode.isArray()) {
-            return "【参数缺失】create 操作需要以下必填参数：name（技能名称）、description（技能描述）、tool_names（工具列表）、instructions（执行步骤）。"
+            return "【参数缺失】create 操作需要以下必填参数：name、description、tool_names、instructions。"
                     + "缺失项：" + (name.isEmpty() ? " name" : "")
                     + (description.isEmpty() ? " description" : "")
                     + (!toolNamesNode.isArray() ? " tool_names" : "")
@@ -182,7 +190,7 @@ public class ManageSkillTool implements Tool {
         }
 
         if (userId == null) {
-            return "【会话上下文丢失】无法获取当前用户或助手类型信息。请重试，若持续失败请联系管理员。";
+            return "【会话上下文丢失】无法获取当前用户信息。请重试，若持续失败请联系管理员。";
         }
 
         // 校验工具名
@@ -194,27 +202,26 @@ public class ManageSkillTool implements Tool {
             }
         }
         if (!invalidTools.isEmpty()) {
-            return "【工具不存在】以下工具名在当前助手中未注册：" + String.join(", ", invalidTools)
+            return "【工具不存在】以下工具名未注册：" + String.join(", ", invalidTools)
                     + "。请先 action=list 查看可用工具，确认拼写无误后重新调用。";
         }
 
-        String toolNames;
-        String triggerWords = null;
+        String toolNamesStr;
+        String triggerWordsStr = null;
         try {
-            toolNames = objectMapper.writeValueAsString(toolNamesNode);
+            toolNamesStr = objectMapper.writeValueAsString(toolNamesNode);
             if (triggerWordsNode.isArray()) {
-                triggerWords = objectMapper.writeValueAsString(triggerWordsNode);
+                triggerWordsStr = objectMapper.writeValueAsString(triggerWordsNode);
             }
         } catch (Exception e) {
-            return "【格式错误】tool_names 或 trigger_words 不是合法的 JSON 数组格式。"
-                    + "请传入标准 JSON 字符串数组，例如 [\"tool_a\", \"tool_b\"]。";
+            return "【格式错误】tool_names 或 trigger_words 不是合法的 JSON 数组。";
         }
 
         // 检查相似技能
         List<Skill> existingSkills = skillService.listSkills(userId);
         Skill similarSkill = null;
         double highestSimilarity = 0;
-        Skill candidate = new Skill(name, description, toolNames, instructions, triggerWords, userId, "custom");
+        Skill candidate = new Skill(name, description, toolNamesStr, instructions, triggerWordsStr, userId, "custom");
         candidate.setAgentConfigId(agentConfigId);
         for (Skill existing : existingSkills) {
             if (existing.getAgentConfigId() != null && !existing.getAgentConfigId().equals(agentConfigId)) continue;
@@ -225,7 +232,7 @@ public class ManageSkillTool implements Tool {
             }
         }
 
-        Skill skill = skillService.createSkill(name, description, toolNames, instructions, triggerWords, userId, "custom");
+        Skill skill = skillService.createSkill(name, description, toolNamesStr, instructions, triggerWordsStr, userId, "custom");
         if (agentConfigId != null) {
             skill.setAgentConfigId(agentConfigId);
             jdbcTemplate.update("UPDATE skill SET agent_config_id = ? WHERE id = ?", agentConfigId, skill.getId());
@@ -233,9 +240,9 @@ public class ManageSkillTool implements Tool {
 
         StringBuilder result = new StringBuilder();
         result.append("技能「").append(name).append("」创建成功 (ID: ").append(skill.getId()).append(")\n");
-        result.append("初始置信度：50%。后续每次使用后请调用 report_skill_result 反馈结果，系统自动调整。\n");
+        result.append("初始置信度：50%。后续每次使用后请调用 skill action=report 反馈结果，系统自动调整。\n");
         result.append("关联工具：").append(toolNamesNode).append("\n");
-        if (triggerWords != null) {
+        if (triggerWordsStr != null) {
             result.append("触发词：").append(triggerWordsNode).append("\n");
         }
         result.append("执行步骤：").append(instructions);
@@ -256,10 +263,9 @@ public class ManageSkillTool implements Tool {
 
     private String handleUpdate(JsonNode args, Long userId) {
         if (!args.has("skill_id") || args.path("skill_id").isNull()) {
-            return "【参数缺失】update 操作需要 skill_id 参数（要编辑的技能 ID）。"
-                    + "请先 action=list 查看技能列表获取目标技能 ID，再传入更新。";
+            return "【参数缺失】update 操作需要 skill_id 参数（要编辑的技能 ID）。请先 action=list 查看技能列表获取目标技能 ID。";
         }
-        long skillId = args.path("skill_id").asLong();
+        long skillId = safeLong(args, "skill_id");
 
         if (userId == null) {
             return "【会话上下文丢失】无法获取当前用户信息。请重试，若持续失败请联系管理员。";
@@ -268,8 +274,7 @@ public class ManageSkillTool implements Tool {
         try {
             Skill existing = skillService.getSkillById(skillId);
             if (!existing.getUserId().equals(userId)) {
-                return "【权限拒绝】技能 ID=" + skillId + " 不属于当前用户，无法编辑。"
-                        + "请先 action=list 查看自己可操作的技能列表，确认目标技能 ID 正确。";
+                return "【权限拒绝】技能 ID=" + skillId + " 不属于当前用户，无法编辑。请先 action=list 查看自己可操作的技能列表。";
             }
         } catch (IllegalArgumentException e) {
             return "错误：" + e.getMessage();
@@ -295,11 +300,11 @@ public class ManageSkillTool implements Tool {
             }
         }
 
-        String toolNames = null;
-        String triggerWords = null;
+        String toolNamesStr = null;
+        String triggerWordsStr = null;
         try {
-            if (toolNamesNode.isArray()) toolNames = objectMapper.writeValueAsString(toolNamesNode);
-            if (triggerWordsNode.isArray()) triggerWords = objectMapper.writeValueAsString(triggerWordsNode);
+            if (toolNamesNode.isArray()) toolNamesStr = objectMapper.writeValueAsString(toolNamesNode);
+            if (triggerWordsNode.isArray()) triggerWordsStr = objectMapper.writeValueAsString(triggerWordsNode);
         } catch (Exception e) {
             return "【格式错误】tool_names 或 trigger_words 不是合法的 JSON 数组。";
         }
@@ -307,18 +312,18 @@ public class ManageSkillTool implements Tool {
         Skill updated = skillService.updateSkill(skillId,
                 name.isEmpty() ? null : name,
                 description.isEmpty() ? null : description,
-                toolNames,
+                toolNamesStr,
                 instructions.isEmpty() ? null : instructions,
-                triggerWords,
+                triggerWordsStr,
                 userId);
 
         StringBuilder result = new StringBuilder();
         result.append("技能「").append(updated.getName()).append("」(ID:").append(skillId).append(") 更新成功。");
         if (name != null && !name.isEmpty()) result.append("\n名称 → ").append(name);
         if (description != null && !description.isEmpty()) result.append("\n描述 → ").append(description);
-        if (toolNames != null) result.append("\n工具 → ").append(toolNamesNode);
+        if (toolNamesStr != null) result.append("\n工具 → ").append(toolNamesNode);
         if (instructions != null && !instructions.isEmpty()) result.append("\n步骤 → ").append(instructions);
-        if (triggerWords != null) result.append("\n触发词 → ").append(triggerWordsNode);
+        if (triggerWordsStr != null) result.append("\n触发词 → ").append(triggerWordsNode);
         return result.toString();
     }
 
@@ -328,10 +333,9 @@ public class ManageSkillTool implements Tool {
 
     private String handleDelete(JsonNode args, Long userId) {
         if (!args.has("skill_id") || args.path("skill_id").isNull()) {
-            return "【参数缺失】delete 操作需要 skill_id 参数（要删除的技能 ID）。"
-                    + "请先 action=list 查看技能列表，确认要删除目标的 ID 后重新调用。";
+            return "【参数缺失】delete 操作需要 skill_id 参数。请先 action=list 查看技能列表，确认要删除目标的 ID 后重新调用。";
         }
-        long skillId = args.path("skill_id").asLong();
+        long skillId = safeLong(args, "skill_id");
 
         if (userId == null) {
             return "【会话上下文丢失】无法获取当前用户信息。请重试，若持续失败请联系管理员。";
@@ -355,11 +359,10 @@ public class ManageSkillTool implements Tool {
         }
 
         List<Skill> skills = skillService.listSkills(userId);
-        // 按 Agent 过滤
         if (agentConfigId != null) {
             skills = skills.stream()
-                .filter(s -> s.getAgentConfigId() == null || s.getAgentConfigId().equals(agentConfigId))
-                .collect(java.util.stream.Collectors.toList());
+                    .filter(s -> s.getAgentConfigId() == null || s.getAgentConfigId().equals(agentConfigId))
+                    .toList();
         }
         if (skills.isEmpty()) {
             return "当前用户尚无已创建的技能。如果你发现某个多步骤操作被重复执行了 3 次以上，"
@@ -385,5 +388,61 @@ public class ManageSkillTool implements Tool {
             if (i < skills.size() - 1) sb.append("\n");
         }
         return sb.toString();
+    }
+
+    // ============================================================
+    // report（原 report_skill_result）
+    // ============================================================
+
+    private String handleReport(JsonNode args, Long userId) {
+        if (!args.has("skill_id") || args.path("skill_id").isNull()) {
+            return "【参数缺失】action=report 需要 skill_id 参数。请传入 skill action=create 返回的 ID，或先 skill action=list 查询。";
+        }
+        if (!args.has("success") || args.path("success").isNull()) {
+            return "【参数缺失】action=report 需要 success 参数。请传入布尔值 true（成功）或 false（失败）。";
+        }
+
+        long skillId = safeLong(args, "skill_id");
+        boolean success = args.path("success").asBoolean();
+
+        if (userId == null) {
+            return "【会话上下文丢失】无法获取当前用户信息。请重试，若持续失败请联系管理员。";
+        }
+        try {
+            Skill existingSkill = skillService.getSkillById(skillId);
+            if (!existingSkill.getUserId().equals(userId)) {
+                return "【权限拒绝】技能 ID=" + skillId + " 不属于当前用户，无法报告执行结果。"
+                        + "请先用 skill action=list 查询自己可操作的技能列表，确认目标技能 ID 正确。";
+            }
+        } catch (IllegalArgumentException e) {
+            return "错误：" + e.getMessage();
+        }
+
+        try {
+            Skill skill = skillService.reportResult(skillId, success);
+            String status = success ? "成功" : "失败";
+            double confidence = skill.getConfidence();
+            String warning = "";
+            if (confidence < 0.1) {
+                warning = "\n⚠️ 技能「" + skill.getName() + "」置信度已低于 0.1，已不再自动生效。";
+            }
+            return "技能「" + skill.getName() + "」(ID:" + skillId + ") 执行结果：" + status
+                    + "\n当前置信度：" + String.format("%.0f%%", confidence * 100)
+                    + "（共使用 " + skill.getUsageCount() + " 次，成功 " + skill.getSuccessCount()
+                    + " / 失败 " + skill.getFailCount() + "）" + warning;
+        } catch (IllegalArgumentException e) {
+            return "错误：" + e.getMessage();
+        }
+    }
+
+    // ==================== 工具方法 ====================
+
+    private long safeLong(JsonNode args, String key) {
+        try {
+            return args.get(key).asLong();
+        } catch (Exception e) {
+            log.warn("skill {}: 解析失败。原始值: {}", key, args.get(key));
+            return 0;
+        }
     }
 }

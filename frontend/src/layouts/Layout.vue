@@ -85,7 +85,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
-import { useSettingsStore, type ThemeMode } from '@/store/settings'
+import { useSettingsStore } from '@/store/settings'
 import { logout } from '@/api/user'
 import { getUserMenus } from '@/api/menu'
 import {
@@ -128,12 +128,14 @@ const themeTooltip = computed(() => {
   return resolvedTheme.value === 'dark' ? '切换到亮色模式' : '切换到暗色模式'
 })
 
-const themes: ThemeMode[] = ['light', 'dark', 'auto']
 function toggleTheme() {
   const current = settingsStore.getTheme()
-  const idx = themes.indexOf(current)
-  const next = themes[(idx + 1) % themes.length]
-  settingsStore.setTheme(next)
+  // 解析当前实际显示的主题（auto 时按系统偏好决定）
+  const resolved: 'light' | 'dark' = current === 'auto'
+    ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    : current as 'light' | 'dark'
+  // 直接切换到相反模式，跳过 auto 循环
+  settingsStore.setTheme(resolved === 'dark' ? 'light' : 'dark')
 }
 
 const toggleCollapsed = () => {

@@ -153,30 +153,37 @@ public class ToolLoopManager {
         try {
             JsonNode args = objectMapper.readTree(argsJson);
             return switch (toolName) {
-                case "read_file", "write_file", "edit_file", "delete_file" -> {
+                case "file_explorer", "file_writer" -> {
                     String path = args.path("file_path").asText("");
                     if (path.isEmpty()) path = args.path("path").asText("");
-                    yield toolName + ":" + (path.isEmpty() ? "*" : path);
+                    // file_explorer 需带上 action 区分 read/glob/grep/tree
+                    String action = args.path("action").asText("");
+                    String label = "file_explorer".equals(toolName) && !action.isEmpty()
+                            ? toolName + ":" + action : toolName;
+                    yield label + ":" + (path.isEmpty() ? "*" : path);
                 }
-                case "run_command", "run_server" -> {
+                case "command" -> {
+                    String cmdAction = args.path("action").asText("");
                     String cmd = args.path("command").asText("");
-                    yield toolName + ":" + (cmd.isEmpty() ? "*" : cmd);
+                    String label = cmdAction.isEmpty() ? "command" : "command:" + cmdAction;
+                    yield label + ":" + (cmd.isEmpty() ? "*" : cmd);
                 }
                 case "execute_sql" -> {
                     String sql = args.path("sql").asText("");
                     yield toolName + ":" + (sql.isEmpty() ? "*" : sql);
                 }
-                case "git_add" -> {
-                    String files = args.path("files").asText("");
-                    yield toolName + ":" + (files.isEmpty() ? "*" : files);
-                }
-                case "git_commit" -> {
-                    String msg = args.path("message").asText("");
-                    yield toolName + ":" + (msg.isEmpty() ? "*" : msg);
-                }
-                case "git_push", "service_control" -> {
+                case "git_submit" -> {
                     String action = args.path("action").asText("");
-                    yield toolName + ":" + (action.isEmpty() ? "*" : action);
+                    String detail = switch (action) {
+                        case "add" -> args.path("path").asText("");
+                        case "commit" -> args.path("message").asText("");
+                        case "push" -> {
+                            String branch = args.path("branch").asText("");
+                            yield branch.isEmpty() ? "push" : branch;
+                        }
+                        default -> action;
+                    };
+                    yield toolName + ":" + (detail.isEmpty() ? action : detail);
                 }
                 default -> toolName;
             };
@@ -275,16 +282,45 @@ public class ToolLoopManager {
     }
 
     /**
-     * 创建工具调用开始的SSE事件
+     * 创建工具调用开始的SSE事件（JSON格式，前端解析后显示加载动画）
+     * @param toolNames 工具名称列表
+     * @param operationSummaries 操作摘要列表（如 "📄 创建文件: xxx"），可为空
+     */
+    public String createToolCallStartEvent(List<String> toolNames, List<String> operationSummaries) {
+        try {
+            ObjectNode root = objectMapper.createObjectNode();
+            root.put("event", "tool_call_start");
+            root.put("id", UUID.randomUUID().toString());
+            root.put("created", Instant.now().getEpochSecond());
+
+            ArrayNode toolsArr = objectMapper.createArrayNode();
+            for (String name : toolNames) {
+                toolsArr.add(name);
+            }
+            root.set("tools", toolsArr);
+
+            ArrayNode summariesArr = objectMapper.createArrayNode();
+            if (operationSummaries != null) {
+                for (String summary : operationSummaries) {
+                    summariesArr.add(summary);
+                }
+            }
+            root.set("summaries", summariesArr);
+
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            log.error("创建工具调用开始事件失败", e);
+            // 降级为旧格式
+            String msg = toolNames.isEmpty() ? "正在调用工具..." : "调用 " + String.join(", ", toolNames);
+            return createReasoningSSEEvent(msg);
+        }
+    }
+
+    /**
+     * 创建工具调用开始的SSE事件（无操作摘要的简化版）
      */
     public String createToolCallStartEvent(List<String> toolNames) {
-        String msg;
-        if (toolNames.isEmpty()) {
-            msg = "正在调用工具...";
-        } else {
-            msg = "调用 " + String.join(", ", toolNames);
-        }
-        return createReasoningSSEEvent(msg);
+        return createToolCallStartEvent(toolNames, null);
     }
 
     /**
