@@ -1,3 +1,4 @@
+> 🌐 English Version：[🇬🇧 CONTRIBUTING_EN](./CONTRIBUTING_EN.md)
 # 🎯 贡献指南
 
 感谢你对 CodeCraft 的关注！我们欢迎任何形式的贡献，包括但不限于：

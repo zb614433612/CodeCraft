@@ -1,3 +1,4 @@
+> 🌐 English Version：[🇬🇧 CODE_OF_CONDUCT_EN](./CODE_OF_CONDUCT_EN.md)
 # 📜 贡献者行为准则
 
 ## 我们的承诺

@@ -1,3 +1,4 @@
+> 🌐 English Version：[🇬🇧 FAQ_EN](./FAQ_EN.md)
 # 常见问题 FAQ
 
 > 开发、运行、打包过程中已踩过的坑和解决方案。

@@ -1,3 +1,4 @@
+> 🌐 English Version：[🇬🇧 CHANGELOG_EN](./CHANGELOG_EN.md)
 # 更新日志
 
 本文档记录 CodeCraft 项目的所有重要版本变更。
