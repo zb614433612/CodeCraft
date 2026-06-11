@@ -36,20 +36,6 @@
 
 与普通的 AI ChatBot 聊天助手不同，CodeCraft 是一个真正具备**完整工具调用能力（Tool Use / Function Calling）** 的 **Autonomous Coding Agent（自主编程智能体）**——它能读取项目文件、搜索代码库、执行 Shell 命令、操作 Git 版本控制，甚至自动创建子 Agent 并行处理复杂开发任务，像一位 **AI 软件工程师（AI Software Engineer）** 一样独立完成工作。
 
-### 🆚 与同类项目对比
-
-| 特性 | CodeCraft | Cline | Aider | OpenCode | Codex CLI |
-|------|-----------|-------|-------|----------|-----------|
-| 底层模型 | **DeepSeek** | Claude/GPT | 多模型 | Claude/GPT | OpenAI |
-| 形态 | **桌面应用 + CLI** | VS Code 插件 | 终端 CLI | 终端 TUI | 终端 CLI |
-| 多 Agent 并行 | ✅ 最多20并发 | ❌ | ❌ | ❌ | ✅ |
-| 快照回滚 | ✅ 内置 | ❌ | ❌ | ❌ | ❌ |
-| 技能系统 | ✅ 贝叶斯置信度 | ❌ | ❌ | ❌ | ❌ |
-| P2P 远程协作 | ✅ Netty+TLS | ❌ | ❌ | ❌ | ❌ |
-| 开箱即用 | ✅ 内置JRE | ❌ 需配置 | ❌ 需配置 | ❌ 需配置 | ❌ 需配置 |
-
----
-
 ## ✨ 核心功能
 
 ### 🧠 多 Agent 并行协作（Multi-Agent System）
