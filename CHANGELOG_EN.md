@@ -98,7 +98,7 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
-## [1.1.0] - 2026-06-24
+## [1.1.0] - 2026-06-04
 
 ### 🎉 New Features
 

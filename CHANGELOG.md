@@ -9,7 +9,7 @@
 
 ### 🎉 工具系统重大重构（Tool Unification）
 
-- **工具合并统一（19 工具 → 19 工具）**：将原有 30+ 个独立工具合并为 19 个统一工具，采用 `action` 参数区分操作模式，大幅降低 LLM 工具选择混淆度
+- **工具合并统一（30 工具 → 19 工具）**：将原有 30+ 个独立工具合并为 19 个统一工具，采用 `action` 参数区分操作模式，大幅降低 LLM 工具选择混淆度
   - **文件操作**：`read_file`/`glob_files`/`grep_search`/`read_project_tree` → `file_explorer`（action: read/glob/grep/tree）
   - **文件编辑**：`write_file`/`edit_file`/`delete_file` → `file_writer`（action: write/edit/delete）
   - **命令执行**：`run_command`/`run_server`/`service_control` → `command`（action: exec/start/list/logs/stop）
@@ -98,7 +98,7 @@
 
 ---
 
-## [1.1.0] - 2026-06-24
+## [1.1.0] - 2026-06-04
 
 ### 🎉 新增功能
 
