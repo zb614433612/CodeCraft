@@ -190,11 +190,7 @@ public class DeepSeekConfig {
             log.debug("从数据库读取 API Key 失败（可能表尚未初始化），回退到配置文件: {}", e.getMessage());
         }
 
-        // 数据库没有则回退到配置文件
-        if (key == null || key.isEmpty()) {
-            key = this.apiKey;
-        }
-
+        // 统一从数据库获取，不再回退到配置文件（与 AgentForkManager 逻辑一致）
         if (key == null || key.isEmpty() || "__MUST_CONFIGURE_API_KEY__".equals(key)) {
             log.warn("API Key 未配置，跳过预热（首次请求将较慢）。请在前端「配置」页面设置 API Key。");
             return;

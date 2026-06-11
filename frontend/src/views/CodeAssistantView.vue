@@ -3922,16 +3922,22 @@ function extractActionFromToolContent(content: string, toolName: string): string
  *   当前置信度：XX%（共使用 N 次，成功 N / 失败 N）
  */
 function renderSkillUsageCard(content: string): string | null {
-  const nameMatch = content.match(/技能「(.+?)」/)
+  // ⚠️ 只检查第一行！避免后续文本中的「技能」「执行结果」等关键词误匹配
+  // 参考下方 tool-result-card 的 isError 判断也做了同样的限制（line 4009-4011）
+  const firstLine = content.split('\n')[0]
+  // 必须包含"执行结果"关键词，否则不是 report 结果（可能是 create/list/update/delete）
+  // 例如 skill create 第一行"技能「xxx」创建成功 (ID: N)"也会匹配 /技能「(.+?)」/，但不含"执行结果"
+  if (!/执行结果/.test(firstLine)) return null
+  const nameMatch = firstLine.match(/技能「(.+?)」/)
   if (!nameMatch) return null
   const skillName = nameMatch[1]
-  const success = /执行结果[：:]\s*(成功)/.test(content)
+  const success = /执行结果[：:]\s*(成功)/.test(firstLine)
   const confMatch = content.match(/当前置信度[：:]\s*(\d+%?)%/)
   const confidence = confMatch ? confMatch[1].replace('%', '') + '%' : ''
   const statusText = success ? '技能使用成功' : '技能使用失败'
   const statusIcon = success ? '&#10003;' : '&#10007;'
   const cardClass = success ? 'skill-usage-success' : 'skill-usage-fail'
-  const firstLine = content.split('\n')[0].substring(0, 80)
+  const firstLineSummary = firstLine.substring(0, 80)
   const escaped = escapeHtml(content)
 
   return `<div class="skill-usage-card tool-result-collapsed ${cardClass}">
@@ -3940,7 +3946,7 @@ function renderSkillUsageCard(content: string): string | null {
       <span class="skill-usage-badge ${success ? 'skill-usage-badge-ok' : 'skill-usage-badge-fail'}">${statusIcon}</span>
       <span class="tr-label">${escapeHtml(statusText)}：${escapeHtml(skillName)}</span>
       ${confidence ? `<span class="skill-usage-conf">${escapeHtml(confidence)}</span>` : ''}
-      <span class="tr-summary">${escapeHtml(firstLine)}</span>
+      <span class="tr-summary">${escapeHtml(firstLineSummary)}</span>
     </div>
     <div class="tool-result-body"><pre>${escaped}</pre></div>
   </div>`
@@ -4007,8 +4013,11 @@ const formatThinking = (thinking: string | undefined, toolResults?: { at: number
 
         const escaped = escapeHtml(displayContent)
         // ⚠️ 只检查第一行！工具报错永远在第一行，避免读取文件内容中的「错误关键词」导致误判
+        // 注意：【[^】]+】不能用作通用匹配——project_info 等工具的成功结果也以【结构】【依赖】开头
         const firstLineOfResult = displayContent.split('\n')[0]
-        const isError = /^(错误[：:]|【[^】]+】|❌\s*错误)/.test(firstLineOfResult) || /\bCannot\b/.test(firstLineOfResult)
+        const isError = /^(错误[：:]|❌\s*错误)/.test(firstLineOfResult)
+                     || /【失败|【异常|【错误|【超时|【无数据|【未找到|【权限不足|【缺少参数|【不支持|【操作失败|【查询失败|【更新失败|【删除失败|【创建失败|【启动失败|【命令未找到|【执行异常|【执行中断|【参数缺失|【参数错误|【并发限制|【任务不存在|【无法识别|【格式错误|【缺少参数/.test(firstLineOfResult)
+                     || /\bCannot\b/.test(firstLineOfResult)
         const firstLine = displayContent.split('\n')[0].substring(0, 80)
         // 提取操作类型并构建更有信息的标签
         const actionLabel = toolName ? extractActionFromToolContent(displayContent, toolName) : ''

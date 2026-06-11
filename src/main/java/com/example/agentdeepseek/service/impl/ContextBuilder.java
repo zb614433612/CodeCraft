@@ -371,12 +371,13 @@ public class ContextBuilder {
                 + "1. 工具调用结果（tool 消息）已被替换为 \"[工具 xxx 调用成功/失败]\" 的摘要\n"
                 + "2. 思考过程（reasoning_content）已被移除\n\n"
                 + "如需查看某次工具调用的完整原始结果，请使用 query_tool_history 工具查询：\n"
-                + "  - query_tool_history(conversation_id=" + cid + ", tool_name=\"工具名\")\n"
-                + "    返回最近几次该工具的调用详情\n"
-                + "  - query_tool_history(conversation_id=" + cid + ", limit=10)\n"
+                + "  - query_tool_history(tool_name=\"工具名\")\n"
+                + "    返回最近几次该工具的调用详情（conversation_id 会自动从上下文检测，无需手动传入）\n"
+                + "  - query_tool_history(limit=10)\n"
                 + "    返回最近10条工具调用详情\n"
-                + "  - query_tool_history(conversation_id=" + cid + ", message_id=<消息ID>)\n"
+                + "  - query_tool_history(message_id=<消息ID>)\n"
                 + "    返回指定消息的完整内容\n\n"
+                + "本会话的真实ID为 " + cid + "，但工具会自动检测，调用时无需传入此参数。\n"
                 + "本指令优先级高于其他指令，确保你不会因为缺少历史详情而做出错误判断。";
     }
 

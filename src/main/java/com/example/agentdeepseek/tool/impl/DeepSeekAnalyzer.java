@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.DeepSeekConfig;
+import com.example.agentdeepseek.service.ConfigService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -23,10 +24,13 @@ public class DeepSeekAnalyzer {
 
     private final WebClient webClient;
     private final DeepSeekConfig deepSeekConfig;
+    private final ConfigService configService;
     private final ObjectMapper objectMapper;
 
-    public DeepSeekAnalyzer(WebClient.Builder webClientBuilder, DeepSeekConfig deepSeekConfig, ObjectMapper objectMapper) {
+    public DeepSeekAnalyzer(WebClient.Builder webClientBuilder, DeepSeekConfig deepSeekConfig,
+                            ConfigService configService, ObjectMapper objectMapper) {
         this.deepSeekConfig = deepSeekConfig;
+        this.configService = configService;
         this.objectMapper = objectMapper;
 
         // 大缓冲区（10MB），适配非流式分析场景
@@ -34,9 +38,12 @@ public class DeepSeekAnalyzer {
                 .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
                 .build();
 
+        // 【修复】不再 hardcode defaultHeader("Authorization")，改为每次请求时动态获取 API Key
+        // - 用户可能在前端「配置」页面修改 API Key（存入数据库 sys_config 表）
+        // - 若硬编码 defaultHeader，后续修改不会生效，导致 401 认证失败
+        // - 参考 AgentForkManager.callDeepSeekApi() 的做法：每次请求前动态获取并设置 Bearer Auth
         this.webClient = webClientBuilder
                 .baseUrl(deepSeekConfig.getBaseUrl())
-                .defaultHeader("Authorization", "Bearer " + deepSeekConfig.getApiKey())
                 .defaultHeader("Content-Type", "application/json")
                 .exchangeStrategies(strategies)
                 .build();
@@ -136,8 +143,16 @@ public class DeepSeekAnalyzer {
             }
 
             try {
+                // 动态获取 API Key（与 AgentForkManager.callDeepSeekApi() 逻辑一致）
+                // 统一从数据库 sys_config 表读取，用户可在前端「配置」页面实时修改
+                final String apiKey = configService.getValue("deepseek_api_key");
+                if (apiKey == null || apiKey.isEmpty()) {
+                    return "错误：DeepSeek API Key 未配置，请先在配置页面设置 API Key";
+                }
+
                 String response = webClient.post()
                         .uri("/v1/chat/completions")
+                        .headers(headers -> headers.setBearerAuth(apiKey))
                         .contentType(MediaType.APPLICATION_JSON)
                         .bodyValue(request)
                         .retrieve()

@@ -6,6 +6,7 @@ import com.example.agentdeepseek.model.entity.MessageRole;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
+import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -47,8 +48,8 @@ public class QueryToolHistoryTool implements Tool {
         return "查询当前会话中历史工具调用的详细信息。\n"
                 + "【适用场景】在 compact 上下文模式下，非本轮对话的工具调用结果已被精简。"
                 + "如需查看某次工具调用的完整原始结果，使用此工具按需获取。\n"
-                + "【使用方式】提供 conversation_id（会话ID），可选 tool_name 过滤特定工具、"
-                + "message_id 查询指定消息、limit 控制返回条数。";
+                + "【使用方式】conversation_id 可选（工具会自动从上下文检测真实会话ID），"
+                + "可选 tool_name 过滤特定工具、message_id 查询指定消息、limit 控制返回条数。";
     }
 
     @Override
@@ -61,7 +62,7 @@ public class QueryToolHistoryTool implements Tool {
         // conversation_id
         ObjectNode convId = objectMapper.createObjectNode();
         convId.put("type", "integer");
-        convId.put("description", "【必填】会话ID（当前对话的 conversationId）");
+        convId.put("description", "【可选】会话ID。工具会自动从上下文检测真实会话ID，通常无需手动传入。仅在需要查询其他会话时使用");
         properties.set("conversation_id", convId);
 
         // tool_name
@@ -85,7 +86,6 @@ public class QueryToolHistoryTool implements Tool {
 
         parameters.set("properties", properties);
         ArrayNode required = objectMapper.createArrayNode();
-        required.add("conversation_id");
         parameters.set("required", required);
 
         return parameters;
@@ -94,10 +94,20 @@ public class QueryToolHistoryTool implements Tool {
     @Override
     public String execute(JsonNode arguments) {
         try {
-            long conversationId = arguments.path("conversation_id").asLong();
-            if (conversationId <= 0) {
-                return "【缺少参数】conversation_id 必须为有效的会话ID";
+            // 优先从 ToolContext ThreadLocal 获取真实会话ID（系统设置，不受LLM幻觉影响）
+            Long contextConvId = ToolContext.getConversationId();
+
+            long conversationId = arguments.path("conversation_id").asLong(0);
+            if (conversationId <= 0 && contextConvId == null) {
+                return "【缺少参数】无法确定会话ID：参数未传入且上下文不可用";
             }
+
+            // ThreadLocal 是权威来源：LLM 即使传错也会被自动修正
+            if (contextConvId != null && contextConvId.longValue() != conversationId && conversationId > 0) {
+                log.warn("LLM 传入了错误的 conversation_id={}，ThreadLocal 实际为 {}，已自动修正",
+                        conversationId, contextConvId);
+            }
+            final long effectiveConvId = contextConvId != null ? contextConvId : conversationId;
 
             // 如果指定了 message_id，直接查询单条消息
             long messageId = arguments.path("message_id").asLong(-1);
@@ -110,9 +120,9 @@ public class QueryToolHistoryTool implements Tool {
             }
 
             // 加载会话的全部消息
-            List<ConversationMessage> allMessages = conversationMessageMapper.selectByConversationId(conversationId);
+            List<ConversationMessage> allMessages = conversationMessageMapper.selectByConversationId(effectiveConvId);
             if (allMessages == null || allMessages.isEmpty()) {
-                return "【无数据】会话 " + conversationId + " 没有消息记录";
+                return "【无数据】会话 " + effectiveConvId + " 没有消息记录";
             }
 
             // 过滤：只保留 TOOL 消息
@@ -131,9 +141,6 @@ public class QueryToolHistoryTool implements Tool {
                 java.util.Map<String, String> tcIdToName = buildToolCallIdNameMap(allMessages);
                 toolMessages = toolMessages.stream()
                         .filter(m -> {
-                            // TOOL 消息的 tool_call_id 存储在 content 或独立字段中
-                            // 这里需要通过关联关系查找：TOOL 消息紧跟对应的 assistant(tool_calls)
-                            // 简化处理：直接在前一条 assistant 消息的 tool_calls 中搜索
                             return matchesToolName(m, toolNameFilter, allMessages, tcIdToName);
                         })
                         .collect(Collectors.toList());
@@ -146,12 +153,12 @@ public class QueryToolHistoryTool implements Tool {
 
             if (toolMessages.isEmpty()) {
                 String filterInfo = toolNameFilter != null ? "（过滤条件：工具名=" + toolNameFilter + "）" : "";
-                return "【无匹配结果】会话 " + conversationId + " 中没有匹配的工具调用记录" + filterInfo;
+                return "【无匹配结果】会话 " + effectiveConvId + " 中没有匹配的工具调用记录" + filterInfo;
             }
 
             // 格式化输出
             StringBuilder sb = new StringBuilder();
-            sb.append("会话 ").append(conversationId).append(" 的工具调用历史（最近 ")
+            sb.append("会话 ").append(effectiveConvId).append(" 的工具调用历史（最近 ")
                     .append(toolMessages.size()).append(" 条）：\n\n");
 
             for (int i = 0; i < toolMessages.size(); i++) {
