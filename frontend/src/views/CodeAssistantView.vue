@@ -549,8 +549,8 @@
                 class="model-select"
                 dropdown-class-name="mode-dropdown"
               >
-                <a-select-option value="deepseek-v4-flash">Flash</a-select-option>
-                <a-select-option value="deepseek-v4-pro">Pro</a-select-option>
+                <a-select-option value="deepseek-v4-flash">v4-flash (1M)</a-select-option>
+                <a-select-option value="deepseek-v4-pro">v4-pro (1M)</a-select-option>
               </a-select>
             </div>
             <div class="mode-selector">
@@ -5743,7 +5743,7 @@ watch(currentConversationId, (newId) => {
   width: 68px;
 }
 .model-select {
-  width: 90px;
+  width: 130px;
 }
 .mode-select :deep(.ant-select-selection-item),
 .model-select :deep(.ant-select-selection-item) {
