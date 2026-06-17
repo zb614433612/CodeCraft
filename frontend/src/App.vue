@@ -27,7 +27,7 @@ const antTheme = computed(() => ({
   }
 }))
 
-// 应用主题到 <html> 元素
+// 应用主题到 <html> 元素，并同步 Electron 标题栏
 function applyTheme(mode: string) {
   let resolved: 'light' | 'dark'
   if (mode === 'auto') {
@@ -36,6 +36,12 @@ function applyTheme(mode: string) {
     resolved = mode as 'light' | 'dark'
   }
   document.documentElement.setAttribute('data-theme', resolved)
+
+  // 通知 Electron 主进程更新标题栏颜色（浏览器环境下该 API 不存在，静默忽略）
+  const api = (window as any).electronAPI
+  if (api?.setTheme) {
+    api.setTheme(mode)
+  }
 }
 
 // 初始化主题

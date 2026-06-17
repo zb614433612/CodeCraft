@@ -1,10 +1,51 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } = require('electron')
 const { spawn, exec } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
 
 const DEV_MODE = process.env.DEV_MODE === 'true'
+
+// ── 标题栏主题色配置 ──
+const TITLE_BAR_THEME = {
+  dark: {
+    color: '#16171d',       // 与前端暗色背景 --bg 一致
+    symbolColor: '#9ca3af'   // 与前端暗色文字 --text 一致
+  },
+  light: {
+    color: '#ffffff',
+    symbolColor: '#333333'
+  }
+}
+
+/**
+ * 根据主题模式更新窗口标题栏样式和 Electron 原生主题
+ * @param {string} mode - 'light' | 'dark' | 'auto'
+ */
+function applyTitleBarTheme(mode) {
+  // 解析实际主题
+  let resolved
+  if (mode === 'auto') {
+    resolved = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+  } else {
+    resolved = mode === 'dark' ? 'dark' : 'light'
+  }
+
+  // 设置 Electron 原生主题（影响原生对话框、右键菜单等）
+  nativeTheme.themeSource = mode === 'auto' ? 'system' : (mode === 'dark' ? 'dark' : 'light')
+
+  // 更新窗口标题栏覆盖色
+  const overlay = TITLE_BAR_THEME[resolved]
+  if (mainWindow) {
+    mainWindow.setTitleBarOverlay({
+      color: overlay.color,
+      symbolColor: overlay.symbolColor,
+      height: 32  // Windows 标题栏默认高度
+    })
+    // 同时设置窗口背景色，避免 dark 模式下标题栏与内容之间有白边
+    mainWindow.setBackgroundColor(resolved === 'dark' ? '#16171d' : '#ffffff')
+  }
+}
 
 /**
  * 获取后端服务端口
@@ -275,6 +316,10 @@ function createWindow() {
   // 移除默认菜单栏
   Menu.setApplicationMenu(null)
   
+  // 根据当前系统主题预设 titleBarOverlay 初始值
+  const initialDark = nativeTheme.shouldUseDarkColors
+  const initialOverlay = initialDark ? TITLE_BAR_THEME.dark : TITLE_BAR_THEME.light
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -287,6 +332,12 @@ function createWindow() {
     },
     title: 'CodeCraft',
     icon: path.join(__dirname, 'icon.png'),
+    backgroundColor: initialDark ? '#16171d' : '#ffffff',
+    titleBarOverlay: {
+      color: initialOverlay.color,
+      symbolColor: initialOverlay.symbolColor,
+      height: 32
+    },
     show: false
   })
 
@@ -310,6 +361,14 @@ function createWindow() {
     mainWindow = null
   })
 }
+/**
+ * IPC handler：设置窗口标题栏主题
+ * 由渲染进程在用户切换主题时调用
+ */
+ipcMain.handle('theme:setTheme', async (_event, mode) => {
+  applyTitleBarTheme(mode)
+})
+
 /**
  * IPC handler：打开原生目录选择对话框
  */

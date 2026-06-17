@@ -120,19 +120,20 @@ jobs:
       - name: Maven 构建
         run: mvn clean package -DskipTests -B
 
-      - name: jlink 裁剪 JRE
+      - name: jlink 裁剪 JRE (macOS)
         run: |
-          if [ ! -d "electron/jre/bin" ]; then
-            echo "正在裁剪 JRE (JAVA_HOME=$JAVA_HOME)..."
-            "$JAVA_HOME/bin/jlink" \
-              --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
-              --strip-debug --compress 2 --no-header-files --no-man-pages \
-              --output electron/jre
-            echo "✅ JRE 裁剪完成"
-            ls -lh electron/jre/bin/java
-          else
-            echo "内置 JRE 已存在，跳过"
-          fi
+          # 强制重新裁剪 JRE（确保是 macOS 版本，而非其他平台残留）
+          rm -rf electron/jre
+          echo "正在裁剪 JRE (JAVA_HOME=$JAVA_HOME)..."
+          "$JAVA_HOME/bin/jlink" \
+            --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+            --strip-debug --compress 2 --no-header-files --no-man-pages \
+            --output electron/jre
+          # 确保 JRE 中所有可执行文件有正确的执行权限
+          chmod +x electron/jre/bin/java
+          chmod +x electron/jre/lib/jspawnhelper 2>/dev/null || true
+          echo "✅ JRE 裁剪完成"
+          ls -lh electron/jre/bin/java
 
       - name: 生成 macOS 图标
         run: |
@@ -167,9 +168,28 @@ jobs:
       - name: Electron 打包 (macOS)
         run: |
           cd electron
-          npx electron-builder --mac
+          npx electron-builder --mac --universal
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: Ad-hoc 签名及验证 (macOS)
+        run: |
+          echo "对 .app 进行 ad-hoc 签名..."
+          APP_PATH=$(find electron/release/mac* -name "CodeCraft.app" -type d 2>/dev/null | head -1)
+          if [ -n "$APP_PATH" ]; then
+            echo "找到应用: $APP_PATH"
+            # 先对 JRE 中的可执行文件和 dylib 进行签名
+            find "$APP_PATH/Contents/Resources/jre" -type f \( -perm +111 -o -name "*.dylib" -o -name "*.jnilib" \) 2>/dev/null | while read f; do
+              codesign --force --deep --sign - --timestamp=none "$f" 2>/dev/null || true
+            done
+            # 对整个 .app 进行 ad-hoc 签名
+            codesign --force --deep --sign - --timestamp=none "$APP_PATH" 2>/dev/null || true
+            echo "✅ Ad-hoc 签名完成"
+            # 验证签名
+            codesign --verify --deep --strict --verbose=2 "$APP_PATH" 2>&1 || echo "⚠️ 签名验证警告（ad-hoc 签名预期会显示未公证）"
+          else
+            echo "⚠️ 未找到 .app，跳过签名"
+          fi
 
       - name: 上传产物 (macOS)
         uses: actions/upload-artifact@v4
@@ -292,12 +312,26 @@ jobs:
 
             ### 📥 下载
             - **Windows**：下载 `CodeCraft-Setup-${{ steps.version.outputs.version }}.exe` 双击安装
-            - **macOS**：下载 `CodeCraft-${{ steps.version.outputs.version }}.dmg` 拖入 Applications
+            - **macOS**：下载 `CodeCraft-${{ steps.version.outputs.version }}.dmg` 拖入 Applications，**首次打开请右键 → 打开**（见下方说明）
             - **Linux**：下载 `.AppImage` 或 `.deb`
+
+            ### 🍎 macOS 用户必读
+            由于未使用 Apple 付费开发者证书（$99/年），首次打开时会提示「无法验证开发者」。
+            请按以下步骤操作：
+            1. 将 `CodeCraft.app` 拖入 `Applications` 文件夹
+            2. **右键（或 Control+点击）→ 打开**
+            3. 在弹出的对话框中点击「打开」
+            4. 之后再打开只需双击即可
+
+            或者终端执行：
+            ```
+            xattr -cr /Applications/CodeCraft.app
+            ```
 
             ### 💡 说明
             - 安装包自带 JRE 运行环境，无需安装 Java
             - 首次使用请在「配置」页面设置 DeepSeek API Key
+            - 支持 Intel 和 Apple Silicon (M1/M2/M3) Mac
 
             > 📝 完整变更见 [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md)
           files: |
