@@ -168,7 +168,7 @@ jobs:
       - name: Electron 打包 (macOS)
         run: |
           cd electron
-          npx electron-builder --mac --universal
+          npx electron-builder --mac
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
