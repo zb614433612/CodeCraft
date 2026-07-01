@@ -11,6 +11,7 @@ export interface AgentConfig {
   modelName?: string
   thinkingMode?: string
   executionMode?: string
+  temperature?: number
   workDir?: string
   sortOrder?: number
   enabled?: number

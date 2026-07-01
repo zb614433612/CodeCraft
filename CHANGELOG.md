@@ -5,6 +5,67 @@
 
 ---
 
+## [1.1.2] - 2026-07-01
+
+### 🌡️ Agent 采样温度（Temperature）全链路支持
+
+- **数据库层**：`agent_config` 表新增 `temperature` 列（DOUBLE，默认 0.3），`AgentConfigServiceImpl` 启动时自动建表 / ALTER TABLE 兼容旧表升级
+- **实体层**：`AgentConfig` 新增 `temperature` 字段，MyBatis Mapper 全量 SQL 同步新增该字段的读写
+- **API 层**：`ChatRequest` / `ForkAgentRequest` 新增 `temperature` 参数，前端可在发送消息或 fork 子 Agent 时指定
+- **服务层**：`DeepSeekServiceImpl` 支持三级优先级（前端传入 > Agent 配置 > 默认 0.3），`ToolContext` 新增 `temperature` ThreadLocal 全程传递
+- **子 Agent**：`AgentForkManager` 子 Agent 执行使用配置温度值，`AgentTool` fork 时自动传递当前 Agent 的 temperature
+- **前端 UI**：`AgentConfigView` 新增采样温度滑块（0~2，步长 0.1），刻度标记 + 实时数值显示，`agent-config.ts` API 接口同步新增字段
+
+### 🐚 Shell 自动发现与多 Shell 支持
+
+- **智能 Shell 发现**：`CommandUtils` 重构，从硬编码 `cmd`/`sh` 改为自动检测最佳 Shell
+  - Windows：pwsh → powershell → Git Bash → cmd（按优先级依次尝试）
+  - Unix/Linux：`$SHELL` 环境变量 → zsh → bash → sh
+- **新增 `ShellDiscoveryService`**：统一 Shell 发现与命令包装服务，`ProjectBuildService` 构建/运行/执行命令全部通过该服务包装
+- **工作目录切换**：Shell 包装命令支持 `cd` 前置（cmd: `cd /d`、pwsh: `Set-Location`、bash: `cd &&`），确保命令在正确目录执行
+- **Git Bash 路径检测**：自动搜索 Program Files / LocalAppData 下的 Git Bash 安装路径，覆盖多种安装场景
+
+### 🖥️ 前端终端面板独立化（xterm.js）
+
+- **新增 `TerminalPanel.vue`**：独立终端组件，集成到右侧工具栏「终端」标签页
+- **引入 xterm.js**：`@xterm/xterm` (6.0.0) + `@xterm/addon-fit` (0.11.0)，替代旧的手写 HTML 终端
+- **CodeAssistantView 重构**：移除旧的终端 Tab（Shell 风格手写终端 + 运行日志混排），精简为仅「运行日志」面板
+- **日志 xterm 终端**：运行日志使用 xterm.js 渲染，支持明暗主题自适应（Pinia settingsStore + 系统 `prefers-color-scheme` 媒体查询双监听）
+- **日志面板优化**：独立拖拽调整高度、清屏 `xterm.clear()`、增量同步 `writeln`（避免全量重绘）
+
+### 📂 目录浏览器增强
+
+- **DirectoryEntry 新增 `directory` 属性**：区分目录与文件，前端可据此显示不同图标
+- **`listChildren` 新增 `includeFiles` 参数**：支持按需包含文件列表（默认仅目录），用于终端 Tab 补全等场景
+- **排序优化**：目录优先，再按名称字母排序（目录在前，文件在后）
+- **前端 API 适配**：`project.ts` 新增 `includeFiles` 查询参数、`DirectoryEntry` 接口新增 `directory` 字段
+
+### 🔧 修复与优化
+
+- **artifactId 修正**：`pom.xml` 中 `artifactId` 从 `codecraft` 修正为 `code-craft`（与 jar 文件名 `code-craft-{version}.jar` 保持一致）
+- **默认 Agent 名称**：从「编码助手」更名为「AI 助手」
+- **前端文本对齐修复**：消息/代码/日志/工具结果等多处 CSS 新增 `text-align: left`，修复暗色主题下文本异常居中的问题
+- **暗色主题控制台样式清理**：移除已废弃的 `.console-panel` / `.console-tab-bar` 暗色样式代码
+
+### 🏷️ 版本号
+
+- 后端：`1.1.1` → `1.1.2`
+- 前端：`1.1.1` → `1.1.2`
+- Electron：`1.1.1` → `1.1.2`
+- 打包产物：`code-craft-1.1.1.jar` → `code-craft-1.1.2.jar`
+
+### 📦 新增依赖
+
+- 前端：`@xterm/xterm` ^6.0.0、`@xterm/addon-fit` ^0.11.0
+- 后端：`ShellDiscoveryService` 新服务类
+
+### 📄 新增文件
+
+- `frontend/src/components/TerminalPanel.vue` — 独立终端面板（xterm.js）
+- `src/main/java/com/example/agentdeepseek/service/ShellDiscoveryService.java` — Shell 自动发现服务
+
+---
+
 ## [1.1.1] - 2026-06-10
 
 ### 🎉 工具系统重大重构（Tool Unification）

@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.0.5 | 更新：2026-05-28 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.2 | 更新：2026-06-13 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -209,6 +209,7 @@ src/main/java/com/example/agentdeepseek/
 │   └── RunningProcessManager  # 子进程生命周期管理（8KB）
 ├── service/                   # 业务接口 + 实现
 │   ├── DeepSeekService        # 核心聊天服务接口
+│   ├── ShellDiscoveryService  # Shell 自动发现（Windows/macOS/Linux 多 Shell 支持）
 │   ├── impl/
 │   │   ├── DeepSeekServiceImpl    # ★★★核心引擎（129KB，最复杂文件）
 │   │   ├── ToolLoopManager        # 工具调用循环（死循环检测/评委/取消）
@@ -258,7 +259,7 @@ src/main/java/com/example/agentdeepseek/
 │       └── Diagnostic         # 编译诊断（lint/语法检查）
 ├── log/LogService             # 应用级日志服务（10.8KB）
 └── util/                      # 工具类
-    ├── CommandUtils           # 命令执行工具（13.9KB）
+    ├── CommandUtils           # 智能 Shell 发现 + 命令执行（13.9KB）
     ├── DiffUtil               # LCS 差异计算
     ├── FileEncodingDetector   # 编码检测（10.2KB）
     ├── OperationDetailGenerator # 操作详情生成
@@ -279,6 +280,7 @@ src/main/java/com/example/agentdeepseek/
 │ password (MD5)   │      │ avatar, system_prompt│
 │ role, status     │      │ tool_names, model    │
 └──────┬───────────┘      │ thinking_mode        │
+       │                  │ temperature          │
        │                  │ execution_mode       │
        │                  │ work_dir, is_builtin │
        │                  └──────────┬───────────┘
@@ -363,6 +365,7 @@ src/main/java/com/example/agentdeepseek/
 | **AI 核心引擎** | 对话管理、API 调用、工具循环 | DeepSeekServiceImpl | ~3000 |
 | **工具循环** | 死循环检测、评委评估、SSE 事件 | ToolLoopManager | ~450 |
 | **子Agent管理** | fork/collect/inspect 生命周期 | AgentForkManager | ~1400 |
+| **Shell 发现** | 智能检测最佳 Shell（Win/Mac/Linux） | ShellDiscoveryService | ~200 |
 | **上下文压缩** | LLM 摘要压缩 + 异步预压缩 | CompactionService | ~550 |
 | **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~500 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~750 |

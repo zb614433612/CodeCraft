@@ -21,9 +21,11 @@ import java.util.List;
 public class ProjectBuildService {
 
     private final RunningProcessManager processManager;
+    private final ShellDiscoveryService shellService;
 
-    public ProjectBuildService(RunningProcessManager processManager) {
+    public ProjectBuildService(RunningProcessManager processManager, ShellDiscoveryService shellService) {
         this.processManager = processManager;
+        this.shellService = shellService;
     }
 
     /**
@@ -45,14 +47,8 @@ public class ProjectBuildService {
         List<String> outputLines = new ArrayList<>();
         long startTime = System.currentTimeMillis();
         try {
-            // Windows 上用 cmd /c 包装以继承 PATH
-            List<String> cmdList;
-            String fullCommand = buildCommand;
-            if (CommandUtils.isWindows()) {
-                cmdList = Arrays.asList("cmd", "/c", fullCommand);
-            } else {
-                cmdList = Arrays.asList("sh", "-c", fullCommand);
-            }
+            // 通过 Shell 发现服务包装命令（自动选择最佳 Shell）
+            List<String> cmdList = shellService.wrap(buildCommand, projectDir);
             ProcessBuilder pb = new ProcessBuilder(cmdList);
             pb.directory(new java.io.File(projectDir));
             Process process = pb.start();
@@ -167,12 +163,7 @@ public class ProjectBuildService {
         long timeout = timeoutMs != null && timeoutMs > 0 ? timeoutMs : 30000L;
 
         try {
-            List<String> cmdList;
-            if (CommandUtils.isWindows()) {
-                cmdList = Arrays.asList("cmd", "/c", command);
-            } else {
-                cmdList = Arrays.asList("sh", "-c", command);
-            }
+            List<String> cmdList = shellService.wrap(command, projectDir);
             ProcessBuilder pb = new ProcessBuilder(cmdList);
             pb.directory(new java.io.File(projectDir));
             pb.redirectErrorStream(true);

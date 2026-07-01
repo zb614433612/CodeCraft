@@ -28,20 +28,123 @@ import java.util.stream.Collectors;
 public class CommandUtils {
 
     /**
-     * 构建 Shell 包装命令，支持管道、重定向、环境变量等 Shell 特性
+     * 构建 Shell 包装命令，自动发现最佳可用 Shell
      * <p>
-     * Windows: {@code cmd.exe /c "<command>"}
-     * Linux/Mac: {@code /bin/sh -c '<command>'}
+     * Windows: pwsh → powershell → Git Bash → cmd
+     * Unix:    $SHELL → zsh → bash → sh
      *
      * @param command 原始命令字符串（如 "mvn compile | grep error"）
      * @return 适合 ProcessBuilder 的命令列表
      */
     public static List<String> buildShellCommand(String command) {
+        return buildShellCommand(command, null);
+    }
+
+    /**
+     * 构建 Shell 包装命令（含工作目录切换），自动发现最佳可用 Shell
+     *
+     * @param command          原始命令字符串
+     * @param workingDirectory 工作目录（可为 null）
+     * @return 适合 ProcessBuilder 的命令列表
+     */
+    public static List<String> buildShellCommand(String command, String workingDirectory) {
         if (isWindows()) {
-            return List.of("cmd.exe", "/c", command);
+            // 按优先级检测 Windows Shell
+            String pwsh = findShellInPath("pwsh.exe");
+            if (pwsh != null) {
+                return psWrap(pwsh, command, workingDirectory);
+            }
+            String powershell = findShellInPath("powershell.exe");
+            if (powershell != null) {
+                return psWrap(powershell, command, workingDirectory);
+            }
+            String bash = findGitBashPath();
+            if (bash != null) {
+                return bashWrap(bash, command, workingDirectory);
+            }
+            return cmdWrap(command, workingDirectory);
         } else {
-            return List.of("/bin/sh", "-c", command);
+            // Unix: $SHELL → zsh → bash → sh
+            String shellEnv = System.getenv("SHELL");
+            if (shellEnv != null && !shellEnv.isEmpty()) {
+                Path p = Paths.get(shellEnv);
+                if (Files.exists(p) && Files.isExecutable(p)) {
+                    String name = p.getFileName().toString();
+                    if ("zsh".equals(name) || "bash".equals(name)) {
+                        return bashWrap(shellEnv, command, workingDirectory);
+                    }
+                    return shWrap(shellEnv, command, workingDirectory);
+                }
+            }
+            for (String candidate : List.of("/bin/zsh", "/bin/bash")) {
+                Path p = Paths.get(candidate);
+                if (Files.exists(p) && Files.isExecutable(p)) {
+                    return bashWrap(candidate, command, workingDirectory);
+                }
+            }
+            return shWrap("/bin/sh", command, workingDirectory);
         }
+    }
+
+    // ===== Shell 包装方法 =====
+
+    private static List<String> psWrap(String shell, String cmd, String dir) {
+        if (dir != null && !dir.isEmpty()) {
+            String d = dir.replace('\\', '/');
+            return List.of(shell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                    "-Command", "Set-Location -LiteralPath '" + d + "'; " + cmd);
+        }
+        return List.of(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd);
+    }
+
+    private static List<String> bashWrap(String shell, String cmd, String dir) {
+        if (dir != null && !dir.isEmpty()) {
+            return List.of(shell, "-l", "-c", "cd \"" + dir + "\" && " + cmd);
+        }
+        return List.of(shell, "-l", "-c", cmd);
+    }
+
+    private static List<String> shWrap(String shell, String cmd, String dir) {
+        if (dir != null && !dir.isEmpty()) {
+            return List.of(shell, "-c", "cd \"" + dir + "\" && " + cmd);
+        }
+        return List.of(shell, "-c", cmd);
+    }
+
+    private static List<String> cmdWrap(String cmd, String dir) {
+        if (dir != null && !dir.isEmpty()) {
+            return List.of("cmd.exe", "/c", "cd /d \"" + dir + "\" && " + cmd);
+        }
+        return List.of("cmd.exe", "/c", cmd);
+    }
+
+    // ===== Shell 发现辅助 =====
+
+    private static String findShellInPath(String name) {
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null) return null;
+        for (String dir : pathEnv.split(isWindows() ? ";" : ":")) {
+            if (dir.isEmpty()) continue;
+            Path full = Paths.get(dir, name);
+            if (Files.exists(full) && Files.isExecutable(full)) {
+                return full.toString();
+            }
+        }
+        return null;
+    }
+
+    private static String findGitBashPath() {
+        for (String c : List.of(
+                "C:\\Program Files\\Git\\bin\\bash.exe",
+                "C:\\Program Files (x86)\\Git\\bin\\bash.exe")) {
+            if (Files.exists(Paths.get(c))) return c;
+        }
+        String localAppData = System.getenv("LOCALAPPDATA");
+        if (localAppData != null) {
+            Path p = Paths.get(localAppData, "Programs", "Git", "bin", "bash.exe");
+            if (Files.exists(p)) return p.toString();
+        }
+        return findShellInPath("bash.exe");
     }
 
     /**

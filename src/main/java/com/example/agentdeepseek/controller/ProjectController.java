@@ -54,11 +54,13 @@ public class ProjectController {
     }
 
     @GetMapping("/children")
-    @Operation(summary = "获取指定目录下的子目录列表", description = "返回指定路径下的目录列表（不含文件），用于目录浏览器逐层导航")
+    @Operation(summary = "获取指定目录下的子目录列表", description = "返回指定路径下的子目录和文件列表，用于目录浏览器逐层导航和终端补全")
     public ApiResponse<List<DirectoryEntry>> listChildren(
             @Parameter(description = "父目录路径")
-            @RequestParam String path) {
-        List<DirectoryEntry> children = projectService.listChildren(path);
+            @RequestParam String path,
+            @Parameter(description = "是否包含文件，默认 false")
+            @RequestParam(defaultValue = "false") boolean includeFiles) {
+        List<DirectoryEntry> children = projectService.listChildren(path, includeFiles);
         return ApiResponse.success(children);
     }
 

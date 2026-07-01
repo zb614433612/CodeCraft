@@ -41,6 +41,9 @@ public class ChatRequest {
     @Schema(description = "思考模式（可选）：non-thinking（关闭）/ thinking（思考_high）/ thinking_max（思考_max），为空则使用服务端默认配置", example = "non-thinking")
     private String thinkingMode;
 
+    @Schema(description = "采样温度（可选）：0-2之间，控制输出随机性，为空则使用Agent配置或默认值0.3", example = "0.3")
+    private Double temperature;
+
     @Schema(description = "是否重连到正在执行的后台任务（为true时忽略message等字段）", example = "false")
     private boolean reconnect;
 

@@ -202,6 +202,7 @@ public class AgentTool implements Tool {
             request.setSkills(skillsList);
             request.setContextMode(contextModeStr);
             request.setMaxIterations(maxIter);
+            request.setTemperature(ToolContext.getTemperature());
 
             String parentContext = buildParentContext(conversationId, contextModeStr);
             agentForkManager.forkAgent(request, conversationId, turnId, parentContext, userId, mode);

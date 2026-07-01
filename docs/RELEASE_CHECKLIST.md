@@ -28,7 +28,7 @@
 # 完整构建（含前端编译）
 mvn clean package -DskipTests
 
-# 产物：target/codecraft-{版本号}.jar（约 67MB）
+# 产物：target/code-craft-{版本号}.jar（约 67MB）
 ```
 
 ---

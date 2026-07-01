@@ -11,6 +11,7 @@ export interface ProjectTreeNode {
 export interface DirectoryEntry {
   name: string
   path: string
+  directory: boolean
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
@@ -32,9 +33,10 @@ export async function getDrives(): Promise<ApiResponse<DirectoryEntry[]>> {
   return request<DirectoryEntry[]>('/project/drives')
 }
 
-export async function getDirChildren(path: string): Promise<ApiResponse<DirectoryEntry[]>> {
+export async function getDirChildren(path: string, includeFiles = false): Promise<ApiResponse<DirectoryEntry[]>> {
   const params = new URLSearchParams()
   params.set('path', path)
+  params.set('includeFiles', String(includeFiles))
   return request<DirectoryEntry[]>(`/project/children?${params}`)
 }
 

@@ -15,6 +15,7 @@ public class ToolContext {
     private static final ThreadLocal<String> currentAgentType = new ThreadLocal<>();
     private static final ThreadLocal<Long> currentAgentConfigId = new ThreadLocal<>();
     private static final ThreadLocal<String> currentTurnId = new ThreadLocal<>();
+    private static final ThreadLocal<Double> currentTemperature = new ThreadLocal<>();
 
     public static void set(String mode, Long conversationId) {
         currentExecutionMode.set(mode);
@@ -64,6 +65,14 @@ public class ToolContext {
         currentAgentConfigId.set(agentConfigId);
     }
 
+    public static Double getTemperature() {
+        return currentTemperature.get();
+    }
+
+    public static void setTemperature(Double temperature) {
+        currentTemperature.set(temperature);
+    }
+
     public static void clear() {
         currentExecutionMode.remove();
         currentConversationId.remove();
@@ -71,5 +80,6 @@ public class ToolContext {
         currentAgentType.remove();
         currentAgentConfigId.remove();
         currentTurnId.remove();
+        currentTemperature.remove();
     }
 }

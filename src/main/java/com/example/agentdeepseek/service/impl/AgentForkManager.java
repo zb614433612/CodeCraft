@@ -175,6 +175,7 @@ public class AgentForkManager {
         context.setUserId(userId);
         context.setMode(mode != null ? mode : "auto");
         context.setConversationId(parentConversationId);
+        context.setTemperature(request.getTemperature());
         runningAgents.put(agentId, context);
 
         // 4. 注册到待收集列表（主Agent完成时自动收集）
@@ -466,7 +467,7 @@ public class AgentForkManager {
             }
 
             // 构建API请求
-            Map<String, Object> apiRequest = buildApiRequest(messages, toolsDef, hasTools);
+            Map<String, Object> apiRequest = buildApiRequest(messages, toolsDef, hasTools, context.getTemperature());
 
             // 调用DeepSeek API（非流式）
             String response = callDeepSeekApi(apiRequest);
@@ -866,12 +867,13 @@ public class AgentForkManager {
      * 构建API请求体
      */
     private Map<String, Object> buildApiRequest(List<Map<String, Object>> messages,
-                                                ArrayNode toolsDef, boolean hasTools) {
+                                                ArrayNode toolsDef, boolean hasTools,
+                                                Double temperature) {
         Map<String, Object> request = new HashMap<>();
         request.put("model", deepSeekConfig.getDefaultModel());
         request.put("messages", messages);
         request.put("stream", false);
-        request.put("temperature", 1.0);
+        request.put("temperature", temperature != null ? temperature : 0.3);
 
         // 思考模式跟随主Agent配置
         String thinkingMode = deepSeekConfig.getThinkingMode();
@@ -1331,4 +1333,5 @@ class SubAgentContext {
     private Long userId;
     private String mode;
     private Long conversationId;
+    private Double temperature;
 }

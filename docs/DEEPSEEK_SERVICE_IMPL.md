@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.0.5 | 更新：2026-05-28 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.2 | 更新：2026-06-13 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 129KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -326,7 +326,7 @@ DeepSeekServiceImpl (编排层，~200行)
 |------|----|------|
 | `MAX_TOOL_CALL_ITERATIONS` | 50 | 工具循环最大迭代次数 |
 | `MAX_JUDGE_GRANTED_ITERATIONS` | 100 | 评委累计最大扩展迭代 |
-| `DEFAULT_TEMPERATURE` | 1.0 | 默认温度参数 |
+| `DEFAULT_TEMPERATURE` | 0.3 | 默认温度参数（三级优先级：前端 > Agent配置 > 默认） |
 | `SESSION_NAME_TRUNCATE_LENGTH` | 6 | 会话名截断长度 |
 | `taskExecutor.corePoolSize` | 2 | 后台任务核心线程 |
 | `taskExecutor.maximumPoolSize` | 10 | 后台任务最大线程 |

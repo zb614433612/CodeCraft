@@ -273,6 +273,22 @@
                   </div>
                 </a-form-item>
 
+                <!-- 采样温度 -->
+                <a-form-item label="采样温度">
+                  <div class="temperature-wrapper">
+                    <a-slider
+                      v-model:value="formData.temperature"
+                      :min="0"
+                      :max="2"
+                      :step="0.1"
+                      :marks="{ 0: '0', 0.5: '0.5', 1: '1', 1.5: '1.5', 2: '2' }"
+                      class="temperature-slider"
+                    />
+                    <span class="temperature-value">{{ formData.temperature ?? 0.3 }}</span>
+                  </div>
+                  <div class="form-hint" style="margin-top: 2px;">控制输出随机性：0=确定，2=最大随机，默认 0.3</div>
+                </a-form-item>
+
                 <!-- 工作目录 -->
                 <a-form-item label="工作目录">
                   <a-input
@@ -386,6 +402,7 @@ const getDefaultForm = (): Partial<AgentConfig> => ({
   avatar: '🤖',
   systemPrompt: '',
   tools: [],
+  temperature: 0.3,
   workDir: '',
 })
 
@@ -453,6 +470,7 @@ const openEditModal = (agent: AgentConfig) => {
     avatar: agent.avatar || '🤖',
     systemPrompt: agent.systemPrompt || '',
     tools: toolsArray,
+    temperature: agent.temperature ?? 0.3,
     workDir: agent.workDir || '',
   })
   showEmojiPicker.value = false
@@ -478,6 +496,7 @@ const handleSave = async () => {
       avatar: formData.avatar || '🤖',
       systemPrompt: formData.systemPrompt || '',
       toolNames: JSON.stringify(formData.tools || []),
+      temperature: formData.temperature ?? 0.3,
       workDir: formData.workDir || '',
     }
 
@@ -1423,6 +1442,23 @@ onMounted(() => {
 [data-theme="dark"] .form-textarea :deep(textarea) { background: #1a1925; border-color: #363448; color: #e4e2f0; }
 [data-theme="dark"] .form-textarea :deep(textarea:hover) { border-color: rgba(139,92,246,0.3); }
 [data-theme="dark"] .form-textarea :deep(textarea:focus) { border-color: #8b5cf6; }
+
+/* ============ 采样温度滑块 ============ */
+.temperature-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.temperature-slider {
+  flex: 1;
+}
+.temperature-value {
+  min-width: 36px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #8b5cf6;
+  text-align: center;
+}
 
 /* ============ 响应式 ============ */
 @media (max-width: 768px) {

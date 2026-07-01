@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v1.0.5 | Updated: 2026-05-28 | Audience: Developers / AI Collaborators
+> Version: v1.1.2 | Updated: 2026-06-13 | Audience: Developers / AI Collaborators
 > This document dissects the 129KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -324,7 +324,7 @@ DeepSeekServiceImpl (orchestration layer, ~200 lines)
 |----------|-------|-------------|
 | `MAX_TOOL_CALL_ITERATIONS` | 50 | Max tool loop iterations |
 | `MAX_JUDGE_GRANTED_ITERATIONS` | 100 | Max judge-granted additional iterations |
-| `DEFAULT_TEMPERATURE` | 1.0 | Default temperature |
+| `DEFAULT_TEMPERATURE` | 0.3 | Default temperature (3-tier priority: frontend > Agent config > default) |
 | `taskExecutor.corePoolSize` | 2 | Core background task threads |
 | `taskExecutor.maximumPoolSize` | 10 | Max background task threads |
 | `taskExecutor.queueCapacity` | 100 | Task queue capacity |

@@ -15,7 +15,7 @@ import java.util.Optional;
 public interface AgentConfigMapper {
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
-            "thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, " +
+            "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
             "user_id, created_at, updated_at FROM agent_config WHERE id = #{id}")
     @Results(id = "agentConfigResultMap", value = {
         @Result(property = "id", column = "id"),
@@ -27,6 +27,7 @@ public interface AgentConfigMapper {
         @Result(property = "modelName", column = "model_name"),
         @Result(property = "thinkingMode", column = "thinking_mode"),
         @Result(property = "executionMode", column = "execution_mode"),
+        @Result(property = "temperature", column = "temperature"),
         @Result(property = "workDir", column = "work_dir"),
         @Result(property = "sortOrder", column = "sort_order"),
         @Result(property = "enabled", column = "enabled"),
@@ -39,7 +40,7 @@ public interface AgentConfigMapper {
     Optional<AgentConfig> selectById(Long id);
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
-            "thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, " +
+            "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
             "user_id, created_at, updated_at FROM agent_config " +
             "WHERE (user_id = #{userId} OR user_id IS NULL OR #{userId} IS NULL) " +
             "AND enabled = 1 " +
@@ -48,7 +49,7 @@ public interface AgentConfigMapper {
     List<AgentConfig> selectByUser(@Param("userId") Long userId);
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
-            "thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, " +
+            "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
             "user_id, created_at, updated_at FROM agent_config " +
             "WHERE user_id IS NULL AND enabled = 1 " +
             "ORDER BY sort_order ASC")
@@ -56,17 +57,17 @@ public interface AgentConfigMapper {
     List<AgentConfig> selectAllSystem();
 
     @Insert("INSERT INTO agent_config (name, description, avatar, system_prompt, tool_names, model_name, " +
-            "thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, " +
+            "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
             "user_id, created_at, updated_at) " +
             "VALUES (#{name}, #{description}, #{avatar}, #{systemPrompt}, #{toolNames}, #{modelName}, " +
-            "#{thinkingMode}, #{executionMode}, #{workDir}, #{sortOrder}, #{enabled}, #{isDefault}, #{isBuiltin}, " +
+            "#{thinkingMode}, #{executionMode}, #{temperature}, #{workDir}, #{sortOrder}, #{enabled}, #{isDefault}, #{isBuiltin}, " +
             "#{userId}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(AgentConfig agentConfig);
 
     @Update("UPDATE agent_config SET name = #{name}, description = #{description}, avatar = #{avatar}, " +
             "system_prompt = #{systemPrompt}, tool_names = #{toolNames}, model_name = #{modelName}, " +
-            "thinking_mode = #{thinkingMode}, execution_mode = #{executionMode}, work_dir = #{workDir}, " +
+            "thinking_mode = #{thinkingMode}, execution_mode = #{executionMode}, temperature = #{temperature}, work_dir = #{workDir}, " +
             "sort_order = #{sortOrder}, enabled = #{enabled}, is_default = #{isDefault}, " +
             "updated_at = #{updatedAt} WHERE id = #{id}")
     int update(AgentConfig agentConfig);
@@ -75,7 +76,7 @@ public interface AgentConfigMapper {
     int delete(Long id);
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
-            "thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, " +
+            "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
             "user_id, created_at, updated_at FROM agent_config " +
             "WHERE is_default = 1 AND (user_id = #{userId} OR user_id IS NULL) " +
             "ORDER BY is_builtin DESC, sort_order ASC LIMIT 1")

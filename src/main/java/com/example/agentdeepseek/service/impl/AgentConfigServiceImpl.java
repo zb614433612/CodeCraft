@@ -40,6 +40,7 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                     "model_name VARCHAR(100) DEFAULT 'deepseek-v4-flash', " +
                     "thinking_mode VARCHAR(20) DEFAULT 'non-thinking', " +
                     "execution_mode VARCHAR(10) DEFAULT 'manual', " +
+                    "temperature DOUBLE DEFAULT 0.3, " +
                     "work_dir VARCHAR(500), " +
                     "sort_order INT DEFAULT 0, " +
                     "enabled TINYINT DEFAULT 1, " +
@@ -51,10 +52,18 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                     ")");
             log.info("AgentConfigService: agent_config 表初始化完成");
 
+            // 兼容旧表：为已存在的 agent_config 表添加 temperature 列（如缺失则忽略错误）
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_config ADD COLUMN temperature DOUBLE DEFAULT 0.3");
+                log.info("AgentConfigService: temperature 列已添加（或已存在）");
+            } catch (Exception e) {
+                log.debug("AgentConfigService: temperature 列可能已存在，跳过: {}", e.getMessage());
+            }
+
             // 初始化默认编码助手 Agent
             jdbcTemplate.update(
-                    "INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at) " +
-                    "VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', NULL, 1, 1, 1, 1, NOW(), NOW())");
+                    "INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at) " +
+                    "VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', 0.3, NULL, 1, 1, 1, 1, NOW(), NOW())");
             log.info("AgentConfigService: 默认 Agent 初始化完成");
         } catch (Exception e) {
             log.warn("AgentConfigService: 初始化 agent_config 表失败: {}", e.getMessage());
@@ -111,6 +120,7 @@ public class AgentConfigServiceImpl implements AgentConfigService {
         if (updated.getModelName() != null) existing.setModelName(updated.getModelName());
         if (updated.getThinkingMode() != null) existing.setThinkingMode(updated.getThinkingMode());
         if (updated.getExecutionMode() != null) existing.setExecutionMode(updated.getExecutionMode());
+        if (updated.getTemperature() != null) existing.setTemperature(updated.getTemperature());
         if (updated.getWorkDir() != null) existing.setWorkDir(updated.getWorkDir());
         if (updated.getSortOrder() != null) existing.setSortOrder(updated.getSortOrder());
         if (updated.getEnabled() != null) existing.setEnabled(updated.getEnabled());
@@ -175,6 +185,7 @@ public class AgentConfigServiceImpl implements AgentConfigService {
         if (runtimeConfig.getModelName() != null) existing.setModelName(runtimeConfig.getModelName());
         if (runtimeConfig.getThinkingMode() != null) existing.setThinkingMode(runtimeConfig.getThinkingMode());
         if (runtimeConfig.getExecutionMode() != null) existing.setExecutionMode(runtimeConfig.getExecutionMode());
+        if (runtimeConfig.getTemperature() != null) existing.setTemperature(runtimeConfig.getTemperature());
         if (runtimeConfig.getWorkDir() != null) existing.setWorkDir(runtimeConfig.getWorkDir());
         existing.setUpdatedAt(LocalDateTime.now());
         agentConfigMapper.update(existing);

@@ -5,6 +5,67 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.2] - 2026-07-01
+
+### 🌡️ Agent Temperature Support (Full-Stack)
+
+- **Database**: `agent_config` table adds `temperature` column (DOUBLE, default 0.3), `AgentConfigServiceImpl` auto-creates table / ALTER TABLE for backward compatibility
+- **Entity**: `AgentConfig` adds `temperature` field, MyBatis Mapper all SQLs synced
+- **API**: `ChatRequest` / `ForkAgentRequest` add `temperature` parameter
+- **Service**: `DeepSeekServiceImpl` supports 3-tier priority (frontend > Agent config > default 0.3), `ToolContext` adds `temperature` ThreadLocal
+- **Sub-Agent**: `AgentForkManager` sub-agent execution uses configured temperature, `AgentTool` passes it on fork
+- **Frontend UI**: `AgentConfigView` adds temperature slider (0~2, step 0.1) with marks and real-time value display
+
+### 🐚 Smart Shell Discovery & Multi-Shell Support
+
+- **Intelligent Shell Discovery**: `CommandUtils` refactored from hardcoded `cmd`/`sh` to auto-detect best available shell
+  - Windows: pwsh → powershell → Git Bash → cmd (priority order)
+  - Unix/Linux: `$SHELL` env → zsh → bash → sh
+- **New `ShellDiscoveryService`**: Unified shell discovery and command wrapping, used by `ProjectBuildService` for all build/run/exec commands
+- **Working Directory Switching**: Shell wrapper commands support `cd` prefix (cmd: `cd /d`, pwsh: `Set-Location`, bash: `cd &&`)
+- **Git Bash Detection**: Auto-search Program Files / LocalAppData for Git Bash installation paths
+
+### 🖥️ Frontend Terminal Panel with xterm.js
+
+- **New `TerminalPanel.vue`**: Standalone terminal component, integrated into right toolbar "Terminal" tab
+- **xterm.js Integration**: `@xterm/xterm` (6.0.0) + `@xterm/addon-fit` (0.11.0), replacing the old hand-written HTML terminal
+- **CodeAssistantView Refactor**: Removed old terminal tab (shell-style terminal + run log hybrid), simplified to "Run Log" panel only
+- **Log xterm Terminal**: Run log rendered via xterm.js with light/dark theme auto-adaptation (Pinia settingsStore + system `prefers-color-scheme` dual listener)
+- **Log Panel Enhancements**: Independent drag resize, `xterm.clear()` for clearing, incremental `writeln` sync
+
+### 📂 Directory Browser Enhancement
+
+- **`DirectoryEntry` adds `directory` property**: Distinguish directories from files for proper icon display
+- **`listChildren` adds `includeFiles` parameter**: On-demand file listing (default directories only), used for terminal tab completion
+- **Sorting optimization**: Directories first, then alphabetical by name
+- **Frontend API**: `project.ts` adds `includeFiles` query param, `DirectoryEntry` interface adds `directory` field
+
+### 🔧 Fixes & Optimizations
+
+- **artifactId fix**: `pom.xml` `artifactId` corrected from `codecraft` to `code-craft` (matching jar filename `code-craft-{version}.jar`)
+- **Default Agent name**: Renamed from "编码助手" to "AI 助手"
+- **Frontend text alignment**: Multiple CSS fixes adding `text-align: left` to messages/code/logs/tool results
+- **Dark theme console cleanup**: Removed deprecated `.console-panel` / `.console-tab-bar` dark theme styles
+
+### 🏷️ Version Bump
+
+- Backend: `1.1.1` → `1.1.2`
+- Frontend: `1.1.1` → `1.1.2`
+- Electron: `1.1.1` → `1.1.2`
+- Build artifact: `code-craft-1.1.1.jar` → `code-craft-1.1.2.jar`
+
+### 📦 New Dependencies
+
+- Frontend: `@xterm/xterm` ^6.0.0, `@xterm/addon-fit` ^0.11.0
+- Backend: `ShellDiscoveryService` new service class
+
+### 📄 New Files
+
+- `frontend/src/components/TerminalPanel.vue` — Standalone terminal panel (xterm.js)
+- `src/main/java/com/example/agentdeepseek/service/ShellDiscoveryService.java` — Shell auto-discovery service
+
+---
+
 ## [1.1.1] - 2026-06-10
 
 ### 🎉 Major Tool System Refactoring (Tool Unification)

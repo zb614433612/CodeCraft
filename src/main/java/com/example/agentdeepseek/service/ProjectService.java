@@ -25,10 +25,11 @@ public interface ProjectService {
     List<DirectoryEntry> listDrives();
 
     /**
-     * 获取指定目录下的子目录列表
+     * 获取指定目录下的子目录（和文件）列表
      * @param parentPath 父目录路径
+     * @param includeFiles 是否包含文件，默认 false
      */
-    List<DirectoryEntry> listChildren(String parentPath);
+    List<DirectoryEntry> listChildren(String parentPath, boolean includeFiles);
 
     /**
      * 读取文件内容

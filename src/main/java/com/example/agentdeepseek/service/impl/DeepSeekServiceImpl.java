@@ -119,7 +119,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private static final String DATA_PREFIX = "data: ";
     private static final String TEMPERATURE_FIELD = "temperature";
     private static final int MAX_TOOL_CALL_ITERATIONS = 50;
-    private static final double DEFAULT_TEMPERATURE = 1.0;
+    private static final double DEFAULT_TEMPERATURE = 0.3;
     private static final int SESSION_NAME_TRUNCATE_LENGTH = 6;
     private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
 
@@ -471,6 +471,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String thinkingMode;
         String executionMode;
         String workDir;
+        Double temperature = null;
 
         if (agentConfigId != null) {
             // ===== 使用自定义 Agent 配置 =====
@@ -518,7 +519,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 // 5. 执行模式
                 executionMode = agentConfig.getExecutionMode() != null ? agentConfig.getExecutionMode() : "auto";
                 
-                // 6. 工作目录
+                // 6. 采样温度
+                Double agentTemperature = agentConfig.getTemperature();
+                temperature = agentTemperature != null ? agentTemperature : DEFAULT_TEMPERATURE;
+                
+                // 7. 工作目录
                 workDir = agentConfig.getWorkDir();
                 if (workDir != null && !workDir.trim().isEmpty()) {
                     ProjectRootContext.set(workDir);
@@ -540,6 +545,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             thinkingMode = deepSeekConfig.getThinkingMode();
             executionMode = "auto";
             workDir = ProjectRootContext.get();
+            temperature = DEFAULT_TEMPERATURE;
         }
 
         // ===== 运行时配置（前端传入）优先于 Agent 配置 =====
@@ -552,6 +558,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (request.getExecutionMode() != null && !request.getExecutionMode().isEmpty()) {
             executionMode = request.getExecutionMode();
         }
+        if (request.getTemperature() != null) {
+            // 前端传入的 temperature 覆盖 Agent 配置
+            temperature = request.getTemperature();
+        }
         if (request.getProjectRoot() != null && !request.getProjectRoot().isEmpty()) {
             workDir = request.getProjectRoot();
             ProjectRootContext.set(workDir);
@@ -559,6 +569,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         request.setModel(modelName);
         request.setThinkingMode(thinkingMode);
         request.setExecutionMode(executionMode);
+        request.setTemperature(temperature);
+        ToolContext.setTemperature(temperature);
 
         Long conversationId;
         Long storageConversationId;
@@ -805,8 +817,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         apiRequest.put("model", (model != null && !model.isEmpty()) ? model : deepSeekConfig.getDefaultModel());
         apiRequest.put("messages", historyMessages);
         apiRequest.put("stream", stream);
-        // 添加温度参数以减少重复
-        apiRequest.put(TEMPERATURE_FIELD, DEFAULT_TEMPERATURE);
+        // 添加温度参数（优先使用 Agent 配置，其次使用默认值 0.3）
+        Double reqTemperature = request.getTemperature();
+        apiRequest.put(TEMPERATURE_FIELD, reqTemperature != null ? reqTemperature : DEFAULT_TEMPERATURE);
         // 添加思考模式参数（DeepSeek API 格式）
         // non-thinking -> thinking.type=disabled
         // thinking    -> thinking.type=enabled + reasoning_effort=high

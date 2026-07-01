@@ -23,6 +23,7 @@ public class AgentConfig {
     private String modelName;
     private String thinkingMode;
     private String executionMode;
+    private Double temperature;
     private String workDir;
     private Integer sortOrder;
     private Integer enabled;

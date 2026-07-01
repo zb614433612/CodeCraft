@@ -248,6 +248,7 @@ CREATE TABLE IF NOT EXISTS agent_config (
   model_name VARCHAR(100) DEFAULT 'deepseek-v4-flash' COMMENT '模型名称',
   thinking_mode VARCHAR(20) DEFAULT 'non-thinking' COMMENT '思考模式：non-thinking/thinking/thinking_max',
   execution_mode VARCHAR(10) DEFAULT 'manual' COMMENT '执行模式：auto/manual',
+  temperature DOUBLE DEFAULT 0.3 COMMENT '采样温度，0-2之间，控制输出随机性',
   work_dir VARCHAR(500) COMMENT '工作目录（绝对路径），为空使用项目根目录',
   sort_order INT DEFAULT 0 COMMENT '排序号',
   enabled TINYINT DEFAULT 1 COMMENT '是否启用',
@@ -262,8 +263,8 @@ CREATE TABLE IF NOT EXISTS agent_config (
 ) DEFAULT CHARSET=utf8mb4 COMMENT='Agent配置表';
 
 -- 初始化默认编码助手 Agent（内置，不可修改删除）
-INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at)
-VALUES (1, '编码助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', NULL, 1, 1, 1, 1, NOW(), NOW());
+INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at)
+VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', 0.3, NULL, 1, 1, 1, 1, NOW(), NOW());
 
 -- 新增 SETTING 菜单：Agent 管理
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES

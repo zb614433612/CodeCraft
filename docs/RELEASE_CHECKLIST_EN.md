@@ -28,7 +28,7 @@
 # Full build (includes frontend compilation)
 mvn clean package -DskipTests
 
-# Output: target/codecraft-{version}.jar (~67MB)
+# Output: target/code-craft-{version}.jar (~67MB)
 ```
 
 ---

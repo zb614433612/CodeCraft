@@ -71,6 +71,11 @@
             <SkillList :agent-config-id="agentConfigId" />
           </div>
 
+          <!-- 终端面板 -->
+          <div v-if="activePanel === 'terminal'" class="drawer-panel-content terminal-drawer-panel">
+            <TerminalPanel :work-dir="workDir" />
+          </div>
+
         </div>
       </div>
     </transition>
@@ -82,11 +87,13 @@ import { ref, computed, onBeforeUnmount, h, type Component } from 'vue'
 import {
   FolderOpenOutlined,
   BranchesOutlined,
+  CodeOutlined,
   ThunderboltOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import GitSidebar from '@/components/GitSidebar.vue'
 import SkillList from '@/components/SkillList.vue'
+import TerminalPanel from '@/components/TerminalPanel.vue'
 
 const props = defineProps<{
   projectRoot?: string
@@ -111,6 +118,7 @@ interface ToolbarItem {
 const toolbarItems: ToolbarItem[] = [
   { key: 'files', label: '文件', icon: FolderOpenOutlined },
   { key: 'git', label: 'Git', icon: BranchesOutlined },
+  { key: 'terminal', label: '终端', icon: CodeOutlined },
   { key: 'skills', label: '技能', icon: ThunderboltOutlined }
 ]
 
@@ -398,6 +406,11 @@ onBeforeUnmount(() => {
 
 [data-theme="dark"] .toolbar-btn.active {
   background: rgba(139, 92, 246, 0.1);
+}
+
+/* 终端抽屉面板 */
+.terminal-drawer-panel {
+  overflow: hidden !important;
 }
 
 [data-theme="dark"] .drawer-resize-handle:hover {

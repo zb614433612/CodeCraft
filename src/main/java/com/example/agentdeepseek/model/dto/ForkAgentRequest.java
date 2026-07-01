@@ -33,4 +33,7 @@ public class ForkAgentRequest {
 
     /** 最大迭代次数，默认30 */
     private Integer maxIterations;
+
+    /** 采样温度（可选）：控制子Agent输出随机性，为空则使用默认值0.3 */
+    private Double temperature;
 }

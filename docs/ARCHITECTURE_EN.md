@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.0.5 | Updated: 2026-05-28 | Audience: Developers / AI Collaborators
+> Version: v1.1.2 | Updated: 2026-06-13 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -207,6 +207,7 @@ src/main/java/com/example/agentdeepseek/
 │   └── RunningProcessManager  # Subprocess lifecycle management (8KB)
 ├── service/                   # Business Interfaces + Implementations
 │   ├── DeepSeekService        # Core chat service interface
+│   ├── ShellDiscoveryService  # Smart Shell discovery (Win/Mac/Linux multi-shell)
 │   └── impl/
 │       ├── DeepSeekServiceImpl    # ★★★Core Engine (129KB)
 │       ├── ToolLoopManager        # Tool loop (dead loop / judge / cancel)
@@ -242,7 +243,7 @@ src/main/java/com/example/agentdeepseek/
 │   └── postedit/              # Post-processing pipeline
 ├── log/LogService             # Application-level logging (10.8KB)
 └── util/                      # Utility classes
-    ├── CommandUtils           # Command execution (13.9KB)
+    ├── CommandUtils           # Smart Shell discovery + Command execution (13.9KB)
     ├── DiffUtil               # LCS diff calculation
     ├── FileEncodingDetector   # Encoding detection (10.2KB)
     └── ...
@@ -261,6 +262,7 @@ src/main/java/com/example/agentdeepseek/
 │ password (MD5)   │      │ avatar, system_prompt│
 │ role, status     │      │ tool_names, model    │
 └──────┬───────────┘      │ thinking_mode        │
+       │                  │ temperature          │
        │                  │ execution_mode       │
        │                  │ work_dir, is_builtin │
        │                  └──────────┬───────────┘
@@ -344,6 +346,7 @@ src/main/java/com/example/agentdeepseek/
 | **AI Core Engine** | Conversation mgmt, API calls, tool loop | DeepSeekServiceImpl | ~3000 |
 | **Tool Loop** | Dead loop detection, judge, SSE events | ToolLoopManager | ~450 |
 | **Sub-Agent Mgmt** | fork/collect/inspect lifecycle | AgentForkManager | ~1400 |
+| **Shell Discovery** | Smart shell detection (Win/Mac/Linux) | ShellDiscoveryService | ~200 |
 | **Context Compaction** | LLM summary compression + async pre-compact | CompactionService | ~550 |
 | **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~500 |
 | **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~750 |

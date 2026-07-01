@@ -368,91 +368,28 @@
         </template>
       </div>
 
-      <!-- ===== 全局控制台（终端 + 运行日志） ===== -->
-      <div class="console-panel" :class="{ minimized: terminalMinimized }">
-        <!-- 拖拽调整大小的手柄 -->
+      <!-- ===== 底部运行日志面板 ===== -->
+      <div v-if="showBuildRunLog" class="run-log-panel" :class="{ minimized: logMinimized }">
         <div
-          class="console-resize-handle"
-          @mousedown.prevent="startTerminalResize"
+          class="log-resize-handle"
+          @mousedown.prevent="startLogResize"
         ></div>
-        <!-- Tab 栏 -->
-        <div class="console-tab-bar">
-          <div class="console-tabs">
-            <div
-              class="console-tab"
-              :class="{ active: consoleActiveTab === 'terminal' }"
-              @click="consoleActiveTab = 'terminal'"
-            >
-              <span class="console-tab-icon">&gt;_</span>
-              <span>终端</span>
-            </div>
-            <div
-              v-if="showBuildRunLog"
-              class="console-tab"
-              :class="{ active: consoleActiveTab === 'log' }"
-              @click="consoleActiveTab = 'log'"
-            >
-              <span class="console-dot" :class="{ running: isServiceRunning }"></span>
-              <span>运行日志</span>
-              <span
-                v-if="!isServiceRunning"
-                class="console-tab-close"
-                @click.stop="closeLogTab"
-              >×</span>
-            </div>
+        <div class="log-tab-bar">
+          <div class="log-tab active">
+            <span class="console-dot" :class="{ running: isServiceRunning }"></span>
+            <span>运行日志</span>
           </div>
           <div class="console-tab-actions">
             <span class="console-tab-cwd" :title="displayCwd">{{ displayCwd }}</span>
-            <a-button size="small" type="text" class="console-tab-btn" @click="clearActiveConsole">
+            <a-button size="small" type="text" @click="consoleLines = []">
               <ClearOutlined /> 清屏
             </a-button>
-            <DownOutlined
-              v-if="!terminalMinimized"
-              class="console-tab-toggle"
-              @click="toggleTerminalMinimize"
-            />
-            <UpOutlined
-              v-else
-              class="console-tab-toggle"
-              @click="toggleTerminalMinimize"
-            />
+            <span v-if="!isServiceRunning" class="console-tab-close" @click="closeLogTab">×</span>
+            <DownOutlined v-if="!logMinimized" @click="logMinimized = true" />
+            <UpOutlined v-else @click="logMinimized = false" />
           </div>
         </div>
-        <!-- 终端内容 -->
-        <div v-show="!terminalMinimized && consoleActiveTab === 'terminal'" class="console-panel-body" ref="terminalBodyRef">
-          <div
-            class="terminal-output"
-            ref="terminalOutputRef"
-            tabindex="0"
-            @keydown="handleTerminalKeydown"
-            @click="focusTerminal"
-          >
-            <div v-for="(line, i) in terminalLines" :key="i" class="terminal-line">{{ line }}</div>
-            <div v-if="isTerminalExecuting" class="terminal-line terminal-executing">
-              <LoadingOutlined spin /> 执行中...
-            </div>
-            <div class="terminal-line terminal-prompt-line" v-if="!isTerminalExecuting">
-              <span class="prompt-sign">{{ formatTerminalPrompt() }}</span>
-              <span class="prompt-input">{{ terminalCurrentInput }}</span>
-              <span class="prompt-cursor" :class="{ blink: terminalFocused }">|</span>
-            </div>
-          </div>
-        </div>
-        <!-- 运行日志内容 -->
-        <div v-show="!terminalMinimized && consoleActiveTab === 'log'" class="console-panel-body console-log-body">
-          <div
-            v-for="(line, i) in consoleLines"
-            :key="i"
-            :class="['log-line', {
-              'log-error': line.includes('[ERROR]') || line.includes('ERROR'),
-              'log-warn': line.includes('[WARNING]') || line.includes('WARN'),
-              'log-success': line.includes('BUILD SUCCESS') || line.includes('SUCCESS')
-            }]"
-          >{{ line }}</div>
-          <div v-if="isBuilding" class="log-loading">
-            <LoadingOutlined spin /> 编译中...
-          </div>
-        </div>
+        <div v-show="!logMinimized" class="log-xterm-container" ref="logXtermContainer"></div>
       </div>
 
       <!-- ===== 输入区域（仅聊天标签时显示） ===== -->
@@ -831,7 +768,10 @@ import SplitLayout from '@/components/SplitLayout.vue'
 import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
-import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput, execCommand } from '@/api/project'
+import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput } from '@/api/project'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 import { getGitDiff, gitRestore, gitShowFile } from '@/api/git'
 import AgentSelector from '@/components/AgentSelector.vue'
 
@@ -1071,7 +1011,6 @@ const handleBuild = async () => {
   }
   isBuilding.value = true
   showBuildRunLog.value = true
-  consoleActiveTab.value = 'log'
   consoleLines.value = []
   try {
     const result = await buildProject(projectRoot)
@@ -1097,7 +1036,6 @@ const handleRun = async () => {
     return
   }
   showBuildRunLog.value = true
-  consoleActiveTab.value = 'log'
   consoleLines.value = ['正在启动服务...']
   try {
     const result = await runProject(projectRoot)
@@ -1169,45 +1107,134 @@ const stopConsolePolling = () => {
   }
 }
 
-// ===== 终端命令行（Shell 风格） =====
-const terminalCurrentInput = ref('')
-const terminalLines = ref<string[]>([])
-const terminalMinimized = ref(true) // 默认折叠
-const isTerminalExecuting = ref(false)
+// ===== 运行日志面板 =====
 const showBuildRunLog = ref(false)
-const consoleActiveTab = ref<'terminal' | 'log'>('terminal')
-const terminalOutputRef = ref<HTMLElement | null>(null)
-const terminalBodyRef = ref<HTMLElement | null>(null)
-const terminalFocused = ref(false)
-// 拖拽调整大小
-const terminalResizeStartY = ref(0)
-const terminalResizeStartHeight = ref(0)
-const terminalPanelRef = ref<HTMLElement | null>(null)
-// 当前工作目录（前端维护，支持 cd 命令）
-const terminalCwd = ref('')
+const logMinimized = ref(false)
+const terminalCwd = ref('')  // 用于 displayCwd 显示（跟随 workDir 同步）
+// 拖拽调整日志面板高度
+const logResizeStartY = ref(0)
+const logResizeStartHeight = ref(0)
+let logPanelRef: HTMLElement | null = null
+
+// ===== xterm.js 日志终端 =====
+const logXtermContainer = ref<HTMLElement | null>(null)
+let logXterm: Terminal | null = null
+let logFitAddon: FitAddon | null = null
+let logLineCount = 0          // 已同步到 xterm 的行数
+let logSystemThemeListener: (() => void) | null = null  // matchMedia 监听器引用
+
+const LOG_DARK_THEME = {
+  background: '#1e1d2c', foreground: '#d4d4d4', cursor: '#d4d4d4',
+  selectionBackground: '#3b3a52',
+  black: '#1e1d2c', red: '#f48771', green: '#3fb950', yellow: '#dcdcaa',
+  blue: '#569cd6', magenta: '#c586c0', cyan: '#4ec9b0', white: '#d4d4d4',
+  brightBlack: '#525070', brightRed: '#f48771', brightGreen: '#3fb950',
+  brightYellow: '#dcdcaa', brightBlue: '#569cd6', brightMagenta: '#c586c0',
+  brightCyan: '#4ec9b0', brightWhite: '#ffffff',
+}
+const LOG_LIGHT_THEME = {
+  background: '#fafafa', foreground: '#1a1a2e', cursor: '#1a1a2e',
+  selectionBackground: '#c4b5fd',
+  black: '#fafafa', red: '#d32f2f', green: '#2e7d32', yellow: '#f9a825',
+  blue: '#1565c0', magenta: '#7b1fa2', cyan: '#00838f', white: '#1a1a2e',
+  brightBlack: '#9e9e9e', brightRed: '#ef5350', brightGreen: '#43a047',
+  brightYellow: '#fdd835', brightBlue: '#1e88e5', brightMagenta: '#ab47bc',
+  brightCyan: '#00acc1', brightWhite: '#424242',
+}
+
+const applyLogXtermTheme = () => {
+  if (!logXterm) return
+  const mode = settingsStore.getTheme()
+  let isDark: boolean
+  if (mode === 'auto') {
+    isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+  } else {
+    isDark = mode === 'dark'
+  }
+  logXterm.options.theme = isDark ? LOG_DARK_THEME : LOG_LIGHT_THEME
+}
+
+const initLogXterm = () => {
+  if (!logXtermContainer.value || logXterm) return
+  logFitAddon = new FitAddon()
+  logXterm = new Terminal({
+    cursorBlink: false,
+    disableStdin: true,        // 只读日志终端
+    fontSize: 12,
+    fontFamily: "'SF Mono','Monaco','Fira Code',monospace",
+    theme: LOG_DARK_THEME,
+    allowProposedApi: true,
+    scrollback: 3000,
+  })
+  logXterm.loadAddon(logFitAddon)
+  logXterm.open(logXtermContainer.value)
+  logFitAddon.fit()
+  applyLogXtermTheme()
+
+  // resize observer
+  const ro = new ResizeObserver(() => { try { logFitAddon?.fit() } catch { /* ignore */ } })
+  ro.observe(logXtermContainer.value)
+
+  // 主题监听：Pinia settingsStore 变化 + 系统媒体查询变化（auto 模式）
+  watch(() => settingsStore.theme, () => applyLogXtermTheme())
+  const systemDarkMq = window.matchMedia('(prefers-color-scheme: dark)')
+  const sysThemeHandler = () => { if (settingsStore.getTheme() === 'auto') applyLogXtermTheme() }
+  systemDarkMq.addEventListener('change', sysThemeHandler)
+  logSystemThemeListener = () => systemDarkMq.removeEventListener('change', sysThemeHandler)
+
+  // 同步已有日志行
+  logLineCount = 0
+  for (const line of consoleLines.value) {
+    logXterm.writeln(line)
+    logLineCount++
+  }
+}
+
+const disposeLogXterm = () => {
+  logSystemThemeListener?.()
+  logSystemThemeListener = null
+  logXterm?.dispose()
+  logXterm = null
+  logFitAddon = null
+  logLineCount = 0
+}
+
+/** 将 consoleLines 增量同步到 xterm */
+const syncConsoleToXterm = () => {
+  if (!logXterm) return
+  const lines = consoleLines.value
+  // 如果行数减少（清屏/替换），先清空再全量重写
+  if (lines.length < logLineCount) {
+    logXterm.clear()
+    logLineCount = 0
+  }
+  for (let i = logLineCount; i < lines.length; i++) {
+    logXterm.writeln(lines[i])
+  }
+  logLineCount = lines.length
+}
+
+/** 清屏：xterm.clear + 重置计数 */
+const clearLogXterm = () => {
+  logXterm?.clear()
+  logLineCount = 0
+}
+
+// consoleLines 变化 → 增量同步到 xterm
+watch(consoleLines, () => syncConsoleToXterm(), { deep: true, flush: 'post' })
+
+// 日志面板展开时初始化 xterm（懒初始化）
+watch(showBuildRunLog, (show) => {
+  if (show) nextTick(() => initLogXterm())
+})
 
 const displayCwd = computed(() => {
   return terminalCwd.value || agentRuntime.value.workDir || '未设置工作目录'
 })
 
-const formatTerminalPrompt = () => {
-  const cwd = terminalCwd.value || agentRuntime.value.workDir || '.'
-  return cwd.replace(/\\/g, '/') + ' $'
-}
-
 const closeLogTab = () => {
   showBuildRunLog.value = false
-  if (consoleActiveTab.value === 'log') {
-    consoleActiveTab.value = 'terminal'
-  }
-}
-
-const clearActiveConsole = () => {
-  if (consoleActiveTab.value === 'terminal') {
-    terminalLines.value = []
-  } else {
-    consoleLines.value = []
-  }
+  disposeLogXterm()
 }
 
 // 确保 terminalCwd 和 settingsStore 跟随 workDir 实时变化
@@ -1219,173 +1246,30 @@ watch(() => agentRuntime.value.workDir, (val) => {
   }
 }, { immediate: true })
 
-const focusTerminal = () => {
-  terminalFocused.value = true
-  nextTick(() => {
-    terminalOutputRef.value?.focus()
-  })
-}
-
-const handleTerminalKeydown = (e: KeyboardEvent) => {
-  if (e.key === 'Enter') {
-    e.preventDefault()
-    executeTerminalCommand()
-    return
-  }
-  if (e.key === 'Backspace') {
-    e.preventDefault()
-    terminalCurrentInput.value = terminalCurrentInput.value.slice(0, -1)
-    return
-  }
-  // Ctrl+C 清空当前输入
-  if (e.key === 'c' && e.ctrlKey) {
-    e.preventDefault()
-    terminalCurrentInput.value = ''
-    terminalLines.value.push(`${formatTerminalPrompt()} ${terminalCurrentInput.value}^C`)
-    return
-  }
-  // Tab 键阻止焦点离开
-  if (e.key === 'Tab') {
-    e.preventDefault()
-    return
-  }
-  // 可打印字符
-  if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault()
-    terminalCurrentInput.value += e.key
-    return
-  }
-}
-
-/**
- * 处理 cd 命令 — 前端直接修改 cwd，不请求后端
- * 支持: cd ..  cd .  cd ~  cd D:  cd /d D:  cd path\to\dir
- */
-const handleCdCommand = (target: string) => {
-  const current = terminalCwd.value || agentRuntime.value.workDir || ''
-
-  if (!target || target === '~') {
-    // cd 或 cd ~ → 回到 workDir
-    terminalCwd.value = agentRuntime.value.workDir || current
-  } else if (target === '.') {
-    // cd . → 不变
-    // no-op
-  } else if (target === '..') {
-    // cd .. → 上一级
-    const parent = current.replace(/\\/g, '/').replace(/\/[^/]*$/, '')
-    terminalCwd.value = parent || current
-  } else if (target.match(/^[a-zA-Z]:/) || target.match(/^\/\//) || target.match(/^\\\\/)) {
-    // 绝对路径（如 D:\dir 或 \\server\share）
-    terminalCwd.value = target
-  } else {
-    // 相对路径：在当前路径后追加
-    const separator = current.endsWith('\\') || current.endsWith('/') ? '' : '\\'
-    const resolved = current + separator + target
-    terminalCwd.value = resolved
-  }
-
-  terminalLines.value.push(`${formatTerminalPrompt().slice(0, -2)}$ cd ${target}`)
-}
-
-const executeTerminalCommand = async () => {
-  const cmd = terminalCurrentInput.value.trim()
-  if (!cmd) return
-
-  // 确保 cwd 已初始化
-  const workDir = agentRuntime.value.workDir
-  if (!terminalCwd.value && workDir) {
-    terminalCwd.value = workDir
-  }
-
-  const projectRoot = workDir
-  if (!projectRoot) {
-    message.warning('请先设置工作目录')
-    return
-  }
-
-  // 拦截 cd 命令（前端处理，不请求后端）
-  if (cmd === 'cd') {
-    handleCdCommand('')
-    terminalCurrentInput.value = ''
-    return
-  }
-  if (cmd.startsWith('cd ')) {
-    handleCdCommand(cmd.substring(3).trim())
-    terminalCurrentInput.value = ''
-    return
-  }
-
-  terminalLines.value.push(`${formatTerminalPrompt()} ${cmd}`)
-  terminalCurrentInput.value = ''
-  isTerminalExecuting.value = true
-
-  try {
-    const cwd = terminalCwd.value || projectRoot
-    const result = await execCommand(cmd, cwd)
-    if (result.output) {
-      const outputLines = result.output.split('\n')
-      for (const line of outputLines) {
-        terminalLines.value.push(line)
-      }
-    }
-    if (result.timedOut) {
-      terminalLines.value.push('[命令执行超时]')
-    } else if (result.exitCode !== 0) {
-      terminalLines.value.push(`[进程退出码: ${result.exitCode}]`)
-    }
-  } catch (e: any) {
-    terminalLines.value.push(`[错误] ${e.message}`)
-  } finally {
-    isTerminalExecuting.value = false
-    scrollTerminalToBottom()
-    focusTerminal()
-  }
-}
-
-const scrollTerminalToBottom = () => {
-  nextTick(() => {
-    if (terminalOutputRef.value) {
-      terminalOutputRef.value.scrollTop = terminalOutputRef.value.scrollHeight
-    }
-  })
-}
-
-const toggleTerminalMinimize = () => {
-  terminalMinimized.value = !terminalMinimized.value
-  if (!terminalMinimized.value) {
-    // 展开后聚焦
-    nextTick(() => {
-      focusTerminal()
-      scrollTerminalToBottom()
-    })
-  }
-}
-
-// 拖拽调整终端高度
-const startTerminalResize = (e: MouseEvent) => {
-  const panel = terminalBodyRef.value?.parentElement
+// ===== 日志面板拖拽调整高度 =====
+const startLogResize = (e: MouseEvent) => {
+  const panel = (e.target as HTMLElement)?.parentElement
   if (!panel) return
-  terminalPanelRef.value = panel
-  terminalResizeStartY.value = e.clientY
-  terminalResizeStartHeight.value = panel.offsetHeight
-
-  document.addEventListener('mousemove', onTerminalResize)
-  document.addEventListener('mouseup', stopTerminalResize)
+  logPanelRef = panel
+  logResizeStartY.value = e.clientY
+  logResizeStartHeight.value = panel.offsetHeight
+  document.addEventListener('mousemove', onLogResize)
+  document.addEventListener('mouseup', stopLogResize)
 }
 
-const onTerminalResize = (e: MouseEvent) => {
-  const panel = terminalPanelRef.value
+const onLogResize = (e: MouseEvent) => {
+  const panel = logPanelRef
   if (!panel) return
-  const delta = terminalResizeStartY.value - e.clientY // 向上拖拽增大
-  const newHeight = terminalResizeStartHeight.value + delta
-  const minH = 100
-  const maxH = window.innerHeight * 0.7
+  const delta = logResizeStartY.value - e.clientY
+  const newHeight = logResizeStartHeight.value + delta
+  const minH = 80
+  const maxH = window.innerHeight * 0.5
   panel.style.height = Math.max(minH, Math.min(maxH, newHeight)) + 'px'
 }
 
-const stopTerminalResize = () => {
-  document.removeEventListener('mousemove', onTerminalResize)
-  document.removeEventListener('mouseup', stopTerminalResize)
+const stopLogResize = () => {
+  document.removeEventListener('mousemove', onLogResize)
+  document.removeEventListener('mouseup', stopLogResize)
 }
 
 // 页面离开时停止轮询
@@ -4268,6 +4152,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  disposeLogXterm()
   // 清理拖拽事件
   document.removeEventListener('mousemove', onGlobalDragMove)
   document.removeEventListener('mouseup', onGlobalDragUp)
@@ -4429,6 +4314,7 @@ watch(currentConversationId, (newId) => {
   height: 100%;
   background: var(--bg-root);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  text-align: left;
 }
 
 /* ===== 侧边栏 ===== */
@@ -5355,6 +5241,7 @@ watch(currentConversationId, (newId) => {
   color: var(--text-2);
   word-wrap: break-word;
   overflow-wrap: break-word;
+  text-align: left;
 }
 
 /* ===== 思考过程 ===== */
@@ -5471,6 +5358,7 @@ watch(currentConversationId, (newId) => {
   font-size: 13px;
   line-height: 1.65;
   color: var(--text-2);
+  text-align: left;
 }
 
 /* ===== 思考时间线 ===== */
@@ -6297,21 +6185,22 @@ watch(currentConversationId, (newId) => {
   font-size: 13px;
 }
 
-/* ===== 控制台面板（终端 + 运行日志） ===== */
-.console-panel {
+/* ===== 底部运行日志面板 ===== */
+.run-log-panel {
   flex-shrink: 0;
-  background: #1a1925;
-  border-top: 1px solid #2a2838;
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 32px;
+  max-height: 50vh;
   position: relative;
 }
-.console-panel.minimized {
+.run-log-panel.minimized {
   flex: 0 0 auto !important;
   height: auto !important;
 }
-.console-resize-handle {
+.log-resize-handle {
   position: absolute;
   top: -4px;
   left: 0;
@@ -6320,158 +6209,37 @@ watch(currentConversationId, (newId) => {
   cursor: ns-resize;
   z-index: 10;
 }
-.console-resize-handle:hover { background: rgba(139, 92, 246, 0.25); }
+.log-resize-handle:hover { background: rgba(139, 92, 246, 0.25); }
 
-/* 控制台 Tab 栏 */
-.console-tab-bar {
+/* 日志面板 Tab 栏 */
+.log-tab-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #1e1d2c;
-  border-bottom: 1px solid #2a2838;
+  background: var(--bg-root);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   min-height: 34px;
   user-select: none;
 }
-.console-tabs { display: flex; align-items: center; }
-.console-tab {
+.log-tab {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 0 14px;
   height: 34px;
   font-size: 12px;
-  color: #7a7898;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: all 0.2s;
-}
-.console-tab:hover {
-  color: #c4b5fd;
-  background: rgba(139, 92, 246, 0.06);
-}
-.console-tab.active {
-  color: #e4e2f0;
-  border-bottom-color: var(--accent);
-  background: #1a1925;
-}
-.console-tab-icon {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--accent);
-  font-family: 'SF Mono', 'Monaco', 'Fira Code', monospace;
-}
-.console-tab-close {
-  font-size: 14px;
-  line-height: 1;
-  color: #6a6880;
-  padding: 2px 4px;
-  border-radius: 3px;
-  margin-left: 2px;
-  transition: all 0.15s;
-}
-.console-tab-close:hover { background: var(--red); color: #fff; }
-.console-tab-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 12px;
-}
-.console-tab-cwd {
-  font-size: 11px;
-  color: #6a6880;
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.console-tab-btn {
-  font-size: 11px !important;
-  color: #7a7898 !important;
-  height: 24px !important;
-  padding: 0 8px !important;
-}
-.console-tab-btn:hover { color: #c4b5fd !important; }
-.console-tab-toggle {
-  font-size: 11px;
-  color: #6a6880;
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 3px;
-  transition: all 0.15s;
-}
-.console-tab-toggle:hover { background: #2a2838; color: #c4b5fd; }
-
-/* 控制台内容 */
-.console-panel-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-.console-log-body {
-  overflow-y: auto;
-  padding: 10px 14px;
-  font-family: 'SF Mono', 'Monaco', 'Fira Code', monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #d4d4d4;
-  white-space: pre-wrap;
-  word-break: break-all;
-  text-align: left;
-}
-.terminal-output {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px 14px;
-  font-family: 'SF Mono', 'Monaco', 'Fira Code', monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #d4d4d4;
-  white-space: pre-wrap;
-  word-break: break-all;
-  outline: none;
-  cursor: text;
-  text-align: left;
-}
-.terminal-line {
-  min-height: 18px;
-  padding: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
-  text-align: left;
-}
-.terminal-executing { color: #7a7898; font-style: italic; }
-.terminal-prompt-line {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  min-height: 18px;
-}
-.prompt-sign {
-  color: var(--accent);
-  white-space: pre;
-  flex-shrink: 0;
-}
-.prompt-input { color: #d4d4d4; white-space: pre; }
-.prompt-cursor {
-  color: #d4d4d4;
-  font-weight: 100;
-  animation: terminalBlink 1s step-end infinite;
-}
-.prompt-cursor.blink { visibility: visible; }
-@keyframes terminalBlink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  color: var(--text-1);
+  border-bottom: 2px solid var(--accent);
+  background: var(--bg-card);
 }
 
-/* ===== 运行日志内容 ===== */
-.log-line { min-height: 18px; padding: 0; text-align: left; }
-.log-line.log-error { color: #f48771; }
-.log-line.log-warn { color: #dcdcaa; }
-.log-line.log-success { color: var(--green); }
-.log-loading { color: #7a7898; padding: 4px 0; font-size: 12px; }
+/* 日志内容 — xterm.js 终端 */
+.log-xterm-container {
+  flex: 1;
+  overflow: hidden;
+  min-height: 60px;
+}
 
 /* ===== 暗色模式 ===== */
 [data-theme="dark"] .chat-container {
@@ -6489,12 +6257,6 @@ watch(currentConversationId, (newId) => {
   --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.5);
   --accent-glow: rgba(139, 92, 246, 0.25);
 }
-
-[data-theme="dark"] .console-panel { background: #0e0d16; border-color: #1e1d2c; }
-[data-theme="dark"] .console-tab-bar { background: #11101a; border-color: #1e1d2c; }
-[data-theme="dark"] .console-tab.active { background: #0e0d16; }
-[data-theme="dark"] .console-tab:hover { background: rgba(139, 92, 246, 0.08); }
-[data-theme="dark"] .console-resize-handle:hover { background: rgba(139, 92, 246, 0.2); }
 
 [data-theme="dark"] .thinking-section { background: #1a1925; border-color: #2a2838; }
 [data-theme="dark"] .thinking-header { background: #1e1d2c; }
@@ -6657,7 +6419,6 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .task-dropdown-body::-webkit-scrollbar-thumb,
 [data-theme="dark"] .changes-panel-body::-webkit-scrollbar-thumb,
 [data-theme="dark"] .console-log-body::-webkit-scrollbar-thumb,
-[data-theme="dark"] .terminal-output::-webkit-scrollbar-thumb,
 [data-theme="dark"] .tool-result-body::-webkit-scrollbar-thumb {
   background: #3a3850;
   border-radius: 2px;
@@ -6666,7 +6427,6 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .task-dropdown-body::-webkit-scrollbar,
 [data-theme="dark"] .changes-panel-body::-webkit-scrollbar,
 [data-theme="dark"] .console-log-body::-webkit-scrollbar,
-[data-theme="dark"] .terminal-output::-webkit-scrollbar,
 [data-theme="dark"] .tool-result-body::-webkit-scrollbar {
   width: 4px;
 }
@@ -6756,6 +6516,7 @@ watch(currentConversationId, (newId) => {
   color: var(--text-2, #5c5c78);
   white-space: pre-wrap;
   word-break: break-all;
+  text-align: left;
 }
 .tool-result-error .tool-result-body pre { color: #991b1b; }
 
@@ -6955,6 +6716,7 @@ watch(currentConversationId, (newId) => {
   word-break: break-word;
   overflow-x: hidden;
   border: 1px solid var(--border, #e8e5f0);
+  text-align: left;
 }
 .code-message code {
   font-family: 'SF Mono', 'Monaco', 'Fira Code', monospace;
@@ -6974,6 +6736,7 @@ watch(currentConversationId, (newId) => {
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: hidden;
+  text-align: left;
 }
 
 /* ===== highlight.js 主题 ===== */

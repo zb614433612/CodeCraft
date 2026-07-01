@@ -123,7 +123,7 @@ public class ProjectServiceImpl implements ProjectService {
     }
 
     @Override
-    public List<DirectoryEntry> listChildren(String parentPath) {
+    public List<DirectoryEntry> listChildren(String parentPath, boolean includeFiles) {
         if (parentPath == null || parentPath.isEmpty()) {
             return List.of();
         }
@@ -137,14 +137,25 @@ public class ProjectServiceImpl implements ProjectService {
         }
         List<DirectoryEntry> result = new ArrayList<>();
         for (File f : files) {
-            if (f.isDirectory() && shouldInclude(f, parentPath)) {
+            boolean isDir = f.isDirectory();
+            // 目录：始终通过 shouldInclude 过滤
+            // 文件：仅在 includeFiles=true 时包含，也通过 shouldInclude 过滤
+            if (isDir && shouldInclude(f, parentPath)) {
                 String childPath = f.getAbsolutePath().replace('\\', '/');
-                result.add(new DirectoryEntry(f.getName(), childPath));
+                result.add(new DirectoryEntry(f.getName(), childPath, true));
+            } else if (includeFiles && !isDir && shouldInclude(f, parentPath)) {
+                String childPath = f.getAbsolutePath().replace('\\', '/');
+                result.add(new DirectoryEntry(f.getName(), childPath, false));
             }
         }
-        // 按名称排序
-        result.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-        log.debug("列出目录子项 {}: {}", parentPath, result.size());
+        // 排序：目录在前，再按名称
+        result.sort((a, b) -> {
+            if (a.isDirectory() != b.isDirectory()) {
+                return a.isDirectory() ? -1 : 1;
+            }
+            return a.getName().compareToIgnoreCase(b.getName());
+        });
+        log.debug("列出目录子项 {}: {} (includeFiles={})", parentPath, result.size(), includeFiles);
         return result;
     }
 
