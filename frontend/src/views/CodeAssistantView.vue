@@ -5765,7 +5765,7 @@ watch(currentConversationId, (newId) => {
   position: relative;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .footer-right {
   display: flex;
@@ -6213,7 +6213,7 @@ watch(currentConversationId, (newId) => {
   gap: 6px;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .footer-right {
   display: flex;
