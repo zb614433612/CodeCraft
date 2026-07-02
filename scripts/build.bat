@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
-REM build.bat — CodeCraft 一键构建打包脚本 (Windows)
-REM 用法: scripts\build.bat [版本号]  (版本号可选，默认从 pom.xml 读取)
+REM build.bat ?? CodeCraft ????????????? (Windows)
+REM ?÷?: scripts\build.bat [?汾??]  (?汾?????????? pom.xml ???)
 REM ============================================================
 setlocal enabledelayedexpansion
 
@@ -11,16 +11,16 @@ set "ELECTRON_DIR=%PROJECT_ROOT%\electron"
 set "RELEASE_DIR=%ELECTRON_DIR%\release"
 
 echo ============================================================
-echo   CodeCraft 一键构建打包
+echo   CodeCraft ??????????
 echo ============================================================
 
-REM ==================== Step 0: 版本号 ====================
+REM ==================== Step 0: ?汾?? ====================
 if not "%~1"=="" (
     set "VERSION=%~1"
-    REM 去掉 v 前缀
+    REM ??? v ??
     if "!VERSION:~0,1!"=="v" set "VERSION=!VERSION:~1!"
-    echo [INFO] 使用指定版本: !VERSION!
-    REM 更新 pom.xml 版本号
+    echo [INFO] ???????汾: !VERSION!
+    REM ???? pom.xml ?汾??
     powershell -NoProfile -Command ^
         "$xml = [xml](Get-Content pom.xml);" ^
         "$xml.project.version = '!VERSION!';" ^
@@ -32,39 +32,39 @@ if not "%~1"=="" (
         goto :got_version
     )
     :got_version
-    echo [INFO] 从 pom.xml 读取版本: !VERSION!
+    echo [INFO] ?? pom.xml ????汾: !VERSION!
 )
 
-REM ==================== Step 1: 版本同步 ====================
+REM ==================== Step 1: ?汾??? ====================
 echo.
-echo [INFO] Step 1/6: 同步版本号...
+echo [INFO] Step 1/6: ????汾??...
 call scripts\sync-version.bat
 
-REM ==================== Step 2: Maven 构建 ====================
+REM ==================== Step 2: Maven ???? ====================
 echo.
-echo [INFO] Step 2/6: Maven 构建后端 JAR...
+echo [INFO] Step 2/6: Maven ??????? JAR...
 call mvn clean package -DskipTests
 if %errorlevel% neq 0 (
-    echo [ERROR] Maven 构建失败！
+    echo [ERROR] Maven ????????
     exit /b 1
 )
-echo [INFO] Maven 构建完成
+echo [INFO] Maven ???????
 
-REM 确认 JAR 存在
-set "JAR_FILE=%PROJECT_ROOT%\target\codecraft-%VERSION%.jar"
+REM ??? JAR ????
+set "JAR_FILE=%PROJECT_ROOT%\target\code-craft-%VERSION%.jar"
 if not exist "%JAR_FILE%" (
-    echo [ERROR] JAR 文件不存在: %JAR_FILE%
+    echo [ERROR] JAR ?????????: %JAR_FILE%
     exit /b 1
 )
-echo [INFO] JAR 产物: %JAR_FILE%
+echo [INFO] JAR ????: %JAR_FILE%
 
-REM ==================== Step 3: JRE 裁剪 ====================
+REM ==================== Step 3: JRE ?ü? ====================
 echo.
-echo [INFO] Step 3/6: jlink 裁剪内置 JRE...
+echo [INFO] Step 3/6: jlink ?ü????? JRE...
 
 set "JRE_DIR=%ELECTRON_DIR%\jre"
 if exist "%JRE_DIR%\bin\java.exe" (
-    echo [INFO] 内置 JRE 已存在，跳过裁剪（如需重新裁剪请删除 electron\jre 目录）
+    echo [INFO] ???? JRE ???????????ü?????????2ü?????? electron\jre ????
 ) else (
     if defined JAVA_HOME (
         set "JLINK=%JAVA_HOME%\bin\jlink.exe"
@@ -72,61 +72,61 @@ if exist "%JRE_DIR%\bin\java.exe" (
         set "JLINK=jlink.exe"
     )
 
-    REM 检查 jlink 是否可用
+    REM ??? jlink ??????
     where !JLINK! >nul 2>&1
     if %errorlevel% neq 0 (
-        echo [WARN] jlink 不可用，跳过热裁剪
-        echo        请安装 JDK 17+ 并设置 JAVA_HOME
+        echo [WARN] jlink ?????????????ü?
+        echo        ??? JDK 17+ ?????? JAVA_HOME
     ) else (
-        echo [INFO] 正在裁剪 JRE（约 30 秒）...
+        echo [INFO] ????ü? JRE??? 30 ??...
         if exist "%JRE_DIR%" rmdir /s /q "%JRE_DIR%"
         "!JLINK!" ^
             --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
               --strip-debug --compress 2 --no-header-files --no-man-pages ^
             --output "%JRE_DIR%"
         if %errorlevel% equ 0 (
-            echo [INFO] JRE 裁剪完成
+            echo [INFO] JRE ?ü????
         ) else (
-            echo [WARN] JRE 裁剪失败，将继续打包（可能缺少内置 JRE）
+            echo [WARN] JRE ?ü??????????????????????????? JRE??
         )
     )
 )
 
-REM ==================== Step 4: 跳过图标（Windows 有 icon.ico） ====================
+REM ==================== Step 4: ???????Windows ?? icon.ico?? ====================
 echo.
-echo [INFO] Step 4/6: Windows 图标 icon.ico 使用现有文件，跳过生成
+echo [INFO] Step 4/6: Windows ??? icon.ico ????????????????????
 
-REM ==================== Step 5: 安装 Electron 依赖 ====================
+REM ==================== Step 5: ??? Electron ???? ====================
 echo.
-echo [INFO] Step 5/6: 检查 Electron 依赖...
+echo [INFO] Step 5/6: ??? Electron ????...
 cd /d "%ELECTRON_DIR%"
 if not exist "node_modules" (
-    echo [INFO] 安装 Electron 依赖（首次约 2 分钟）...
+    echo [INFO] ??? Electron ?????????? 2 ?????...
     call npm install
 )
 
-REM ==================== Step 6: Electron 打包 ====================
+REM ==================== Step 6: Electron ??? ====================
 echo.
-echo [INFO] Step 6/6: Electron 打包 (Windows)...
+echo [INFO] Step 6/6: Electron ??? (Windows)...
 call npm run dist:win
 if %errorlevel% neq 0 (
-    echo [ERROR] Electron 打包失败！
+    echo [ERROR] Electron ???????
     exit /b 1
 )
 
-REM ==================== 汇总 ====================
+REM ==================== ???? ====================
 echo.
 echo ============================================================
-echo   ✅ 打包完成！
+echo   ? ???????
 echo ============================================================
 echo.
 if exist "%RELEASE_DIR%" (
     dir "%RELEASE_DIR%\*.exe" /b 2>nul
     dir "%RELEASE_DIR%\*.yml" /b 2>nul
     echo.
-    echo 版本: %VERSION%  ^|  平台: Windows
+    echo ?汾: %VERSION%  ^|  ??: Windows
     echo.
-    REM 计算 MD5
+    REM ???? MD5
     for %%f in ("%RELEASE_DIR%\CodeCraft-Setup-%VERSION%.exe") do (
         certutil -hashfile "%%f" MD5 | findstr /v ":" | findstr /v "^$"
     )
