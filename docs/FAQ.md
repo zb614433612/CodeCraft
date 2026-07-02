@@ -19,7 +19,7 @@ lsof -i :8084
 kill -9 <PID>
 ```
 
-或者改端口：`SERVER_PORT=8085 mvn spring-boot:run`
+或者改端口：`SERVER_PORT=8084 mvn spring-boot:run`
 
 ---
 
