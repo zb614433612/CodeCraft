@@ -1,7 +1,7 @@
 # 服务器配置
 server:
   # 服务器端口
-  port: 8085
+  port: 8084
 # Spring配置
 spring:
   # 允许循环引用（AgentForkManager ↔ ToolExecutor 通过工具形成良性循环）
