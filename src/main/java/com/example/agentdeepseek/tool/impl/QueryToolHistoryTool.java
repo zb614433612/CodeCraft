@@ -173,8 +173,10 @@ public class QueryToolHistoryTool implements Tool {
                     sb.append("工具：").append(associatedToolName).append("\n");
                 }
 
-                String content = msg.getContent();
-                if (content != null && !content.isEmpty()) {
+                // TOOL消息的内容存储在reasoning字段（根据MessagePersister的设计）
+                String content = msg.getReasoning() != null ? msg.getReasoning() :
+                        (msg.getContent() != null ? msg.getContent() : "");
+                if (!content.isEmpty()) {
                     sb.append("结果：\n").append(content).append("\n");
                 }
                 sb.append("\n");
@@ -221,7 +223,8 @@ public class QueryToolHistoryTool implements Tool {
                         for (JsonNode tc : tcNode) {
                             String id = tc.path("id").asText();
                             String name = tc.path("function").path("name").asText();
-                            if (!id.isEmpty() && !name.isEmpty()) {
+                            // 过滤 NullNode 返回的 "null" 字符串
+                            if (!id.isEmpty() && !"null".equals(id) && !name.isEmpty() && !"null".equals(name)) {
                                 map.put(id, name);
                             }
                         }

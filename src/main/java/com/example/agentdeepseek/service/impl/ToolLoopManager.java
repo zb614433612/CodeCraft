@@ -216,10 +216,26 @@ public class ToolLoopManager {
             return false;
         }
         for (ObjectNode toolCall : accumulatedToolCalls.values()) {
+            // 校验 function 节点存在
             JsonNode function = toolCall.path("function");
             if (function.isMissingNode()) {
                 return false;
             }
+            // 校验 function.name 有效（非 MissingNode、非 NullNode、非空/非 "null" 字符串）
+            JsonNode name = function.path("name");
+            String nameText = name.asText("");
+            if (name.isMissingNode() || name.isNull() || nameText.isEmpty() || "null".equals(nameText)) {
+                log.warn("工具调用缺少有效 function.name，accumulatedToolCalls={}", accumulatedToolCalls);
+                return false;
+            }
+            // 校验 id 有效（非 MissingNode、非 NullNode、非空/非 "null" 字符串）
+            JsonNode id = toolCall.path("id");
+            String idText = id.asText("");
+            if (id.isMissingNode() || id.isNull() || idText.isEmpty() || "null".equals(idText)) {
+                log.warn("工具调用缺少有效 id，accumulatedToolCalls={}", accumulatedToolCalls);
+                return false;
+            }
+            // 校验 arguments 存在且为合法 JSON
             JsonNode arguments = function.path("arguments");
             if (arguments.isMissingNode() || arguments.asText("").isEmpty()) {
                 return false;
@@ -241,7 +257,18 @@ public class ToolLoopManager {
         ArrayNode arrayNode = objectMapper.createArrayNode();
         accumulatedToolCalls.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
-                .forEach(entry -> arrayNode.add(entry.getValue()));
+                .forEach(entry -> {
+                    ObjectNode tc = entry.getValue();
+                    // 防御性清理：确保 id 和 function.name 不为 null/空
+                    // （正常情况下 isToolCallsComplete 已确保这些字段有效，此处作为安全网）
+                    String id = tc.path("id").asText("");
+                    String name = tc.path("function").path("name").asText("");
+                    if (!id.isEmpty() && !"null".equals(id) && !name.isEmpty() && !"null".equals(name)) {
+                        arrayNode.add(tc);
+                    } else {
+                        log.warn("跳过无效工具调用 (id={}, name={}): {}", id, name, tc);
+                    }
+                });
         return arrayNode;
     }
 
@@ -332,7 +359,8 @@ public class ToolLoopManager {
             for (JsonNode call : toolCalls) {
                 JsonNode func = call.path("function");
                 String name = func.path("name").asText("");
-                if (!name.isEmpty()) {
+                // 过滤 NullNode 返回的 "null" 字符串
+                if (!name.isEmpty() && !"null".equals(name)) {
                     names.add(name);
                 }
             }
@@ -416,10 +444,20 @@ public class ToolLoopManager {
             String jsonStr = response;
             if (jsonStr.contains("```json")) {
                 jsonStr = jsonStr.substring(jsonStr.indexOf("```json") + 7);
-                jsonStr = jsonStr.substring(0, jsonStr.indexOf("```"));
+                int endIdx = jsonStr.indexOf("```");
+                if (endIdx < 0) {
+                    log.warn("评委响应中找到 ```json 但未找到结束的 ```，原始响应: {}", response);
+                    return null;
+                }
+                jsonStr = jsonStr.substring(0, endIdx);
             } else if (jsonStr.contains("```")) {
                 jsonStr = jsonStr.substring(jsonStr.indexOf("```") + 3);
-                jsonStr = jsonStr.substring(0, jsonStr.indexOf("```"));
+                int endIdx = jsonStr.indexOf("```");
+                if (endIdx < 0) {
+                    log.warn("评委响应中找到 ``` 但未找到结束的 ```，原始响应: {}", response);
+                    return null;
+                }
+                jsonStr = jsonStr.substring(0, endIdx);
             }
             jsonStr = jsonStr.trim();
 

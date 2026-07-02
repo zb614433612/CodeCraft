@@ -5,6 +5,52 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.3] - 2026-07-02
+
+### 🌐 Multi LLM Provider Support System
+
+- **Multi-Provider Support**: Supports mainstream LLM platforms including DeepSeek, OpenAI, Anthropic, Ollama, MiMo
+- **Dynamic Switching**: Frontend can switch Providers at runtime without restarting the service
+- **Agent Binding**: Each Agent can be bound to a specific Provider and model
+- **Unified Interface**: All Providers are called through a unified `LLMClient` interface, shielding platform differences
+- **Hot Refresh**: Client cache is automatically refreshed after Provider configuration changes
+
+### 🏗️ Core Architecture Changes
+
+- **New LLMClient Abstraction Layer**: Unified interface for DeepSeek/OpenAI/Anthropic/Ollama/MiMo
+- **New LLMClientManager**: Core manager for Provider registration, routing, and caching
+- **6 New Provider Implementations**: DeepSeekClient, OpenAIClient, AnthropicClient, OllamaClient, MiMoClient, AbstractLLMClient
+- **New LLMProviderController**: REST API controller for Provider CRUD operations
+- **New llm_provider Database Table**: Stores Provider configuration information
+
+### 🎨 Frontend UI Enhancements
+
+- **New Provider Switching UI**: CodeAssistantView supports runtime Provider switching
+- **Dynamic Model List**: Automatically refreshes model list based on current Provider
+- **No Provider Guide**: Displays guide interface when no Provider is configured
+- **Agent Config Enhancement**: AgentConfigView adds Provider binding configuration
+
+### 🔧 Fixes & Optimizations
+
+- **Tool call parameter accumulation saves partial content on interruption**
+- **Judge extension counter memory leak prevention**
+- **Sub-agent timeout statistics**
+- **NullNode handling fix**
+
+### 🏷️ Version Bump
+
+- Backend: `1.1.2` → `1.1.3`
+- Frontend: `1.1.2` → `1.1.3`
+- Electron: `1.1.2` → `1.1.3`
+- Build artifact: `code-craft-1.1.2.jar` → `code-craft-1.1.3.jar`
+
+### 📦 New Dependencies
+
+- Backend: `LLMClientManager`, `LLMClient` interface and 6 implementation classes
+- Frontend: `llm-provider.ts` API interface, `ProviderConfigView.vue` page
+
+---
+
 ## [1.1.2] - 2026-07-01
 
 ### 🌡️ Agent Temperature Support (Full-Stack)

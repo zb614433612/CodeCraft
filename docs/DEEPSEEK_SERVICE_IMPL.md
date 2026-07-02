@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.1.2 | 更新：2026-06-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.3 | 更新：2026-07-02 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 129KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -21,7 +21,7 @@ DeepSeekServiceImpl 承担的职责（理想情况下应拆分为 4~5 个类）�
 │ 6. 评委评估      evaluateWithJudge / buildJudgeContext   │
 │ 7. 死循环检测    hasRepeatedCalls / extractToolKey        │
 │ 8. 消息持久化    saveUserMessage / saveAssistantMessage   │
-│ 9. API Key 管理  initDynamicApiKey                       │
+│ 9. LLM Provider 路由  resolveClient / buildRequestBody   │
 │10. 语言指令注入  buildLanguageInstruction                │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -33,12 +33,13 @@ DeepSeekServiceImpl 承担的职责（理想情况下应拆分为 4~5 个类）�
 ## 二、依赖注入全景图
 
 ```
-DeepSeekServiceImpl (21 个依赖)
+DeepSeekServiceImpl (22 个依赖)
 ├─ 外部通信
-│   └─ WebClient deepSeekWebClient     → DeepSeek API HTTP 调用
+│   └─ WebClient deepSeekWebClient     → DeepSeek API HTTP 调用（兜底，正常走 LLMClient）
 ├─ 配置
-│   ├─ DeepSeekConfig                  → API URL / Key / 模型参数
-│   └─ ConfigService                   → 动态 API Key 读取
+│   ├─ DeepSeekConfig                  → API URL / Key / 模型参数（兜底配置）
+│   ├─ ConfigService                   → 动态配置读取
+│   └─ LLMClientManager               → ★新增：多 LLM Provider 路由管理
 ├─ 数据库
 │   ├─ ConversationMapper              → 会话 CRUD
 │   ├─ ConversationMessageMapper       → 消息 CRUD
@@ -77,8 +78,9 @@ DeepSeekServiceImpl (21 个依赖)
 ├─ ① prepareConversationContext(request, stream=true)
 │   ├─ 获取/创建 Conversation
 │   ├─ 获取 AgentConfig（工具列表、模型、思考模式等）
+│   ├─ 解析 LLM Provider + Client（providerCode > providerId > 默认）
 │   ├─ 加载技能 → SkillMatcher.match()
-│   ├─ 构建 API 请求体（消息 + 工具定义 + 参数）
+│   ├─ 构建 API 请求体（LLMClient.buildRequestBody）
 │   └─ 返回 ConversationContext（含 apiRequest, toolNames, skillMatchEvent）
 ├─ ② toolExecutor.buildToolDefinitions(toolNames)
 │   └─ 构建 OpenAI Function Calling tools 数组
@@ -109,7 +111,7 @@ DeepSeekServiceImpl (21 个依赖)
 │       │   │
 │       │   └─ 正常迭代 → handleStreamingPhase()
 │       │       │
-│       │       ├─ 发送 HTTP 请求到 DeepSeek API（SSE 流式）
+│       │       ├─ 发送 HTTP 请求到 LLM Provider API（SSE 流式，跟随 Provider 动态 WebClient）
 │       │       ├─ SSE 事件解析：
 │       │       │   ├─ reasoning_content → createReasoningSSEEvent()
 │       │       │   ├─ content delta → 累积文本
@@ -298,7 +300,48 @@ CompactionService.asyncPrecompress()
 
 ---
 
-## 八、已知问题与拆分建议
+## 八、LLM Provider 路由机制（v1.1.3 新增）
+
+### 8.1 路由优先级
+
+```
+前端动态 providerCode（ChatRequest.providerCode）
+    ↓ 未找到
+Agent 配置 providerId（AgentConfig.providerId）
+    ↓ 未找到
+第一个可用 Provider（LLMClientManager.getFirstClient()）
+    ↓ 未找到
+抛出异常：没有可用的 LLM Provider
+```
+
+### 8.2 关键代码路径
+
+```
+prepareConversationContext()
+    ↓
+    ├─ request.getProviderCode() → llmClientManager.resolveClientByCode()
+    ├─ agentConfig.getProviderId() → llmClientManager.resolveClientByProviderId()
+    └─ llmClientManager.getFirstClient()
+    ↓
+    llmClient.buildRequestBody(messages, model, temperature, thinkingMode, stream, tools)
+    ↓
+    apiRequest.put("_llmClient", llmClient)  // 存储到内部字段
+    ↓
+    流式/阻塞调用时：
+    ├─ activeWebClient = llmClient.getWebClient()  // 使用 Provider 的 WebClient
+    ├─ llmClient.getChatEndpoint()                  // 使用 Provider 的端点路径
+    └─ llmClient.extractContentFromStreamChunk()    // 使用 Provider 的响应解析器
+```
+
+### 8.3 评委/子Agent 跟随机制
+
+评委和子 Agent 使用与主 Agent 相同的 LLM Provider，通过 `ToolContext.setProviderCode()` 传递：
+- 评委 API 调用：从 `_llmClient` 提取 `providerCode`，传给 `deepSeekAnalyzer.analyzeWithoutThinking()`
+- 子 Agent 工具调用：通过 `ToolContext.setProviderCode()` 设置到线程上下文
+
+---
+
+## 九、已知问题与拆分建议
 
 | 问题 | 位置 | 建议 |
 |------|------|------|
@@ -307,6 +350,7 @@ CompactionService.asyncPrecompress()
 | `evaluateWithJudge` 逻辑 | ~100 行 | 已委托 ToolLoopManager，但调用链仍在 |
 | 子Agent收集逻辑 | `executeSemiStreamingToolCycle` 尾部 | 抽到 `SubAgentCollector` |
 | `handleStreamingPhase` | 最大的单个方法 | 拆分为 `sendApiRequest` + `parseSseResponse` |
+| LLM Provider 路由 | prepareConversationContext | 已通过 LLMClientManager 解耦，路由逻辑可进一步独立 |
 
 **推荐拆分方案**：
 ```
@@ -320,7 +364,7 @@ DeepSeekServiceImpl (编排层，~200行)
 
 ---
 
-## 九、关键常量速查
+## 十、关键常量速查
 
 | 常量 | 值 | 说明 |
 |------|----|------|

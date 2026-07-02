@@ -11,6 +11,8 @@ import com.example.agentdeepseek.service.SkillMatcher;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.model.dto.PendingQuestion;
 import com.example.agentdeepseek.service.PendingQuestionStore;
+import com.example.agentdeepseek.service.llm.LLMClientManager;
+import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.ToolExecutor;
@@ -27,8 +29,6 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -45,7 +45,6 @@ import java.util.stream.Collectors;
 @Component
 public class AgentForkManager {
 
-    private final WebClient deepSeekWebClient;
     private final DeepSeekConfig deepSeekConfig;
     private final ObjectMapper objectMapper;
     private final ToolExecutor toolExecutor;
@@ -58,6 +57,7 @@ public class AgentForkManager {
     private final ConfigService configService;
     private final DeepSeekAnalyzer deepSeekAnalyzer;
     private final ToolLoopManager toolLoopManager;
+    private final LLMClientManager llmClientManager;
 
     /** 子Agent结果存储：agentId → CompletableFuture */
     private final ConcurrentHashMap<String, CompletableFuture<SubAgentResult>> agentFutures = new ConcurrentHashMap<>();
@@ -98,7 +98,6 @@ public class AgentForkManager {
     );
 
     public AgentForkManager(
-            WebClient deepSeekWebClient,
             DeepSeekConfig deepSeekConfig,
             ObjectMapper objectMapper,
             @Lazy ToolExecutor toolExecutor,
@@ -110,8 +109,8 @@ public class AgentForkManager {
             PendingQuestionStore pendingQuestionStore,
             ConfigService configService,
             DeepSeekAnalyzer deepSeekAnalyzer,
-            ToolLoopManager toolLoopManager) {
-        this.deepSeekWebClient = deepSeekWebClient;
+            ToolLoopManager toolLoopManager,
+            LLMClientManager llmClientManager) {
         this.deepSeekConfig = deepSeekConfig;
         this.objectMapper = objectMapper;
         this.toolExecutor = toolExecutor;
@@ -124,6 +123,7 @@ public class AgentForkManager {
         this.configService = configService;
         this.deepSeekAnalyzer = deepSeekAnalyzer;
         this.toolLoopManager = toolLoopManager;
+        this.llmClientManager = llmClientManager;
     }
 
     // ================================================================
@@ -156,7 +156,7 @@ public class AgentForkManager {
         }
 
         // 1. 构建子Agent的系统提示词
-        String systemPrompt = buildSubAgentSystemPrompt(request, parentContext);
+        String systemPrompt = buildSubAgentSystemPrompt(request, parentContext, userId);
 
         // 2. 构建初始消息列表
         List<Map<String, Object>> messages = buildSubAgentMessages(systemPrompt, request.getInstructions());
@@ -176,6 +176,7 @@ public class AgentForkManager {
         context.setMode(mode != null ? mode : "auto");
         context.setConversationId(parentConversationId);
         context.setTemperature(request.getTemperature());
+        context.setProviderCode(request.getProviderCode());
         runningAgents.put(agentId, context);
 
         // 4. 注册到待收集列表（主Agent完成时自动收集）
@@ -260,8 +261,18 @@ public class AgentForkManager {
             runningAgents.remove(agentId);
             return result;
         } catch (TimeoutException e) {
+            // 超时后清理资源，避免内存泄漏和后续操作失败
+            future.cancel(true);
+            removePending(agentId);
+            agentFutures.remove(agentId);
+            runningAgents.remove(agentId);
             return SubAgentResult.timeout(agentId, timeoutSec);
         } catch (Exception e) {
+            // 异常时也清理资源
+            future.cancel(true);
+            removePending(agentId);
+            agentFutures.remove(agentId);
+            runningAgents.remove(agentId);
             return SubAgentResult.failed(agentId, e.getMessage());
         }
     }
@@ -319,12 +330,14 @@ public class AgentForkManager {
     public List<SubAgentResult> batchCollectAgents(List<String> agentIds, long timeoutSec) {
         if (agentIds.isEmpty()) return List.of();
 
-        // 并行提交每个子Agent的收集任务
+        // 并行提交每个子Agent的收集任务，保留agentId索引映射
         List<CompletableFuture<SubAgentResult>> futures = new ArrayList<>();
+        List<String> futureAgentIds = new ArrayList<>();  // 记录每个future对应的agentId
         for (String agentId : agentIds) {
             CompletableFuture<SubAgentResult> collector = CompletableFuture.supplyAsync(
                     () -> collectAgent(agentId, timeoutSec), agentExecutor);
             futures.add(collector);
+            futureAgentIds.add(agentId);
         }
 
         // 并行等待所有子Agent完成（每个子Agent内部有 timeoutSec 超时保护）
@@ -339,15 +352,18 @@ public class AgentForkManager {
         }
 
         // 收集所有结果（此时每个 future 应已完成或超时）
-        return futures.stream()
-                .map(f -> {
-                    try {
-                        return f.getNow(SubAgentResult.failed("unknown", "future not completed"));
-                    } catch (Exception e) {
-                        return SubAgentResult.failed("unknown", e.getMessage());
-                    }
-                })
-                .toList();
+        List<SubAgentResult> results = new ArrayList<>();
+        for (int i = 0; i < futures.size(); i++) {
+            String agentId = futureAgentIds.get(i);
+            try {
+                SubAgentResult result = futures.get(i).getNow(
+                        SubAgentResult.failed(agentId, "future not completed"));
+                results.add(result);
+            } catch (Exception e) {
+                results.add(SubAgentResult.failed(agentId, e.getMessage()));
+            }
+        }
+        return results;
     }
 
     /**
@@ -466,29 +482,40 @@ public class AgentForkManager {
                 log.info("子Agent {} 检测到会话 {} 已获批，跳过所有权限检查", context.getAgentId(), sessionConvId);
             }
 
-            // 构建API请求
-            Map<String, Object> apiRequest = buildApiRequest(messages, toolsDef, hasTools, context.getTemperature());
+            // 构建API请求（传入 providerCode，跟随主Agent的Provider选择）
+            Map<String, Object> apiRequest = buildApiRequest(messages, toolsDef, hasTools, context.getTemperature(), context.getProviderCode());
 
-            // 调用DeepSeek API（非流式）
-            String response = callDeepSeekApi(apiRequest);
+            // 获取 LLMClient（用于 Provider 适配层提取响应内容）
+            LLMClient client = (context.getProviderCode() != null && !context.getProviderCode().isEmpty())
+                    ? llmClientManager.resolveClientByCode(context.getProviderCode())
+                    : llmClientManager.getDefaultClient();
 
-            // 解析响应
+            // 调用 LLM API（非流式）
+            String response = client.blockingChat(apiRequest, Duration.ofSeconds(300));
+
+            // 使用 Provider 适配层提取内容（兼容 Anthropic/Ollama 等非 OpenAI 格式）
+            String assistantContent = client.extractContentFromBlockingResponse(response);
+            if (assistantContent == null) assistantContent = "";
+
+            // 手动解析 reasoning_content 和 tool_calls（兼容 OpenAI 格式的 Provider）
+            String reasoningContent = "";
+            JsonNode toolCalls = null;
             JsonNode responseNode;
             try {
                 responseNode = objectMapper.readTree(response);
+                JsonNode choice = responseNode.path("choices").get(0);
+                JsonNode messageNode = choice.path("message");
+                // OpenAI 格式的 reasoning_content
+                String openaiReasoning = messageNode.path("reasoning_content").asText("");
+                if (!openaiReasoning.isEmpty()) reasoningContent = openaiReasoning;
+                // OpenAI 格式的 tool_calls
+                toolCalls = messageNode.path("tool_calls");
             } catch (Exception e) {
                 log.warn("子Agent API响应解析失败: {}", e.getMessage());
                 result.setCompileResult("failed");
                 result.setErrorMessage("API响应解析失败: " + e.getMessage());
                 break;
             }
-
-            JsonNode choice = responseNode.path("choices").get(0);
-            JsonNode messageNode = choice.path("message");
-
-            // 提取助手消息内容
-            String assistantContent = messageNode.path("content").asText("");
-            String reasoningContent = messageNode.path("reasoning_content").asText("");
 
             // 构建assistant消息并加入历史（thinking模式下reasoning_content必须回传）
             Map<String, Object> assistantMsg = new HashMap<>();
@@ -499,11 +526,9 @@ public class AgentForkManager {
             }
             messages.add(assistantMsg);
 
-            // 检查是否有tool_calls
-            JsonNode toolCalls = messageNode.path("tool_calls");
-
+            // 检查是否有tool_calls（使用前面解析出的 toolCalls 变量）
             // 如果有tool_calls，将tool_calls加入assistant消息（tool消息需要关联tool_call_id）
-            if (!toolCalls.isMissingNode() && toolCalls.isArray() && toolCalls.size() > 0) {
+            if (toolCalls != null && !toolCalls.isMissingNode() && toolCalls.isArray() && toolCalls.size() > 0) {
                 assistantMsg.put("tool_calls", toolCalls);
             }
 
@@ -514,14 +539,14 @@ public class AgentForkManager {
             if (!reasoningContent.isEmpty()) {
                 fullAssistantMsg.put("reasoning_content", reasoningContent);
             }
-            if (!toolCalls.isMissingNode() && toolCalls.isArray() && toolCalls.size() > 0) {
+            if (toolCalls != null && !toolCalls.isMissingNode() && toolCalls.isArray() && toolCalls.size() > 0) {
                 fullAssistantMsg.put("tool_calls", toolCalls);
             }
             if (!firstMsg) fullMessagesJson.append(",");
             fullMessagesJson.append(toMessageJson(fullAssistantMsg));
             firstMsg = false;
 
-            if (toolCalls.isMissingNode() || !toolCalls.isArray() || toolCalls.isEmpty()) {
+            if (toolCalls == null || toolCalls.isMissingNode() || !toolCalls.isArray() || toolCalls.isEmpty()) {
                 // 没有工具调用，任务完成
                 // 优先用 assistantContent；如果为空（thinking模式下可能如此），fallback 到 reasoning_content
                 String summaryText = assistantContent;
@@ -547,8 +572,13 @@ public class AgentForkManager {
             Set<String> highRiskTools = Set.of("file_writer", "execute_sql", "command");
             List<ToolExecutor.ToolCallResult> toolResults = new ArrayList<>();
             for (JsonNode tc : toolCalls) {
+                // 防御 NullNode：asText() 对 JSON null 返回字符串 "null"
                 String tcId = tc.path("id").asText();
                 String tcName = tc.path("function").path("name").asText();
+                if (tcId.isEmpty() || "null".equals(tcId) || tcName.isEmpty() || "null".equals(tcName)) {
+                    log.warn("子Agent工具调用缺少有效 id/name，跳过: id={}, name={}", tcId, tcName);
+                    continue;
+                }
                 String argsStr = tc.path("function").path("arguments").asText();
                 JsonNode args;
                 try {
@@ -775,7 +805,7 @@ public class AgentForkManager {
     /**
      * 构建子Agent的system prompt
      */
-    private String buildSubAgentSystemPrompt(ForkAgentRequest request, String parentContext) {
+    private String buildSubAgentSystemPrompt(ForkAgentRequest request, String parentContext, Long userId) {
         StringBuilder sb = new StringBuilder();
         sb.append("你是主Agent创建的子Agent「").append(request.getName()).append("」。\n\n");
         sb.append("## 你的任务\n").append(request.getInstructions()).append("\n\n");
@@ -792,7 +822,7 @@ public class AgentForkManager {
             sb.append("## 可用技能\n");
             sb.append("以下技能可用于指导你的工作流程，根据任务情况自动匹配使用：\n\n");
             try {
-                List<Skill> skills = loadSkillsByNameOrId(request.getSkills());
+                List<Skill> skills = loadSkillsByNameOrId(request.getSkills(), userId);
                 for (Skill skill : skills) {
                     sb.append("### ").append(skill.getName()).append("\n");
                     sb.append(skill.getDescription()).append("\n");
@@ -864,77 +894,48 @@ public class AgentForkManager {
     }
 
     /**
-     * 构建API请求体
+     * 构建API请求体（使用默认 Provider 的 LLMClient）
      */
     private Map<String, Object> buildApiRequest(List<Map<String, Object>> messages,
                                                 ArrayNode toolsDef, boolean hasTools,
-                                                Double temperature) {
-        Map<String, Object> request = new HashMap<>();
-        request.put("model", deepSeekConfig.getDefaultModel());
-        request.put("messages", messages);
-        request.put("stream", false);
-        request.put("temperature", temperature != null ? temperature : 0.3);
+                                                Double temperature, String providerCode) {
+        LLMClient client = (providerCode != null && !providerCode.isEmpty())
+                ? llmClientManager.resolveClientByCode(providerCode)
+                : llmClientManager.getDefaultClient();
 
-        // 思考模式跟随主Agent配置
-        String thinkingMode = deepSeekConfig.getThinkingMode();
-        Map<String, Object> thinking = new HashMap<>();
-        if ("non-thinking".equals(thinkingMode)) {
-            thinking.put("type", "disabled");
-        } else {
-            thinking.put("type", "enabled");
-            request.put("reasoning_effort", "thinking_max".equals(thinkingMode) ? "max" : "high");
-        }
-        request.put("thinking", thinking);
-
-        if (hasTools) {
-            List<Map<String, Object>> toolsList = objectMapper.convertValue(
+        List<Map<String, Object>> toolsList = null;
+        if (hasTools && toolsDef != null && toolsDef.size() > 0) {
+            toolsList = objectMapper.convertValue(
                     toolsDef,
                     objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class)
             );
-            request.put("tools", toolsList);
-            request.put("tool_choice", "auto");
         }
 
-        return request;
+        // 使用 LLMClient 构建请求体（thinking 参数跟随 Provider 默认值）
+        String model = llmClientManager.getDefaultModel(client.getProviderCode());
+        return client.buildRequestBody(messages, model, temperature != null ? temperature : 0.3,
+                null, false, toolsList);
     }
 
     /**
-     * 调用DeepSeek API（非流式）
-     * 每次请求前从数据库动态获取 API Key（与主Agent保持一致）
+     * 调用 LLM API（非流式）
+     * 使用默认 Provider 的 LLMClient，API Key 由 LLMWebClientManager 自动管理
      */
-    private String callDeepSeekApi(Map<String, Object> apiRequest) {
-        try {
-            // 动态获取 API Key（与主Agent DeepSeekServiceImpl 中 initDynamicApiKey() 的 filter 逻辑一致）
-            String apiKey = configService.getValue("deepseek_api_key");
-            if (apiKey == null || apiKey.isEmpty()) {
-                throw new RuntimeException("DeepSeek API Key 未配置，请先在配置页面设置 API Key");
-            }
-            return deepSeekWebClient.post()
-                    .uri("/v1/chat/completions")
-                    .headers(headers -> headers.setBearerAuth(apiKey))
-                    .bodyValue(apiRequest)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block(Duration.ofSeconds(300));
-        } catch (WebClientResponseException e) {
-            String responseBody = e.getResponseBodyAsString();
-            log.error("子Agent API调用失败 ({}): status={}, body={}", 
-                    e.getStatusCode(), e.getStatusCode().value(), 
-                    responseBody.length() > 2000 ? responseBody.substring(0, 2000) + "..." : responseBody);
-            throw new RuntimeException("DeepSeek API调用失败: " + e.getStatusCode() + " - " 
-                    + (responseBody.length() > 200 ? responseBody.substring(0, 200) : responseBody), e);
-        } catch (Exception e) {
-            log.error("子Agent API调用失败", e);
-            throw new RuntimeException("DeepSeek API调用失败: " + e.getMessage(), e);
-        }
+    private String callDeepSeekApi(Map<String, Object> apiRequest, String providerCode) {
+        LLMClient client = (providerCode != null && !providerCode.isEmpty())
+                ? llmClientManager.resolveClientByCode(providerCode)
+                : llmClientManager.getDefaultClient();
+        return client.blockingChat(apiRequest, Duration.ofSeconds(300));
     }
 
     /**
      * 通过名称或ID加载技能
      */
-    private List<Skill> loadSkillsByNameOrId(List<String> skillRefs) {
+    private List<Skill> loadSkillsByNameOrId(List<String> skillRefs, Long userId) {
         if (skillRefs == null || skillRefs.isEmpty()) return List.of();
         List<Skill> result = new ArrayList<>();
+        List<Skill> allSkills = null;  // 延迟加载，只在需要按名称匹配时加载
+        
         for (String ref : skillRefs) {
             try {
                 Long id = Long.parseLong(ref);
@@ -943,8 +944,22 @@ public class AgentForkManager {
                     result.add(skill);
                 }
             } catch (NumberFormatException e) {
-                // 按名称匹配（简化实现：返回空，实际可扩展名称查询）
-                log.debug("技能引用不是数字ID，按名称匹配暂不支持: {}", ref);
+                // 按名称匹配
+                if (allSkills == null) {
+                    // 延迟加载当前用户的技能
+                    allSkills = skillService.listSkills(userId);
+                }
+                boolean found = false;
+                for (Skill skill : allSkills) {
+                    if (ref.equals(skill.getName())) {
+                        result.add(skill);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    log.warn("技能引用未找到: {}", ref);
+                }
             }
         }
         return result;
@@ -1334,4 +1349,5 @@ class SubAgentContext {
     private String mode;
     private Long conversationId;
     private Double temperature;
+    private String providerCode;
 }

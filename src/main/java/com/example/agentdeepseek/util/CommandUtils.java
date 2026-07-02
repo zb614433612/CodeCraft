@@ -23,6 +23,14 @@ import java.util.stream.Collectors;
  * <p>
  * 核心改进：通过系统 Shell 执行命令，支持管道、重定向、环境变量等 Shell 特性。
  * 提供预检、编码检测等辅助功能。
+ * <p>
+ * <b>兼容性说明：</b>
+ * <ul>
+ *   <li>PowerShell 7 (pwsh.exe)：完整支持 &&/|| 命令链</li>
+ *   <li>PowerShell 5.1 (powershell.exe)：不支持 &&/||，检测到命令链自动降级为 cmd</li>
+ *   <li>Bash/Zsh 不使用 -l (login shell)，避免加载 .bashrc 带来的 1~3s 启动延迟</li>
+ *   <li>所有路径参数做安全转义（单引号/双引号/反斜杠）防止注入和解析异常</li>
+ * </ul>
  */
 @Slf4j
 public class CommandUtils {
@@ -30,8 +38,8 @@ public class CommandUtils {
     /**
      * 构建 Shell 包装命令，自动发现最佳可用 Shell
      * <p>
-     * Windows: pwsh → powershell → Git Bash → cmd
-     * Unix:    $SHELL → zsh → bash → sh
+     * Windows: pwsh (PS 7) &rarr; powershell (PS 5.1) &rarr; Git Bash &rarr; cmd
+     * Unix:    $SHELL &rarr; zsh &rarr; bash &rarr; sh
      *
      * @param command 原始命令字符串（如 "mvn compile | grep error"）
      * @return 适合 ProcessBuilder 的命令列表
@@ -49,19 +57,27 @@ public class CommandUtils {
      */
     public static List<String> buildShellCommand(String command, String workingDirectory) {
         if (isWindows()) {
-            // 按优先级检测 Windows Shell
+            // 1) pwsh.exe — PowerShell 7+（完整支持 && ||）
             String pwsh = findShellInPath("pwsh.exe");
             if (pwsh != null) {
                 return psWrap(pwsh, command, workingDirectory);
             }
+            // 2) powershell.exe — Windows PowerShell 5.1（不支持 && ||）
             String powershell = findShellInPath("powershell.exe");
             if (powershell != null) {
+                // PowerShell 5.1 不支持 &&/||，检测到命令链则降级为 cmd
+                if (containsShellChain(command)) {
+                    log.debug("PowerShell 5.1 不支持 &&/||，降级 cmd 执行: {}", command);
+                    return cmdWrap(command, workingDirectory);
+                }
                 return psWrap(powershell, command, workingDirectory);
             }
+            // 3) Git Bash
             String bash = findGitBashPath();
             if (bash != null) {
                 return bashWrap(bash, command, workingDirectory);
             }
+            // 4) 兜底 cmd
             return cmdWrap(command, workingDirectory);
         } else {
             // Unix: $SHELL → zsh → bash → sh
@@ -88,46 +104,79 @@ public class CommandUtils {
 
     // ===== Shell 包装方法 =====
 
+    /**
+     * PowerShell 7+ / Windows PowerShell 5.1 包装（无命令链时使用）。
+     * 单引号 `'` 转义为 `''`（PowerShell 语法），防止路径注入。
+     */
     private static List<String> psWrap(String shell, String cmd, String dir) {
         if (dir != null && !dir.isEmpty()) {
-            String d = dir.replace('\\', '/');
+            String d = dir.replace("'", "''");
             return List.of(shell, "-NoLogo", "-NoProfile", "-NonInteractive",
                     "-Command", "Set-Location -LiteralPath '" + d + "'; " + cmd);
         }
         return List.of(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd);
     }
 
+    /**
+     * Bash / Zsh 包装。
+     * 不使用 -l (login shell)，避免加载 .bashrc/.profile 带来的性能开销。
+     * 路径中的双引号 `"`、反斜杠 `\`、`$`、`` ` `` 均做转义防止注入。
+     */
     private static List<String> bashWrap(String shell, String cmd, String dir) {
         if (dir != null && !dir.isEmpty()) {
-            return List.of(shell, "-l", "-c", "cd \"" + dir + "\" && " + cmd);
-        }
-        return List.of(shell, "-l", "-c", cmd);
-    }
-
-    private static List<String> shWrap(String shell, String cmd, String dir) {
-        if (dir != null && !dir.isEmpty()) {
-            return List.of(shell, "-c", "cd \"" + dir + "\" && " + cmd);
+            String d = escapeBashDq(dir);
+            return List.of(shell, "-c", "cd \"" + d + "\" && " + cmd);
         }
         return List.of(shell, "-c", cmd);
     }
 
+    /**
+     * 通用 POSIX sh 包装。
+     */
+    private static List<String> shWrap(String shell, String cmd, String dir) {
+        if (dir != null && !dir.isEmpty()) {
+            String d = escapeBashDq(dir);
+            return List.of(shell, "-c", "cd \"" + d + "\" && " + cmd);
+        }
+        return List.of(shell, "-c", cmd);
+    }
+
+    /**
+     * Windows CMD 包装。
+     * <ul>
+     *   <li>普通路径使用 cd /d 切换驱动器+目录</li>
+     *   <li>UNC 路径（\\server\share）cd /d 不支持，改用 pushd</li>
+     *   <li>路径中的双引号 `"` 转义为 `""`（CMD 语法）</li>
+     * </ul>
+     */
     private static List<String> cmdWrap(String cmd, String dir) {
         if (dir != null && !dir.isEmpty()) {
-            return List.of("cmd.exe", "/c", "cd /d \"" + dir + "\" && " + cmd);
+            String d = dir.replace("\"", "\"\"");
+            if (d.startsWith("\\\\")) {
+                return List.of("cmd.exe", "/c", "pushd \"" + d + "\" && " + cmd);
+            }
+            return List.of("cmd.exe", "/c", "cd /d \"" + d + "\" && " + cmd);
         }
         return List.of("cmd.exe", "/c", cmd);
     }
 
     // ===== Shell 发现辅助 =====
 
+    /**
+     * 在 PATH 中搜索 Shell 可执行文件。
+     * Windows 上 {@link Files#isExecutable(Path)} 行为不可靠，
+     * 因此仅检查文件是否存在。
+     */
     private static String findShellInPath(String name) {
         String pathEnv = System.getenv("PATH");
         if (pathEnv == null) return null;
         for (String dir : pathEnv.split(isWindows() ? ";" : ":")) {
             if (dir.isEmpty()) continue;
             Path full = Paths.get(dir, name);
-            if (Files.exists(full) && Files.isExecutable(full)) {
-                return full.toString();
+            if (isWindows()) {
+                if (Files.exists(full)) return full.toString();
+            } else {
+                if (Files.exists(full) && Files.isExecutable(full)) return full.toString();
             }
         }
         return null;
@@ -146,6 +195,30 @@ public class CommandUtils {
         }
         return findShellInPath("bash.exe");
     }
+
+    // ===== 转义辅助 =====
+
+    /**
+     * 检测命令是否包含 Shell 命令链操作符（&& 或 ||）。
+     * PowerShell 5.1 不支持这些操作符，需降级为 cmd 执行。
+     */
+    private static boolean containsShellChain(String cmd) {
+        return cmd.contains("&&") || cmd.contains("||");
+    }
+
+    /**
+     * 转义字符串使其安全嵌入 Bash/Zsh 双引号字符串。
+     * 在双引号内需转义：\、"、$、`（反引号用于命令替换）
+     */
+    static String escapeBashDq(String s) {
+        if (s == null || s.isEmpty()) return s;
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("$", "\\$")
+                .replace("`", "\\`");
+    }
+
+    // ===== 可执行文件检查 =====
 
     /**
      * 检查命令是否可以执行的最外层（用于快速失败反馈）
@@ -251,7 +324,9 @@ public class CommandUtils {
     }
 
     /**
-     * 通过 chcp.com 查询 Windows 当前活动代码页
+     * 通过 chcp.com 查询 Windows 当前活动代码页。
+     * 使用 {@link ProcessBuilder} 配合 cmdWrap 统一 Shell 包装逻辑，
+     * 而非直接 Runtime.exec()，避免潜在的编码/环境不一致问题。
      */
     private static synchronized Charset detectWindowsCodePage() {
         // 双重检查锁定
@@ -260,7 +335,9 @@ public class CommandUtils {
             return detectedOutputCharset;
         }
         try {
-            Process process = Runtime.getRuntime().exec("chcp.com");
+            // 使用 cmdWrap 包装，与其他命令执行走统一的 Shell 逻辑
+            ProcessBuilder pb = new ProcessBuilder(cmdWrap("chcp.com", null));
+            Process process = pb.start();
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line = reader.readLine();
@@ -367,8 +444,12 @@ public class CommandUtils {
     }
 
     /**
-     * 将命令字符串解析为可执行文件 + 参数列表
-     * 支持单引号、双引号包裹的参数，以及反斜杠转义
+     * 将命令字符串解析为可执行文件 + 参数列表。
+     * 支持单引号、双引号包裹的参数。
+     * <p>
+     * <b>注意：反斜杠转义仅限双引号内部。</b>
+     * 在双引号外，反斜杠视为普通字符（如 Windows 路径 C:\Users\test），
+     * 不会被错误转义。在双引号内，\"、\\ 等传统转义规则生效。
      *
      * @param command 原始命令字符串
      * @return 解析后的 token 列表
@@ -382,7 +463,9 @@ public class CommandUtils {
         for (int i = 0; i < command.length(); i++) {
             char c = command.charAt(i);
 
-            if (c == '\\' && !inSingleQuote) {
+            // 反斜杠转义：仅在双引号内部生效（bash/cmd 风格）
+            // 双引号外保持不变，避免 Windows 路径 C:\Users\test 被错误转义
+            if (c == '\\' && !inSingleQuote && inDoubleQuote) {
                 if (i + 1 < command.length()) {
                     i++;
                     current.append(command.charAt(i));

@@ -16,7 +16,7 @@ public interface AgentConfigMapper {
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
             "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
-            "user_id, created_at, updated_at FROM agent_config WHERE id = #{id}")
+            "provider_id, provider_code, character_profile, user_id, created_at, updated_at FROM agent_config WHERE id = #{id}")
     @Results(id = "agentConfigResultMap", value = {
         @Result(property = "id", column = "id"),
         @Result(property = "name", column = "name"),
@@ -33,6 +33,9 @@ public interface AgentConfigMapper {
         @Result(property = "enabled", column = "enabled"),
         @Result(property = "isDefault", column = "is_default"),
         @Result(property = "isBuiltin", column = "is_builtin"),
+        @Result(property = "providerId", column = "provider_id"),
+        @Result(property = "providerCode", column = "provider_code"),
+        @Result(property = "characterProfile", column = "character_profile"),
         @Result(property = "userId", column = "user_id"),
         @Result(property = "createdAt", column = "created_at"),
         @Result(property = "updatedAt", column = "updated_at")
@@ -41,7 +44,7 @@ public interface AgentConfigMapper {
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
             "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
-            "user_id, created_at, updated_at FROM agent_config " +
+            "provider_id, provider_code, character_profile, user_id, created_at, updated_at FROM agent_config " +
             "WHERE (user_id = #{userId} OR user_id IS NULL OR #{userId} IS NULL) " +
             "AND enabled = 1 " +
             "ORDER BY is_builtin DESC, sort_order ASC, created_at DESC")
@@ -50,7 +53,7 @@ public interface AgentConfigMapper {
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
             "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
-            "user_id, created_at, updated_at FROM agent_config " +
+            "provider_id, provider_code, character_profile, user_id, created_at, updated_at FROM agent_config " +
             "WHERE user_id IS NULL AND enabled = 1 " +
             "ORDER BY sort_order ASC")
     @ResultMap("agentConfigResultMap")
@@ -58,18 +61,18 @@ public interface AgentConfigMapper {
 
     @Insert("INSERT INTO agent_config (name, description, avatar, system_prompt, tool_names, model_name, " +
             "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
-            "user_id, created_at, updated_at) " +
+            "provider_id, provider_code, character_profile, user_id, created_at, updated_at) " +
             "VALUES (#{name}, #{description}, #{avatar}, #{systemPrompt}, #{toolNames}, #{modelName}, " +
             "#{thinkingMode}, #{executionMode}, #{temperature}, #{workDir}, #{sortOrder}, #{enabled}, #{isDefault}, #{isBuiltin}, " +
-            "#{userId}, #{createdAt}, #{updatedAt})")
+            "#{providerId}, #{providerCode}, #{characterProfile}, #{userId}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(AgentConfig agentConfig);
 
     @Update("UPDATE agent_config SET name = #{name}, description = #{description}, avatar = #{avatar}, " +
             "system_prompt = #{systemPrompt}, tool_names = #{toolNames}, model_name = #{modelName}, " +
             "thinking_mode = #{thinkingMode}, execution_mode = #{executionMode}, temperature = #{temperature}, work_dir = #{workDir}, " +
-            "sort_order = #{sortOrder}, enabled = #{enabled}, is_default = #{isDefault}, " +
-            "updated_at = #{updatedAt} WHERE id = #{id}")
+            "sort_order = #{sortOrder}, enabled = #{enabled}, is_default = #{isDefault}, provider_id = #{providerId}, " +
+            "provider_code = #{providerCode}, character_profile = #{characterProfile}, updated_at = #{updatedAt} WHERE id = #{id}")
     int update(AgentConfig agentConfig);
 
     @Delete("DELETE FROM agent_config WHERE id = #{id}")
@@ -77,7 +80,7 @@ public interface AgentConfigMapper {
 
     @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
             "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
-            "user_id, created_at, updated_at FROM agent_config " +
+            "provider_id, provider_code, character_profile, user_id, created_at, updated_at FROM agent_config " +
             "WHERE is_default = 1 AND (user_id = #{userId} OR user_id IS NULL) " +
             "ORDER BY is_builtin DESC, sort_order ASC LIMIT 1")
     @ResultMap("agentConfigResultMap")

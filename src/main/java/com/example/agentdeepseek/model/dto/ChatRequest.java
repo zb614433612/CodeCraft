@@ -53,6 +53,9 @@ public class ChatRequest {
     @Schema(description = "Agent配置ID（可选），指定使用的自定义Agent配置", example = "1")
     private Long agentConfigId;
 
+    @Schema(description = "LLM Provider 编码（可选），如 deepseek/openai/anthropic/ollama。前端动态切换时传入，优先级高于 agentConfig.providerId", example = "deepseek")
+    private String providerCode;
+
     @Schema(description = "上下文模式（可选）：full（全量注入）/ compact（精简历史工具调用和思考过程），为空则使用服务端默认配置", example = "compact")
     private String contextMode;
 

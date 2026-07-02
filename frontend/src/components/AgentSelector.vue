@@ -61,7 +61,9 @@ const runtime = reactive({
   model: 'deepseek-v4-flash',
   thinkingMode: 'non-thinking',
   executionMode: 'manual',
-  workDir: ''
+  workDir: '',
+  providerId: undefined as number | undefined,
+  providerCode: ''   // ★ 前端动态 Provider Code（如 deepseek/openai/anthropic）
 })
 
 let currentAgent: AgentConfig | null = null
@@ -85,6 +87,8 @@ const fetchAgents = async () => {
           runtime.thinkingMode = fresh.thinkingMode || 'non-thinking'
           runtime.executionMode = fresh.executionMode || 'manual'
           runtime.workDir = fresh.workDir || ''
+          runtime.providerId = fresh.providerId || undefined
+          runtime.providerCode = fresh.providerCode || ''  // 从 DB 恢复用户选择
         }
       }
     }
@@ -103,6 +107,8 @@ const switchAgent = (agent: AgentConfig) => {
   runtime.thinkingMode = agent.thinkingMode || 'non-thinking'
   runtime.executionMode = agent.executionMode || 'manual'
   runtime.workDir = agent.workDir || ''
+  runtime.providerId = agent.providerId || undefined
+  runtime.providerCode = agent.providerCode || ''  // 从 DB 恢复用户选择
   emit('change', agent.id, agent)
 }
 
@@ -113,13 +119,17 @@ const saveRuntime = async () => {
       modelName: runtime.model,
       thinkingMode: runtime.thinkingMode,
       executionMode: runtime.executionMode,
-      workDir: runtime.workDir
+      workDir: runtime.workDir,
+      providerId: runtime.providerId,
+      providerCode: runtime.providerCode
     })
     if (currentAgent) {
       currentAgent.modelName = runtime.model
       currentAgent.thinkingMode = runtime.thinkingMode
       currentAgent.executionMode = runtime.executionMode
       currentAgent.workDir = runtime.workDir
+      currentAgent.providerId = runtime.providerId
+      currentAgent.providerCode = runtime.providerCode
     }
   } catch (e: any) {
     console.error('保存运行时配置失败:', e)

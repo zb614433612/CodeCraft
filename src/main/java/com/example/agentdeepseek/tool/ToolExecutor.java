@@ -125,16 +125,18 @@ public class ToolExecutor {
      * 执行单个工具调用
      */
     private ToolCallResult executeSingleToolCall(JsonNode toolCallNode) {
+        // 使用 .asText() 时，Jackson NullNode 返回字符串 "null"（而非空字符串），
+        // 因此必须同时检查 isEmpty() 和 "null" 字面量，防止 JSON null 值穿透检查
         String toolCallId = toolCallNode.path("id").asText();
-        if (toolCallId.isEmpty()) {
-            log.error("工具调用缺少id字段: {}", toolCallNode);
+        if (toolCallId.isEmpty() || "null".equals(toolCallId)) {
+            log.error("工具调用id字段无效 (值为'{}'): {}", toolCallId, toolCallNode);
             return null;
         }
 
         JsonNode functionNode = toolCallNode.path("function");
         String toolName = functionNode.path("name").asText();
-        if (toolName.isEmpty()) {
-            log.error("工具调用缺少function.name字段: {}", toolCallNode);
+        if (toolName.isEmpty() || "null".equals(toolName)) {
+            log.error("工具调用function.name字段无效 (值为'{}'): {}", toolName, toolCallNode);
             return null;
         }
 
@@ -255,7 +257,14 @@ public class ToolExecutor {
             ObjectNode message = objectMapper.createObjectNode();
             message.put("role", "tool");
             message.put("content", result.getContent());
-            message.put("tool_call_id", result.getToolCallId());
+            // 防御：tool_call_id 为 null / 空 / "null" 时生成 fallback，
+            // 避免 API 返回 400 "id is null"
+            String tcId = result.getToolCallId();
+            if (tcId == null || tcId.isEmpty() || "null".equals(tcId)) {
+                tcId = "call_" + java.util.UUID.randomUUID().toString().substring(0, 8);
+                log.warn("tool_call_id 无效，使用 fallback: {} -> {}", result.getToolName(), tcId);
+            }
+            message.put("tool_call_id", tcId);
             message.put("tool_name", result.getToolName());
             messages.add(message);
         }

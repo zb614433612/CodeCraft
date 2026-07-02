@@ -15,9 +15,17 @@ import java.util.Locale;
  * Shell 自动发现服务 —— 替代固定 cmd /c / sh -c
  * <p>
  * 检测当前系统上可用的最佳 Shell，并为给定命令生成合适的参数。
+ * <p>
  * 发现优先级：
- *   Windows: pwsh → powershell → bash (Git) → cmd
+ *   Windows: pwsh (PS 7) → powershell (PS 5.1) → bash (Git) → cmd
  *   Unix:    $SHELL → zsh → bash → sh
+ * <p>
+ * <b>兼容性说明：</b>
+ * <ul>
+ *   <li>PowerShell 7 (pwsh.exe) 完整支持 && / || 命令链</li>
+ *   <li>PowerShell 5.1 (powershell.exe) 不支持 && / ||，检测到命令链时自动降级为 cmd</li>
+ *   <li>Bash/Zsh 不使用 -l (login shell)，避免加载用户配置文件带来的性能开销</li>
+ * </ul>
  */
 @Slf4j
 @Service
@@ -53,19 +61,22 @@ public class ShellDiscoveryService {
 
     private ShellInfo discover() {
         if (isWindows()) {
-            // 按优先级检测
-            for (String candidate : List.of("pwsh.exe", "powershell.exe")) {
-                String path = findInPath(candidate);
-                if (path != null) {
-                    return new ShellInfo("pwsh", path, ShellType.PWSH);
-                }
+            // 1) pwsh.exe — PowerShell 7+（完整支持 && ||）
+            String pwshPath = findInPath("pwsh.exe");
+            if (pwshPath != null) {
+                return new ShellInfo("pwsh", pwshPath, ShellType.PWSH);
             }
-            // Git Bash（通常安装在 %ProgramFiles%/Git/bin/bash.exe）
+            // 2) powershell.exe — Windows PowerShell 5.1（不支持 && ||）
+            String psPath = findInPath("powershell.exe");
+            if (psPath != null) {
+                return new ShellInfo("powershell", psPath, ShellType.POWERSHELL_LEGACY);
+            }
+            // 3) Git Bash
             String gitBash = findGitBash();
             if (gitBash != null) {
                 return new ShellInfo("bash", gitBash, ShellType.BASH);
             }
-            // 兜底 cmd
+            // 4) 兜底 cmd
             return new ShellInfo("cmd", "cmd.exe", ShellType.CMD);
         } else {
             // Unix：优先 $SHELL 环境变量
@@ -96,21 +107,27 @@ public class ShellDiscoveryService {
         return System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
     }
 
+    /**
+     * 在 PATH 中搜索可执行文件。
+     * Windows 上 {@link Files#isExecutable(Path)} 行为不可靠（几乎总是返回 true），
+     * 因此 Windows 下仅检查文件是否存在。
+     */
     private static String findInPath(String executable) {
         String pathEnv = System.getenv("PATH");
         if (pathEnv == null) return null;
         String[] dirs = pathEnv.split(isWindows() ? ";" : ":");
         for (String dir : dirs) {
             Path full = Paths.get(dir, executable);
-            if (Files.exists(full) && Files.isExecutable(full)) {
-                return full.toString();
+            if (isWindows()) {
+                if (Files.exists(full)) return full.toString();
+            } else {
+                if (Files.exists(full) && Files.isExecutable(full)) return full.toString();
             }
         }
         return null;
     }
 
     private static String findGitBash() {
-        // 常见 Git for Windows 安装位置
         String[] candidates = {
                 "C:\\Program Files\\Git\\bin\\bash.exe",
                 "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
@@ -119,7 +136,6 @@ public class ShellDiscoveryService {
         for (String c : candidates) {
             if (c != null && Files.exists(Paths.get(c))) return c;
         }
-        // 最后尝试 PATH 中找 bash.exe
         return findInPath("bash.exe");
     }
 
@@ -132,11 +148,32 @@ public class ShellDiscoveryService {
         };
     }
 
+    /**
+     * 检测命令是否包含 Shell 命令链操作符（&& 或 ||）
+     */
+    private static boolean containsShellChain(String cmd) {
+        return cmd.contains("&&") || cmd.contains("||");
+    }
+
+    /**
+     * 转义字符串使其安全嵌入 Bash/Zsh 双引号字符串。
+     * 在双引号内需要转义的字符：\、"、$、`
+     */
+    static String escapeBashDq(String s) {
+        if (s == null || s.isEmpty()) return s;
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("$", "\\$")
+                .replace("`", "\\`");
+    }
+
     // ===== 内部类型 =====
 
     public enum ShellType {
-        /** PowerShell (Windows) */
+        /** PowerShell 7+ (pwsh.exe) — 完整支持 && || */
         PWSH,
+        /** Windows PowerShell 5.1 (powershell.exe) — 不支持 && || */
+        POWERSHELL_LEGACY,
         /** Git Bash / Linux bash */
         BASH,
         /** Zsh (macOS/Linux) */
@@ -160,37 +197,71 @@ public class ShellDiscoveryService {
 
         /**
          * 按 Shell 类型生成命令列表。
-         * PowerShell 需要 cd + 命令；bash/zsh 使用 login shell 加载用户环境；cmd 用 /c。
+         * <ul>
+         *   <li>PWSH / POWERSHELL_LEGACY: -NoLogo -NoProfile -NonInteractive -Command "..."</li>
+         *   <li>POWERSHELL_LEGACY + &&/||: 自动降级为 cmd /c</li>
+         *   <li>BASH / ZSH: -c "cd DIR && cmd"</li>
+         *   <li>CMD: /c "cd /d DIR && cmd"（UNC 路径自动用 pushd）</li>
+         * </ul>
+         * 所有路径参数均做安全转义，防止注入。
          */
         List<String> buildCommand(String cmd, String workDir) {
-            String dir = (workDir != null && !workDir.isEmpty()) ? workDir.replace('\\', '/') : "";
+            String dir = (workDir != null && !workDir.isEmpty()) ? workDir : "";
 
             return switch (type) {
                 case PWSH -> {
-                    // pwsh -NoLogo -NoProfile -NonInteractive -Command "..."
                     if (!dir.isEmpty()) {
+                        // 转义单引号（PowerShell 中 ' → ''）
+                        String safeDir = dir.replace("'", "''");
                         yield List.of(path, "-NoLogo", "-NoProfile", "-NonInteractive",
-                                "-Command", "Set-Location -LiteralPath '" + dir + "'; " + cmd);
+                                "-Command", "Set-Location -LiteralPath '" + safeDir + "'; " + cmd);
+                    }
+                    yield List.of(path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd);
+                }
+                case POWERSHELL_LEGACY -> {
+                    // PowerShell 5.1 不支持 && / ||，检测到命令链则降级为 cmd
+                    if (containsShellChain(cmd)) {
+                        log.debug("PowerShell 5.1 不支持 &&/||，降级为 cmd 执行: {}", cmd);
+                        if (!dir.isEmpty()) {
+                            String safeDir = dir.replace("\"", "\"\"");
+                            if (safeDir.startsWith("\\\\")) {
+                                yield List.of("cmd.exe", "/c", "pushd \"" + safeDir + "\" && " + cmd);
+                            }
+                            yield List.of("cmd.exe", "/c", "cd /d \"" + safeDir + "\" && " + cmd);
+                        }
+                        yield List.of("cmd.exe", "/c", cmd);
+                    }
+                    // 无命令链，正常用 PowerShell 执行
+                    if (!dir.isEmpty()) {
+                        String safeDir = dir.replace("'", "''");
+                        yield List.of(path, "-NoLogo", "-NoProfile", "-NonInteractive",
+                                "-Command", "Set-Location -LiteralPath '" + safeDir + "'; " + cmd);
                     }
                     yield List.of(path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd);
                 }
                 case BASH, ZSH -> {
-                    // bash -l -c "cd DIR && cmd"  —— login shell 加载 .bashrc/.zshrc
+                    // 不用 -l (login shell)，避免加载 .bashrc/.profile 带来的 1~3s 启动延迟
                     if (!dir.isEmpty()) {
-                        yield List.of(path, "-l", "-c", "cd \"" + dir + "\" && " + cmd);
+                        String safeDir = escapeBashDq(dir);
+                        yield List.of(path, "-c", "cd \"" + safeDir + "\" && " + cmd);
                     }
-                    yield List.of(path, "-l", "-c", cmd);
+                    yield List.of(path, "-c", cmd);
                 }
                 case CMD -> {
                     if (!dir.isEmpty()) {
-                        // cmd /c "cd /d DIR && cmd"
-                        yield List.of(path, "/c", "cd /d \"" + dir + "\" && " + cmd);
+                        String safeDir = dir.replace("\"", "\"\"");
+                        // UNC 路径（\\server\share）不支持 cd /d，使用 pushd
+                        if (safeDir.startsWith("\\\\")) {
+                            yield List.of(path, "/c", "pushd \"" + safeDir + "\" && " + cmd);
+                        }
+                        yield List.of(path, "/c", "cd /d \"" + safeDir + "\" && " + cmd);
                     }
                     yield List.of(path, "/c", cmd);
                 }
                 case SH -> {
                     if (!dir.isEmpty()) {
-                        yield List.of(path, "-c", "cd \"" + dir + "\" && " + cmd);
+                        String safeDir = escapeBashDq(dir);
+                        yield List.of(path, "-c", "cd \"" + safeDir + "\" && " + cmd);
                     }
                     yield List.of(path, "-c", cmd);
                 }

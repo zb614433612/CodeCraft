@@ -16,6 +16,7 @@ public class ToolContext {
     private static final ThreadLocal<Long> currentAgentConfigId = new ThreadLocal<>();
     private static final ThreadLocal<String> currentTurnId = new ThreadLocal<>();
     private static final ThreadLocal<Double> currentTemperature = new ThreadLocal<>();
+    private static final ThreadLocal<String> currentProviderCode = new ThreadLocal<>();
 
     public static void set(String mode, Long conversationId) {
         currentExecutionMode.set(mode);
@@ -73,6 +74,14 @@ public class ToolContext {
         currentTemperature.set(temperature);
     }
 
+    public static String getProviderCode() {
+        return currentProviderCode.get();
+    }
+
+    public static void setProviderCode(String providerCode) {
+        currentProviderCode.set(providerCode);
+    }
+
     public static void clear() {
         currentExecutionMode.remove();
         currentConversationId.remove();
@@ -81,5 +90,6 @@ public class ToolContext {
         currentAgentConfigId.remove();
         currentTurnId.remove();
         currentTemperature.remove();
+        currentProviderCode.remove();
     }
 }

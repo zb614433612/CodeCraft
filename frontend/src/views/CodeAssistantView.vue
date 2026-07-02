@@ -153,8 +153,17 @@
         <!-- ===== 聊天标签 ===== -->
         <template v-if="activeTab?.type === 'chat'">
           <div class="chat-messages-area">
+            <!-- ★ 无 Provider 时：全屏引导界面 -->
+            <div v-if="providerOptions.length === 0" class="no-provider-guide">
+              <div class="guide-icon">🔌</div>
+              <h2 class="guide-title">尚未配置 LLM Provider</h2>
+              <p class="guide-desc">AI 助手需要通过 LLM Provider 连接大模型才能工作</p>
+              <a-button type="primary" size="large" class="guide-btn" @click="router.push('/config')">
+                前往设置 创建 Provider
+              </a-button>
+            </div>
             <!-- 无消息时的占位区（撑满弹性空间，使输入框始终在底部） -->
-      <div v-if="currentMessages.length === 0" class="message-list-empty">
+            <div v-else-if="currentMessages.length === 0" class="message-list-empty">
         <div v-if="isLoadingMessages" class="loading-messages">
           <a-spin size="small" />
           <span>加载消息中...</span>
@@ -392,8 +401,8 @@
         <div v-show="!logMinimized" class="log-xterm-container" ref="logXtermContainer"></div>
       </div>
 
-      <!-- ===== 输入区域（仅聊天标签时显示） ===== -->
-      <footer v-if="activeTab?.type === 'chat'" class="chat-input-area">
+      <!-- ===== 输入区域（仅聊天标签 + 有Provider时显示） ===== -->
+      <footer v-if="activeTab?.type === 'chat' && providerOptions.length > 0" class="chat-input-area">
         <!-- 隐藏的文件选择器 -->
         <input
           ref="fileInputRef"
@@ -463,6 +472,7 @@
         </div>
         <div class="input-footer">
           <div class="footer-left">
+            <!-- 高频：执行模式 -->
             <div class="mode-selector">
               <span class="mode-emoji">🛡️</span>
               <span class="mode-label">执行</span>
@@ -477,6 +487,7 @@
                 <a-select-option value="auto">自动</a-select-option>
               </a-select>
             </div>
+            <!-- 高频：模型选择 -->
             <div class="mode-selector">
               <span class="mode-emoji">⚡</span>
               <a-select
@@ -486,39 +497,20 @@
                 class="model-select"
                 dropdown-class-name="mode-dropdown"
               >
-                <a-select-option value="deepseek-v4-flash">v4-flash (1M)</a-select-option>
-                <a-select-option value="deepseek-v4-pro">v4-pro (1M)</a-select-option>
+                <a-select-option
+                  v-for="m in availableModels"
+                  :key="m"
+                  :value="m"
+                >{{ formatModelLabel(m) }}</a-select-option>
+                <!-- 兜底：当前模型不在列表中时也能显示 -->
+                <a-select-option
+                  v-if="!availableModels.includes(agentRuntime.model)"
+                  :key="agentRuntime.model"
+                  :value="agentRuntime.model"
+                >{{ agentRuntime.model }}</a-select-option>
               </a-select>
             </div>
-            <div class="mode-selector">
-              <span class="mode-emoji">💡</span>
-              <a-select
-                :value="agentRuntime.thinkingMode"
-                @change="(v: string) => { updateAgentRuntime('thinkingMode', v) }"
-                size="small"
-                class="model-select"
-                dropdown-class-name="mode-dropdown"
-              >
-                <a-select-option value="non-thinking">关闭思考</a-select-option>
-                <a-select-option value="thinking">思考</a-select-option>
-                <a-select-option value="thinking_max">深度思考</a-select-option>
-              </a-select>
-            </div>
-            <div class="mode-selector">
-              <span class="mode-emoji">🧠</span>
-              <span class="mode-label">上下文</span>
-              <a-select
-                :value="settingsStore.contextMode"
-                @change="(v: string) => { settingsStore.contextMode = v as 'full' | 'compact'; saveContextModeToServer(v) }"
-                size="small"
-                class="model-select"
-                dropdown-class-name="mode-dropdown"
-              >
-                <a-select-option value="full">📋 全量</a-select-option>
-                <a-select-option value="compact">⚡ 精简</a-select-option>
-              </a-select>
-            </div>
-            <!-- 任务进度触发器 -->
+            <!-- 高频：任务进度触发器 -->
             <div class="mode-selector task-trigger" @click="toggleTaskDropdown" :class="{ active: showTaskDropdown, loading: isSending }">
               <span class="mode-icon task-trigger-icon">
                 <LoadingOutlined v-if="isSending" spin />
@@ -527,7 +519,7 @@
               <span class="task-trigger-text" v-if="taskItems.length === 0">任务</span>
               <span class="task-trigger-text" v-else>{{ completedTaskCount }}/{{ taskItems.length }}</span>
             </div>
-            <!-- 文件改动触发器 -->
+            <!-- 高频：文件改动触发器 -->
             <div class="mode-selector changes-trigger" @click="toggleChangesPanel" :class="{ active: showChangesPanel }" :style="{ display: currentConversationId && !currentConversationId.startsWith('local-') ? '' : 'none' }">
               <span class="mode-icon changes-trigger-icon">
                 <span>📄</span>
@@ -536,6 +528,63 @@
               <span v-if="sessionChanges" class="changes-trigger-badge">
                 +{{ sessionChanges.totalLinesAdded }}/-{{ sessionChanges.totalLinesDeleted }}
               </span>
+            </div>
+            <!-- 低频：更多设置折叠 -->
+            <div class="mode-selector more-settings-trigger" @click="showMoreSettings = !showMoreSettings" :class="{ active: showMoreSettings }">
+              <span class="mode-emoji">⚙️</span>
+              <span class="mode-label">更多</span>
+              <DownOutlined v-if="!showMoreSettings" class="more-settings-arrow" />
+              <UpOutlined v-else class="more-settings-arrow" />
+            </div>
+            <!-- 低频：更多设置弹出面板 -->
+            <div v-if="showMoreSettings" class="more-settings-popover">
+              <div class="more-settings-item">
+                <span class="mode-emoji">📡</span>
+                <span class="mode-label">Provider</span>
+                <a-select
+                  :value="agentRuntime.providerCode || providerOptions[0]?.code"
+                  @change="(v: string) => { onProviderSwitch(v) }"
+                  size="small"
+                  class="model-select"
+                  dropdown-class-name="mode-dropdown"
+                  :getPopupContainer="trigger => trigger.parentElement"
+                >
+                  <a-select-option
+                    v-for="prov in providerOptions"
+                    :key="prov.code"
+                    :value="prov.code"
+                  >{{ prov.name }}</a-select-option>
+                </a-select>
+              </div>
+              <div class="more-settings-item">
+                <span class="mode-emoji">💡</span>
+                <span class="mode-label">思考模式</span>
+                <a-select
+                  :value="agentRuntime.thinkingMode"
+                  @change="(v: string) => { updateAgentRuntime('thinkingMode', v) }"
+                  size="small"
+                  class="model-select"
+                  dropdown-class-name="mode-dropdown"
+                >
+                  <a-select-option value="non-thinking">关闭思考</a-select-option>
+                  <a-select-option value="thinking">思考</a-select-option>
+                  <a-select-option value="thinking_max">深度思考</a-select-option>
+                </a-select>
+              </div>
+              <div class="more-settings-item">
+                <span class="mode-emoji">🧠</span>
+                <span class="mode-label">上下文</span>
+                <a-select
+                  :value="settingsStore.contextMode"
+                  @change="(v: string) => { settingsStore.contextMode = v as 'full' | 'compact'; saveContextModeToServer(v) }"
+                  size="small"
+                  class="model-select"
+                  dropdown-class-name="mode-dropdown"
+                >
+                  <a-select-option value="full">📋 全量</a-select-option>
+                  <a-select-option value="compact">⚡ 精简</a-select-option>
+                </a-select>
+              </div>
             </div>
           </div>
           <div class="footer-right" v-if="currentMessages.length > 0">
@@ -723,6 +772,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch, h } from 'vue'
+import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
@@ -774,11 +824,13 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { getGitDiff, gitRestore, gitShowFile } from '@/api/git'
 import AgentSelector from '@/components/AgentSelector.vue'
+import { listProviders, parseModelList, type ProviderConfig } from '@/api/llm-provider'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
 
 const userStore = useUserStore()
 const settingsStore = useSettingsStore()
+const router = useRouter()
 
 interface Conversation {
   id: string
@@ -834,7 +886,9 @@ const agentRuntime = computed(() => ({
   model: agentSelectorRef.value?.runtime?.model || 'deepseek-v4-flash',
   thinkingMode: agentSelectorRef.value?.runtime?.thinkingMode || 'non-thinking',
   executionMode: agentSelectorRef.value?.runtime?.executionMode || 'manual',
-  workDir: agentSelectorRef.value?.runtime?.workDir || ''
+  workDir: agentSelectorRef.value?.runtime?.workDir || '',
+  providerId: agentSelectorRef.value?.runtime?.providerId || undefined,
+  providerCode: agentSelectorRef.value?.runtime?.providerCode || ''
 }))
 
 const updateAgentRuntime = (key: string, value: string) => {
@@ -843,6 +897,78 @@ const updateAgentRuntime = (key: string, value: string) => {
     (rt as any)[key] = value
     agentSelectorRef.value?.saveRuntime()
   }
+}
+
+/** Provider 切换：持久化用户选择到 AgentConfig */
+const onProviderSwitch = (v: string) => {
+  const rt = agentSelectorRef.value?.runtime
+  if (!rt) return
+  rt.providerCode = v
+  refreshModelList()
+  agentSelectorRef.value?.saveRuntime()
+}
+
+// ===== LLM Provider + 动态模型列表 =====
+const providerOptions = ref<ProviderConfig[]>([])
+const availableModels = ref<string[]>(['deepseek-v4-flash', 'deepseek-v4-pro']) // 默认兜底
+
+const fetchAvailableModels = async () => {
+  try {
+    const res = await listProviders()
+    if (res.code === 200 && res.data && res.data.length > 0) {
+      providerOptions.value = res.data
+      refreshModelList()
+    }
+  } catch (e) {
+    console.warn('加载 Provider 列表失败，使用默认模型列表', e)
+  }
+}
+
+/** 根据当前 Provider 刷新模型列表：runtime.providerCode > 第一个 Provider */
+const refreshModelList = () => {
+  const providers = providerOptions.value
+  if (providers.length === 0) {
+    availableModels.value = []
+    return
+  }
+
+  const runtime = agentSelectorRef.value?.runtime
+  // 找到当前使用的 Provider
+  const prov = (runtime?.providerCode
+    ? providers.find((p: ProviderConfig) => p.code === runtime.providerCode)
+    : null) || providers[0]
+
+  if (prov?.parsedModelList && prov.parsedModelList.length > 0) {
+    availableModels.value = prov.parsedModelList
+    // 如果当前模型不在新 Provider 列表中，自动切到默认模型
+    const currentModel = runtime?.model
+    if (runtime && (!currentModel || !prov.parsedModelList.includes(currentModel))) {
+      runtime.model = prov.defaultModel || prov.parsedModelList[0]
+      agentSelectorRef.value?.saveRuntime()
+    }
+  } else {
+    availableModels.value = providers.flatMap((p: ProviderConfig) => p.parsedModelList || [])
+  }
+}
+
+// ★ 监听 Provider 手动切换 → 重新加载模型列表
+watch(() => agentSelectorRef.value?.runtime?.providerCode, () => {
+  if (providerOptions.value.length > 0) {
+    refreshModelList()
+  }
+})
+
+// ★ 监听 providerOptions 首次加载完成 → 刷新一次（解决初始化时序问题）
+watch(providerOptions, (opts) => {
+  if (opts.length > 0) {
+    refreshModelList()
+  }
+})
+
+/** 格式化模型显示名称 */
+const formatModelLabel = (model: string): string => {
+  // 简短显示，去掉常见前缀
+  return model.replace(/^deepseek-/, '').replace(/^gpt-/, '')
 }
 
 // ===== 多Agent后台流式 - 辅助函数 =====
@@ -1274,6 +1400,8 @@ const stopLogResize = () => {
 
 // 页面离开时停止轮询
 onMounted(() => {
+  // 加载 Provider 模型列表（用于动态渲染模型选择器）
+  fetchAvailableModels()
   // 检查当前是否有运行中的服务
   getRunStatus().then(status => {
     isServiceRunning.value = status.running
@@ -1911,6 +2039,7 @@ interface TaskItem {
 const taskItems = ref<TaskItem[]>([])
 const completedTaskCount = computed(() => taskItems.value.filter(t => t.status === 'completed').length)
 const showTaskDropdown = ref(false)
+const showMoreSettings = ref(false)
 // 「执行中」的任务：当 isSending 或 activeTask 时，第一个 pending 任务视为 executing
 const executingTaskId = computed(() => {
   if (!isSending.value && !activeTask.value) return null
@@ -3024,6 +3153,8 @@ const sendMessage = async () => {
 
     // 构建thinking内容
     let thinkingContent = ''
+    // 追踪上一个事件类型：thinking→content 切换时需要补换行（与历史消息加载逻辑一致）
+    let lastEventType: string | null = null
 
     for await (const event of streamChat(finalMessage, sessionId, {
       promptFileName: PROMPT_FILE,
@@ -3033,6 +3164,7 @@ const sendMessage = async () => {
       thinkingMode: agentRuntime.value.thinkingMode,
       turnId,
       agentConfigId: currentAgentConfigId.value,
+      providerCode: agentRuntime.value.providerCode || undefined,
       contextMode: settingsStore.contextMode,
       attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined
     }, abortCtrl)) {
@@ -3085,6 +3217,7 @@ const sendMessage = async () => {
           thinkingContent += event.data
         }
         assistantMsg.thinking = thinkingContent
+        lastEventType = 'thinking'
         // 节流刷新（携带思考消息ID，更新 DOM 后自动滚动到底部）
         scheduleMessageUpdate(convId, assistantMsg.id)
       } else if (event.type === 'tool_call_start') {
@@ -3107,7 +3240,12 @@ const sendMessage = async () => {
         streamStatus.value = '正在生成回答...'
         // 实时更新消息内容
         if (event.data) {
+          // thinking→content 切换时，若已有内容则补换行（与历史消息加载 processMessageGroups 逻辑一致）
+          if (lastEventType === 'thinking' && assistantMsg.content) {
+            assistantMsg.content += '\n'
+          }
           assistantMsg.content += event.data
+          lastEventType = 'content'
         }
         // 第一个 content 事件中获取 sessionId（后端在第一个事件中就会返回）
         if (event.sessionId && !currentStreamSessionId.value) {
@@ -3286,6 +3424,8 @@ const reconnectToTaskStream = async (convId: number) => {
     targetMsg.isStreaming = true
   }
   let thinkingContent = targetMsg.thinking || ''
+  // 追踪上一个事件类型：thinking→content 切换时需要补换行
+  let lastEventType: string | null = null
 
   const abortCtrl = new AbortController()
   stopAbortController.value = abortCtrl
@@ -3323,11 +3463,18 @@ const reconnectToTaskStream = async (convId: number) => {
           }
         }
         targetMsg.thinking = thinkingContent
+        lastEventType = 'thinking'
         // 携带思考消息ID，更新 DOM 后自动滚动到底部
         scheduleMessageUpdate(stringConvId, targetMsg.id)
       } else if (event.type === 'content') {
         streamStatus.value = '正在生成回答...'
-        targetMsg.content = (targetMsg.content || '') + event.data
+        // thinking→content 切换时，若已有内容则补换行（与历史消息加载 processMessageGroups 逻辑一致）
+        if (lastEventType === 'thinking' && targetMsg.content) {
+          targetMsg.content = (targetMsg.content || '') + '\n' + event.data
+        } else {
+          targetMsg.content = (targetMsg.content || '') + event.data
+        }
+        lastEventType = 'content'
         scheduleMessageUpdate(stringConvId)
       } else if (event.type === 'ask_user') {
         streamStatus.value = '等待用户授权...'
@@ -4147,6 +4294,9 @@ onMounted(() => {
     }
     if (!target.closest('.changes-trigger') && !target.closest('.changes-panel')) {
       showChangesPanel.value = false
+    }
+    if (!target.closest('.more-settings-trigger') && !target.closest('.more-settings-popover') && !target.closest('.ant-select-dropdown')) {
+      showMoreSettings.value = false
     }
   })
 })
@@ -5061,6 +5211,46 @@ watch(currentConversationId, (newId) => {
   font-size: 14px;
 }
 
+/* ===== 无 Provider 引导界面 ===== */
+.no-provider-guide {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 60px 40px;
+  text-align: center;
+}
+.guide-icon {
+  font-size: 64px;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+.guide-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+.guide-desc {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-3);
+  max-width: 400px;
+  line-height: 1.6;
+}
+.guide-btn {
+  margin-top: 8px;
+  border-radius: 10px !important;
+  font-weight: 700 !important;
+  padding: 0 28px !important;
+  height: 44px !important;
+  font-size: 15px !important;
+}
+[data-theme="dark"] .guide-title { color: #e4e2f0; }
+[data-theme="dark"] .guide-desc { color: #7a7898; }
+
 /* ===== 消息项 ===== */
 .message-item {
   display: flex;
@@ -5561,24 +5751,33 @@ watch(currentConversationId, (newId) => {
   justify-content: space-between;
   align-items: center;
   margin-top: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
+  position: relative;
+  min-width: 0;
 }
 
 .footer-left {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 .footer-right {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .context-tokens {
   color: var(--text-3);
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
 }
 .context-mode-badge {
   margin-left: 6px;
@@ -5673,6 +5872,57 @@ watch(currentConversationId, (newId) => {
   font-weight: 700;
   color: var(--text-2);
   white-space: nowrap;
+}
+
+/* ===== 更多设置折叠区 ===== */
+.more-settings-trigger {
+  cursor: pointer;
+  position: relative;
+}
+.more-settings-trigger:hover {
+  background: var(--accent-lt);
+  border-color: var(--accent-md);
+}
+.more-settings-trigger.active {
+  background: var(--accent-lt);
+  border-color: var(--accent);
+}
+.more-settings-arrow {
+  font-size: 10px;
+  color: var(--text-3);
+  margin-left: 2px;
+}
+.more-settings-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  min-width: 280px;
+  animation: panelSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.more-settings-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.more-settings-item .mode-emoji {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.more-settings-item .mode-label {
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  font-weight: 600;
+  min-width: 60px;
 }
 
 /* ===== 任务下拉面板 ===== */
@@ -5961,10 +6211,15 @@ watch(currentConversationId, (newId) => {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 .footer-right {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* Git 侧边栏 / 技能面板（已在侧边栏通用样式中定义背景） */

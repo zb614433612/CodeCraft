@@ -36,4 +36,6 @@ public class ForkAgentRequest {
 
     /** 采样温度（可选）：控制子Agent输出随机性，为空则使用默认值0.3 */
     private Double temperature;
+    /** LLM Provider Code（可选）：指定子Agent使用的LLM平台，为空则跟随主Agent配置 */
+    private String providerCode;
 }

@@ -34,8 +34,8 @@ public class ExecuteSqlTool implements Tool {
     private static final Pattern COMMENT_PATTERN = Pattern.compile("^\\s*(/\\*.*?\\*/\\s*|--[^\n]*\n)*", Pattern.DOTALL);
     /** 匹配已有 LIMIT 子句的正则（忽略大小写、单词边界） */
     private static final Pattern LIMIT_PATTERN = Pattern.compile("\\bLIMIT\\b", Pattern.CASE_INSENSITIVE);
-    /** 匹配 SQL 字符串字面量的正则 */
-    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile("'[^']*'|'[^']*");
+    /** 匹配 SQL 字符串字面量的正则（单引号和双引号） */
+    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile("'[^']*'|\"[^\"]*\"");
     /** 写操作关键字列表 */
     private static final List<String> WRITE_KEYWORDS = List.of(
             "INSERT", "UPDATE", "DELETE", "REPLACE",

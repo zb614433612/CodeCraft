@@ -109,12 +109,11 @@
               >
                 <StarOutlined />
               </a-button>
-              <a-button
+               <a-button
                 size="small"
                 type="text"
                 class="btn-action btn-edit"
                 @click="openEditModal(agent)"
-                :disabled="agent.isBuiltin"
                 title="编辑"
               >
                 <EditOutlined />
@@ -162,13 +161,13 @@
 
             <!-- 弹窗主体 -->
             <div class="modal-body">
-              <a-form
-                ref="formRef"
-                :model="formData"
-                :label-col="{ span: 5 }"
-                :wrapper-col="{ span: 19 }"
-                class="agent-form"
-              >
+                <a-form
+                  ref="formRef"
+                  :model="formData"
+                  :label-col="{ span: 6 }"
+                  :wrapper-col="{ span: 18 }"
+                  class="agent-form"
+                >
                 <!-- 名称 -->
                 <a-form-item label="名称" required>
                   <a-input
@@ -215,16 +214,18 @@
                 <a-form-item label="系统提示词">
                   <a-textarea
                     v-model:value="formData.systemPrompt"
-                    placeholder="输入系统提示词，定义 Agent 的角色和行为..."
+                    :placeholder="isUsingDefaultPrompt ? '（使用默认系统提示词，编辑后保存将覆盖默认值）' : '输入系统提示词，定义 Agent 的角色和行为...'"
                     :rows="4"
                     :maxLength="5000"
                     show-count
                     class="form-textarea"
                   />
+                  <div class="form-hint" style="margin-top: 4px;">留空则使用后台内置的默认系统提示词</div>
                 </a-form-item>
 
                 <!-- 工具选择 -->
                 <a-form-item label="工具选择">
+                  <div v-if="isToolNamesNull" class="form-hint" style="margin-bottom: 8px;">当前使用默认工具集，选择工具后将覆盖默认值</div>
                   <div v-if="loadingTools" class="form-hint">加载工具列表中...</div>
                   <div v-else class="tools-panel">
                     <a-collapse
@@ -302,6 +303,66 @@
                   </a-input>
                 </a-form-item>
               </a-form>
+
+              <!-- ★ 角色性格配置（独立 toggle，不与工具分类 collapse 共享 activeKey） -->
+              <div class="char-section">
+                <button type="button" class="char-toggle" @click="showCharForm = !showCharForm">
+                  <span class="char-toggle-icon">{{ showCharForm ? '▼' : '▶' }}</span>
+                  <span>🎭 角色性格（可选）</span>
+                </button>
+                <div v-show="showCharForm" class="char-body">
+                  <div class="char-form-grid">
+                    <div class="char-field">
+                      <label class="char-label">姓名</label>
+                      <a-input v-model:value="formData.charName" placeholder="如：小柔" />
+                    </div>
+                    <div class="char-field">
+                      <label class="char-label">物种</label>
+                      <a-select v-model:value="formData.charSpecies" placeholder="请选择" :getPopupContainer="trigger => trigger.parentElement">
+                        <a-select-option value="人">👤 人类</a-select-option>
+                        <a-select-option value="猫娘">🐱 猫娘</a-select-option>
+                        <a-select-option value="狗娘">🐶 狗娘</a-select-option>
+                        <a-select-option value="精灵">🧝 精灵</a-select-option>
+                        <a-select-option value="机器人">🤖 机器人</a-select-option>
+                        <a-select-option value="自定义">✨ 自定义</a-select-option>
+                      </a-select>
+                    </div>
+                    <div class="char-field">
+                      <label class="char-label">性别</label>
+                      <a-select v-model:value="formData.charGender" placeholder="请选择" :getPopupContainer="trigger => trigger.parentElement">
+                        <a-select-option value="男">♂️ 男</a-select-option>
+                        <a-select-option value="女">♀️ 女</a-select-option>
+                        <a-select-option value="无性">⚪ 无性</a-select-option>
+                        <a-select-option value="其他">🌈 其他</a-select-option>
+                      </a-select>
+                    </div>
+                    <div class="char-field">
+                      <label class="char-label">年龄</label>
+                      <a-input-number v-model:value="formData.charAge" :min="1" :max="9999" placeholder="年龄" style="width:100%" />
+                    </div>
+                    <div class="char-field char-field-wide">
+                      <label class="char-label">性格</label>
+                      <a-textarea v-model:value="formData.charPersonality" placeholder="如：温柔体贴，善解人意" :rows="2" :maxLength="500" />
+                    </div>
+                    <div class="char-field">
+                      <label class="char-label">称呼</label>
+                      <a-input v-model:value="formData.charGreeting" placeholder="用户对你的称呼，如：主人、哥哥" />
+                    </div>
+                    <div class="char-field char-field-wide">
+                      <label class="char-label">背景</label>
+                      <a-textarea v-model:value="formData.charBackground" placeholder="如：来自未来世界的 AI 助手..." :rows="3" :maxLength="1000" />
+                    </div>
+                    <div class="char-field">
+                      <label class="char-label">喜好</label>
+                      <a-input v-model:value="formData.charLikes" placeholder="如：看书、听音乐、帮助人类" />
+                    </div>
+                    <div class="char-field char-field-wide">
+                      <label class="char-label">风格</label>
+                      <a-textarea v-model:value="formData.charStyle" placeholder="如：说话温柔，喜欢用表情符号" :rows="2" :maxLength="500" />
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- 弹窗底部 -->
@@ -359,6 +420,11 @@ const toolCategories = ref<ToolCategory[]>([])
 const loadingTools = ref(false)
 const allToolNames = ref<string[]>([])
 const activeCategoryKeys = ref<string[]>([])
+const showCharForm = ref(false)
+// ★ 标记原始 systemPrompt 是否为 null（表示使用内置默认提示词）
+const isUsingDefaultPrompt = ref(false)
+// ★ 标记原始 toolNames 是否为 null（表示使用内置默认工具集）
+const isToolNamesNull = ref(false)
 
 // 常用 emoji 列表
 const emojiList = [
@@ -404,6 +470,9 @@ const getDefaultForm = (): Partial<AgentConfig> => ({
   tools: [],
   temperature: 0.3,
   workDir: '',
+  // 角色性格字段
+  charName: '', charSpecies: '', charGender: '', charAge: undefined as number | undefined,
+  charPersonality: '', charGreeting: '', charBackground: '', charLikes: '', charStyle: '',
 })
 
 const formData = reactive<Partial<AgentConfig>>(getDefaultForm())
@@ -447,23 +516,31 @@ const fetchToolRegistry = async () => {
 const openCreateModal = () => {
   isEditing.value = false
   editingId.value = null
-  Object.assign(formData, getDefaultForm())
+  // ★ 用 getDefaultForm 覆盖所有字段（不 delete reactive key，避免破坏响应式）
+  const defaults = getDefaultForm()
+  for (const key of Object.keys(defaults)) {
+    (formData as any)[key] = (defaults as any)[key]
+  }
+  // 清理角色性格中可能在编辑时残留的额外字段
+  const charKeys = ['charName','charSpecies','charGender','charAge','charPersonality','charGreeting','charBackground','charLikes','charStyle']
+  for (const k of charKeys) { (formData as any)[k] = (defaults as any)[k] || '' }
   showEmojiPicker.value = false
+  showCharForm.value = false
   modalVisible.value = true
 }
 
 const openEditModal = (agent: AgentConfig) => {
-  if (agent.isBuiltin) {
-    message.warning('内置 Agent 不允许修改')
-    return
-  }
   isEditing.value = true
   editingId.value = agent.id
+  // ★ 记录原始 toolNames 是否为 null（表示使用内置默认工具集）
+  isToolNamesNull.value = !agent.toolNames
   let toolsArray: string[] = []
   if (agent.toolNames) {
     try { toolsArray = JSON.parse(agent.toolNames) } catch { toolsArray = [] }
   }
   oldToolNames.value = [...toolsArray]
+  // ★ 记录原始 systemPrompt 是否为 null（表示使用内置默认提示词）
+  isUsingDefaultPrompt.value = !agent.systemPrompt
   Object.assign(formData, {
     name: agent.name,
     description: agent.description || '',
@@ -473,6 +550,26 @@ const openEditModal = (agent: AgentConfig) => {
     temperature: agent.temperature ?? 0.3,
     workDir: agent.workDir || '',
   })
+  // ★ 解析角色性格配置 JSON
+  if (agent.characterProfile) {
+    try {
+      const cp = JSON.parse(agent.characterProfile)
+      // ★ 修复："{}" 表示无性格，不展开面板也不覆盖表单
+      if (Object.keys(cp).length > 0) {
+        Object.assign(formData, {
+          charName: cp.name || '', charSpecies: cp.species || '', charGender: cp.gender || '',
+          charAge: cp.age || undefined, charPersonality: cp.personality || '',
+          charGreeting: cp.greeting || '', charBackground: cp.background || '',
+          charLikes: cp.likes || '', charStyle: cp.style || '',
+        })
+        showCharForm.value = true
+      } else {
+        showCharForm.value = false
+      }
+    } catch { showCharForm.value = false }
+  } else {
+    showCharForm.value = false
+  }
   showEmojiPicker.value = false
   modalVisible.value = true
 }
@@ -490,15 +587,35 @@ const handleSave = async () => {
 
   modalSaving.value = true
   try {
+    // ★ 修复：systemPrompt 为空时发送 null（保持数据库 NULL，使用内置默认提示词）
+    //   不要发空字符串，否则后端会覆盖数据库中的 NULL
+    const systemPromptVal = formData.systemPrompt?.trim()
+    // ★ 修复：tools 为空且原始值为 null 时发送 null（保持数据库 NULL，使用内置默认工具集）
+    //   不要发 "[]"，否则后端会覆盖数据库中的 NULL，导致 LLM 无工具可用
+    const toolsVal = (formData.tools && formData.tools.length > 0) ? formData.tools : null
+
     const payload: Partial<AgentConfig> = {
       name: formData.name.trim(),
       description: formData.description?.trim() || '',
       avatar: formData.avatar || '🤖',
-      systemPrompt: formData.systemPrompt || '',
-      toolNames: JSON.stringify(formData.tools || []),
+      systemPrompt: systemPromptVal || null,
+      toolNames: toolsVal ? JSON.stringify(toolsVal) : null,
       temperature: formData.temperature ?? 0.3,
       workDir: formData.workDir || '',
     }
+    // ★ 角色性格 → JSON 字符串
+    const cp: Record<string, any> = {}
+    if (formData.charName) cp.name = formData.charName
+    if (formData.charSpecies) cp.species = formData.charSpecies
+    if (formData.charGender) cp.gender = formData.charGender
+    if (formData.charAge) cp.age = formData.charAge
+    if (formData.charPersonality) cp.personality = formData.charPersonality
+    if (formData.charGreeting) cp.greeting = formData.charGreeting
+    if (formData.charBackground) cp.background = formData.charBackground
+    if (formData.charLikes) cp.likes = formData.charLikes
+    if (formData.charStyle) cp.style = formData.charStyle
+    // ★ 修复：清空性格时发送 "{}"（运行时视为无性格），不再用 undefined 导致后端无法区分清除行为
+    payload.characterProfile = Object.keys(cp).length > 0 ? JSON.stringify(cp) : "{}"
 
     if (isEditing.value && editingId.value) {
       await updateAgentConfig(editingId.value, payload)
@@ -1025,13 +1142,11 @@ onMounted(() => {
 
   background: var(--modal-bg);
   border-radius: 18px;
-  width: 680px;
-  max-height: 85vh;
+  width: 740px;
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--modal-border);
   box-shadow: 0 20px 60px rgba(0,0,0,0.2), 0 0 0 1px rgba(0,0,0,0.05);
-  overflow: hidden;
   color: var(--modal-text-1);
 }
 
@@ -1042,6 +1157,8 @@ onMounted(() => {
   gap: 14px;
   padding: 20px 24px 16px;
   border-bottom: 1px solid var(--modal-border);
+  border-radius: 18px 18px 0 0;
+  flex-shrink: 0;
 }
 .modal-header-icon {
   font-size: 24px;
@@ -1080,6 +1197,7 @@ onMounted(() => {
   border-radius: 8px;
   transition: all 0.2s;
   flex-shrink: 0;
+  line-height: 1;
 }
 .modal-close:hover {
   color: var(--modal-text-1);
@@ -1092,8 +1210,16 @@ onMounted(() => {
   overflow-y: auto;
   padding: 20px 24px;
 }
-.modal-body::-webkit-scrollbar { width: 4px; }
-.modal-body::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 2px; }
+.modal-body::-webkit-scrollbar {
+  width: 5px;
+}
+.modal-body::-webkit-scrollbar-thumb {
+  background: #dcd8ea;
+  border-radius: 3px;
+}
+.modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
 
 /* 弹窗底部 */
 .modal-footer {
@@ -1103,6 +1229,8 @@ onMounted(() => {
   padding: 16px 24px;
   border-top: 1px solid var(--modal-border);
   background: #faf9fc;
+  border-radius: 0 0 18px 18px;
+  flex-shrink: 0;
 }
 .btn-cancel {
   border-radius: var(--radius-sm) !important;
@@ -1117,7 +1245,7 @@ onMounted(() => {
 
 /* ---------- 表单样式 ---------- */
 .agent-form :deep(.ant-form-item) {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 .agent-form :deep(.ant-form-item-label > label) {
   font-weight: 600;
@@ -1333,6 +1461,77 @@ onMounted(() => {
   background: #faf9fc;
   border-radius: 8px;
   border: 1px dashed var(--border);
+}
+
+/* ===== 角色性格配置（独立 toggle + Grid 布局，不使用 a-collapse） ===== */
+.char-section {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.char-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 16px;
+  border: none;
+  background: var(--bg-hover, #faf9fc);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background 0.2s;
+  text-align: left;
+}
+.char-toggle:hover {
+  background: rgba(139,92,246,0.08);
+}
+.char-toggle-icon {
+  font-size: 11px;
+  transition: transform 0.2s;
+  width: 14px;
+  display: inline-block;
+  color: var(--text-3);
+}
+.char-body {
+  padding: 16px 18px;
+}
+.char-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+}
+.char-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.char-field-wide {
+  grid-column: 1 / -1;
+}
+.char-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.char-field :deep(.ant-input),
+.char-field :deep(.ant-input-number),
+.char-field :deep(.ant-select-selector),
+.char-field :deep(textarea) {
+  border-radius: 8px;
+}
+[data-theme="dark"] .char-label { color: #e4e2f0; }
+[data-theme="dark"] .char-toggle {
+  background: rgba(255,255,255,0.03);
+  color: #e4e2f0;
+}
+[data-theme="dark"] .char-toggle:hover {
+  background: rgba(139,92,246,0.1);
+}
+[data-theme="dark"] .char-section {
+  border-color: var(--modal-border, #363448);
 }
 
 /* ============ 弹窗过渡动画 ============ */

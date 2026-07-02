@@ -189,7 +189,7 @@ public class ProjectInfoTool implements Tool {
         }
 
         // 【P1-6】错误短路：结构解析失败则不继续
-        if (structureResult.startsWith("错误：")) {
+        if (structureResult.startsWith("错误：") || structureResult.startsWith("【解析失败】") || structureResult.startsWith("【错误】")) {
             return structureResult;
         }
 

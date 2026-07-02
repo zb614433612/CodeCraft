@@ -151,7 +151,17 @@ public class HttpRequestTool implements Tool {
         }
 
         HttpEntity<String> entity = new HttpEntity<>(bodyStr, httpHeaders);
-        URI uri = URI.create(url);
+        URI uri;
+        try {
+            uri = URI.create(url);
+        } catch (IllegalArgumentException e) {
+            // URL包含特殊字符，尝试使用URL编码
+            try {
+                uri = new java.net.URL(url).toURI();
+            } catch (Exception ex) {
+                return "【URL格式错误】URL包含无法编码的特殊字符: " + url + "\n错误: " + ex.getMessage();
+            }
+        }
 
         ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.valueOf(method), entity, String.class);
 

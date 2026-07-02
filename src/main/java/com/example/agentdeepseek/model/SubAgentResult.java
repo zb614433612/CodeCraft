@@ -149,7 +149,7 @@ public class SubAgentResult {
 
         // 状态行
         String statusIcon;
-        switch (status) {
+        switch (status != null ? status : "unknown") {
             case "completed": statusIcon = "✅"; break;
             case "failed":    statusIcon = "❌"; break;
             case "timeout":   statusIcon = "⏰"; break;

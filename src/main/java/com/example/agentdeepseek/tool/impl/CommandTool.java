@@ -549,7 +549,18 @@ public class CommandTool implements Tool {
         }
         synchronized int getOutputLineCount() { return outputLines.size(); }
         boolean isAlive() { return !finished && process.isAlive(); }
-        void markFinished() { finished = true; try { exitCode = process.exitValue(); } catch (IllegalThreadStateException e) { exitCode = -1; } }
+        void markFinished() {
+            finished = true;
+            try { exitCode = process.exitValue(); } catch (IllegalThreadStateException e) { exitCode = -1; }
+            // 延迟清理：服务结束5分钟后自动从SERVICES中移除，避免内存泄漏
+            Thread cleanupThread = new Thread(() -> {
+                try { Thread.sleep(5 * 60 * 1000); } catch (InterruptedException e) { return; }
+                SERVICES.remove(id);
+                log.debug("自动清理已结束的服务 #{}", id);
+            }, "svc-cleanup-" + id);
+            cleanupThread.setDaemon(true);
+            cleanupThread.start();
+        }
         int exitValue() { if (exitCode != null) return exitCode; try { return process.exitValue(); } catch (IllegalThreadStateException e) { return -1; } }
     }
 }

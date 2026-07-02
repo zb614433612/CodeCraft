@@ -1,14 +1,12 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.DeepSeekConfig;
-import com.example.agentdeepseek.service.ConfigService;
+import com.example.agentdeepseek.service.llm.LLMClientManager;
+import com.example.agentdeepseek.service.llm.LLMClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.ExchangeStrategies;
-import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.time.Duration;
@@ -22,31 +20,16 @@ import java.util.*;
 @Component
 public class DeepSeekAnalyzer {
 
-    private final WebClient webClient;
     private final DeepSeekConfig deepSeekConfig;
-    private final ConfigService configService;
     private final ObjectMapper objectMapper;
+    private final LLMClientManager llmClientManager;
 
-    public DeepSeekAnalyzer(WebClient.Builder webClientBuilder, DeepSeekConfig deepSeekConfig,
-                            ConfigService configService, ObjectMapper objectMapper) {
+    public DeepSeekAnalyzer(DeepSeekConfig deepSeekConfig,
+                            ObjectMapper objectMapper,
+                            LLMClientManager llmClientManager) {
         this.deepSeekConfig = deepSeekConfig;
-        this.configService = configService;
         this.objectMapper = objectMapper;
-
-        // 大缓冲区（10MB），适配非流式分析场景
-        ExchangeStrategies strategies = ExchangeStrategies.builder()
-                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
-                .build();
-
-        // 【修复】不再 hardcode defaultHeader("Authorization")，改为每次请求时动态获取 API Key
-        // - 用户可能在前端「配置」页面修改 API Key（存入数据库 sys_config 表）
-        // - 若硬编码 defaultHeader，后续修改不会生效，导致 401 认证失败
-        // - 参考 AgentForkManager.callDeepSeekApi() 的做法：每次请求前动态获取并设置 Bearer Auth
-        this.webClient = webClientBuilder
-                .baseUrl(deepSeekConfig.getBaseUrl())
-                .defaultHeader("Content-Type", "application/json")
-                .exchangeStrategies(strategies)
-                .build();
+        this.llmClientManager = llmClientManager;
     }
 
     /**
@@ -67,6 +50,17 @@ public class DeepSeekAnalyzer {
         userMsg.put("content", userMessage);
 
         return analyzeInternal(List.of(systemMsg, userMsg), timeoutSeconds, true);
+    }
+
+    /** 指定 providerCode 的分析 */
+    public String analyze(String systemPrompt, String userMessage, int timeoutSeconds, String providerCode) {
+        Map<String, Object> systemMsg = new HashMap<>();
+        systemMsg.put("role", "system");
+        systemMsg.put("content", systemPrompt);
+        Map<String, Object> userMsg = new HashMap<>();
+        userMsg.put("role", "user");
+        userMsg.put("content", userMessage);
+        return analyzeInternal(List.of(systemMsg, userMsg), timeoutSeconds, true, providerCode);
     }
 
     /**
@@ -92,6 +86,17 @@ public class DeepSeekAnalyzer {
         return analyzeInternal(List.of(systemMsg, userMsg), timeoutSeconds, false);
     }
 
+    /** 指定 providerCode 的分析（不含 thinking） */
+    public String analyzeWithoutThinking(String systemPrompt, String userMessage, int timeoutSeconds, String providerCode) {
+        Map<String, Object> systemMsg = new HashMap<>();
+        systemMsg.put("role", "system");
+        systemMsg.put("content", systemPrompt);
+        Map<String, Object> userMsg = new HashMap<>();
+        userMsg.put("role", "user");
+        userMsg.put("content", userMessage);
+        return analyzeInternal(List.of(systemMsg, userMsg), timeoutSeconds, false, providerCode);
+    }
+
     /**
      * 调用 DeepSeek 非流式 API 进行分析（完整消息列表）
      */
@@ -110,22 +115,28 @@ public class DeepSeekAnalyzer {
      * @return 分析结果文本
      */
     private String analyzeInternal(List<Map<String, Object>> messages, int timeoutSeconds, boolean enableThinking) {
-        Map<String, Object> request = new HashMap<>();
-        request.put("model", deepSeekConfig.getDefaultModel());
-        request.put("messages", messages);
-        request.put("stream", false);
+        return analyzeInternal(messages, timeoutSeconds, enableThinking, null);
+    }
 
-        if (enableThinking) {
-            String thinkingMode = deepSeekConfig.getThinkingMode();
-            if (thinkingMode != null && !thinkingMode.isEmpty()) {
-                request.put("thinking_mode", thinkingMode);
-            }
-        } else {
-            // 【修复】显式禁用 thinking，避免模型默认启用导致 content 为空
-            // deepseek-v4-pro 等模型默认启用 thinking，不传 thinking_mode 时
-            // API 返回 content="" + reasoning_content="思考文本"，导致评委提取 JSON 失败
-            request.put("thinking_mode", "non-thinking");
-        }
+    /**
+     * 执行非流式 API 调用（带重试+可选 ProviderCode）
+     */
+    private String analyzeInternal(List<Map<String, Object>> messages, int timeoutSeconds,
+                                    boolean enableThinking, String providerCode) {
+        // ===== 解析 LLM Client：providerCode > 默认 Provider =====
+        LLMClient client = (providerCode != null && !providerCode.isEmpty())
+                ? llmClientManager.resolveClientByCode(providerCode)
+                : llmClientManager.getDefaultClient();
+        String model = llmClientManager.getDefaultModel(client.getProviderCode());
+
+        // ===== 思考模式：false=non-thinking（评委快速响应），true=跟随 Agent 配置 =====
+        String thinkingMode = enableThinking
+                ? deepSeekConfig.getThinkingMode()
+                : "non-thinking";
+
+        // ===== 使用 LLMClient 构建标准请求体（Provider 适配层自动处理 thinking 格式差异）=====
+        Map<String, Object> request = client.buildRequestBody(
+                messages, model, 0.3, thinkingMode, false, null);
 
         int maxRetries = 2;
         Exception lastException = null;
@@ -133,7 +144,8 @@ public class DeepSeekAnalyzer {
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             if (attempt > 0) {
                 long waitMs = attempt * 2000L;
-                log.info("DeepSeek 分析调用重试 (第 {}/{} 次)，等待 {}ms", attempt, maxRetries, waitMs);
+                log.info("LLM 分析调用重试 (第 {}/{} 次)，Provider=[{}]，等待 {}ms",
+                        attempt, maxRetries, client.getProviderCode(), waitMs);
                 try {
                     Thread.sleep(waitMs);
                 } catch (InterruptedException ie) {
@@ -143,37 +155,24 @@ public class DeepSeekAnalyzer {
             }
 
             try {
-                // 动态获取 API Key（与 AgentForkManager.callDeepSeekApi() 逻辑一致）
-                // 统一从数据库 sys_config 表读取，用户可在前端「配置」页面实时修改
-                final String apiKey = configService.getValue("deepseek_api_key");
-                if (apiKey == null || apiKey.isEmpty()) {
-                    return "错误：DeepSeek API Key 未配置，请先在配置页面设置 API Key";
-                }
-
-                String response = webClient.post()
-                        .uri("/v1/chat/completions")
-                        .headers(headers -> headers.setBearerAuth(apiKey))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .bodyValue(request)
-                        .retrieve()
-                        .bodyToMono(String.class)
-                        .block(Duration.ofSeconds(timeoutSeconds));
+                // 使用当前 Provider 的 blockingChat（自动处理认证头/超时/错误）
+                String response = client.blockingChat(request, Duration.ofSeconds(timeoutSeconds));
 
                 if (response == null || response.isEmpty()) {
                     return "错误：API 返回空响应";
                 }
 
+                // 使用 Provider 适配层提取内容（兼容 Anthropic/Ollama 等非 OpenAI 格式）
+                String content = client.extractContentFromBlockingResponse(response);
+                if (content != null && !content.isEmpty()) {
+                    return content;
+                }
+
+                // 降级：content 为空时，尝试手动解析 reasoning_content
                 JsonNode responseNode = objectMapper.readTree(response);
                 JsonNode choices = responseNode.path("choices");
                 if (choices.isArray() && choices.size() > 0) {
                     JsonNode message = choices.get(0).path("message");
-                    String content = message.path("content").asText("");
-                    if (!content.isEmpty()) {
-                        return content;
-                    }
-
-                    // 降级：content 为空时，尝试从 reasoning_content 中提取 JSON
-                    // thinking 模式下模型可能把 JSON 放在思考过程中
                     String reasoning = message.path("reasoning_content").asText("");
                     if (!reasoning.isEmpty()) {
                         String extractedJson = extractJsonFromText(reasoning);
@@ -181,26 +180,32 @@ public class DeepSeekAnalyzer {
                             log.info("从 reasoning_content 中成功提取 JSON");
                             return extractedJson;
                         }
-                        // 提取不到 JSON，返回原始推理内容（调用方需自行处理）
                         return "[思考过程]\n" + reasoning;
                     }
-                    return "错误：API 返回的 content 为空";
                 }
-                return "错误：API 返回的 choices 为空";
+                return "错误：API 返回的 content 为空";
 
-            } catch (WebClientResponseException e) {
-                lastException = e;
-                int statusCode = e.getStatusCode().value();
-                String errorBody = e.getResponseBodyAsString();
-                String errorMsg = String.format("HTTP %d: %s", statusCode,
-                        errorBody != null && !errorBody.isEmpty() ? errorBody : e.getMessage());
-                log.error("DeepSeek 分析调用失败: {}", errorMsg);
+            } catch (RuntimeException e) {
+                // blockingChat() 将 WebClientResponseException 包装为 RuntimeException
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                if (cause instanceof WebClientResponseException wcre) {
+                    lastException = wcre;
+                    int statusCode = wcre.getStatusCode().value();
+                    String errorBody = wcre.getResponseBodyAsString();
+                    String errorMsg = String.format("HTTP %d: %s", statusCode,
+                            errorBody != null && !errorBody.isEmpty() ? errorBody : wcre.getMessage());
+                    log.error("LLM 分析调用失败 [{}]: {}", client.getProviderCode(), errorMsg);
 
-                // 4xx 客户端错误（非 429 限流）不重试，直接返回
-                if (statusCode >= 400 && statusCode < 500 && statusCode != 429) {
-                    return "错误：API 请求被拒绝 - " + errorMsg;
+                    // 4xx 客户端错误（非 429 限流）不重试，直接返回
+                    if (statusCode >= 400 && statusCode < 500 && statusCode != 429) {
+                        return "错误：API 请求被拒绝 - " + errorMsg;
+                    }
+                    // 429 限流 或 5xx 服务端错误，继续重试
+                } else {
+                    lastException = e;
+                    log.error("LLM 分析调用失败 [{}]: {}", client.getProviderCode(), e.getMessage(), e);
+                    // 非 HTTP 异常，继续重试
                 }
-                // 429 限流 或 5xx 服务端错误，继续重试
 
             } catch (Exception e) {
                 lastException = e;

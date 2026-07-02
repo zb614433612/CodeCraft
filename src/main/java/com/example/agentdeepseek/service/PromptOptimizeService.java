@@ -1,14 +1,11 @@
 package com.example.agentdeepseek.service;
 
+import com.example.agentdeepseek.service.llm.LLMClientManager;
+import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.util.PromptUtil;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 
-import java.time.Duration;
 import java.util.*;
 
 /**
@@ -19,9 +16,7 @@ import java.util.*;
 @Service
 public class PromptOptimizeService {
 
-    private final WebClient webClient;
-    private final ConfigService configService;
-    private final ObjectMapper objectMapper;
+    private final LLMClientManager llmClientManager;
 
     private static final String OPTIMIZE_PROMPT_FILE = "prompt_optimize.txt";
     private static final String FLASH_MODEL = "deepseek-v4-flash";
@@ -29,17 +24,8 @@ public class PromptOptimizeService {
     private static final int TIMEOUT_SECONDS = 15;
     private static final double TEMPERATURE = 0.0;
 
-    public PromptOptimizeService(WebClient.Builder webClientBuilder,
-                                 ConfigService configService,
-                                 ObjectMapper objectMapper) {
-        this.configService = configService;
-        this.objectMapper = objectMapper;
-
-        // 构建独立的 WebClient（不依赖静态 API Key，每次请求时动态获取）
-        this.webClient = webClientBuilder
-                .baseUrl("https://api.deepseek.com")
-                .defaultHeader("Content-Type", "application/json")
-                .build();
+    public PromptOptimizeService(LLMClientManager llmClientManager) {
+        this.llmClientManager = llmClientManager;
     }
 
     /**
@@ -60,11 +46,11 @@ public class PromptOptimizeService {
             return originalMessage;
         }
 
-        // 2. 获取动态 API Key
-        String apiKey = configService.getValue("deepseek_api_key");
-        if (apiKey == null || apiKey.isEmpty()) {
-            log.warn("未配置 API Key，跳过优化");
-            return originalMessage;
+        // 2. 使用默认 Provider 的 LLMClient（API Key 由 LLMWebClientManager 自动管理）
+        LLMClient client = llmClientManager.getDefaultClient();
+        String model = llmClientManager.getDefaultModel(client.getProviderCode());
+        if (model == null || model.isEmpty()) {
+            model = FLASH_MODEL;
         }
 
         // 3. 构建消息列表
@@ -79,47 +65,23 @@ public class PromptOptimizeService {
         userMsg.put("content", originalMessage);
         messages.add(userMsg);
 
-        // 4. 构建请求体
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", FLASH_MODEL);
-        requestBody.put("messages", messages);
-        requestBody.put("stream", false);
+        // 4. 使用 LLMClient 构建请求体（关闭思考模式 + max_tokens）
+        Map<String, Object> requestBody = client.buildRequestBody(
+                messages, model, TEMPERATURE, "non-thinking", false, null);
         requestBody.put("max_tokens", MAX_TOKENS);
-        requestBody.put("temperature", TEMPERATURE);
-
-        // 关闭思考模式（优化任务不需要推理过程）
-        Map<String, Object> thinking = new HashMap<>();
-        thinking.put("type", "disabled");
-        requestBody.put("thinking", thinking);
 
         // 5. 调用 API
         try {
-            log.info("提示词优化请求: 消息长度={}", originalMessage.length());
-            String response = webClient.post()
-                    .uri("/v1/chat/completions")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .header("Authorization", "Bearer " + apiKey)
-                    .bodyValue(requestBody)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block(Duration.ofSeconds(TIMEOUT_SECONDS));
-
-            if (response == null || response.isEmpty()) {
-                log.warn("优化 API 返回空响应");
-                return originalMessage;
-            }
+            log.info("提示词优化请求: 消息长度={}, Provider=[{}], model={}",
+                    originalMessage.length(), client.getProviderCode(), model);
+            String response = client.blockingChat(requestBody, java.time.Duration.ofSeconds(TIMEOUT_SECONDS));
 
             // 6. 解析响应
-            JsonNode responseNode = objectMapper.readTree(response);
-            JsonNode choices = responseNode.path("choices");
-            if (choices.isArray() && choices.size() > 0) {
-                JsonNode message = choices.get(0).path("message");
-                String optimized = message.path("content").asText("");
-                if (!optimized.isEmpty()) {
-                    log.info("提示词优化完成: 原始长度={}, 优化后长度={}",
-                            originalMessage.length(), optimized.length());
-                    return optimized.trim();
-                }
+            String optimized = client.extractContentFromBlockingResponse(response);
+            if (optimized != null && !optimized.isEmpty()) {
+                log.info("提示词优化完成: 原始长度={}, 优化后长度={}",
+                        originalMessage.length(), optimized.length());
+                return optimized.trim();
             }
 
             log.warn("优化 API 返回的 content 为空");

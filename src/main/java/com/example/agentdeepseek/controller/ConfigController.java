@@ -23,10 +23,6 @@ public class ConfigController {
     @GetMapping("/{key}")
     public ApiResponse<Map<String, String>> getConfig(@PathVariable String key) {
         String value = configService.getValue(key);
-        // 对 API Key 做脱敏处理
-        if ("deepseek_api_key".equals(key) && value != null && !value.isEmpty()) {
-            value = maskApiKey(value);
-        }
         return ApiResponse.success(Map.of("key", key, "value", value != null ? value : ""));
     }
 
@@ -37,15 +33,5 @@ public class ConfigController {
         configService.setValue(key, value);
         log.info("配置已更新: key={}", key);
         return ApiResponse.success(null);
-    }
-
-    /**
-     * 脱敏 API Key：只保留前4位和后4位
-     */
-    private String maskApiKey(String key) {
-        if (key.length() <= 8) {
-            return "****";
-        }
-        return key.substring(0, 4) + "****" + key.substring(key.length() - 4);
     }
 }

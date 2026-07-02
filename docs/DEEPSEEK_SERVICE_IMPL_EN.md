@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v1.1.2 | Updated: 2026-06-13 | Audience: Developers / AI Collaborators
+> Version: v1.1.3 | Updated: 2026-07-02 | Audience: Developers / AI Collaborators
 > This document dissects the 129KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -21,7 +21,7 @@ DeepSeekServiceImpl responsibilities (ideally split into 4-5 classes):
 │ 6. Judge evaluation       evaluateWithJudge / buildJudgeContext  │
 │ 7. Dead loop detection    hasRepeatedCalls / extractToolKey      │
 │ 8. Message persistence    saveUserMessage / saveAssistantMessage │
-│ 9. API Key management     initDynamicApiKey                      │
+│ 9. LLM Provider routing   resolveClient / buildRequestBody      │
 │10. Language directive     buildLanguageInstruction               │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -296,7 +296,48 @@ CompactionService.asyncPrecompress()
 
 ---
 
-## 8. Known Issues & Split Recommendations
+## 8. LLM Provider Routing Mechanism (New in v1.1.3)
+
+### 8.1 Routing Priority
+
+```
+Frontend dynamic providerCode (ChatRequest.providerCode)
+    ↓ Not found
+Agent config providerId (AgentConfig.providerId)
+    ↓ Not found
+First available Provider (LLMClientManager.getFirstClient())
+    ↓ Not found
+Throw exception: No available LLM Provider
+```
+
+### 8.2 Key Code Path
+
+```
+prepareConversationContext()
+    ↓
+    ├─ request.getProviderCode() → llmClientManager.resolveClientByCode()
+    ├─ agentConfig.getProviderId() → llmClientManager.resolveClientByProviderId()
+    └─ llmClientManager.getFirstClient()
+    ↓
+    llmClient.buildRequestBody(messages, model, temperature, thinkingMode, stream, tools)
+    ↓
+    apiRequest.put("_llmClient", llmClient)  // Store in internal field
+    ↓
+    Streaming/blocking call:
+    ├─ activeWebClient = llmClient.getWebClient()  // Use Provider's WebClient
+    ├─ llmClient.getChatEndpoint()                  // Use Provider's endpoint path
+    └─ llmClient.extractContentFromStreamChunk()    // Use Provider's response parser
+```
+
+### 8.3 Judge/Sub-Agent Following Mechanism
+
+Judges and sub-agents use the same LLM Provider as the main Agent, propagated via `ToolContext.setProviderCode()`:
+- Judge API call: Extract `providerCode` from `_llmClient`, pass to `deepSeekAnalyzer.analyzeWithoutThinking()`
+- Sub-agent tool call: Set to thread context via `ToolContext.setProviderCode()`
+
+---
+
+## 9. Known Issues & Split Recommendations
 
 | Issue | Location | Recommendation |
 |-------|----------|---------------|
@@ -305,6 +346,7 @@ CompactionService.asyncPrecompress()
 | `evaluateWithJudge` logic | ~100 lines | Delegated to ToolLoopManager, but call chain remains |
 | Sub-agent collection logic | Tail of `executeSemiStreamingToolCycle` | Extract to `SubAgentCollector` |
 | `handleStreamingPhase` | Largest single method | Split into `sendApiRequest` + `parseSseResponse` |
+| LLM Provider routing | prepareConversationContext | Already decoupled via LLMClientManager, routing logic can be further isolated |
 
 **Recommended split plan**:
 ```
@@ -318,7 +360,7 @@ DeepSeekServiceImpl (orchestration layer, ~200 lines)
 
 ---
 
-## 9. Key Constants Quick Reference
+## 10. Key Constants Quick Reference
 
 | Constant | Value | Description |
 |----------|-------|-------------|

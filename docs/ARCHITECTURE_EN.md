@@ -1,14 +1,14 @@
 > 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.1.2 | Updated: 2026-06-13 | Audience: Developers / AI Collaborators
+> Version: v1.1.3 | Updated: 2026-07-02 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
 
 ## 1. One-Sentence Definition
 
-**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **19 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration.
+**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **19 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.).
 
 ---
 
@@ -137,6 +137,7 @@ Main Agent (running in user session)
 | **Database** | H2 (Embedded) | Desktop app needs zero-config deployment, no MySQL required |
 | **Cache** | Caffeine | Replaces Redis, zero-dependency out of the box |
 | **AI Communication** | WebFlux + SSE | Supports streaming output, users see AI typing in real-time |
+| **Multi-LLM Support** | LLMClient Abstraction | Unified interface for DeepSeek/OpenAI/Anthropic/Ollama/MiMo, runtime dynamic switching |
 | **P2P Network** | Netty + JSON | High-performance async IO, JSON debugging friendly |
 | **P2P Signaling** | QR Code + ZXing | No manual address entry, scan to pair devices |
 | **P2P Security** | TLS + BouncyCastle | Self-signed certificates + AES encryption, end-to-end secure channel |
@@ -355,6 +356,7 @@ src/main/java/com/example/agentdeepseek/
 | **User Permissions** | RBAC, Token auth, menu control | UserServiceImpl + Filter | ~500 |
 | **Scheduled Tasks** | Cron/one-time scheduling, execution tracking | ScheduleTaskScheduler | ~350 |
 | **Skill System** | BM25 matching, Bayesian confidence | SkillMatcher + SkillIndexer | ~400 |
+| **Multi-LLM Provider** | Provider CRUD, client routing, hot refresh | LLMClientManager + LLMClient + 6 implementations | ~1500 |
 
 ---
 
@@ -382,6 +384,22 @@ src/main/java/com/example/agentdeepseek/
 | Frontend lacks tests | 🟡 Medium | Add Vitest unit tests for core components |
 | snapshots/ directory bloat | 🟡 Medium | Add periodic cleanup or Git-based snapshots |
 | Some config hardcoded | 🟢 Low | Move DeepSeekConfig defaults to yml |
+
+---
+
+## 10. Multi LLM Provider Support
+
+> Detailed documentation: [LLM_PROVIDER_SYSTEM_EN.md](./LLM_PROVIDER_SYSTEM_EN.md)
+
+CodeCraft supports multiple LLM platforms. Core components:
+
+- **llm_provider table**: Stores Provider config (code/name/baseUrl/apiKey/defaultModel/requestTemplate, etc.)
+- **LLMClient Interface**: Unified abstraction layer; all Providers must implement it (buildRequestBody/streamChat/extractContent, etc.)
+- **LLMClientManager**: Core manager for Provider registration, routing (resolveClientByCode/resolveClientByProviderId), hot refresh
+- **6 Provider Implementations**: DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / AbstractLLMClient
+- **Agent Binding**: agent_config table gains provider_id/provider_code fields; each Agent can be bound to a specific Provider
+- **Frontend Dynamic Switching**: CodeAssistantView supports runtime Provider switching with automatic model list refresh
+- **Provider Routing Priority**: Frontend dynamic providerCode > Agent config providerId > First available Provider
 
 ---
 

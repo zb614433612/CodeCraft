@@ -2,6 +2,8 @@ package com.example.agentdeepseek.service.impl;
 
 import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
+import com.example.agentdeepseek.service.llm.LLMClientManager;
+import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.mapper.AgentConfigMapper;
 import com.example.agentdeepseek.model.dto.ChatRequest;
@@ -105,6 +107,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final AgentEventBus agentEventBus;
     private final SupplementStore supplementStore;
     private final AttachmentStore attachmentStore;
+    private final LLMClientManager llmClientManager;
 
     @Autowired
     private AgentForkManager agentForkManager;
@@ -165,7 +168,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                  ContextBuilder contextBuilder,
                                   ToolLoopManager toolLoopManager,
                                   SupplementStore supplementStore,
-                                  AttachmentStore attachmentStore) {
+                                  AttachmentStore attachmentStore,
+                                  LLMClientManager llmClientManager) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -188,40 +192,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.toolLoopManager = toolLoopManager;
         this.supplementStore = supplementStore;
         this.attachmentStore = attachmentStore;
+        this.llmClientManager = llmClientManager;
     }
 
     // ===== 拆分出的组件 =====
     private final MessagePersister messagePersister;
     private final ContextBuilder contextBuilder;
     private final ToolLoopManager toolLoopManager;
-
-    @jakarta.annotation.PostConstruct
-    public void initDynamicApiKey() {
-        // 为 WebClient 添加过滤器，每次请求前从数据库获取最新的 API Key
-        this.webClient = this.webClient.mutate()
-                .filter((request, next) -> {
-                    String userKey = configService.getValue("deepseek_api_key");
-                    if (userKey == null || userKey.isEmpty()) {
-                        // 未配置 Key 时，返回 SSE 提示消息引导用户去配置页面
-                        String msg = "⚠️ 未配置 DeepSeek API Key，请先在左侧菜单底部「配置」页面设置 API Key 后再使用聊天功能。";
-                        String sseData = "data: {\"content\": \"" + msg + "\"}\n\ndata: [DONE]\n\n";
-                        java.nio.charset.Charset utf8 = java.nio.charset.StandardCharsets.UTF_8;
-                        org.springframework.core.io.buffer.DataBuffer buffer =
-                                new org.springframework.core.io.buffer.DefaultDataBufferFactory()
-                                        .wrap(sseData.getBytes(utf8));
-                        return Mono.just(ClientResponse.create(HttpStatus.OK)
-                                .header("Content-Type", "text/event-stream")
-                                .body(Flux.just(buffer))
-                                .build());
-                    }
-                    // 创建新请求，设置动态 API Key（request.headers() 是只读的，不能用 set）
-                    ClientRequest newRequest = ClientRequest.from(request)
-                            .headers(headers -> headers.set("Authorization", "Bearer " + userKey))
-                            .build();
-                    return next.exchange(newRequest);
-                })
-                .build();
-    }
 
     @Override
     public void afterPropertiesSet() {
@@ -473,6 +450,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String workDir;
         Double temperature = null;
 
+        // ★ 角色性格配置：从 Agent 配置读取（每个 Agent 独立）
+        String characterProfile = null;
+
         if (agentConfigId != null) {
             // ===== 使用自定义 Agent 配置 =====
             AgentConfig agentConfig = agentConfigMapper.selectById(agentConfigId).orElse(null);
@@ -530,6 +510,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 } else {
                     workDir = ProjectRootContext.get();
                 }
+                // 8. 角色性格配置
+                characterProfile = agentConfig.getCharacterProfile();
             }
         } else {
             // ===== 默认 Agent =====
@@ -602,7 +584,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             String systemPrompt = promptContent;
 
             // 在首次会话时注入角色性格配置（追加到系统提示词末尾）
-            String characterProfile = configService.getValue("character_profile");
             if (characterProfile != null && !characterProfile.isEmpty() && !"{}".equals(characterProfile.trim())) {
                 String charSection = CharacterPromptUtil.buildCharacterSection(characterProfile);
                 if (charSection != null) {
@@ -811,33 +792,65 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // （DeepSeek 的 reasoning 对 user 消息中的指令响应更强）
         contextBuilder.injectLanguageIntoLastUserMessage(historyMessages);
 
-        // 构建API请求体
-        Map<String, Object> apiRequest = new HashMap<>();
-        String model = request.getModel();
-        apiRequest.put("model", (model != null && !model.isEmpty()) ? model : deepSeekConfig.getDefaultModel());
-        apiRequest.put("messages", historyMessages);
-        apiRequest.put("stream", stream);
-        // 添加温度参数（优先使用 Agent 配置，其次使用默认值 0.3）
-        Double reqTemperature = request.getTemperature();
-        apiRequest.put(TEMPERATURE_FIELD, reqTemperature != null ? reqTemperature : DEFAULT_TEMPERATURE);
-        // 添加思考模式参数（DeepSeek API 格式）
-        // non-thinking -> thinking.type=disabled
-        // thinking    -> thinking.type=enabled + reasoning_effort=high
-        // thinking_max -> thinking.type=enabled + reasoning_effort=max
-        String thinkingModeForApi = request.getThinkingMode();
-        if (thinkingModeForApi == null || thinkingModeForApi.isEmpty()) {
-            thinkingModeForApi = deepSeekConfig.getThinkingMode();
+        // ===== 解析 LLM Provider + Client =====
+        // 优先级：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
+        LLMClient llmClient = null;
+        String requestProviderCode = request.getProviderCode();
+        if (requestProviderCode != null && !requestProviderCode.isEmpty()) {
+            llmClient = llmClientManager.resolveClientByCode(requestProviderCode);
         }
-        if ("non-thinking".equals(thinkingModeForApi)) {
-            Map<String, Object> thinking = new HashMap<>();
-            thinking.put("type", "disabled");
-            apiRequest.put("thinking", thinking);
-        } else {
-            Map<String, Object> thinking = new HashMap<>();
-            thinking.put("type", "enabled");
-            apiRequest.put("thinking", thinking);
-            apiRequest.put("reasoning_effort", "thinking_max".equals(thinkingModeForApi) ? "max" : "high");
+        if (llmClient == null) {
+            Long providerId = (agentConfigId != null)
+                    ? agentConfigMapper.selectById(agentConfigId).map(AgentConfig::getProviderId).orElse(null)
+                    : null;
+            llmClient = llmClientManager.resolveClientByProviderId(providerId);
         }
+        if (llmClient == null) {
+            llmClient = llmClientManager.getFirstClient();
+        }
+        if (llmClient == null) {
+            log.error("没有可用的 LLM Provider，请检查 LLM 管理页面配置");
+            throw new RuntimeException("没有可用的 LLM Provider，请先在 LLM管理 页面配置一个 Provider");
+        }
+        log.debug("使用 LLM Provider: [{}], providerCode={}, agentConfigId={}",
+                llmClient.getProviderCode(), requestProviderCode, agentConfigId);
+
+        // ===== 解析最终模型/温度/思考模式（Agent配置 → 前端运行时覆盖 → Provider默认值）=====
+        String effectiveModel = request.getModel();
+        if (effectiveModel == null || effectiveModel.isEmpty()) {
+            effectiveModel = llmClientManager.getDefaultModel(llmClient.getProviderCode());
+        }
+        Double effectiveTemperature = request.getTemperature();
+        if (effectiveTemperature == null) {
+            effectiveTemperature = temperature;  // 由上方 Agent 配置或默认值决定
+        }
+        String effectiveThinkingMode = request.getThinkingMode();
+        if (effectiveThinkingMode == null || effectiveThinkingMode.isEmpty()) {
+            effectiveThinkingMode = thinkingMode;  // 由上方 Agent 配置或默认值决定
+        }
+
+        // ===== 构建工具列表（提前构建，供 buildRequestBody 使用）=====
+        JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(filteredToolNames);
+        List<Map<String, Object>> toolsList = null;
+        if (toolDefinitions != null && toolDefinitions.size() > 0) {
+            toolsList = objectMapper.convertValue(
+                toolDefinitions,
+                objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class)
+            );
+        }
+
+        // ===== 使用 LLMClient 构建标准请求体（模型/消息/温度/思考/工具）=====
+        Map<String, Object> apiRequest = new HashMap<>(llmClient.buildRequestBody(
+                historyMessages,
+                effectiveModel,
+                effectiveTemperature,
+                effectiveThinkingMode,
+                stream,
+                toolsList
+        ));
+
+        // ===== 存储 LLMClient 引用（后续流式/阻塞调用时使用）=====
+        apiRequest.put("_llmClient", llmClient);
 
         // 保存项目根目录到 API 请求中（不在发送给 API 的字段中，仅内部使用）
         String projectRoot = request.getProjectRoot();
@@ -884,26 +897,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
         apiRequest.put("_contextMode", contextMode);
 
-        // 添加工具定义（如果存在），根据提示词中的工具组过滤
-        JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(filteredToolNames);
-        if (toolDefinitions != null && toolDefinitions.size() > 0) {
-            // 将JsonNode转换为List<Map>以便放入请求体
-            List<Map<String, Object>> toolsList = objectMapper.convertValue(
-                toolDefinitions,
-                objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class)
-            );
-            apiRequest.put("tools", toolsList);
-            apiRequest.put("tool_choice", "auto");
-            log.debug("添加工具定义到API请求，工具数量: {}", toolDefinitions.size());
-        }
-
         // 将技能注入内容存入隐藏字段，供工具循环路径复用
         if (injectedSkillsSection != null) {
             apiRequest.put("_skillsSection", injectedSkillsSection);
         }
 
-        log.debug("调用DeepSeek API{}接口，会话ID: {}, 消息长度: {}, 用户ID: {}",
-                stream ? "流式" : "非流式", conversationId, userMessage.length(), userId);
+        log.debug("调用 LLM API{}接口，Provider=[{}], 会话ID: {}, 模型: {}, 消息长度: {}, 用户ID: {}",
+                stream ? "流式" : "非流式", llmClient.getProviderCode(),
+                conversationId, effectiveModel, userMessage.length(), userId);
 
         return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId, agentType, userId, skillMatchEvent);
     }
@@ -944,11 +945,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // 收集响应内容，用于保存助手消息
             StringBuilder responseBuilder = new StringBuilder();
 
+            // ★ 提前提取 providerCode（lambda 闭包中可直接引用 final/effectively-final 变量）
+            LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
+            final String providerCode = ctxClient != null ? ctxClient.getProviderCode() : null;
+
             // 创建主Flux处理API响应（移除内部字段后发送）
             Map<String, Object> requestBody = new HashMap<>(apiRequest);
             requestBody.keySet().removeIf(k -> k.startsWith("_"));
-            return Flux.concat(skillEventFlux, sessionEvent, webClient.post()
-                    .uri("/v1/chat/completions")
+            // 使用当前 Provider 的 WebClient（替换原来的 this.webClient）
+            WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
+            return Flux.concat(skillEventFlux, sessionEvent, activeWebClient.post()
+                    .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(requestBody)
                     .accept(MediaType.TEXT_EVENT_STREAM) // 接受text/event-stream
@@ -991,7 +998,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);
                         // 异步预压缩：提前压缩最早的历史，降低下次请求延迟
-                        compactionService.asyncPrecompress(conversationId);
+                        compactionService.asyncPrecompress(conversationId, providerCode);
                     }));
         }
     }
@@ -1008,6 +1015,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * SSE 断开后工具循环继续执行，不销毁
      */
     private Flux<String> startBackgroundTask(Long conversationId, Long storageConversationId, Map<String, Object> apiRequest) {
+        // 从 apiRequest 提取当前会话的 providerCode（供子Agent/评委/压缩等辅助调用跟随）
+        LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
+        final String providerCode = ctxClient != null ? ctxClient.getProviderCode() : null;
         // 创建任务记录
         AgentTask task = new AgentTask(conversationId, MAX_TOOL_CALL_ITERATIONS);
         try {
@@ -1063,15 +1073,28 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     sink.tryEmitNext("\n═══════════════════════════════════════\n");
                                     sink.tryEmitNext("📋 主Agent已完成，正在等待 " + pendingCount + " 个子Agent结果...\n");
                                     List<SubAgentResult> subResults = agentForkManager.collectPendingAgents(conversationId, 300);
+                                    int completedCount = 0;
+                                    int timeoutCount = 0;
                                     for (SubAgentResult subResult : subResults) {
                                         sink.tryEmitNext("\n─────────────────────────────────────\n");
                                         sink.tryEmitNext(subResult.toResultString());
+                                        if ("TIMEOUT".equals(subResult.getStatus())) {
+                                            timeoutCount++;
+                                        } else {
+                                            completedCount++;
+                                        }
                                     }
                                     sink.tryEmitNext("\n═══════════════════════════════════════\n");
-                                    log.info("子Agent结果收集完成，共 {} 个", subResults.size());
+                                    if (timeoutCount > 0) {
+                                        sink.tryEmitNext("⚠️ 注意: " + timeoutCount + " 个子Agent超时未完成，" + completedCount + " 个正常完成\n");
+                                        log.warn("子Agent结果收集完成，共 {} 个（{} 个超时）", subResults.size(), timeoutCount);
+                                    } else {
+                                        log.info("子Agent结果收集完成，共 {} 个", subResults.size());
+                                    }
                                 }
                             } catch (Exception e) {
                                 log.warn("自动收集子Agent结果异常: {}", e.getMessage());
+                                sink.tryEmitNext("\n⚠️ 自动收集子Agent结果异常: " + e.getMessage() + "\n");
                             }
 
                             // emit [DONE] so frontend gets complete event with sessionId
@@ -1084,7 +1107,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 } catch (Exception ignored) {}
                             }
                             // 后台异步预压缩：提前压缩最早的历史，降低下次请求延迟
-                            compactionService.asyncPrecompress(conversationId);
+                            compactionService.asyncPrecompress(conversationId, providerCode);
                             agentEventBus.unregister(conversationId);
                             taskSubscriptions.remove(conversationId);
                         }
@@ -1249,10 +1272,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 初始化评委扩展计数器
         judgeGrantedIterations.put(conversationId, 0);
 
+        // 防止内存泄漏：如果 Map 大小超过 1000，清理可能残留的旧条目
+        if (judgeGrantedIterations.size() > 1000) {
+            log.warn("judgeGrantedIterations Map 大小超过 1000，清理旧条目");
+            judgeGrantedIterations.clear();
+            judgeGrantedIterations.put(conversationId, 0);
+        }
+
         // 使用递归函数处理工具调用循环
         // 工具循环结束后自动检查并收集待完成的子Agent结果，确保主Agent对子Agent负责到底
         return handleToolCallIteration(conversationId, storageConversationId, initialApiRequest, messages, 0, MAX_TOOL_CALL_ITERATIONS)
                 .concatWith(Flux.defer(() -> {
+                    // 工具循环正常结束，清除评委扩展计数器，避免影响下次对话
+                    judgeGrantedIterations.remove(conversationId);
+                    log.debug("工具循环结束，已清除评委扩展计数器: conversationId={}", conversationId);
+
                     // 工具循环结束后，检查是否有待收集的子Agent
                     if (agentForkManager != null && agentForkManager.getPendingAgentCount(conversationId) > 0) {
                         int pendingCount = agentForkManager.getPendingAgentCount(conversationId);
@@ -1309,8 +1343,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return 流式响应Flux
      */
     private Flux<String> handleToolCallIteration(Long conversationId, Long storageConversationId, Map<String, Object> initialApiRequest,
-                                                 List<Map<String, Object>> messages, int iteration, int maxIterations) {
-        // ★ 关键：整个方法体包裹在 Flux.defer 中，将补充队列检查从「方法调用时同步执行」
+                                                  List<Map<String, Object>> messages, int iteration, int maxIterations) {
+        // ★ 关键：整个方法体包裹在 Flux.defer 中
         // 改为「Flux 被订阅时延迟执行」。原因：
         //   - 方法在 flatMap 内部被调用时，Flux 尚未被订阅（还在等待 toolCallEvents emit 完成）
         //   - 补充消息可能在 toolCallEvents emit 期间入队
@@ -1451,8 +1485,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             return Flux.just(createReasoningSSEEvent("评委提示词加载失败，任务自动终止。"));
         }
 
-        // 3. 调用评委 API（非流式，超时 180s，禁用 thinking 模式以获得更快的确定性响应）
-        return Mono.fromCallable(() -> deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180))
+        // 3. 调用评委 API（跟随主Agent的Provider选择）
+        LLMClient judgeClient = (LLMClient) initialApiRequest.get("_llmClient");
+        String judgeProviderCode = judgeClient != null ? judgeClient.getProviderCode() : null;
+        return Mono.fromCallable(() -> deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180, judgeProviderCode))
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMapMany(response -> {
                     // 4. 解析 JSON 响应
@@ -1526,12 +1562,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
 
             // 合并字段：id、type、function
+            // 注意：NullNode 不是 MissingNode，必须显式排除，否则 JSON null 值会被写入对象
             JsonNode id = toolCallDelta.path("id");
-            if (!id.isMissingNode()) {
+            if (!id.isMissingNode() && !id.isNull()) {
                 existing.set("id", id);
             }
             JsonNode type = toolCallDelta.path("type");
-            if (!type.isMissingNode()) {
+            if (!type.isMissingNode() && !type.isNull()) {
                 existing.set("type", type);
             }
             JsonNode functionDelta = toolCallDelta.path("function");
@@ -1545,7 +1582,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     functionNode = (ObjectNode) existingFunction;
                 }
                 JsonNode name = functionDelta.path("name");
-                if (!name.isMissingNode()) {
+                if (!name.isMissingNode() && !name.isNull()) {
                     functionNode.set("name", name);
                 }
                 JsonNode arguments = functionDelta.path("arguments");
@@ -1661,8 +1698,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
                 conversationId, iteration, requestBodySize);
 
-        return webClient.post()
-                .uri("/v1/chat/completions")
+        // 使用当前 Provider 的 WebClient（从 _llmClient 提取）
+        LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
+        WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
+        return activeWebClient.post()
+                .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .accept(MediaType.TEXT_EVENT_STREAM)
@@ -1977,6 +2017,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             if (currentAgentConfigId != null) {
                                                                 ToolContext.setAgentConfigId(currentAgentConfigId);
                                                             }
+                                                            ToolContext.setProviderCode(
+                                                                    ((LLMClient) apiRequest.get("_llmClient")) != null
+                                                                            ? ((LLMClient) apiRequest.get("_llmClient")).getProviderCode()
+                                                                            : null);
                                                             PermissionContext.set(pendingQuestionStore, objectMapper);
                                                             PermissionContext.setApproved();
 
@@ -2063,6 +2107,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         if (currentAgentConfigId != null) {
                                             ToolContext.setAgentConfigId(currentAgentConfigId);
                                         }
+                                        // ★ 让 fork/评委跟随主Agent的Provider选择
+                                        LLMClient tempCli = (LLMClient) apiRequest.get("_llmClient");
+                                        ToolContext.setProviderCode(tempCli != null ? tempCli.getProviderCode() : null);
                                         PermissionContext.set(pendingQuestionStore, objectMapper);
                                         try {
                                             return toolExecutor.executeToolCalls(completeToolCalls);
@@ -2140,23 +2187,20 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 }
                             }
 
-                            // 提取文本内容并收集
-                            JsonNode contentNode = delta.path("content");
-                            if (!contentNode.isMissingNode() && !contentNode.isNull()) {
-                                String contentValue = contentNode.asText("");
-                                if (!contentValue.isEmpty()) {
-                                    contentCollector.append(contentValue);
-                                }
+                            // 提取文本内容并收集（使用 Provider 适配层解析，兼容 Anthropic/Ollama 等格式）
+                            String extractedContent = ctxClient.extractContentFromStreamChunk(data);
+                            if (extractedContent != null && !extractedContent.isEmpty()) {
+                                contentCollector.append(extractedContent);
                             }
-                            // 检查 reasoning_content（始终实时流式输出，不过审查）
-                            JsonNode reasoningNode = delta.path("reasoning_content");
-                            if (!reasoningNode.isMissingNode() && !reasoningNode.isNull() && !reasoningNode.asText("").isEmpty()) {
-                                log.debug("reasoning_content 实时转发: len={}", reasoningNode.asText("").length());
+                            // 检查 reasoning_content（使用 Provider 适配层解析，始终实时流式输出，不过审查）
+                            String extractedReasoning = ctxClient.extractReasoningFromStreamChunk(data);
+                            if (extractedReasoning != null && !extractedReasoning.isEmpty()) {
+                                log.debug("reasoning_content 实时转发: len={}", extractedReasoning.length());
                                 return Flux.just(data);
                             }
                         }
                     } catch (Exception e) {
-                        log.debug("解析SSE事件失败，可能是不完整的JSON: {}", e.getMessage());
+                        log.warn("解析SSE事件失败，可能是不完整的JSON或API返回格式变更: {}, data={}", e.getMessage(), data);
                         // 忽略解析错误，继续转发原始数据
                     }
 
@@ -2176,7 +2220,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // 检查是否有未完成的工具调用累积
                     if (accumulatingToolCalls.get()) {
                         log.warn("流式调用在工具调用参数累积过程中结束，参数可能不完整。累积数据: {}", accumulatedToolCalls);
-                        // 可以选择尝试执行不完整的工具调用，但这里选择丢弃并记录警告
+                        // 尝试将已累积的部分数据作为最后一条消息保存，避免内容丢失
+                        String partialContent = contentCollector.toString();
+                        String messageContent;
+                        if (!partialContent.isEmpty()) {
+                            messageContent = partialContent + "\n\n⚠️ [注意：工具调用参数累积过程中流中断，部分工具调用可能未执行]";
+                        } else {
+                            // 即使没有文本内容，也要保存提示信息，避免用户看不到任何反馈
+                            messageContent = "⚠️ [注意：AI 正在准备工具调用时连接中断，工具调用未执行。请重新发送消息重试]";
+                        }
+                        messagePersister.saveAssistantMessage(storageConversationId, messageContent, null);
+                        log.info("已保存中断的工具调用累积内容: len={}", partialContent.length());
                     }
 
                     // 只有在没有检测到工具调用（shouldContinue为true）且流正常完成时才保存助手消息

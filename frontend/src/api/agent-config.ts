@@ -17,6 +17,9 @@ export interface AgentConfig {
   enabled?: number
   isDefault?: number
   isBuiltin?: number
+  providerId?: number
+  providerCode?: string
+  characterProfile?: string
   userId?: number
   createdAt?: string
   updatedAt?: string

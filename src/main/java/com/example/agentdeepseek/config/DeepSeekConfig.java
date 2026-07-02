@@ -3,24 +3,17 @@ package com.example.agentdeepseek.config;
 import io.netty.channel.ChannelOption;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.event.EventListener;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,12 +28,8 @@ import java.util.Map;
 @Data
 public class DeepSeekConfig {
 
-    /** 内部持有 HttpClient 引用，供预热连接使用 */
+    /** 内部持有 HttpClient 引用，供 WebClient bean 使用 */
     private HttpClient httpClient;
-
-    /** 数据库操作，用于从 sys_config 表读取用户配置的 API Key */
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
 
     /**
      * DeepSeek API基础URL
@@ -166,55 +155,5 @@ public class DeepSeekConfig {
                 .exchangeStrategies(exchangeStrategies)
                 .clientConnector(new ReactorClientHttpConnector(this.httpClient))
                 .build();
-    }
-
-    /**
-     * 服务启动完成后，异步预热到 DeepSeek API 的 HTTPS 连接。
-     * DNS + TCP + TLS 握手在后台完成，消除首次用户请求的 10-20 秒延迟。
-     * 
-     * 优先从数据库 sys_config 表读取用户配置的 API Key，
-     * 数据库没有时回退到配置文件（application.yml / application-local.yml）。
-     */
-    @EventListener(ApplicationReadyEvent.class)
-    public void warmupDeepSeekConnection() {
-        // 优先从数据库读取 API Key（与 DeepSeekServiceImpl 中 initDynamicApiKey() 逻辑一致）
-        String key = null;
-        try {
-            List<String> rows = jdbcTemplate.queryForList(
-                    "SELECT config_value FROM sys_config WHERE config_key = 'deepseek_api_key'",
-                    String.class);
-            if (rows != null && !rows.isEmpty()) {
-                key = rows.get(0);
-            }
-        } catch (Exception e) {
-            log.debug("从数据库读取 API Key 失败（可能表尚未初始化），回退到配置文件: {}", e.getMessage());
-        }
-
-        // 统一从数据库获取，不再回退到配置文件（与 AgentForkManager 逻辑一致）
-        if (key == null || key.isEmpty() || "__MUST_CONFIGURE_API_KEY__".equals(key)) {
-            log.warn("API Key 未配置，跳过预热（首次请求将较慢）。请在前端「配置」页面设置 API Key。");
-            return;
-        }
-
-        final String finalKey = key;
-        log.info("开始预热 DeepSeek API 连接 (HTTP/2)...");
-        Mono.fromRunnable(() -> {
-            try {
-                // HTTP/2 协议下，即使返回 401 连接也不会被关闭，后续用户请求直接复用
-                this.httpClient
-                        .headers(h -> h.set("Authorization", "Bearer " + finalKey))
-                        .get()
-                        .uri("https://api.deepseek.com/v1/models")
-                        .responseSingle((response, bytes) -> {
-                            log.info("DeepSeek API 连接预热完成, status={}", response.status());
-                            return Mono.just("ok");
-                        })
-                        .block(Duration.ofSeconds(15));
-            } catch (Exception e) {
-                log.warn("DeepSeek API 连接预热失败: {}（首次用户请求将稍慢）", e.getMessage());
-            }
-        })
-        .subscribeOn(Schedulers.boundedElastic())
-        .subscribe();
     }
 }

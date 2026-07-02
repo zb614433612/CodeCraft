@@ -5,6 +5,52 @@
 
 ---
 
+## [1.1.3] - 2026-07-02
+
+### 🌐 多 LLM Provider 支持系统
+
+- **多 Provider 支持**：支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo 等主流 LLM 平台
+- **动态切换**：前端运行时可随时切换 Provider，无需重启服务
+- **Agent 绑定**：每个 Agent 可以绑定特定的 Provider 和模型
+- **统一接口**：所有 Provider 通过统一的 `LLMClient` 接口调用，屏蔽平台差异
+- **热刷新**：Provider 配置变更后自动刷新客户端缓存
+
+### 🏗️ 核心架构变更
+
+- **新增 LLMClient 抽象层**：统一接口适配 DeepSeek/OpenAI/Anthropic/Ollama/MiMo
+- **新增 LLMClientManager**：核心管理器，负责 Provider 注册、路由和缓存
+- **新增 6 个 Provider 实现**：DeepSeekClient、OpenAIClient、AnthropicClient、OllamaClient、MiMoClient、AbstractLLMClient
+- **新增 LLMProviderController**：REST API 控制器，支持 Provider CRUD 操作
+- **新增 llm_provider 数据库表**：存储 Provider 配置信息
+
+### 🎨 前端 UI 增强
+
+- **新增 Provider 切换 UI**：CodeAssistantView 支持运行时切换 Provider
+- **动态模型列表**：根据当前 Provider 动态刷新模型列表
+- **无 Provider 引导界面**：当没有配置任何 Provider 时，显示引导界面
+- **Agent 配置增强**：AgentConfigView 新增 Provider 绑定配置
+
+### 🔧 修复与优化
+
+- **工具调用参数累积中断时保存部分内容**
+- **评委扩展计数器内存泄漏防护**
+- **子 Agent 超时统计**
+- **NullNode 处理修复**
+
+### 🏷️ 版本号
+
+- 后端：`1.1.2` → `1.1.3`
+- 前端：`1.1.2` → `1.1.3`
+- Electron：`1.1.2` → `1.1.3`
+- 打包产物：`code-craft-1.1.2.jar` → `code-craft-1.1.3.jar`
+
+### 📦 新增依赖
+
+- 后端：`LLMClientManager`、`LLMClient` 接口及 6 个实现类
+- 前端：`llm-provider.ts` API 接口、`ProviderConfigView.vue` 页面
+
+---
+
 ## [1.1.2] - 2026-07-01
 
 ### 🌡️ Agent 采样温度（Temperature）全链路支持

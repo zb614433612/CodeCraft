@@ -15,6 +15,7 @@ export interface ChatRequest {
   thinkingMode?: string
   turnId?: string
   agentConfigId?: number
+  providerCode?: string
   contextMode?: string
   attachmentIds?: string[]
 }
@@ -28,6 +29,7 @@ export interface StreamChatOptions {
   thinkingMode?: string
   turnId?: string
   agentConfigId?: number
+  providerCode?: string
   contextMode?: string
   attachmentIds?: string[]
 }
@@ -105,6 +107,9 @@ export async function* streamChat(
   }
   if (options?.agentConfigId !== undefined) {
     requestBody.agentConfigId = options.agentConfigId
+  }
+  if (options?.providerCode) {
+    requestBody.providerCode = options.providerCode
   }
   if (options?.contextMode) {
     requestBody.contextMode = options.contextMode

@@ -25,7 +25,7 @@
           >{{ n }}</div>
         </div>
       </div>
-      <div class="fe-editor-wrapper">
+      <div class="fe-editor-wrapper" ref="editorWrapperRef" @scroll="handleEditorWrapperScroll">
         <pre class="fe-highlight-layer" ref="highlightRef"><code class="hljs" v-html="highlightedCode"></code></pre>
         <textarea
           ref="textareaRef"
@@ -73,6 +73,7 @@ const emit = defineEmits<{
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const highlightRef = ref<HTMLElement | null>(null)
 const gutterRef = ref<HTMLElement | null>(null)
+const editorWrapperRef = ref<HTMLElement | null>(null)
 const isSaving = ref(false)
 const saveMessage = ref('')
 const saveMsgType = ref<'success' | 'error'>('success')
@@ -213,11 +214,12 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
 }
 
-// 滚动同步：textarea → highlight + gutter
+// 滚动同步：textarea → highlight + gutter + editorWrapper
 const syncScroll = () => {
   const textarea = textareaRef.value
   const highlight = highlightRef.value
   const gutter = gutterRef.value
+  const editorWrapper = editorWrapperRef.value
   if (!textarea) return
   if (highlight) {
     highlight.scrollTop = textarea.scrollTop
@@ -225,6 +227,28 @@ const syncScroll = () => {
   }
   if (gutter) {
     gutter.scrollTop = textarea.scrollTop
+  }
+  if (editorWrapper) {
+    editorWrapper.scrollTop = textarea.scrollTop
+    editorWrapper.scrollLeft = textarea.scrollLeft
+  }
+}
+
+// 外层容器滚动时同步到 textarea
+const handleEditorWrapperScroll = () => {
+  const textarea = textareaRef.value
+  const editorWrapper = editorWrapperRef.value
+  const highlight = highlightRef.value
+  const gutter = gutterRef.value
+  if (!textarea || !editorWrapper) return
+  textarea.scrollTop = editorWrapper.scrollTop
+  textarea.scrollLeft = editorWrapper.scrollLeft
+  if (highlight) {
+    highlight.scrollTop = editorWrapper.scrollTop
+    highlight.scrollLeft = editorWrapper.scrollLeft
+  }
+  if (gutter) {
+    gutter.scrollTop = editorWrapper.scrollTop
   }
 }
 
@@ -394,14 +418,14 @@ const handleSave = async () => {
   position: relative;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 .fe-highlight-layer {
   position: absolute;
   top: 0;
   left: 0;
-  right: 0;
-  bottom: 0;
+  min-width: 100%;
+  min-height: 100%;
   margin: 0;
   padding: 8px 12px;
   font-size: 13px;
@@ -443,8 +467,8 @@ const handleSave = async () => {
   z-index: 1;
   top: 0;
   left: 0;
-  right: 0;
-  bottom: 0;
+  width: 100%;
+  height: 100%;
   border: none;
   outline: none;
   resize: none;
@@ -467,6 +491,48 @@ const handleSave = async () => {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeSpeed;
+}
+
+/* 隐藏 textarea 的滚动条，只使用外层容器的滚动条 */
+.fe-textarea::-webkit-scrollbar {
+  display: none;
+}
+.fe-textarea {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* 外层容器滚动条样式 - 亮色模式 */
+.fe-editor-wrapper::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.fe-editor-wrapper::-webkit-scrollbar-track {
+  background: #f5f5f5;
+}
+.fe-editor-wrapper::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 5px;
+}
+.fe-editor-wrapper::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+.fe-editor-wrapper::-webkit-scrollbar-corner {
+  background: #f5f5f5;
+}
+
+/* 外层容器滚动条样式 - 暗色模式 */
+[data-theme="dark"] .fe-editor-wrapper::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+[data-theme="dark"] .fe-editor-wrapper::-webkit-scrollbar-thumb {
+  background: #424242;
+}
+[data-theme="dark"] .fe-editor-wrapper::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+[data-theme="dark"] .fe-editor-wrapper::-webkit-scrollbar-corner {
+  background: #1e1e1e;
 }
 /* ::selection 移入下方非 scoped 块以避免 scoped 属性选择器导致伪元素失效 */
 

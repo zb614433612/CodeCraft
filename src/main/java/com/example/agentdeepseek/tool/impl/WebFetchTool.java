@@ -55,7 +55,21 @@ public class WebFetchTool implements Tool {
             log.info("网页读取工具已配置代理: {}:{}", config.getProxy().getHost(), config.getProxy().getPort());
         }
 
+        // 使用 InterceptingClientHttpRequestFactory 来添加默认请求头
+        // 这样每次请求都会自动带上 User-Agent 等头信息
         this.restTemplate = new RestTemplate(factory);
+        this.restTemplate.getInterceptors().add((request, body, execution) -> {
+            if (!request.getHeaders().containsKey("User-Agent")) {
+                request.getHeaders().set("User-Agent", config.getFetchUserAgent());
+            }
+            if (!request.getHeaders().containsKey("Accept")) {
+                request.getHeaders().set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            }
+            if (!request.getHeaders().containsKey("Accept-Language")) {
+                request.getHeaders().set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7");
+            }
+            return execution.execute(request, body);
+        });
     }
 
     @Override
@@ -130,8 +144,14 @@ public class WebFetchTool implements Tool {
 
             // 其次从 HTML meta 标签检测
             if (charset == null) {
-                charset = Jsoup.parse(new String(body, StandardCharsets.ISO_8859_1))
-                        .charset().name();
+                try {
+                    java.nio.charset.Charset detectedCharset = Jsoup.parse(new String(body, StandardCharsets.ISO_8859_1)).charset();
+                    if (detectedCharset != null) {
+                        charset = detectedCharset.name();
+                    }
+                } catch (Exception e) {
+                    log.debug("从HTML meta标签检测charset失败", e);
+                }
             }
 
             String html = new String(body, charset != null ? charset : StandardCharsets.UTF_8.name());

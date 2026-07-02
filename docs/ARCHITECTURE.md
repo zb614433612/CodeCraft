@@ -1,14 +1,14 @@
 > 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.1.2 | 更新：2026-06-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.3 | 更新：2026-07-02 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
 
 ## 一、一句话定义
 
-**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 19 种工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作。
+**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 19 种工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作，支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等）动态切换。
 
 ---
 
@@ -45,12 +45,13 @@
 │ │ │   ├─ CompactionService (上下文压缩)        │                      │ │
 │ │ │   ├─ ContextBuilder (消息组装/Token估算)   │                      │ │
 │ │ │   ├─ AgentEventBus (SSE事件推送)           │                      │ │
-│ │ │   └─ MessagePersister (消息持久化)         │                      │ │
+│ │ │   ├─ MessagePersister (消息持久化)         │                      │ │
+│ │ │   └─ LLMClientManager (多Provider管理)     │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
 │ └───────────────────────┼─────────────────────────────────────────────┘ │
 └─────────────────────────┼──────────────────────────────────────────────┘
                           │
-                    DeepSeek API
+                    LLM Provider API (DeepSeek/OpenAI/Anthropic/Ollama/MiMo)
 ```
 
 ---
@@ -133,6 +134,7 @@
 | **数据库** | H2 (嵌入式) | 桌面应用需零配置部署，无需用户安装 MySQL |
 | **缓存** | Caffeine | 替代 Redis，同样为了零依赖开箱即用 |
 | **AI 通信** | WebFlux + SSE | 支持流式输出，用户可实时看到 AI 打字效果 |
+| **多LLM支持** | LLMClient 抽象层 | 统一接口适配 DeepSeek/OpenAI/Anthropic/Ollama/MiMo，运行时动态切换 |
 | **P2P 网络** | Netty + JSON | 高性能异步 IO，JSON 调试友好 |
 | **P2P 信令** | 二维码 + ZXing | 免手动输入地址，扫码即可配对设备 |
 | **P2P 安全** | TLS + BouncyCastle | 自签名证书 + AES 加密，端到端安全通道 |
@@ -374,6 +376,7 @@ src/main/java/com/example/agentdeepseek/
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |
 | **技能系统** | BM25 匹配、贝叶斯置信度 | SkillMatcher + SkillIndexer | ~400 |
+| **多LLM Provider** | Provider CRUD、客户端路由、热刷新 | LLMClientManager + LLMClient + 6个实现 | ~1500 |
 
 ---
 
@@ -401,6 +404,22 @@ src/main/java/com/example/agentdeepseek/
 | 前端缺少测试 | 🟡 中 | 至少为核心组件补充 Vitest 单元测试 |
 | snapshots/ 目录膨胀 | 🟡 中 | 增加定期清理机制或切换到 Git-based 快照 |
 | 部分配置硬编码 | 🟢 低 | DeepSeekConfig 中有些默认值可移到 yml |
+
+---
+
+## 十、多 LLM Provider 支持
+
+> 详细文档请参阅 [LLM_PROVIDER_SYSTEM.md](./LLM_PROVIDER_SYSTEM.md)
+
+CodeCraft 支持多种 LLM 平台，核心组件：
+
+- **llm_provider 表**：存储 Provider 配置（code/name/baseUrl/apiKey/defaultModel/requestTemplate 等）
+- **LLMClient 接口**：统一抽象层，所有 Provider 必须实现（buildRequestBody/streamChat/extractContent 等）
+- **LLMClientManager**：核心管理器，负责 Provider 注册、路由（resolveClientByCode/resolveClientByProviderId）、热刷新
+- **6 个 Provider 实现**：DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / AbstractLLMClient
+- **Agent 绑定**：agent_config 表新增 provider_id/provider_code 字段，每个 Agent 可绑定特定 Provider
+- **前端动态切换**：CodeAssistantView 支持运行时切换 Provider，自动刷新模型列表
+- **Provider 路由优先级**：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
 
 ---
 

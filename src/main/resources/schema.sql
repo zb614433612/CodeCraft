@@ -175,7 +175,7 @@ INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_t
 (5, '用户管理', '/user-management', 'UserOutlined', NULL, 5, 'MANAGE'),
 (6, '菜单权限管理', '/menu-permission', 'SafetyOutlined', NULL, 6, 'MANAGE'),
 (7, '个人信息', '/profile', 'FormOutlined', NULL, 7, 'MANAGE'),
-(8, '配置', '/config', 'SettingOutlined', NULL, 8, 'SETTING');
+(8, '配置', '/config', 'SettingOutlined', NULL, 2, 'SETTING');
 
 -- 管理员分配所有菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
@@ -225,11 +225,11 @@ CREATE TABLE IF NOT EXISTS schedule_task (
 
 -- 新增 SETTING 菜单：定时任务
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
-(9, '定时任务', '/schedule-tasks', 'ClockCircleOutlined', NULL, 9, 'SETTING');
+(9, '定时任务', '/schedule-tasks', 'ClockCircleOutlined', NULL, 6, 'SETTING');
 
 -- 新增 SETTING 菜单：运行日志
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
-(10, '运行日志', '/logs', 'FileTextOutlined', NULL, 10, 'SETTING');
+(10, '运行日志', '/logs', 'FileTextOutlined', NULL, 7, 'SETTING');
 
 -- 管理员分配新菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
@@ -254,6 +254,9 @@ CREATE TABLE IF NOT EXISTS agent_config (
   enabled TINYINT DEFAULT 1 COMMENT '是否启用',
   is_default TINYINT DEFAULT 0 COMMENT '是否为默认Agent',
   is_builtin TINYINT DEFAULT 0 COMMENT '是否为内置Agent（不允许修改删除）',
+  provider_id BIGINT DEFAULT NULL COMMENT 'LLM Provider ID',
+  provider_code VARCHAR(30) DEFAULT NULL COMMENT 'LLM Provider Code',
+  character_profile TEXT DEFAULT NULL COMMENT '角色设定',
   user_id BIGINT COMMENT '创建者用户ID（null=系统级）',
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
@@ -262,31 +265,57 @@ CREATE TABLE IF NOT EXISTS agent_config (
   INDEX idx_sort (sort_order)
 ) DEFAULT CHARSET=utf8mb4 COMMENT='Agent配置表';
 
+-- ============================================================
+-- LLM Provider 配置表（多模型平台适配）
+-- ============================================================
+-- ★ Provider 由用户在 LLM管理 页面手动创建，不再初始化默认数据
+CREATE TABLE IF NOT EXISTS llm_provider (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  code VARCHAR(30) NOT NULL UNIQUE COMMENT 'Provider编码：deepseek/openai/anthropic/ollama/custom',
+  name VARCHAR(100) NOT NULL COMMENT '显示名称，如 DeepSeek / OpenAI / Claude',
+  base_url VARCHAR(300) NOT NULL COMMENT 'API Base URL，如 https://api.deepseek.com',
+  api_key VARCHAR(200) COMMENT 'API Key（可加密存储，为空时从 sys_config 兜底读取）',
+  default_model VARCHAR(100) COMMENT '该 Provider 的默认模型名',
+  model_list TEXT COMMENT '可用模型列表 JSON 数组，如 ["deepseek-v4-pro","deepseek-v4-flash"]',
+  request_template VARCHAR(30) DEFAULT 'deepseek' COMMENT '请求模板类型：deepseek / openai / anthropic / ollama / custom',
+  is_default TINYINT DEFAULT 0 COMMENT '是否为默认 Provider',
+  enabled TINYINT DEFAULT 1 COMMENT '是否启用',
+  sort_order INT DEFAULT 0 COMMENT '排序号',
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  INDEX idx_provider_code (code),
+  INDEX idx_provider_enabled (enabled)
+) DEFAULT CHARSET=utf8mb4 COMMENT='LLM Provider 配置表';
+
+-- agent_config 表新增 provider_id 字段（用于绑定 Agent → LLM Provider）
+-- H2 不支持 IF NOT EXISTS 的 ALTER TABLE ADD COLUMN，使用 MySQL/MariaDB 语法
+-- ALTER TABLE agent_config ADD COLUMN IF NOT EXISTS provider_id BIGINT DEFAULT 1 COMMENT 'LLM Provider ID，关联 llm_provider.id' AFTER is_builtin;
+
 -- 初始化默认编码助手 Agent（内置，不可修改删除）
-INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, created_at, updated_at)
-VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', 0.3, NULL, 1, 1, 1, 1, NOW(), NOW());
+INSERT IGNORE INTO agent_config (id, name, description, avatar, system_prompt, tool_names, model_name, thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, provider_id, provider_code, character_profile, created_at, updated_at)
+VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', NULL, NULL, 'deepseek-v4-flash', 'non-thinking', 'manual', 0.3, NULL, 1, 1, 1, 1, 1, NULL, NULL, NOW(), NOW());
 
--- 新增 SETTING 菜单：Agent 管理
+-- 新增 SETTING 菜单：智能体
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
-(11, 'Agent管理', '/agent-config', 'RobotOutlined', NULL, 11, 'SETTING');
+(11, '智能体', '/agent-config', 'RobotOutlined', NULL, 5, 'SETTING');
 
--- 管理员分配 Agent 管理菜单
+-- 管理员分配智能体菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 11;
 
--- 新增 SETTING 菜单：技能管理
+-- 新增 SETTING 菜单：技能
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
-(12, '技能管理', '/skill-manage', 'ToolOutlined', NULL, 12, 'SETTING');
+(12, '技能', '/skill-manage', 'ToolOutlined', NULL, 4, 'SETTING');
 
--- 管理员分配技能管理菜单
+-- 管理员分配技能菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 12;
 
--- 新增 SETTING 菜单：P2P连接
+-- 新增 SETTING 菜单：协作
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
-(13, 'P2P连接', '/p2p', 'LinkOutlined', NULL, 13, 'SETTING');
+(13, '协作', '/p2p', 'LinkOutlined', NULL, 3, 'SETTING');
 
--- 管理员分配 P2P连接 菜单
+-- 管理员分配协作菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 13;
 

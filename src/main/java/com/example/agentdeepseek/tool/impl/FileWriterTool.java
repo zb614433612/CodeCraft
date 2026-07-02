@@ -41,7 +41,11 @@ public class FileWriterTool implements Tool {
     private static final long MAX_CONTENT_SIZE = 50 * 1024 * 1024;
 
     // ============ edit 常量 ============
-    private static final ConcurrentHashMap<Path, ReentrantLock> FILE_LOCKS = new ConcurrentHashMap<>();
+    private static final com.github.benmanes.caffeine.cache.Cache<Path, ReentrantLock> FILE_LOCKS =
+            com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
+                    .maximumSize(1000)
+                    .expireAfterAccess(java.time.Duration.ofMinutes(30))
+                    .build();
     private static final int MAX_FUZZY_RESULTS = 5;
     private static final int MAX_DIFF_LINES = 50;
 
@@ -305,7 +309,7 @@ public class FileWriterTool implements Tool {
         }
 
         Path normalizedPath = filePath.normalize();
-        ReentrantLock fileLock = FILE_LOCKS.computeIfAbsent(normalizedPath, k -> new ReentrantLock());
+        ReentrantLock fileLock = FILE_LOCKS.get(normalizedPath, k -> new ReentrantLock());
         fileLock.lock();
         try {
             return executeReplace(filePath, oldTextStr, newTextStr);

@@ -303,7 +303,8 @@ public class ContextBuilder {
                 for (JsonNode tc : tcNode) {
                     String id = tc.path("id").asText();
                     String name = tc.path("function").path("name").asText();
-                    if (!id.isEmpty() && !name.isEmpty()) {
+                    // 过滤 NullNode 返回的 "null" 字符串
+                    if (!id.isEmpty() && !"null".equals(id) && !name.isEmpty() && !"null".equals(name)) {
                         tcIdToName.put(id, name);
                     }
                 }
@@ -330,16 +331,24 @@ public class ContextBuilder {
                 String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
 
                 if (content != null) {
-                    // 错误检测：检查标准错误前缀或关键词（仅检查前200字符避免全文误判）
+                    // 错误检测：检查特定的错误前缀模式，避免误判包含 "error" 的正常内容
+                    // 只检查明确的错误标识，不检查通用的 "error"/"ERROR" 关键词
                     String contentPrefix = content.length() > 200 ? content.substring(0, 200) : content;
-                    boolean isError = contentPrefix.contains("ERROR") ||
-                            contentPrefix.contains("error") ||
-                            contentPrefix.contains("失败") ||
+                    boolean isError = contentPrefix.startsWith("ERROR:") ||
+                            contentPrefix.startsWith("ERROR：") ||
+                            contentPrefix.startsWith("Error:") ||
+                            contentPrefix.startsWith("Error：") ||
+                            contentPrefix.startsWith("Exception:") ||
+                            contentPrefix.startsWith("Exception：") ||
                             contentPrefix.contains("【缺少参数】") ||
                             contentPrefix.contains("【未找到】") ||
                             contentPrefix.contains("【查询失败】") ||
                             contentPrefix.contains("【无匹配") ||
-                            contentPrefix.contains("【无数据】");
+                            contentPrefix.contains("【无数据】") ||
+                            contentPrefix.contains("Permission denied") ||
+                            contentPrefix.contains("Access denied") ||
+                            contentPrefix.contains("命令执行失败") ||
+                            contentPrefix.contains("操作失败：");
 
                     if (isError) {
                         // 提取错误信息前 150 字符
@@ -491,7 +500,30 @@ public class ContextBuilder {
         StringBuilder reasoningBuilder = new StringBuilder();
 
         try {
-            JsonParser parser = objectMapper.getFactory().createParser(streamResponse);
+            // 清理SSE前缀：按行分割，去除 "data: " 前缀和 "[DONE]" 标记，拼接为纯JSON对象序列
+            StringBuilder cleanedInput = new StringBuilder();
+            for (String line : streamResponse.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.equals("[DONE]")) {
+                    continue;
+                }
+                if (trimmed.startsWith("data: ")) {
+                    trimmed = trimmed.substring(6).trim();
+                }
+                if (trimmed.equals("[DONE]") || trimmed.isEmpty()) {
+                    continue;
+                }
+                cleanedInput.append(trimmed);
+            }
+
+            String cleanJson = cleanedInput.toString();
+            if (cleanJson.isEmpty()) {
+                result.put("content", "");
+                result.put("reasoning", "");
+                return result;
+            }
+
+            JsonParser parser = objectMapper.getFactory().createParser(cleanJson);
 
             while (true) {
                 try {

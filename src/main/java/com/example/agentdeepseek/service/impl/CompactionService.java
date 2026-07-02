@@ -6,6 +6,8 @@ import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.model.entity.CompactionRecord;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
+import com.example.agentdeepseek.service.llm.LLMClientManager;
+import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.util.PromptUtil;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -16,7 +18,6 @@ import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -38,14 +39,14 @@ import java.util.stream.Collectors;
 public class CompactionService {
 
     private final DeepSeekConfig deepSeekConfig;
-    private final WebClient webClient;
     private final CompactionMapper compactionMapper;
     private final ConversationMessageMapper conversationMessageMapper;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final LLMClientManager llmClientManager;
 
-    /** 预压缩执行器（单线程，避免并发冲突） */
+    /** 预压缩执行器（多线程，支持并发压缩不同会话） */
     private final java.util.concurrent.ExecutorService precompressExecutor =
-            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            java.util.concurrent.Executors.newFixedThreadPool(3, r -> {
                 Thread t = new Thread(r, "compaction-precompress-");
                 t.setDaemon(true);
                 return t;
@@ -58,11 +59,11 @@ public class CompactionService {
     public CompactionService(DeepSeekConfig deepSeekConfig,
                              CompactionMapper compactionMapper,
                              ConversationMessageMapper conversationMessageMapper,
-                             WebClient deepSeekWebClient) {
+                             LLMClientManager llmClientManager) {
         this.deepSeekConfig = deepSeekConfig;
-        this.webClient = deepSeekWebClient;
         this.compactionMapper = compactionMapper;
         this.conversationMessageMapper = conversationMessageMapper;
+        this.llmClientManager = llmClientManager;
     }
 
     /**
@@ -118,6 +119,18 @@ public class CompactionService {
      * @return 压缩后的 token 数，如果不需要压缩返回 -1
      */
     public int compact(Long conversationId, List<Map<String, Object>> messages) {
+        return compact(conversationId, messages, null);
+    }
+
+    /**
+     * 执行智能压缩
+     *
+     * @param conversationId 会话 ID
+     * @param messages       API 格式的消息列表（会被修改：用压缩摘要替换最早历史）
+     * @param providerCode   LLM Provider Code（可选，为空则用默认）
+     * @return 压缩后的 token 数，如果不需要压缩返回 -1
+     */
+    public int compact(Long conversationId, List<Map<String, Object>> messages, String providerCode) {
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
         if (!cfg.isEnabled() || messages == null || messages.size() < 4) {
             return -1;
@@ -180,7 +193,7 @@ public class CompactionService {
         // 4. 调用 LLM 压缩
         String summary;
         try {
-            summary = callCompactionLlm(toCompress);
+            summary = callCompactionLlm(toCompress, providerCode);
         } catch (Exception e) {
             log.error("LLM 压缩调用失败，跳过压缩: {}", e.getMessage());
             return -1;
@@ -226,6 +239,10 @@ public class CompactionService {
      * @param conversationId 会话 ID
      */
     public void asyncPrecompress(Long conversationId) {
+        asyncPrecompress(conversationId, null);
+    }
+
+    public void asyncPrecompress(Long conversationId, String providerCode) {
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
         if (!cfg.isEnabled() || !cfg.isAsyncPrecompress()) {
             return;
@@ -255,7 +272,7 @@ public class CompactionService {
 
                     // 构建 API 格式消息列表来调用 compact（内部会重新查 DB）
                     List<Map<String, Object>> apiMessages = buildApiMessages(messages);
-                    compact(conversationId, apiMessages);
+                    compact(conversationId, apiMessages, providerCode);
                 }
             } catch (Exception e) {
                 log.warn("异步预压缩失败: conversationId={}, error={}", conversationId, e.getMessage());
@@ -304,6 +321,13 @@ public class CompactionService {
                 continue;
             }
 
+            // 额外检查：确保索引在有效范围内
+            if (startIdx >= dbMessages.size() || endIdx >= dbMessages.size()) {
+                log.warn("压缩记录索引越界，跳过: recordId={}, startIdx={}, endIdx={}, dbMessages.size={}",
+                        record.getId(), startIdx, endIdx, dbMessages.size());
+                continue;
+            }
+
             // 创建压缩摘要消息
             ConversationMessage compactMsg = new ConversationMessage();
             compactMsg.setConversationId(conversationId);
@@ -331,52 +355,37 @@ public class CompactionService {
     // ==================== 内部方法 ====================
 
     /**
-     * 调用 LLM 执行压缩
+     * 调用 LLM 执行压缩（使用默认 Provider 的 LLMClient）
      */
-    private String callCompactionLlm(List<ConversationMessage> messages) {
+    private String callCompactionLlm(List<ConversationMessage> messages, String providerCode) {
         String historyText = formatMessagesForCompaction(messages);
         String prompt = buildCompactionPrompt(historyText);
 
+        LLMClient client = (providerCode != null && !providerCode.isEmpty())
+                ? llmClientManager.resolveClientByCode(providerCode)
+                : llmClientManager.getDefaultClient();
+        if (client == null) {
+            log.error("无法获取 LLMClient，providerCode={}, 跳过压缩", providerCode);
+            return null;
+        }
         String model = deepSeekConfig.getCompaction().getModel();
         if (model == null || model.trim().isEmpty()) {
-            model = deepSeekConfig.getDefaultModel();
+            model = llmClientManager.getDefaultModel(client.getProviderCode());
         }
 
-        // 构建请求体
-        ObjectNode requestBody = objectMapper.createObjectNode();
-        requestBody.put("model", model);
-        requestBody.put("stream", false);
-        requestBody.put("temperature", 0.3); // 低温度确保一致性
-
-        ArrayNode messagesNode = requestBody.putArray("messages");
-        ObjectNode userMsg = messagesNode.addObject();
+        // 构建消息列表
+        List<Map<String, Object>> msgs = new ArrayList<>();
+        Map<String, Object> userMsg = new HashMap<>();
         userMsg.put("role", "user");
         userMsg.put("content", prompt);
+        msgs.add(userMsg);
+
+        // 使用 LLMClient 构建请求体 + 阻塞调用
+        Map<String, Object> requestBody = client.buildRequestBody(msgs, model, 0.3, "non-thinking", false, null);
 
         try {
-            String responseBody = webClient.post()
-                    .bodyValue(requestBody)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block(java.time.Duration.ofSeconds(60));
-
-            if (responseBody == null || responseBody.isEmpty()) {
-                log.warn("LLM 压缩返回空响应");
-                return null;
-            }
-
-            JsonNode root = objectMapper.readTree(responseBody);
-            JsonNode choices = root.path("choices");
-            if (choices.isArray() && choices.size() > 0) {
-                JsonNode message = choices.get(0).path("message");
-                String content = message.path("content").asText("");
-                if (!content.isEmpty()) {
-                    return content.trim();
-                }
-            }
-
-            log.warn("LLM 压缩返回格式异常: {}", responseBody.length() > 200 ? responseBody.substring(0, 200) : responseBody);
-            return null;
+            String responseBody = client.blockingChat(requestBody, java.time.Duration.ofSeconds(60));
+            return client.extractContentFromBlockingResponse(responseBody);
         } catch (Exception e) {
             log.error("调用 LLM 压缩失败: {}", e.getMessage());
             return null;
