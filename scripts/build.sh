@@ -38,7 +38,8 @@ if [ $# -ge 1 ]; then
     sed -i.bak -E 's|<version>[0-9]+\.[0-9]+\.[0-9]+</version>|<version>'"$VERSION"'</version>|' "$PROJECT_ROOT/pom.xml"
     rm -f "$PROJECT_ROOT/pom.xml.bak"
 else
-    VERSION=$(grep -oPm1 '<version>\K[^<]+' "$PROJECT_ROOT/pom.xml" | head -1)
+    # 使用 sed 替代 grep -P，兼容 macOS
+    VERSION=$(sed -n 's/.*<version>\([^<]*\)<\/version>.*/\1/p' "$PROJECT_ROOT/pom.xml" | head -1)
     log_info "从 pom.xml 读取版本: $VERSION"
 fi
 
@@ -91,11 +92,14 @@ else
         else
             log_info "正在裁剪 JRE（约 30 秒）..."
             rm -rf "$JRE_DIR"
-            "$JLINK" \
+            if "$JLINK" \
                 --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
-                --strip-debug --compress 2 --no-header-files --no-man-pages \
-                --output "$JRE_DIR"
-            log_info "JRE 裁剪完成 ($(du -sh "$JRE_DIR" | cut -f1))"
+                --strip-debug --compress=zip-6 --no-header-files --no-man-pages \
+                --output "$JRE_DIR"; then
+                log_info "JRE 裁剪完成 ($(du -sh "$JRE_DIR" | cut -f1))"
+            else
+                log_warn "JRE 裁剪失败，将继续打包（可能缺少内置 JRE）"
+            fi
         fi
     else
         log_warn "jlink 不可用，跳过热裁剪"

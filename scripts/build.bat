@@ -26,7 +26,8 @@ if not "%~1"=="" (
         "$xml.project.version = '!VERSION!';" ^
         "$xml.Save((Resolve-Path pom.xml).Path)"
 ) else (
-    for /f "tokens=2 delims=<>" %%a in ('findstr /r "<version>[0-9].*</version>" pom.xml') do (
+    for /f "tokens=*" %%a in ('powershell -NoProfile -Command ^
+        "$xml = [xml](Get-Content pom.xml); $xml.project.version"') do (
         set "VERSION=%%a"
         goto :got_version
     )
@@ -81,7 +82,7 @@ if exist "%JRE_DIR%\bin\java.exe" (
         if exist "%JRE_DIR%" rmdir /s /q "%JRE_DIR%"
         "!JLINK!" ^
             --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
-            --strip-debug --compress 2 --no-header-files --no-man-pages ^
+            --strip-debug --compress=zip-6 --no-header-files --no-man-pages ^
             --output "%JRE_DIR%"
         if %errorlevel% equ 0 (
             echo [INFO] JRE 裁剪完成

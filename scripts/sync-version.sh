@@ -29,14 +29,18 @@ else
 fi
 
 # -------------------- 更新 package.json --------------------
+# 跨平台兼容的 sed -i 方案（macOS sed 需要 -i ''，Linux sed 需要 -i）
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    SED_INPLACE=(sed -i '')
+else
+    SED_INPLACE=(sed -i)
+fi
+
 # ① 更新顶层的 "version" 字段
-sed -i.bak -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VERSION"'"/' "$PKG"
+"${SED_INPLACE[@]}" -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VERSION"'"/' "$PKG"
 
 # ② 更新 extraResources 中的 JAR 路径（codecraft-x.x.x.jar → codecraft-新版本.jar）
-sed -i.bak -E 's/codecraft-[0-9]+\.[0-9]+\.[0-9]+\.jar/codecraft-'"$VERSION"'.jar/g' "$PKG"
-
-# 清理备份文件
-rm -f "$PKG.bak"
+"${SED_INPLACE[@]}" -E 's/codecraft-[0-9]+\.[0-9]+\.[0-9]+\.jar/codecraft-'"$VERSION"'.jar/g' "$PKG"
 
 echo "✅ package.json 已同步: version=$VERSION, JAR=codecraft-$VERSION.jar"
 echo ""

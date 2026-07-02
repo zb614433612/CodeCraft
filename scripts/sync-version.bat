@@ -8,7 +8,9 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0\.."
 
 REM -------------------- 提取 pom.xml 版本号 --------------------
-for /f "tokens=2 delims=<>" %%a in ('findstr /r "<version>[0-9].*</version>" pom.xml') do (
+REM 使用 PowerShell XML 解析，精确提取 project.version
+for /f "tokens=*" %%a in ('powershell -NoProfile -Command ^
+    "$xml = [xml](Get-Content pom.xml); $xml.project.version"') do (
     set "VERSION=%%a"
     goto :found_version
 )
@@ -20,8 +22,9 @@ exit /b 1
 echo 📦 当前版本: %VERSION%
 
 REM -------------------- 更新 package.json --------------------
+REM 使用绝对路径，避免依赖当前工作目录
 powershell -NoProfile -Command ^
-    "$pkg = 'electron\package.json';" ^
+    "$pkg = '%cd%\electron\package.json';" ^
     "$json = Get-Content $pkg -Raw | ConvertFrom-Json;" ^
     "$json.version = '%VERSION%';" ^
     "$json.build.extraResources[0].from = '../target/codecraft-%VERSION%.jar';" ^
