@@ -54,7 +54,7 @@ mvn clean package -DskipTests
 log_info "Maven 构建完成"
 
 # 确认 JAR 存在
-JAR_FILE="$PROJECT_ROOT/target/codecraft-$VERSION.jar"
+JAR_FILE="$PROJECT_ROOT/target/code-craft-$VERSION.jar"
 if [ ! -f "$JAR_FILE" ]; then
     log_error "JAR 文件不存在: $JAR_FILE"
     exit 1
