@@ -40,6 +40,20 @@ mvn spring-boot:run
 
 ### 2.1 Configuration
 
+CodeCraft supports multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.).
+
+**Option A: Configure via Web UI (Recommended)**
+
+After starting the backend, open `http://localhost:8084`:
+1. Login with default account
+2. Navigate to **「Config」** or **「Provider Config」**
+3. Click **「Add Provider」**, fill in Provider info (code, name, Base URL, API Key, model list, etc.)
+4. Click **「Create Provider」**
+
+You can add multiple Providers and switch between them at runtime. See [LLM Provider System](docs/LLM_PROVIDER_SYSTEM.md).
+
+**Option B: Config file (fallback for DeepSeek only)**
+
 ```bash
 # 1. Copy local config template
 cp application-local.yml.example application-local.yml
@@ -49,7 +63,7 @@ cp application-local.yml.example application-local.yml
 #   api-key: sk-your-key-here
 ```
 
-This file is in `.gitignore` and will not be committed.
+This file is in `.gitignore` and will not be committed. The Web UI Provider config takes priority over this file.
 
 ### 2.2 Start Backend
 
@@ -136,6 +150,7 @@ project root
 │   ├── tool/impl/           → 19 AI tool implementations
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/impl/        → Core business logic
+│   └── service/llm/         → ★ LLM Client Layer (LLMClient + 6 Provider impls)
 ├── src/main/resources/
 │   ├── application.yml      → Base configuration
 │   ├── application-local.yml.example → Local config template
@@ -209,6 +224,7 @@ Password:  (empty)
 ```sql
 SELECT * FROM conversation ORDER BY updated_at DESC LIMIT 10;
 SELECT * FROM agent_config WHERE enabled = 1;
+SELECT * FROM llm_provider WHERE enabled = 1;
 SELECT * FROM skill WHERE confidence > 0.5;
 SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 ```

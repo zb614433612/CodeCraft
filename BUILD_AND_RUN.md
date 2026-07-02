@@ -31,31 +31,32 @@
 
 ## 配置说明
 
-### API Key 配置（必须）
+### LLM Provider 配置（必须）
 
-CodeCraft 需要配置 AI 模型的 API Key 才能正常使用。
+CodeCraft 需要配置至少一个 LLM Provider 才能正常使用。支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo 等多种大语言模型。
 
 **推荐方式：通过页面配置**
 
 启动后端服务后，打开浏览器访问 `http://localhost:8084`，按以下步骤操作：
 
 1. 使用默认账号登录（如需）
-2. 点击左侧菜单 **「配置」**
-3. 在 **「DeepSeek API 配置」** 中输入你的 API Key
-4. 点击 **「保存」** 即可
+2. 点击左侧菜单 **「配置」** 或 **「Provider 配置」**
+3. 点击 **「新增 Provider」**，填写 Provider 信息（编码、名称、Base URL、API Key、模型列表等）
+4. 点击 **「创建 Provider」** 即可
 
-配置保存后即时生效，所有聊天请求将使用此 Key 调用 DeepSeek API。
+配置保存后即时生效，所有聊天请求将使用选定的 Provider 调用对应的大模型 API。
 
-> ?? API Key 保存到数据库中，登录后只有你自己能看到（页面显示脱敏后的 Key）。
+> ?? 支持添加多个 Provider，运行时可在聊天界面随时切换。每个 Agent 也可以绑定特定的 Provider。
+> 详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
 
 **备用方式：环境变量或配置文件**
 
 如不方便通过页面配置，也可通过以下方式：
 
-- **环境变量**：设置 `DEEPSEEK_API_KEY=sk-你的API密钥`
-- **配置文件**：在 `src/main/resources/application.yml` 中修改 `deepseek.api-key`
+- **环境变量**：设置 `DEEPSEEK_API_KEY=sk-你的API密钥`（兜底配置，仅 DeepSeek）
+- **配置文件**：在 `src/main/resources/application.yml` 中修改 `deepseek.api-key`（兜底配置，仅 DeepSeek）
 
-> 注意：页面配置的 Key 优先级最高，会覆盖环境变量和配置文件中的 Key。
+> 注意：页面配置的 LLM Provider 优先级最高，会覆盖环境变量和配置文件中的 Key。
 
 ### 其他配置（可选）
 
@@ -64,12 +65,14 @@ CodeCraft 需要配置 AI 模型的 API Key 才能正常使用。
 - **服务器端口**：默认 `8084`，可通过环境变量 `SERVER_PORT` 或修改 `application.yml` 中的 `server.port`
 
 > ?? **首次运行前**：项目启动时会自动加载 `application-local.yml`（优先级高于 `application.yml`）。
-> 请复制模板文件 `application-local.yml.example` 为 `application-local.yml`，并填入你的 API Key：
+> 请复制模板文件 `application-local.yml.example` 为 `application-local.yml`，并填入你的 API Key（作为兜底配置）：
 > ```bash
 > cp application-local.yml.example application-local.yml
 > # 然后编辑 application-local.yml，填入 deepseek.api-key
 > ```
 > 该文件已在 `.gitignore` 中排除，不会提交到 Git。
+>
+> 推荐通过页面「Provider 配置」添加 LLM Provider，支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等多种模型。
 
 ---
 
@@ -460,11 +463,12 @@ codecraft/
 │   │   └── com/example/agentdeepseek/
 │   │       ├── common/         # 通用枚举、响应封装
 │   │       ├── config/         # 配置类
-│   │       ├── controller/     # REST API 控制器
+│   │       ├── controller/     # REST API 控制器（含 LLM Provider 等 API）
 │   │       ├── mapper/         # 数据访问层
-│   │       ├── model/          # DTO、实体、VO
+│   │       ├── model/          # DTO、实体（含 ProviderConfig）、VO
 │   │       ├── scheduler/      # 定时任务
 │   │       ├── service/        # 业务逻辑层
+│   │       │   └── llm/        # LLM 客户端层（LLMClient + 6 个 Provider 实现）
 │   │       ├── tool/           # AI Agent 工具（19 个工具）
 │   │       └── util/           # 工具类
 │   └── main/resources/         # 配置文件和静态资源
