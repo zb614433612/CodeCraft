@@ -2,10 +2,10 @@
 <div align="center">
   <img src="frontend/src/assets/logo.svg" alt="CodeCraft Logo" width="120" height="120">
   <h1>CodeCraft 🛠️</h1>
-  <p><strong>DeepSeek 驱动的 AI 编程 Agent · 终端级代码助手 · 自然语言开发工具</strong></p>
+   <p><strong>多 LLM 驱动的 AI 编程 Agent · 终端级代码助手 · 自然语言开发工具</strong></p>
   <p>
-    AI Coding Agent | AI Pair Programming | Autonomous Coding Assistant | LLM-Powered DevTool<br>
-    基于 DeepSeek 大语言模型的智能体编程助手——自然语言对话，自动读写文件、搜索代码、执行命令、管理 Git，复杂任务自动拆解并行执行
+    AI Coding Agent | AI Pair Programming | Autonomous Coding Assistant | Multi-LLM DevTool<br>
+    支持多种大语言模型（DeepSeek / OpenAI / Anthropic / Ollama / MiMo）的智能体编程助手——自然语言对话，自动读写文件、搜索代码、执行命令、管理 Git，复杂任务自动拆解并行执行
   </p>
 
   <p>
@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/badge/Spring%20Boot-3.4-brightgreen?logo=springboot" alt="Spring Boot 3.4">
     <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vuedotjs" alt="Vue 3.5">
     <img src="https://img.shields.io/badge/Electron-33-47848F?logo=electron" alt="Electron 33">
-    <img src="https://img.shields.io/badge/DeepSeek-LLM-4B7BF5?logo=deepseek" alt="DeepSeek">
+    <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Ollama%20%7C%20MiMo-4B7BF5" alt="Multi-LLM">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/download-exe%20%7C%20dmg%20%7C%20AppImage-brightgreen" alt="Download">
@@ -24,7 +24,7 @@
 
 ## 🏷️ 关键词 / Topics
 
-`ai-coding-assistant` `coding-agent` `ai-agent` `deepseek` `llm` `large-language-model` `vibe-coding` `developer-tools` `cli-tool` `terminal` `ai-pair-programming` `autonomous-agents` `multi-agent` `task-decomposition` `code-generation` `agentic-ai` `open-source` `ai-assisted-development` `coding-assistant` `git-automation` `ai-software-engineer` `agent-framework` `self-hosted` `natural-language-programming` `ai-code-editor`
+`ai-coding-assistant` `coding-agent` `ai-agent` `deepseek` `openai` `anthropic` `ollama` `mimo` `multi-llm` `llm` `large-language-model` `vibe-coding` `developer-tools` `cli-tool` `terminal` `ai-pair-programming` `autonomous-agents` `multi-agent` `task-decomposition` `code-generation` `agentic-ai` `open-source` `ai-assisted-development` `coding-assistant` `git-automation` `ai-software-engineer` `agent-framework` `self-hosted` `natural-language-programming` `ai-code-editor`
 
 > 💡 **搜这些词都能找到 CodeCraft！** 以上是 GitHub 上同类 AI 编程助手（Cline / Aider / OpenCode / Codex / Cursor 等）用户最常用的搜索关键词，已全部覆盖。
 
@@ -32,7 +32,7 @@
 
 ## 📖 项目简介
 
-**CodeCraft** 是一个基于 **DeepSeek 大语言模型（Large Language Model）** 构建的 **AI 编程 Agent（AI Coding Agent / AI Pair Programming Tool）**，以桌面应用 + 终端命令行的形态，将自然语言对话转化为生产力级的自动化编程操作。
+**CodeCraft** 是一个支持**多种大语言模型（DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等）** 的 **AI 编程 Agent（AI Coding Agent / AI Pair Programming Tool）**，以桌面应用 + 终端命令行的形态，将自然语言对话转化为生产力级的自动化编程操作。通过统一的 LLMClient 抽象层，用户可在运行时动态切换不同 LLM Provider，每个 Agent 也可绑定特定的 Provider 和模型。
 
 与普通的 AI ChatBot 聊天助手不同，CodeCraft 是一个真正具备**完整工具调用能力（Tool Use / Function Calling）** 的 **Autonomous Coding Agent（自主编程智能体）**——它能读取项目文件、搜索代码库、执行 Shell 命令、操作 Git 版本控制，甚至自动创建子 Agent 并行处理复杂开发任务，像一位 **AI 软件工程师（AI Software Engineer）** 一样独立完成工作。
 
@@ -40,6 +40,9 @@
 
 ### 🧠 多 Agent 并行协作（Multi-Agent System）
 可创建不同角色的 AI Agent（Coding Agent、Code Reviewer、Software Architect 等），每个 Agent 独立配置系统提示词（System Prompt）、工具集和模型参数。主 Agent 执行复杂任务时，自动进行 **Task Decomposition（任务拆解）**，召唤多个子 Agent 后台并行执行，最多 20 个并发协作——典型的多 Agent 框架（Multi-Agent Framework）架构。
+
+### 🌐 多 LLM Provider 支持（Multi-LLM Platform）
+支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo 等主流 LLM 平台。通过统一的 LLMClient 抽象层屏蔽不同平台的 API 差异，前端运行时可随时切换 Provider，无需重启服务。每个 Agent 可以绑定特定的 Provider 和模型，Provider 配置变更后自动热刷新客户端缓存。详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
 
 ### 🛡️ 三层安全防护（Human-in-the-Loop）
 工具执行采用渐进式安全策略：Manual 模式下数据操作和路径敏感操作弹窗授权，Auto 模式下高危工具（file_writer action=delete / execute_sql 等）仍需人工确认。支持"本轮对话全部同意"一键放行，在 Autonomous Agent 自动化和 Human-in-the-Loop 人工管控之间取得最佳平衡。
@@ -80,7 +83,7 @@ Electron 桌面应用，内置 JRE + Node.js + H2 嵌入式数据库，下载安
 
 | 层级 | 技术 | 版本 |
 |------|------|------|
-| **AI 大模型** | **DeepSeek**（兼容 OpenAI API 格式） | - |
+| **AI 大模型** | **DeepSeek / OpenAI / Anthropic / Ollama / MiMo**（统一 LLMClient 抽象层） | - |
 | **后端** | Java + Spring Boot | 17+ / 3.4 |
 | **前端** | Vue 3 + TypeScript + Vite | 3.5 / 5.x / 6.x |
 | **桌面壳** | Electron | 33 |
@@ -102,7 +105,7 @@ Electron 桌面应用，内置 JRE + Node.js + H2 嵌入式数据库，下载安
 - 双击安装即可使用，**无需安装 Java**（JRE 已内置在安装包中）
 
 > 安装后启动，后端服务自动运行（等待约 10~30 秒），然后自动打开主界面。
-> 首次使用请先到「配置」页面设置你的 **DeepSeek API Key**。
+> 首次使用请先到「配置」页面添加 **LLM Provider**（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等）。
 
 ---
 
@@ -156,12 +159,13 @@ codecraft/
 │   │   └── com/example/agentdeepseek/
 │   │       ├── common/           # 通用枚举、响应封装
 │   │       ├── config/           # 配置类
-│   │       ├── controller/       # REST API 控制器（含工具注册表 API）
+│   │       ├── controller/       # REST API 控制器（含 LLM Provider、工具注册表等 API）
 │   │       ├── filter/           # 过滤器（Token 鉴权）
 │   │       ├── mapper/           # MyBatis 数据访问层
-│   │       ├── model/            # DTO、实体、VO
+│   │       ├── model/            # DTO、实体（含 ProviderConfig）、VO
 │   │       ├── scheduler/        # 定时任务
 │   │       ├── service/          # 业务逻辑层
+│   │       │   └── llm/          # LLM 客户端层（LLMClient 接口 + 6 个 Provider 实现）
 │   │       ├── tool/             # AI Agent 工具（19 个工具）
 │   │       │   ├── impl/         # 工具实现
 │   │       │   ├── permission/   # 工具权限控制
@@ -199,6 +203,7 @@ codecraft/
 |------|--------|------|
 | [架构全景图](docs/ARCHITECTURE.md) | 新人 / AI 协作 | 5 分钟建立全局认知 |
 | [工具系统](docs/TOOL_SYSTEM.md) | 开发者 | 如何新增一个 AI Tool |
+| [LLM Provider 系统](docs/LLM_PROVIDER_SYSTEM.md) | 开发者 | 多 LLM 平台支持、Provider 路由、扩展指南 |
 | [核心引擎](docs/DEEPSEEK_SERVICE_IMPL.md) | 资深开发者 | Tool Loop 状态机 + 方法调用拓扑 |
 | [P2P 协作](docs/P2P_SYSTEM.md) | 开发者 | 远程 Agent 调用全链路 |
 | [快照系统](docs/SNAPSHOT_SYSTEM.md) | 开发者 | 代码备份与回滚机制 |
@@ -223,6 +228,9 @@ codecraft/
 ## 🙏 致谢
 
 - [DeepSeek](https://deepseek.com/) — 强大的大语言模型（LLM），驱动 CodeCraft 的核心智能
+- [OpenAI](https://openai.com/) — GPT 系列模型，AI 领域的先驱
+- [Anthropic](https://www.anthropic.com/) — Claude 系列模型，安全可靠的 AI 助手
+- [Ollama](https://ollama.com/) — 本地 LLM 运行平台，让大模型触手可及
 - [Spring Boot](https://spring.io/projects/spring-boot) — 后端框架
 - [Vue.js](https://vuejs.org/) — 前端框架
 - [Electron](https://www.electronjs.org/) — 跨平台桌面应用框架

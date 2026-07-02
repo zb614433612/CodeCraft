@@ -6,14 +6,15 @@
   <img src="https://img.shields.io/badge/Spring_Boot-3.4-blue" alt="Spring Boot 3.4">
   <img src="https://img.shields.io/badge/Vue-3.4-42b883" alt="Vue 3.4">
   <img src="https://img.shields.io/badge/Electron-34.5-47848f" alt="Electron 34.5">
-  <img src="https://img.shields.io/badge/DeepSeek-API-4f46e5" alt="DeepSeek API">
+  <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Ollama%20%7C%20MiMo-4f46e5" alt="Multi-LLM">
 </p>
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant based on AI Agent. Users interact with AI through a chat interface, and AI automatically invokes **19 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration for complex multi-module development.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.). Users interact with AI through a chat interface, and AI automatically invokes **19 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
+- 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo with unified LLMClient interface, runtime dynamic switching
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
 - 🧰 **19-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
@@ -54,7 +55,7 @@ mvn clean package -DskipTests && mvn spring-boot:run
 
 ### First Launch Configuration
 
-After the first launch, go to **Settings → System Config**, enter your DeepSeek API Key to start using AI features.
+After the first launch, go to **Settings → System Config**, add an **LLM Provider** (supports DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.) to start using AI features.
 
 Default admin account: `admin` / `123456`
 
@@ -63,12 +64,13 @@ Default admin account: `admin` / `123456`
 ```
 CodeCraft
 ├── src/main/java/.../              # Java Backend (Spring Boot 3.4)
-│   ├── controller/                 # REST API Controllers (16)
+│   ├── controller/                 # REST API Controllers (17)
 │   ├── service/impl/               # Core Business Logic
 │   │   ├── DeepSeekServiceImpl     # ★ AI Engine Core (129KB)
 │   │   ├── ToolLoopManager         # Tool Call Loop Engine
 │   │   ├── AgentForkManager        # Sub-Agent Lifecycle
 │   │   └── CompactionService       # Context Compaction
+│   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 6 Provider impls)
 │   ├── tool/                       # AI Agent Tools (19 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
 │   │   ├── agent/                  # P2pAgentService, Handlers
@@ -76,7 +78,7 @@ CodeCraft
 │   │   ├── protocol/               # MessageFrame, MessageType
 │   │   ├── security/               # TlsHelper, CryptoHelper
 │   │   └── signaling/              # QR Code Signaling, Connection String
-│   ├── model/entity/               # Database Entities (14)
+│   ├── model/entity/               # Database Entities (15, incl. ProviderConfig)
 │   ├── mapper/                     # MyBatis Mappers (26)
 │   └── config/                     # Spring Configuration
 ├── frontend/                       # Vue 3 Frontend (TypeScript)
@@ -91,11 +93,12 @@ CodeCraft
 │   │   │   ├── FileTree            # File Browser
 │   │   │   ├── GitSidebar          # Git Diff/Commit Sidebar
 │   │   │   └── ...
-│   │   └── api/                    # API Call Modules (17)
+│   │   └── api/                    # API Call Modules (18, incl. llm-provider API)
 │   └── ...
 ├── electron/                       # Electron Desktop Shell
 ├── docs/                           # Project Documentation
 │   ├── ARCHITECTURE.md             # Architecture Panorama
+│   ├── LLM_PROVIDER_SYSTEM.md     # ★ Multi-LLM Provider System
 │   ├── DEEPSEEK_SERVICE_IMPL.md    # Core Engine Deep Dive
 │   ├── P2P_SYSTEM.md               # P2P System Deep Dive
 │   ├── SNAPSHOT_SYSTEM.md          # Snapshot System Deep Dive
@@ -154,6 +157,7 @@ Main Agent (user conversation)
 |-------|-----------|-------|
 | **Backend** | Spring Boot 3.4 + MyBatis-Plus | Java 17 |
 | **AI Communication** | WebFlux + SSE | Streaming output |
+| **Multi-LLM Support** | LLMClient Abstraction Layer | DeepSeek / OpenAI / Anthropic / Ollama / MiMo |
 | **Database** | H2 (Embedded) | Zero-config deployment |
 | **Cache** | Caffeine | In-memory, zero-dependency |
 | **Frontend** | Vue 3 + TypeScript + Vite | Composition API |
@@ -166,6 +170,7 @@ Main Agent (user conversation)
 | Document | Reader | Description |
 |----------|--------|-------------|
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Developers / AI | Architecture panorama: topology, data flow, package structure, ER diagram |
+| [LLM_PROVIDER_SYSTEM.md](./docs/LLM_PROVIDER_SYSTEM.md) | Developers / AI | Multi-LLM Provider system: architecture, data model, routing, extension guide |
 | [DEEPSEEK_SERVICE_IMPL.md](./docs/DEEPSEEK_SERVICE_IMPL.md) | Developers / AI | Core engine: method call topology, Tool Loop state machine, SSE events |
 | [P2P_SYSTEM.md](./docs/P2P_SYSTEM.md) | Developers / AI | P2P: protocol stack, connection lifecycle, agent remote invocation |
 | [TOOL_SYSTEM.md](./docs/TOOL_SYSTEM.md) | Developers / AI | Tool system: architecture, permission pipeline, how to add a tool |
