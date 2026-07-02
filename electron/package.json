@@ -68,7 +68,7 @@
       }
     },
     "dmg": {
-      "title": "CodeCraft",
+      "title": "CodeCraft-${arch}",
       "icon": "icon.icns"
     },
     "linux": {
