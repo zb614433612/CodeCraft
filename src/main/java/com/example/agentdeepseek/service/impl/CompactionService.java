@@ -167,24 +167,45 @@ public class CompactionService {
         // 所以这里也需要对 DB 消息执行同样的操作才能对齐索引
         applyCompactionRecords(conversationId, allMessages);
 
-        // 找到对应的消息 ID 范围（现在 allMessages 的消息数量与 messages 一致）
-        Long startMsgId = allMessages.get(Math.min(compressStart, allMessages.size() - 1)).getId();
-        Long endMsgId = allMessages.get(Math.min(compressEnd - 1, allMessages.size() - 1)).getId();
+        // ★ 找到对应的消息 ID 范围（跳过摘要消息）：
+        // applyCompactionRecords 注入的摘要消息 id 为负数（-recordId），并非真实 DB 消息。
+        // 若直接用索引位置的 id 落库，后续轮次 applyCompactionRecords 用该 id 在 DB 消息中
+        // 匹配会失败（负数 id 在 DB 中不存在），压缩记录被跳过、压缩链断裂。
+        // 因此 startMsgId/endMsgId 必须取区间内第一条/最后一条真实消息（id > 0）的 id。
+        Long startMsgId = null;
+        for (int i = compressStart; i < allMessages.size(); i++) {
+            Long id = allMessages.get(i).getId();
+            if (id != null && id > 0) {
+                startMsgId = id;
+                break;
+            }
+        }
+        Long endMsgId = null;
+        for (int i = Math.min(compressEnd - 1, allMessages.size() - 1); i >= 0; i--) {
+            Long id = allMessages.get(i).getId();
+            if (id != null && id > 0) {
+                endMsgId = id;
+                break;
+            }
+        }
+        if (startMsgId == null || endMsgId == null || startMsgId > endMsgId) {
+            log.info("压缩跳过：可压缩范围内没有真实消息（历史已全部是摘要），startMsgId={}, endMsgId={}", startMsgId, endMsgId);
+            return -1;
+        }
 
         // 3. 收集被压缩的消息内容，构建压缩 prompt
-        // 使用索引范围提取（比 ID 范围更可靠，因为摘要消息可能没有真实 ID）
-        List<ConversationMessage> toCompress;
-        if (compressStart >= 0 && compressEnd <= allMessages.size() && compressStart < compressEnd) {
-            toCompress = new ArrayList<>(allMessages.subList(compressStart, compressEnd));
-        } else {
-            toCompress = allMessages.stream()
-                    .filter(m -> {
-                        Long id = m.getId();
-                        if (id == null) return false;
-                        return id >= startMsgId && id <= endMsgId;
-                    })
-                    .collect(Collectors.toList());
-        }
+        // ★ 只用区间内的真实消息（id > 0），排除旧摘要（负 id）：
+        // compressStart 固定为 1，若之前压缩过，旧摘要就位于 index 1 附近，
+        // 用 subList 会把它包进来导致：旧摘要被重复压缩进新摘要（内容冗余、LLM 浪费），
+        // 且 record 落库区间 [startMsgId, endMsgId] 与 toCompress 实际内容不一致。
+        final Long fStartMsgId = startMsgId;
+        final Long fEndMsgId = endMsgId;
+        List<ConversationMessage> toCompress = allMessages.stream()
+                .filter(m -> {
+                    Long id = m.getId();
+                    return id != null && id >= fStartMsgId && id <= fEndMsgId;
+                })
+                .collect(Collectors.toList());
 
         if (toCompress.isEmpty()) {
             return -1;
@@ -217,12 +238,21 @@ public class CompactionService {
         log.info("压缩完成：conversationId={}, 压缩 {} 条消息, 节省 {} tokens, recordId={}",
                 conversationId, toCompress.size(), Math.max(savings, 0), record.getId());
 
-        // 7. 将之前已有的、被本压缩覆盖的旧压缩记录标记为废弃
+        // 7. 将之前已有的、被本压缩完全覆盖的旧压缩记录标记为废弃
+        // 废弃条件：旧记录的消息区间 [start, end] 完全落在本次压缩区间 [startMsgId, endMsgId] 内
+        // 之前用 old.getEndMessageId() <= endMsgId 判断，会导致相邻区间的旧记录被误废弃
+        // （例如第一次压缩 [1,10]、第二次压缩 [11,20] 时，第一次记录 end=10 <= 20 被错误标记废弃，
+        //   其摘要失效后原始消息重新进入上下文，压缩链条断裂）
         List<CompactionRecord> activeRecords = compactionMapper.selectActiveByConversationId(conversationId);
         for (CompactionRecord old : activeRecords) {
-            if (!old.getId().equals(record.getId()) && old.getEndMessageId() <= endMsgId) {
+            Long oldStart = old.getStartMessageId();
+            Long oldEnd = old.getEndMessageId();
+            if (!old.getId().equals(record.getId())
+                    && oldStart != null && oldEnd != null
+                    && oldStart >= startMsgId && oldEnd <= endMsgId) {
                 compactionMapper.markSuperseded(old.getId());
-                log.debug("标记旧压缩记录为废弃: id={}", old.getId());
+                log.debug("标记旧压缩记录为废弃: id={}, 区间[{},{}] 被本次 [{},{}] 完全覆盖",
+                        old.getId(), oldStart, oldEnd, startMsgId, endMsgId);
             }
         }
 
@@ -330,6 +360,10 @@ public class CompactionService {
 
             // 创建压缩摘要消息
             ConversationMessage compactMsg = new ConversationMessage();
+            // ★ 使用负数合成 ID（数据库真实 ID 均为正数，不会冲突）：
+            // 摘要消息被后续压缩范围覆盖时，compact() 会以该 ID 作为 startMsgId/endMsgId 落库，
+            // 保证 applyCompactionRecords 的索引匹配仍能成立，压缩链不会断裂。
+            compactMsg.setId(-record.getId());
             compactMsg.setConversationId(conversationId);
             compactMsg.setRole(MessageRole.SYSTEM);
             compactMsg.setContent(record.getSummary());

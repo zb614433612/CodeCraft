@@ -62,6 +62,9 @@ public class AgentForkManager {
     /** 子Agent结果存储：agentId → CompletableFuture */
     private final ConcurrentHashMap<String, CompletableFuture<SubAgentResult>> agentFutures = new ConcurrentHashMap<>();
 
+    /** 子Agent执行线程：agentId → Thread（用于超时中断，避免孤儿线程继续占用线程池和消耗 token） */
+    private final ConcurrentHashMap<String, Thread> agentThreads = new ConcurrentHashMap<>();
+
     /** 运行中的子Agent上下文：agentId → SubAgentContext */
     private final ConcurrentHashMap<String, SubAgentContext> runningAgents = new ConcurrentHashMap<>();
 
@@ -202,6 +205,8 @@ public class AgentForkManager {
             String originalThreadName = Thread.currentThread().getName();
             Thread.currentThread().setName("sub-agent-" + agentId);
             try {
+                // 记录执行线程，供 collectAgent 超时时中断
+                agentThreads.put(agentId, Thread.currentThread());
                 // 设置线程级上下文（子Agent需要这些信息来通过权限检查和发送事件）
                 ToolContext.set(mode != null ? mode : "auto", parentConversationId,
                         ToolContext.getAgentType(), userId);
@@ -226,6 +231,7 @@ public class AgentForkManager {
                 ToolContext.clear();
                 PermissionContext.clear();
                 ProjectRootContext.clear();
+                agentThreads.remove(agentId);
                 Thread.currentThread().setName(originalThreadName);
             }
         });
@@ -263,6 +269,13 @@ public class AgentForkManager {
         } catch (TimeoutException e) {
             // 超时后清理资源，避免内存泄漏和后续操作失败
             future.cancel(true);
+            // 真正中断执行线程：blockingChat 阻塞在 HTTP 调用上时，cancel 只标记 future，
+            // 线程仍会继续运行消耗 token。interrupt 配合 executeSubAgentCycle 的中断检查才能停止。
+            Thread worker = agentThreads.get(agentId);
+            if (worker != null) {
+                worker.interrupt();
+                log.warn("子Agent {} 收集超时（{}s），已发送中断信号", agentId, timeoutSec);
+            }
             removePending(agentId);
             agentFutures.remove(agentId);
             runningAgents.remove(agentId);
@@ -270,6 +283,10 @@ public class AgentForkManager {
         } catch (Exception e) {
             // 异常时也清理资源
             future.cancel(true);
+            Thread worker = agentThreads.get(agentId);
+            if (worker != null) {
+                worker.interrupt();
+            }
             removePending(agentId);
             agentFutures.remove(agentId);
             runningAgents.remove(agentId);
@@ -474,6 +491,17 @@ public class AgentForkManager {
         boolean firstMsg = true;
 
         for (int iteration = 0; iteration < maxIterations + totalGranted; iteration++) {
+
+            // 检查线程中断（collectAgent 超时后会发送中断信号），避免孤儿线程继续消耗 token
+            if (Thread.currentThread().isInterrupted()) {
+                log.warn("子Agent {} 收到中断信号，停止执行（已迭代 {} 次）", context.getAgentId(), iteration);
+                SubAgentResult interrupted = SubAgentResult.timeout(context.getAgentId(), 0);
+                // 覆盖 timeout() 生成的"超时（0秒）"占位文案，语义化为中断原因
+                interrupted.setSummary("已被主Agent中断（收集超时）");
+                interrupted.setErrorMessage("子Agent被中断，已迭代 " + iteration + " 次");
+                interrupted.setIterationsUsed(iteration);
+                return interrupted;
+            }
 
             // 检查会话级别批准：如果已获批，设置 PermissionContext 跳过后续所有权限检查
             Long sessionConvId = context.getConversationId();

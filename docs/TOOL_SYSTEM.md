@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v1.1.3 | 更新：2026-07-02 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.4 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -374,5 +374,37 @@ DeepSeekServiceImpl
 权限上下文（`PermissionContext`）由 `DeepSeekServiceImpl` 在每次用户新消息开始时通过 `PermissionContext.removeSessionApproved()` 重置。
 
 ---
+
+## 十、MCP 外部工具（动态注册）
+
+除静态注解工具外，工具系统还支持 **MCP（Model Context Protocol）外部工具**——由 MCP Client 模块从外部 MCP Server 拉取、运行时动态注册进 ToolRegistry，与内置工具走同一套执行与权限管道。
+
+### 10.1 注册链路
+
+```
+McpClientManager（启动时自动连接 mcp_server 表 enabled=1 的配置）
+    ↓ listTools() 拉取外部工具列表
+McpToolAdapter（包装器：工具名前缀 + 描述【MCP-服务器名】标记）
+    ↓ toolRegistry.register(adapter)          ← 与内置工具同池
+ToolPermissionRegistry.register(fullName, 档位.toMetadata())   ← 权限联动（P7）
+```
+
+- **命名**：`工具前缀 + 原始名`（前缀取自 `mcp_server.tool_prefix`，缺省用服务器名小写），强制避免与内置工具冲突；同名冲突时跳过注册
+- **描述**：自动追加 `【MCP-服务器名】` 标记，前端可辨识
+- **注销**：断开连接时 `toolRegistry.removeTool()` + `permissionRegistry.unregister()` 同步清理
+
+### 10.2 权限档位（mcp_server.permission_level → ToolPermissionMetadata）
+
+| 档位 | 映射 | 效果 |
+|------|------|------|
+| `SAFE`（默认） | READ / affectsData=false / highRisk=false | 无授权要求 |
+| `DATA` | WRITE / affectsData=true / highRisk=false | manual 模式需前置授权 |
+| `HIGH_RISK` | EXECUTE / affectsData=true / pathSensitive=true / highRisk=true | 所有模式需授权 |
+
+动态注册与静态 `@ToolPermission` 注解扫描共存：动态注册覆盖同名 key，注销后回退默认元数据。
+
+### 10.3 配置方式
+
+外部服务器配置存于 `mcp_server` 表（name / type[http|stdio] / url 或 command / headers / tool_prefix / permission_level / enabled / auto_register），通过前端「MCP 服务器」管理页或 `/api/mcp/servers` API 维护。详细设计见 `docs/MCP_SYSTEM.md`。
 
 > 📌 **文档维护约定**: 新增工具后请更新本文档的「全部工具速查表」。

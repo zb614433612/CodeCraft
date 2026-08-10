@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -242,7 +243,8 @@ public class FileWriterTool implements Tool {
                 System.arraycopy(contentBytes, 0, full, bom.length, contentBytes.length);
                 Files.write(filePath, full, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
             } else {
-                Files.writeString(filePath, contentStr, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                // 保持原文件编码写回（GBK 等非 UTF-8 文件不被强制转码），新文件默认 UTF-8
+                writeFilePreservingEncoding(filePath, contentStr);
             }
 
             long fileSize = Files.size(filePath);
@@ -351,6 +353,39 @@ public class FileWriterTool implements Tool {
         }
     }
 
+    /**
+     * 写入文件并尽量保持原文件编码（仅覆盖已存在的文件时生效）
+     * <p>
+     * 读取时 FileEncodingDetector 支持 GBK 等编码检测，但原实现写入固定 UTF-8，
+     * 导致中文 Windows 上的 GBK 遗留文件被编辑后整体转码、出现乱码风险。
+     * 此方法先检测原文件编码再写回：GBK 写 GBK、UTF-8 写 UTF-8、UTF-8 带 BOM 保持 BOM；
+     * 新文件（不存在）默认 UTF-8。
+     */
+    private void writeFilePreservingEncoding(Path filePath, String content) throws IOException {
+        Charset charset = StandardCharsets.UTF_8;
+        boolean keepBom = false;
+        if (Files.exists(filePath)) {
+            charset = FileEncodingDetector.detectCharset(filePath);
+            // BOM 检测（仅 UTF-8 BOM 需要保持，其他编码无 BOM 概念）
+            try (InputStream is = Files.newInputStream(filePath)) {
+                byte[] header = new byte[3];
+                int read = is.read(header);
+                keepBom = read >= 3
+                        && (header[0] & 0xFF) == 0xEF && (header[1] & 0xFF) == 0xBB && (header[2] & 0xFF) == 0xBF;
+            }
+        }
+        if (keepBom) {
+            byte[] bom = {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+            byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
+            byte[] full = new byte[bom.length + contentBytes.length];
+            System.arraycopy(bom, 0, full, 0, bom.length);
+            System.arraycopy(contentBytes, 0, full, bom.length, contentBytes.length);
+            Files.write(filePath, full, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } else {
+            Files.writeString(filePath, content, charset, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        }
+    }
+
     private String doReplace(Path filePath, String originalContent, String normalizedContent,
                              String normalizedOld, String normalizedNew, int matchIndex) throws IOException {
         String beforeMatch = normalizedContent.substring(0, matchIndex);
@@ -363,7 +398,8 @@ public class FileWriterTool implements Tool {
                 + normalizedContent.substring(matchIndex + normalizedOld.length());
 
         String writeContent = convertLineEndings(resultContent, originalContent);
-        Files.writeString(filePath, writeContent, StandardCharsets.UTF_8);
+        // 保持原文件编码写回，避免 GBK 等非 UTF-8 文件被强制转码
+        writeFilePreservingEncoding(filePath, writeContent);
 
         PostEditPipeline.PostEditResult postResult = postEditPipeline.execute(filePath);
 
@@ -502,7 +538,8 @@ public class FileWriterTool implements Tool {
         try {
             String resultContent = normalizedContent.substring(0, origStart) + normalizedNew + normalizedContent.substring(origEnd);
             String writeContent = convertLineEndings(resultContent, originalContent);
-            Files.writeString(filePath, writeContent, StandardCharsets.UTF_8);
+            // 保持原文件编码写回，避免 GBK 等非 UTF-8 文件被强制转码
+            writeFilePreservingEncoding(filePath, writeContent);
             PostEditPipeline.PostEditResult postResult = postEditPipeline.execute(filePath);
 
             int oldLineCount = Math.max(1, countLines(actualOld));

@@ -5,6 +5,37 @@
 
 ---
 
+## [1.1.4] - 2026-07-08
+
+### 🛰️ MCP 双向功能（Model Context Protocol）
+
+- **MCP Server**：将内置工具暴露为 MCP 服务，供 Claude Desktop / Cursor 等外部客户端调用（Streamable HTTP 传输 + 可选 X-API-Key 认证 + 白名单控制）
+- **MCP Client**：连接外部 MCP Server，将外部工具动态注册到 ToolRegistry 供 LLM 调用（http/stdio 双传输、自定义请求头、连接失败不阻塞启动）
+- **MCP 服务器管理工具**：新增 `mcp_server_manager` 内置工具，可在聊天窗口直接创建/删除/连接/断开/刷新 MCP 服务器，无需打开配置页面
+- **动态权限档位**：MCP 外部工具按 SAFE/DATA/HIGH_RISK 三档映射权限元数据，断开连接时自动注销工具与权限
+- **前后端管理界面**：新增 MCP 服务器配置页（/mcp-config），支持 CRUD、连接状态三态展示、工具数统计
+
+### ✨ 提示词系统优化
+
+- **重构核心 Agent 系统提示词**（code_agent_prompt.txt）：工具清单修正为 20 个内置工具、补充 MCP 外部工具说明、新增工作目录/执行模式/上下文压缩/快照保护等系统行为说明
+- **重构评委提示词**（judge_prompt.txt）：迭代限制动态化（不再写死 50 次）、细化 extend/reject 评估维度、明确 JSON 输出格式与中文字段要求
+- **增强提示词优化器**（prompt_optimize.txt）：新增代码需求改写规则（保留代码标识符原样）、500 字长度控制、明确无需优化的场景
+
+### 🔧 修复与优化
+
+- **application.yml** 工具列表补充 `mcp_server_manager`，与代码实际注册的 20 个内置工具保持一致
+- **.gitignore** 排除文件化任务规划工作文件（task_plan.md / findings.md / progress.md / .planning/）
+
+### 🏷️ 版本号
+
+- 后端：`1.1.3` → `1.1.4`
+- 前端：`1.1.3` → `1.1.4`
+- Electron：`1.1.3` → `1.1.4`
+- MCP Server 握手版本：`1.1.3` → `1.1.4`
+- 打包产物：`code-craft-1.1.3.jar` → `code-craft-1.1.4.jar`
+
+---
+
 ## [1.1.3] - 2026-07-02
 
 ### 🌐 多 LLM Provider 支持系统

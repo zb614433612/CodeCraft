@@ -1,7 +1,7 @@
 ﻿import MarkdownIt from 'markdown-it'
 import markdownItHighlightjs from 'markdown-it-highlightjs'
-import markdownItKatex from 'markdown-it-katex'
-// import markdownItMermaid from 'markdown-it-mermaid'
+import texmath from 'markdown-it-texmath'
+import katex from 'katex'
 
 // 初始化Markdown解析器
 const md = new MarkdownIt({
@@ -18,8 +18,13 @@ md.use(markdownItHighlightjs, {
   code: true,
 })
 
-// 添加KaTeX数学公式支持
-md.use(markdownItKatex)
+// KaTeX 数学公式支持
+// 使用 markdown-it-texmath（维护中、无已知漏洞），替代已废弃且存在 XSS 漏洞（GHSA-5ff8-jcf9-fw62）的 markdown-it-katex
+md.use(texmath, {
+  engine: katex,
+  delimiters: 'dollars',
+  katexOptions: { throwOnError: false },
+})
 
 // 添加Mermaid图表支持 (暂时禁用)
 // md.use(markdownItMermaid, {

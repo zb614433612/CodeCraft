@@ -68,6 +68,9 @@ AI 修改文件前自动创建快照备份，支持按消息、按文件、按�
 ### 🧰 19 个工具生态（Tool Use / Function Calling）
 文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能管理等 7 大类 19 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
 
+### 🛰️ MCP 生态接入（Model Context Protocol）
+**双向 MCP 支持**：作为 Client 连接外部 MCP Server（GitHub、数据库、浏览器自动化等），外部工具动态注册进工具池供 AI 调用（支持 http/stdio 双传输、工具名前缀防冲突、权限档位映射）；作为 Server 对外暴露内置工具，供 Claude Desktop / Cursor 等客户端连接。前端提供「MCP 服务器」管理页（连接/断开/刷新/状态监控）。详见 `docs/MCP_SYSTEM.md`。
+
 ### 🧠 智能上下文压缩（Context Window Management）
 三级渐进式压缩策略（预警→压缩→丢弃），LLM 摘要 + 保护带机制 + 异步预压缩，确保超长对话不超 Token 限制、不崩溃。
 

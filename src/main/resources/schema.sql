@@ -299,6 +299,26 @@ VALUES (1, 'AI 助手', '默认的AI编程助手，拥有全部工具', '🤖', 
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
 (11, '智能体', '/agent-config', 'RobotOutlined', NULL, 5, 'SETTING');
 
+-- ============================================================
+-- MCP 外部服务器配置表（MCP Client 方向）
+-- ============================================================
+-- ★ 用于配置 CodeCraft 作为 MCP Client 连接的外部 MCP Server（http / stdio 两种传输）
+CREATE TABLE IF NOT EXISTS mcp_server (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL COMMENT '服务器名称（展示用），如 GitHub',
+  type VARCHAR(20) DEFAULT 'http' COMMENT '传输类型：http=Streamable HTTP, stdio=本地进程',
+  url VARCHAR(500) COMMENT 'http 类型：MCP 端点 URL，如 http://localhost:3001/mcp',
+  command VARCHAR(500) COMMENT 'stdio 类型：启动命令，如 npx -y @modelcontextprotocol/server-github',
+  headers TEXT COMMENT '自定义请求头 JSON，如 {"Authorization":"Bearer xxx"}',
+  tool_prefix VARCHAR(50) DEFAULT '' COMMENT '工具名前缀（防冲突），如 github_，空则用服务器名小写',
+  permission_level VARCHAR(20) DEFAULT 'SAFE' COMMENT '权限档位：SAFE=只读 / DATA=可写数据 / HIGH_RISK=高危（写文件、执行命令等）',
+  enabled TINYINT DEFAULT 0 COMMENT '是否启用：1=启用, 0=停用',
+  auto_register TINYINT DEFAULT 1 COMMENT '启用时是否自动注册其工具到 ToolRegistry：1=是, 0=否',
+  created_at DATETIME NOT NULL COMMENT '创建时间',
+  updated_at DATETIME NOT NULL COMMENT '更新时间',
+  INDEX idx_mcp_server_enabled (enabled)
+) DEFAULT CHARSET=utf8mb4 COMMENT='MCP 外部服务器配置表';
+
 -- 管理员分配智能体菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 11;
@@ -318,6 +338,22 @@ INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_t
 -- 管理员分配协作菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 13;
+
+-- 新增 SETTING 菜单：数据管理（重置所有数据）
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(14, '数据管理', '/system-setting', 'DeleteOutlined', NULL, 8, 'SETTING');
+
+-- 管理员分配数据管理菜单
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 14;
+
+-- 新增 SETTING 菜单：MCP 服务器（外部 MCP Server 配置与连接管理）
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(15, 'MCP 服务器', '/mcp-config', 'ApiOutlined', NULL, 9, 'SETTING');
+
+-- 管理员分配 MCP 服务器菜单
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 15;
 
 -- ============================================================
 -- Agent 后台任务表（用于追踪流式任务状态、支持页面刷新后重连）

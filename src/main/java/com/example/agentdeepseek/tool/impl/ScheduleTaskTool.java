@@ -204,7 +204,12 @@ public class ScheduleTaskTool implements Tool {
         task.setName(name);
         task.setInstruction(instruction);
         task.setCronExpression(cronExpression.isEmpty() ? null : cronExpression);
-        task.setExecuteTime(executeTime);
+        if (!cronExpression.isEmpty()) {
+            // cron 任务：计算首次执行时间，避免 execute_time 为 NULL 被扫描器立即执行一次
+            task.setExecuteTime(computeFirstExecutionTime(cronExpression));
+        } else {
+            task.setExecuteTime(executeTime);
+        }
         task.setStatus("ENABLED");
 
         // max_execute_count：不传默认100次上限，传0表示不限；硬封顶10000
@@ -354,7 +359,8 @@ public class ScheduleTaskTool implements Tool {
         }
         if (timeResult.cronExpression != null) {
             task.setCronExpression(timeResult.cronExpression);
-            task.setExecuteTime(null);
+            // 重新计算首次执行时间，避免 execute_time 为 NULL 被扫描器立即执行一次
+            task.setExecuteTime(computeFirstExecutionTime(timeResult.cronExpression));
         } else if (timeResult.executeTime != null) {
             task.setExecuteTime(timeResult.executeTime);
             task.setCronExpression(null);
@@ -555,5 +561,28 @@ public class ScheduleTaskTool implements Tool {
 
     private String buildError(String message) {
         return message;
+    }
+
+    /**
+     * 计算 Cron 任务的下次执行时间
+     * <p>
+     * schedule_task 表的到期扫描条件为 {@code execute_time IS NULL OR execute_time <= NOW()}，
+     * 若创建/更新 cron 任务时不设置 execute_time，任务会在下一次扫描（30 秒内）被立即执行一次，
+     * 与用户预期的"每天9点执行"不符。此方法在 create/update 时预计算首次执行时间。
+     * </p>
+     *
+     * @param cronExpression 6 位 Cron 表达式（秒 分 时 日 月 周）
+     * @return 下次执行时间；解析失败时兜底为 1 分钟后，避免任务永久不触发
+     */
+    private LocalDateTime computeFirstExecutionTime(String cronExpression) {
+        try {
+            org.springframework.scheduling.support.CronExpression cron =
+                    org.springframework.scheduling.support.CronExpression.parse(cronExpression);
+            java.time.ZonedDateTime next = cron.next(java.time.ZonedDateTime.now());
+            return next != null ? next.toLocalDateTime() : LocalDateTime.now().plusMinutes(1);
+        } catch (Exception e) {
+            log.warn("计算 cron 首次执行时间失败: {}, 兜底为1分钟后", cronExpression);
+            return LocalDateTime.now().plusMinutes(1);
+        }
     }
 }

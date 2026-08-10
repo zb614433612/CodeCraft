@@ -5,6 +5,37 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.4] - 2026-07-08
+
+### 🛰️ MCP Bidirectional Support (Model Context Protocol)
+
+- **MCP Server**: Exposes built-in tools as MCP services for external clients like Claude Desktop / Cursor (Streamable HTTP transport + optional X-API-Key auth + whitelist control)
+- **MCP Client**: Connects to external MCP Servers and dynamically registers their tools into ToolRegistry for LLM invocation (http/stdio dual transport, custom headers, non-blocking startup on failure)
+- **MCP Server Management Tool**: New built-in `mcp_server_manager` tool — create/delete/connect/disconnect/refresh MCP servers directly in the chat window, no config page needed
+- **Dynamic Permission Levels**: MCP external tools map to SAFE/DATA/HIGH_RISK permission metadata; tools & permissions auto-unregistered on disconnect
+- **Management UI**: New MCP server config page (/mcp-config) with CRUD, 3-state connection status, and tool count
+
+### ✨ Prompt System Optimization
+
+- **Refactored core agent system prompt** (code_agent_prompt.txt): tool list corrected to 20 built-in tools, added MCP external tool section, working directory / execution mode / context compaction / snapshot protection behaviors
+- **Refactored judge prompt** (judge_prompt.txt): dynamic iteration limit (no longer hard-coded 50), refined extend/reject criteria, explicit JSON output format with Chinese fields
+- **Enhanced prompt optimizer** (prompt_optimize.txt): code-request rewrite rules (keep identifiers as-is), 500-char length limit, explicit no-optimization scenarios
+
+### 🔧 Fixes & Optimizations
+
+- **application.yml** tool list now includes `mcp_server_manager`, aligned with the 20 registered built-in tools
+- **.gitignore** excludes planning-with-files workspace files (task_plan.md / findings.md / progress.md / .planning/)
+
+### 🏷️ Version Bump
+
+- Backend: `1.1.3` → `1.1.4`
+- Frontend: `1.1.3` → `1.1.4`
+- Electron: `1.1.3` → `1.1.4`
+- MCP Server handshake version: `1.1.3` → `1.1.4`
+- Build artifact: `code-craft-1.1.3.jar` → `code-craft-1.1.4.jar`
+
+---
+
 ## [1.1.3] - 2026-07-02
 
 ### 🌐 Multi LLM Provider Support System

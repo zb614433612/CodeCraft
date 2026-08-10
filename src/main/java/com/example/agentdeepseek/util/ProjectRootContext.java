@@ -25,6 +25,14 @@ public class ProjectRootContext {
     }
 
     /**
+     * 当前线程是否已显式设置过项目根目录
+     * 用于调用方在临时修改后恢复原值（避免误把 get() 的 user.dir 兜底值当"原值"写回）
+     */
+    public static boolean isSet() {
+        return currentProjectRoot.get() != null;
+    }
+
+    /**
      * 清除当前线程的项目根目录
      */
     public static void clear() {

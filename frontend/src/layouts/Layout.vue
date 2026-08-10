@@ -103,7 +103,9 @@ import {
   ClockCircleOutlined,
   FileTextOutlined,
   LinkOutlined,
-  ToolOutlined
+  ToolOutlined,
+  DeleteOutlined,
+  ApiOutlined
 } from '@ant-design/icons-vue'
 import type { MenuProps } from 'ant-design-vue'
 import appLogo from '@/assets/logo.svg'
@@ -152,7 +154,7 @@ const iconMap: Record<string, any> = {
   RobotOutlined, MessageOutlined, LineChartOutlined,
   CodeOutlined, SettingOutlined, UserOutlined,
   SafetyOutlined, FormOutlined, ClockCircleOutlined,
-  FileTextOutlined, LinkOutlined, ToolOutlined
+  FileTextOutlined, LinkOutlined, ToolOutlined, DeleteOutlined, ApiOutlined
 }
 
 // 加载左侧菜单和底部管理菜单

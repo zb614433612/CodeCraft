@@ -405,9 +405,9 @@ const userId = () => userStore.userInfo?.userId || userStore.userInfo?.id || 1
 
 // ===== 计算属性 =====
 
-// 已激活技能（置信度>=40%）
+// 已激活技能（置信度>=10%，与后端 SkillMapper 注入阈值 confidence >= 0.1 保持一致）
 const activeSkillCount = computed(() =>
-  skills.value.filter(s => (s.confidence ?? 0.5) >= 0.4).length
+  skills.value.filter(s => (s.confidence ?? 0.5) >= 0.1).length
 )
 
 // 前端搜索过滤

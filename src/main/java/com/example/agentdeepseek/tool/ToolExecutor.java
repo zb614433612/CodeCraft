@@ -256,7 +256,8 @@ public class ToolExecutor {
         for (ToolCallResult result : toolCallResults) {
             ObjectNode message = objectMapper.createObjectNode();
             message.put("role", "tool");
-            message.put("content", result.getContent());
+            // ★ 单条工具结果截断：防止文件读取等大结果直接撑爆上下文（模型 1M tokens 上限）
+            message.put("content", truncateToolContent(result.getContent(), result.getToolName()));
             // 防御：tool_call_id 为 null / 空 / "null" 时生成 fallback，
             // 避免 API 返回 400 "id is null"
             String tcId = result.getToolCallId();
@@ -269,6 +270,29 @@ public class ToolExecutor {
             messages.add(message);
         }
         return messages;
+    }
+
+    /** 单条工具结果发给 LLM 的最大字符数（超出部分首尾截断，防止撑爆上下文） */
+    private static final int MAX_TOOL_RESULT_CHARS = 30000;
+    /** 截断时保留的头部字符数 */
+    private static final int TOOL_RESULT_HEAD_KEEP = 12000;
+    /** 截断时保留的尾部字符数 */
+    private static final int TOOL_RESULT_TAIL_KEEP = 3000;
+
+    /**
+     * 单条工具结果首尾截断：保留头部（文件头/摘要）和尾部（错误信息/结尾），中间省略。
+     * 仅在 buildToolMessages 构建发给 LLM 的 tool 消息时生效，
+     * 不影响存库（saveToolMessage）与前端展示（createToolResultEvent 使用原始 content）。
+     */
+    private String truncateToolContent(String content, String toolName) {
+        if (content == null || content.length() <= MAX_TOOL_RESULT_CHARS) return content;
+        int omitted = content.length() - TOOL_RESULT_HEAD_KEEP - TOOL_RESULT_TAIL_KEEP;
+        log.warn("工具结果过大，截断后发送给 LLM: tool={}, 原始 {} 字符, 省略中间 {} 字符",
+                toolName, content.length(), omitted);
+        return content.substring(0, TOOL_RESULT_HEAD_KEEP)
+                + "\n\n...[工具 " + toolName + " 结果过长，已截断：原始 " + content.length()
+                + " 字符，中间省略 " + omitted + " 字符]...\n\n"
+                + content.substring(content.length() - TOOL_RESULT_TAIL_KEEP);
     }
 
     /**

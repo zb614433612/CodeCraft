@@ -126,6 +126,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private static final int SESSION_NAME_TRUNCATE_LENGTH = 6;
     private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
 
+    /**
+     * 事件重放缓冲上限：SSE 断线重连时最多能重放的历史事件数。
+     * 权衡说明：
+     * - replay 缓冲满时 tryEmitNext 返回非 OK 并静默丢弃最旧事件，不会抛异常或阻塞；
+     * - 100000 条事件（含工具调用结果 JSON，单条约 0.1KB~几十 KB）可占用数百 MB 内存，
+     *   多会话并发任务时内存压力极大（任务运行期间一直占用，任务结束才随 unregister 释放）；
+     * - 10000 条约覆盖 3~5 轮工具循环的事件量（单轮流式输出约几百条 chunk 事件），
+     *   页面刷新重连一般只丢最早的过程事件，最终结果由数据库历史消息兜底，不受影响。
+     */
+    private static final int MAX_EVENT_REPLAY_BUFFER = 10000;
+
     // ===== 后台任务相关 =====
     private final ExecutorService taskExecutor = new ThreadPoolExecutor(
             2,                              // corePoolSize — 核心常驻线程数
@@ -434,7 +445,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return 会话上下文
      */
     private ConversationContext prepareConversationContext(ChatRequest request, boolean stream) {
-        String userMessage = request.getMessage();
+        // 记录调用前的项目根目录，方法结束时（含异常路径）恢复原值，
+        // 避免请求线程（Tomcat 线程池复用）上残留 ThreadLocal 值导致后续请求读到错误的 workDir
+        String prevProjectRoot = ProjectRootContext.get();
+        boolean hadPrevProjectRoot = ProjectRootContext.isSet();
+        try {
+            String userMessage = request.getMessage();
         Long sessionId = request.getSessionId();
         Long userId = request.getUserId();
 
@@ -906,7 +922,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 stream ? "流式" : "非流式", llmClient.getProviderCode(),
                 conversationId, effectiveModel, userMessage.length(), userId);
 
-        return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId, agentType, userId, skillMatchEvent);
+            return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId, agentType, userId, skillMatchEvent);
+        } finally {
+            // 恢复调用前的项目根目录（无论正常返回还是中间抛异常，都清理 ThreadLocal，避免线程池复用残留）
+            if (hadPrevProjectRoot) {
+                ProjectRootContext.set(prevProjectRoot);
+            } else {
+                ProjectRootContext.clear();
+            }
+        }
     }
 
     @Override
@@ -1030,7 +1054,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         // 创建事件 Sink（replay 模式，新订阅者可获取历史事件，确保页面刷新重连后不丢事件）
-        Sinks.Many<String> sink = Sinks.unsafe().many().replay().limit(100000);
+        Sinks.Many<String> sink = Sinks.unsafe().many().replay().limit(MAX_EVENT_REPLAY_BUFFER);
         agentEventBus.register(conversationId, sink);
 
         // 在后台线程订阅工具循环 Flux
@@ -1388,6 +1412,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
             log.debug("半流式工具调用循环迭代 {}，消息数量: {}", iteration + 1, messages.size());
 
+            // ★ 工具循环上下文预算守卫：防止多轮工具调用累积导致上下文超限（模型 1M tokens 上限，API 400）
+            //   每次迭代请求前检查，超限则执行工具循环专用裁剪（旧 tool 消息摘要化 + 超大消息首尾截断）。
+            //   阈值取 maxContextTokens 的 85%，预留输出空间与 token 估算偏差。
+            int toolLoopGuardLimit = (int) (deepSeekConfig.getMaxContextTokens() * 0.85);
+            int loopEstimatedTokens = TokenEstimator.estimateMessages(messages);
+            if (loopEstimatedTokens > toolLoopGuardLimit) {
+                log.warn("工具循环上下文超限预警：估算 {} tokens > 守卫上限 {}，执行裁剪",
+                        loopEstimatedTokens, toolLoopGuardLimit);
+                contextBuilder.trimToolLoopToBudget(messages, toolLoopGuardLimit);
+            }
+
             // 构建当前迭代的API请求
             Map<String, Object> apiRequest = new HashMap<>(initialApiRequest);
             apiRequest.put("messages", messages);
@@ -1688,7 +1723,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         AtomicBoolean shouldContinue = new AtomicBoolean(true);
         // 工具调用累积状态
         AtomicBoolean accumulatingToolCalls = new AtomicBoolean(false);
-        Map<Integer, ObjectNode> accumulatedToolCalls = new HashMap<>();
+        // 使用 ConcurrentHashMap：flatMap 默认并发处理多个 chunk，普通 HashMap 并发写有死循环风险
+        Map<Integer, ObjectNode> accumulatedToolCalls = new ConcurrentHashMap<>();
 
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);
@@ -1914,6 +1950,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
                                         return Flux.fromIterable(approvalEvents)
                                                 .concatWith(Mono.fromFuture(pq.getFuture())
+                                                        // ★ timeout 只限制"等待用户授权"阶段：
+                                                        // 放在 flatMapMany 之前，避免把同步工具执行（command 可能耗时 5-10 分钟）
+                                                        // 和后续迭代时间也计入 5 分钟超时，导致用户已授权仍误报"等待用户授权超时"
+                                                        .timeout(java.time.Duration.ofMinutes(5))
                                                         .flatMapMany(answer -> {
                                                             pendingQuestionStore.remove(uuid);
                                                             updatePendingQuestion(conversationId, null, null);
@@ -2071,7 +2111,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                             conversationId, storageConversationId, apiRequest,
                                                                             messages, iteration + 1, maxIterations));
                                                         })
-                                                        .timeout(java.time.Duration.ofMinutes(5))
                                                         .onErrorResume(e -> {
                                                             pendingQuestionStore.remove(uuid);
                                                             updatePendingQuestion(conversationId, null, null);
@@ -2374,6 +2413,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 返回 Flux：发出问题事件 → 等待回答 → 用答案替换工具结果 → 继续工具循环
         return Flux.just(questionEvent)
                 .concatWith(Mono.fromFuture(pq.getFuture())
+                        // ★ timeout 只限制"等待用户回答"阶段：放在 flatMapMany 之前，
+                        // 避免把回答后继续工具循环（LLM 调用 + 工具执行）的时间计入 5 分钟超时
+                        .timeout(java.time.Duration.ofMinutes(5))
                         .flatMapMany(answer -> {
                             log.info("收到用户回答: uuid={}, answer={}", uuid, answer);
 
@@ -2425,7 +2467,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             conversationId, storageConversationId, apiRequest,
                                             messages, iteration + 1, maxIterations));
                         })
-                        .timeout(java.time.Duration.ofMinutes(5))
                         .onErrorResume(e -> {
                             pendingQuestionStore.remove(uuid);
                             updatePendingQuestion(conversationId, null, null);

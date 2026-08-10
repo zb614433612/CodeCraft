@@ -132,132 +132,32 @@ function findJava() {
 
 /**
  * 获取后端 JAR 文件路径
+ * 开发环境：动态扫描 target 目录取最新构建的 jar，避免 artifactId/版本号写死导致漂移
  */
 function getJarPath() {
   if (app.isPackaged) {
     // 打包后 extraResources 位于 resources/ 目录下
     return path.join(process.resourcesPath, 'backend', 'codecraft.jar')
   }
-  // 开发环境
-  return path.join(__dirname, '..', 'target', 'codecraft-1.0.1.jar')
-}
-
-/**
- * 获取当前 exe 文件的修改时间戳（毫秒）
- * 用于检测是否发生了覆盖安装（exe 被重新替换）
- */
-function getExeMtime() {
+  // 开发环境：扫描 target 目录，取修改时间最新的构建产物
+  const targetDir = path.join(__dirname, '..', 'target')
   try {
-    const exePath = app.getPath('exe')
-    const stat = fs.statSync(exePath)
-    return stat.mtimeMs
-  } catch (e) {
-    console.warn('获取 exe 文件信息失败:', e.message)
-    return 0
-  }
-}
-
-/**
- * 读取上次记录的 exe 修改时间戳
- */
-function getLastExeMtime(dataDir) {
-  const flagFile = path.join(dataDir, '.exe_mtime')
-  try {
-    if (fs.existsSync(flagFile)) {
-      return parseFloat(fs.readFileSync(flagFile, 'utf-8')) || 0
-    }
-  } catch (e) {
-    console.warn('读取 exe 时间戳记录失败:', e.message)
-  }
-  return 0
-}
-
-/**
- * 记录当前 exe 修改时间戳
- */
-function saveExeMtime(dataDir, mtime) {
-  const flagFile = path.join(dataDir, '.exe_mtime')
-  try {
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true })
-    }
-    fs.writeFileSync(flagFile, String(mtime), 'utf-8')
-  } catch (e) {
-    console.warn('保存 exe 时间戳记录失败:', e.message)
-  }
-}
-
-/**
- * 清理所有旧数据：H2 数据库文件 + 浏览器 localStorage + Session Storage
- * 仅在检测到覆盖安装后执行，确保重装后无残留
- */
-function cleanAllData(dataDir) {
-  console.log('检测到覆盖安装，正在清理旧数据...')
-
-  // 1. 清理 H2 数据库文件（两处：jar包目录 + userData旧版兼容）
-  const jarDir = path.dirname(getJarPath())
-  const dbDirs = [path.join(jarDir, 'data'), path.join(dataDir, 'data')]
-  const dbFileNames = ['codecraft.mv.db', 'codecraft.trace.db']
-  for (const dbDir of dbDirs) {
-    for (const fileName of dbFileNames) {
-      const file = path.join(dbDir, fileName)
-      try {
-        if (fs.existsSync(file)) {
-          fs.unlinkSync(file)
-          console.log('已删除数据库文件:', file)
-        }
-      } catch (e) {
-        console.error('删除数据库文件失败:', e.message)
+    if (fs.existsSync(targetDir)) {
+      const jars = fs.readdirSync(targetDir)
+        .filter(f => f.endsWith('.jar') && !f.endsWith('.original') && !f.endsWith('-sources.jar') && !f.endsWith('-javadoc.jar'))
+        .map(name => ({ name, mtime: fs.statSync(path.join(targetDir, name)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+      if (jars.length > 0) {
+        const jarPath = path.join(targetDir, jars[0].name)
+        console.log('使用后端 JAR:', jarPath)
+        return jarPath
       }
     }
-  }
-
-  // 2. 清理浏览器 localStorage（持久化设置和登录 token）
-  const localStorageDir = path.join(dataDir, 'Local Storage')
-  try {
-    if (fs.existsSync(localStorageDir)) {
-      for (const file of fs.readdirSync(localStorageDir)) {
-        fs.unlinkSync(path.join(localStorageDir, file))
-      }
-      console.log('已清理 localStorage')
-    }
   } catch (e) {
-    console.error('清理 localStorage 失败:', e.message)
+    console.warn('扫描 target 目录失败:', e.message)
   }
-
-  // 3. 清理 Session Storage
-  const sessionDir = path.join(dataDir, 'Session Storage')
-  try {
-    if (fs.existsSync(sessionDir)) {
-      for (const file of fs.readdirSync(sessionDir)) {
-        fs.unlinkSync(path.join(sessionDir, file))
-      }
-      console.log('已清理 Session Storage')
-    }
-  } catch (e) {
-    console.error('清理 Session Storage 失败:', e.message)
-  }
-
-  console.log('旧数据清理完成')
-}
-
-/**
- * 检查 exe 文件是否被替换（覆盖安装），是则清理旧数据
- * 对比逻辑：首次安装无记录 → 清理；exe 修改时间变化 → 清理；相同 → 正常启动跳过
- */
-function checkDataCleanup(dataDir) {
-  if (!app.isPackaged) {
-    return // 开发模式不触发清理
-  }
-  const currentMtime = getExeMtime()
-  if (currentMtime === 0) {
-    return // 无法获取 exe 信息，跳过
-  }
-  const lastMtime = getLastExeMtime(dataDir)
-  if (lastMtime === 0 || currentMtime !== lastMtime) {
-    cleanAllData(dataDir)
-    saveExeMtime(dataDir, currentMtime)
-  }
+  // 未找到构建产物：返回 null，由 startBackend 提示用户先构建（不写死版本号，避免升级后误用旧路径）
+  return null
 }
 
 /**
@@ -265,6 +165,14 @@ function checkDataCleanup(dataDir) {
  */
 function startBackend() {
   const jarPath = getJarPath()
+  if (!jarPath) {
+    const msg = '未找到后端 JAR 文件。\n\n请先在项目根目录执行 "mvn package" 构建后端，或确认 target 目录存在构建产物。'
+    console.error(msg)
+    if (app.isPackaged) {
+      dialog.showErrorBox('后端启动失败', msg)
+    }
+    return
+  }
   const javaCmd = findJava()
 
   console.log(`启动后端服务: ${jarPath}`)
@@ -480,10 +388,6 @@ async function start() {
 
   // 非开发模式：自动启动后端
   if (!DEV_MODE) {
-    // 在启动后端之前，先检测 exe 文件是否被替换（覆盖安装），是则清理旧数据
-    const dataDir = app.getPath('userData')
-    checkDataCleanup(dataDir)
-
     startBackend()
     try {
       await waitForBackend()

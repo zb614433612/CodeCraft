@@ -1,13 +1,19 @@
-declare module 'markdown-it-katex' {
-  import { PluginWithOptions } from 'markdown-it'
-  const markdownItKatex: PluginWithOptions
-  export default markdownItKatex
-}
+declare module 'markdown-it-texmath' {
+  import { MarkdownIt } from 'markdown-it'
+  import katex from 'katex'
 
-declare module 'markdown-it-mermaid' {
-  import { PluginWithOptions } from 'markdown-it'
-  const markdownItMermaid: PluginWithOptions
-  export default markdownItMermaid
+  interface TexMathOptions {
+    engine: typeof katex
+    delimiters?: string | string[]
+    katexOptions?: Record<string, unknown>
+    blockOpen?: string
+    blockClose?: string
+    inlineOpen?: string
+    inlineClose?: string
+  }
+
+  const texmath: (md: MarkdownIt, options: TexMathOptions) => void
+  export default texmath
 }
 
 declare module 'markdown-it-container' {

@@ -87,4 +87,35 @@ public class ToolPermissionRegistry implements InitializingBean {
     public boolean requiresApproval(String toolName, String executionMode) {
         return getMetadata(toolName).requiresApproval(executionMode);
     }
+
+    // ==================== 动态注册 API（MCP 外部工具等运行时创建的工具） ====================
+
+    /**
+     * 动态注册（或覆盖）单个工具的权限元数据。
+     * 用于运行时创建的工具（如 MCP 外部工具适配器），
+     * 与静态注解扫描的结果共存，动态注册优先（同名覆盖）。
+     */
+    public void register(String toolName, ToolPermissionMetadata metadata) {
+        if (toolName == null || toolName.isBlank()) {
+            return;
+        }
+        ToolPermissionMetadata safe = metadata == null ? ToolPermissionMetadata.DEFAULT : metadata;
+        metadataMap.put(toolName, safe);
+        log.info("权限元数据动态注册: {}（category={}, affectsData={}, highRisk={}）",
+                toolName, safe.getCategory(), safe.affectsData(), safe.highRisk());
+    }
+
+    /**
+     * 注销单个工具的权限元数据（工具从注册中心移除时调用）。
+     * 注销后查询该工具将回退为默认元数据（DEFAULT，无授权要求）。
+     */
+    public void unregister(String toolName) {
+        if (toolName == null) {
+            return;
+        }
+        ToolPermissionMetadata removed = metadataMap.remove(toolName);
+        if (removed != null) {
+            log.info("权限元数据动态注销: {}", toolName);
+        }
+    }
 }

@@ -206,6 +206,7 @@ deepseek:
       - "query_tool_history"
       - "chat_attachment"
       - "schedule_task"
+      - "mcp_server_manager"
 
 # ==================== P2P 远程连接配置 ====================
 p2p:
@@ -241,3 +242,17 @@ chat-attachment:
     pdf-max-pages: 50                           # PDF 最大解析页数
     excel-max-rows: 500                         # Excel 最大行数
     content-max-length: 30000                   # 单文件最大输出字符数
+
+# ==================== MCP Server 对外暴露配置 ====================
+codecraft:
+  mcp:
+    server:
+      # 是否启用 MCP Server（对外暴露 CodeCraft 工具，供 Claude Desktop / Cursor 等客户端连接）
+      enabled: false
+      # MCP 端点路径（Streamable HTTP，复用内嵌 Tomcat）
+      path: /mcp
+      # 认证 Token：空=不认证；非空=客户端需带 X-API-Key 请求头
+      auth-token: ""
+      # 工具白名单：空=默认只读工具集；"*"=暴露全部工具（危险，谨慎使用）
+      # 默认只读集：file_explorer / git_query / web_search / web_fetch / check_network / project_info
+      exposed-tools: []

@@ -66,3 +66,12 @@ application-local.yml
 
 ### User desktop temp files ###
 ~/
+
+### Planning files (task planning workspace, exclude from git) ###
+task_plan.md
+findings.md
+progress.md
+.planning/
+
+### Build logs ###
+electron/build-log.txt

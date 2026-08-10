@@ -72,9 +72,21 @@ const router = createRouter({
           component: () => import('@/views/AgentConfigView.vue')
         },
         {
+          path: 'system-setting',
+          name: 'system-setting',
+          component: () => import('@/views/SystemSettingView.vue'),
+          meta: { requiresAdmin: true }
+        },
+        {
           path: 'p2p',
           name: 'p2p',
           component: () => import('@/components/P2pPanel.vue')
+        },
+        {
+          path: 'mcp-config',
+          name: 'mcp-config',
+          component: () => import('@/views/McpConfigView.vue'),
+          meta: { requiresAdmin: true }
         },
 
       ]

@@ -435,6 +435,126 @@ public class ContextBuilder {
                 trimmed, messages.size(), estimatedTokens);
     }
 
+    /** 单条工具结果保留给 LLM 的最大字符数（超出部分首尾截断） */
+    private static final int MAX_TOOL_CONTENT_CHARS = 30000;
+    /** 工具结果截断时保留的头部字符数 */
+    private static final int TOOL_HEAD_KEEP_CHARS = 12000;
+    /** 工具结果截断时保留的尾部字符数 */
+    private static final int TOOL_TAIL_KEEP_CHARS = 3000;
+
+    /**
+     * 工具循环专用上下文裁剪（兜底策略，防工具循环内消息无限膨胀导致 API 400 超限）
+     * <p>
+     * 与 {@link #trimToTokenBudget} 的区别：
+     * - trimToTokenBudget 基于 user 轮次保护带，工具循环内通常只有 1 条 user 消息，
+     *   findProtectStart 会返回 1 导致裁剪循环不执行，保护带逻辑失效；
+     * - 本方法专门处理工具循环场景：
+     *   1. 将最早的历史 tool 消息 content 替换为"[工具 xxx 调用成功/失败]"摘要
+     *      （tool_call_id 必须保留，API 格式要求，只替换 content）；
+     *   2. 摘要化后仍超限时，对剩余超大 tool 消息做首尾截断（保留头尾，中间省略）。
+     * </p>
+     *
+     * @param messages 消息列表（会直接修改）
+     * @param maxTokens token 上限
+     */
+    public void trimToolLoopToBudget(List<Map<String, Object>> messages, int maxTokens) {
+        if (messages == null || messages.isEmpty()) return;
+
+        int estimated = TokenEstimator.estimateMessages(messages);
+        if (estimated <= maxTokens) return;
+        log.warn("工具循环上下文裁剪：估算 {} tokens (上限 {}), 共 {} 条消息", estimated, maxTokens, messages.size());
+
+        // 1. 构建 tool_call_id → tool_name 映射（用于摘要文案）
+        Map<String, String> tcIdToName = new HashMap<>();
+        for (Map<String, Object> msg : messages) {
+            Object tcObj = msg.get("tool_calls");
+            if (tcObj instanceof JsonNode tcNode && tcNode.isArray()) {
+                for (JsonNode tc : tcNode) {
+                    String id = tc.path("id").asText();
+                    String name = tc.path("function").path("name").asText();
+                    if (!id.isEmpty() && !"null".equals(id) && !name.isEmpty() && !"null".equals(name)) {
+                        tcIdToName.put(id, name);
+                    }
+                }
+            }
+        }
+
+        // 2. 确定摘要区：保留最近 1 轮完整工具调用（最后一条 assistant(tool_calls) 及其后消息），
+        //    倒数第二条 assistant(tool_calls) 之前的 tool 消息全部摘要化
+        int summaryEnd = 0; // [0, summaryEnd) 区间内的 tool 消息摘要化
+        int assistantWithToolCallsSeen = 0;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Map<String, Object> msg = messages.get(i);
+            if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
+                assistantWithToolCallsSeen++;
+                if (assistantWithToolCallsSeen >= 2) {
+                    summaryEnd = i;
+                    break;
+                }
+            }
+        }
+
+        // 3. 摘要化 [0, summaryEnd) 内的 tool 消息（保留 tool_call_id，替换 content）
+        int compacted = 0;
+        for (int i = 0; i < summaryEnd; i++) {
+            Map<String, Object> msg = messages.get(i);
+            if (!"tool".equals(msg.get("role"))) continue;
+            String content = (String) msg.get("content");
+            if (content == null || content.isEmpty()) continue;
+            String toolCallId = (String) msg.get("tool_call_id");
+            String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
+
+            String prefix = content.length() > 200 ? content.substring(0, 200) : content;
+            boolean isError = prefix.startsWith("ERROR:") || prefix.startsWith("ERROR：")
+                    || prefix.startsWith("Error:") || prefix.startsWith("Error：")
+                    || prefix.startsWith("Exception:") || prefix.startsWith("Exception：")
+                    || prefix.contains("【缺少参数】") || prefix.contains("【未找到】")
+                    || prefix.contains("【查询失败】") || prefix.contains("【无匹配")
+                    || prefix.contains("【无数据】") || prefix.contains("Permission denied")
+                    || prefix.contains("Access denied") || prefix.contains("命令执行失败")
+                    || prefix.contains("操作失败：");
+
+            if (isError) {
+                String shortContent = content.length() > 150 ? content.substring(0, 150) + "..." : content;
+                msg.put("content", "[工具 " + toolName + " 调用失败(上下文裁剪): " + shortContent + "]");
+            } else {
+                msg.put("content", "[工具 " + toolName + " 调用成功 - 上下文超限已裁剪，完整结果请用 query_tool_history 查询]");
+            }
+            compacted++;
+        }
+
+        // 4. 仍超限：对剩余超大 tool 消息按从新到旧顺序做首尾截断（保留头尾，省略中间）
+        estimated = TokenEstimator.estimateMessages(messages);
+        int truncated = 0;
+        if (estimated > maxTokens) {
+            for (int i = messages.size() - 1; i >= 0 && estimated > maxTokens; i--) {
+                Map<String, Object> msg = messages.get(i);
+                if (!"tool".equals(msg.get("role"))) continue;
+                String content = (String) msg.get("content");
+                if (content == null || content.length() <= MAX_TOOL_CONTENT_CHARS) continue;
+                String toolCallId = (String) msg.get("tool_call_id");
+                String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
+                msg.put("content", truncatePreservingHeadTail(content, toolName));
+                truncated++;
+                estimated = TokenEstimator.estimateMessages(messages);
+            }
+        }
+
+        log.info("工具循环裁剪完成：摘要化 {} 条, 截断 {} 条, 剩余估算 {} tokens", compacted, truncated, estimated);
+    }
+
+    /**
+     * 工具结果首尾截断：保留头部（文件头/摘要）和尾部（错误信息/结尾），中间省略
+     */
+    private String truncatePreservingHeadTail(String content, String toolName) {
+        if (content == null || content.length() <= MAX_TOOL_CONTENT_CHARS) return content;
+        int omitted = content.length() - TOOL_HEAD_KEEP_CHARS - TOOL_TAIL_KEEP_CHARS;
+        return content.substring(0, TOOL_HEAD_KEEP_CHARS)
+                + "\n\n...[工具 " + toolName + " 结果过长，已截断：原始 " + content.length()
+                + " 字符，中间省略 " + omitted + " 字符]...\n\n"
+                + content.substring(content.length() - TOOL_TAIL_KEEP_CHARS);
+    }
+
     /**
      * 查找保护带的起始位置
      * 从后往前找，找到第 protectRounds 个 user 消息的索引
