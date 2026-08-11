@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v1.1.4 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
+> Version: v1.1.5 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
 > This document dissects the 129KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -60,6 +60,10 @@ DeepSeekServiceImpl (21 dependencies)
 │   ├─ SkillService                    → Skill CRUD
 │   ├─ SkillMatcher                    → Skill matching
 │   └─ DeepSeekAnalyzer                → AI analyzer
+├─ Growth System (★new in v1.1.5)
+│   ├─ LessonService                   → CRUD + on-demand retrieval + state machine
+│   ├─ LessonRecorder                  → Auto-capture drafts on failure (source=auto)
+│   └─ LessonReviewService             → Turn-level async review (C2)
 ├─ Permission/Pending
 │   ├─ PendingQuestionStore            → Pending approval storage
 │   ├─ ExecutionTokenManager           → Token management
@@ -78,6 +82,7 @@ Entry: streamChat(ChatRequest)
 │   ├─ Get/Create Conversation
 │   ├─ Get AgentConfig (tool list, model, thinking mode, etc.)
 │   ├─ Load skills → SkillMatcher.match()
+│   │   ├─ Load lessons → LessonService.retrieveRelevant (passive injection, dedup per conversation)
 │   ├─ Build API request body (messages + tool definitions + params)
 │   └─ Return ConversationContext (apiRequest, toolNames, skillMatchEvent)
 ├─ ② toolExecutor.buildToolDefinitions(toolNames)
@@ -124,6 +129,7 @@ Entry: streamChat(ChatRequest)
 │       │       │   │   ├─ Check hasRepeatedCalls() → 4 consecutive → terminate
 │       │       │   │   ├─ toolExecutor.executeToolCalls()
 │       │       │   │   │   └─ Per tool → snapshot → permission pipeline → execute → diff
+│       │       │   │   │   │   │   │   │   │   │       └─ Tool throws → LessonRecorder auto-captures draft (symptom only, source=auto)
 │       │       │   │   ├─ Append tool results to message list
 │       │       │   │   └─ Recurse handleToolCallIteration(iteration+1)
 │       │       │   │
@@ -133,6 +139,7 @@ Entry: streamChat(ChatRequest)
 │       │           ├─ WebClientResponseException → error event
 │       │           └─ Generic Exception → error event
 │       │
+│       │   ├─ After tool loop → lessonReviewService.reviewAsync (async review, distill root cause/solution, C2)
 │       └─ concatWith(Flux.defer(sub-agent auto-collect))
 │           ├─ agentForkManager.getPendingAgentCount() > 0 ?
 │           ├─ agentForkManager.collectPendingAgents(timeout=300)

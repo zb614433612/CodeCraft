@@ -53,6 +53,9 @@ AI 修改文件前自动创建快照备份，支持按消息、按文件、按�
 ### 🧩 智能技能系统（Agent Skills / Plugin System）
 将常用操作流程封装为可复用技能（名称 + 触发词 + 执行步骤），AI 通过 BM25 + 触发词双路匹配自动调用，贝叶斯置信度动态调整确保越用越精准。技能信息采用「动态注入」不占上下文窗口，长对话开销恒定——类似 Claude Code 的 custom commands / Codex 的 skills 机制。
 
+### 📚 成长体系（踩坑经验库 / Lesson Knowledge Base）
+AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按需检索、零上下文开销）：工具失败自动捕获草稿、对话级异步复盘提炼解法；再次遇到相同错误时自动向 AI 注入「解法提示 + 补全引导」；**反馈验证闭环**驱动经验转正/隐藏（有效复用 2 次转正、连续失败 5 次隐藏），越用越聪明。前端提供「踩坑经验」管理页（/lesson-manage）与成长看板统计。
+
 ### ⏰ 定时任务（Scheduled / Cron Job）
 支持一次性任务和 Cron 周期任务，可绑定指定 Agent 自动执行，每次执行生成独立会话追溯。实现 Agentic Workflow（智能工作流）自动化。
 
@@ -65,8 +68,8 @@ AI 修改文件前自动创建快照备份，支持按消息、按文件、按�
 ### 👥 用户管理与权限（Multi-User / RBAC）
 完整的账户体系：注册登录、Token 鉴权（JWT）、角色权限控制（RBAC）、菜单可见性管理、初始管理员自动创建。
 
-### 🧰 19 个工具生态（Tool Use / Function Calling）
-文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能管理等 7 大类 19 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
+### 🧰 21 个工具生态（Tool Use / Function Calling）
+文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理等 8 大类 21 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
 
 ### 🛰️ MCP 生态接入（Model Context Protocol）
 **双向 MCP 支持**：作为 Client 连接外部 MCP Server（GitHub、数据库、浏览器自动化等），外部工具动态注册进工具池供 AI 调用（支持 http/stdio 双传输、工具名前缀防冲突、权限档位映射）；作为 Server 对外暴露内置工具，供 Claude Desktop / Cursor 等客户端连接。前端提供「MCP 服务器」管理页（连接/断开/刷新/状态监控）。详见 `docs/MCP_SYSTEM.md`。
@@ -168,8 +171,9 @@ codecraft/
 │   │       ├── model/            # DTO、实体（含 ProviderConfig）、VO
 │   │       ├── scheduler/        # 定时任务
 │   │       ├── service/          # 业务逻辑层
-│   │       │   └── llm/          # LLM 客户端层（LLMClient 接口 + 6 个 Provider 实现）
-│   │       ├── tool/             # AI Agent 工具（19 个工具）
+│   │       │   ├── llm/          # LLM 客户端层（LLMClient 接口 + 6 个 Provider 实现）
+│   │       │   └── lesson/       # 成长体系（经验库：检索/记录/复盘/失败归一化）
+│   │       ├── tool/             # AI Agent 工具（21 个工具）
 │   │       │   ├── impl/         # 工具实现
 │   │       │   ├── permission/   # 工具权限控制
 │   │       │   └── postedit/     # 工具后处理（格式化、检查）

@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.1.4 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.5 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -50,7 +50,6 @@
 │ │ └─────────────────────┬──────────────────────┘                      │ │
 │ └───────────────────────┼─────────────────────────────────────────────┘ │
 └─────────────────────────┼──────────────────────────────────────────────┘
-                          │
                     LLM Provider API (DeepSeek/OpenAI/Anthropic/Ollama/MiMo)
 ```
 
@@ -227,6 +226,11 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── CharacterPromptUtil    # 角色设定提示词工具
 │   │   ├── AttachmentReaderService # 附件文件读取服务
 │   │   └── ... (User/Config/Menu/Role 等 CRUD 服务)
+│   ├── lesson/                 # ★成长体系：踩坑经验库（按项目隔离，零上下文开销）
+│   │   ├── LessonService       # 经验 CRUD + 按需检索 + 状态机（38.8KB）
+│   │   ├── LessonRecorder      # 失败自动捕获草稿 / LLM 主动记录
+│   │   ├── LessonReviewService # 对话级异步复盘（提炼根因/解法，C2）
+│   │   └── FailureNormalizer   # 错误码归一化 + 指纹去重（error_signature）
 │   └── SkillService / UserService / ConfigService / ...
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
@@ -235,19 +239,21 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolInitializer        # 启动时自动初始化所有工具
 │   ├── ExecutionTokenManager  # 工具执行 Token 管理
 │   ├── PermissionContext      # 会话级权限上下文
-│   ├── impl/                  # 19 个工具实现
-│   │   ├── 文件操作: ReadFileTool, WriteFileTool, EditFileTool,
-│   │   │            DeleteFileTool, GlobFilesTool, GrepSearchTool
-│   │   ├── 命令执行: RunCommandTool, RunServerTool, ServiceControlTool
+│   ├── impl/                  # 21 个工具实现（新命名，一工具多 action）
+│   │   ├── 文件操作: FileExplorerTool (read/glob/grep/tree),
+│   │   │            FileWriterTool (write/edit/delete)
+│   │   ├── 命令执行: CommandTool (exec/start/list/logs/stop)
 │   │   ├── 网络请求: SearchTool, WebFetchTool, HttpRequestTool, NetworkCheckTool
 │   │   ├── 数据库:   ExecuteSqlTool
-│   │   ├── Git 操作: GitStatusTool, GitDiffTool, GitLogTool,
-│   │   │            GitAddTool, GitCommitTool, GitPushTool, GitBranchTool
-│   │   ├── Agent协作: ForkAgentTool, CollectAgentTool, InspectAgentTool
-│   │   ├── 技能管理: ManageSkillTool, ReportSkillResultTool
-│   │   ├── 项目管理: ProjectInfoTool, ReadProjectTreeTool
+│   │   ├── Git 操作: GitQueryTool, GitSubmitTool, GitBranchTool
+│   │   ├── Agent协作: AgentTool (fork/collect/batch_collect/inspect)
+│   │   ├── 技能管理: SkillTool (create/update/delete/list/report)
+│   │   ├── 经验库:   LessonTool (search/record/complete/feedback/list) ★成长体系
+│   │   ├── 项目管理: ProjectInfoTool
 │   │   ├── 任务管理: TaskManagerTool
-│   │   ├── 交互工具: AskClarificationTool
+│   │   ├── 交互工具: AskClarificationTool, ChatAttachmentTool, QueryToolHistoryTool
+│   │   ├── 定时任务: ScheduleTaskTool
+│   │   ├── MCP 管理: McpServerManagerTool
 │   │   └── 分析工具: DeepSeekAnalyzer
 │   ├── permission/            # 权限控制
 │   │   ├── ToolPermission / ToolPermissionMetadata / ToolPermissionRegistry
@@ -356,6 +362,18 @@ src/main/java/com/example/agentdeepseek/
                           │ status (ENABLED/...) │
                           │ max_execute_count    │
                           └──────────────────────┘
+                          ┌──────────────────────────────────┐
+                          │ lesson（成长体系：踩坑经验）      │
+                          │ ──────────────────────────────  │
+                          │ id (PK)                          │
+                          │ project_key (隔离维度)           │
+                          │ tool_name + error_category       │
+                          │ error_code + error_signature(UQ) │
+                          │ symptom/root_cause/solution      │
+                          │ status (0草稿/1有效/2隐藏)       │
+                          │ source (auto/llm/manual)         │
+                          │ hit/success/fail_count           │
+                          └──────────────────────────────────┘
 ```
 
 ---
@@ -372,7 +390,8 @@ src/main/java/com/example/agentdeepseek/
 | **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~500 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~750 |
 | **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~2000 (整个p2p包) |
-| **工具系统** | 19 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~6000 |
+| **工具系统** | 21 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~6000 |
+| **成长体系** | 踩坑经验检索/自动捕获/复盘/验证闭环 | LessonService + LessonTool + FailureNormalizer | ~1200 |
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |
 | **技能系统** | BM25 匹配、贝叶斯置信度 | SkillMatcher + SkillIndexer | ~400 |

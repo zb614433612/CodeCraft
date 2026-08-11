@@ -783,7 +783,7 @@ public class AgentForkManager {
 
             // 到达迭代上限，触发评委
             if (iteration >= maxIterations - 1 + totalGranted) {
-                boolean shouldExtend = evaluateWithSubJudge(messages);
+                boolean shouldExtend = evaluateWithSubJudge(messages, context.getProviderCode());
                 if (shouldExtend && totalGranted < MAX_JUDGE_GRANTED) {
                     int additional = Math.min(10, MAX_JUDGE_GRANTED - totalGranted);
                     totalGranted += additional;
@@ -1097,7 +1097,7 @@ public class AgentForkManager {
      * API 调用失败时自动降级到本地简化逻辑，确保子Agent不被误杀。
      * </p>
      */
-    private boolean evaluateWithSubJudge(List<Map<String, Object>> messages) {
+    private boolean evaluateWithSubJudge(List<Map<String, Object>> messages, String providerCode) {
         // 1. 加载评委提示词
         String judgePrompt = PromptUtil.getPrompt("judge_prompt.txt");
         if (judgePrompt == null || judgePrompt.isEmpty()) {
@@ -1108,8 +1108,8 @@ public class AgentForkManager {
         // 2. 构建评委上下文（复用 ToolLoopManager）
         String judgeContext = toolLoopManager.buildJudgeContext(messages);
 
-        // 3. 调用评委 API（禁用 thinking 以获得更快响应，超时 180s）
-        String response = deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180);
+        // 3. 调用评委 API（禁用 thinking 以获得更快响应，超时 180s，跟随子Agent的Provider选择）
+        String response = deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180, providerCode);
 
         // 4. 检查是否返回错误
         if (response.startsWith("错误：")) {
@@ -1148,6 +1148,16 @@ public class AgentForkManager {
                 }
             }
         }
+        // 记录降级判定终止的原因（最近3条消息的 role + 内容摘要），避免"评估失败无原因"无法排查
+        StringBuilder tail = new StringBuilder();
+        for (int i = Math.max(0, messages.size() - 3); i < messages.size(); i++) {
+            Map<String, Object> m = messages.get(i);
+            String c = (String) m.get("content");
+            tail.append(m.get("role")).append(": ")
+                    .append(c != null && c.length() > 80 ? c.substring(0, 80) + "..." : c)
+                    .append(" | ");
+        }
+        log.warn("子Agent评委降级判定终止: 最近6条消息中无成功工具调用（尾部={}）", tail);
         return false;
     }
 

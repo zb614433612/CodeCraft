@@ -20,10 +20,10 @@ After startup visit: **http://localhost:8084**
 
 ```bash
 # Windows
-scripts\build.bat v1.1.4
+scripts\build.bat v1.1.5
 
 # Mac / Linux
-./scripts/build.sh v1.1.4
+./scripts/build.sh v1.1.5
 ```
 
 ---
@@ -99,6 +99,8 @@ Password:  (empty)
 SELECT * FROM conversation ORDER BY updated_at DESC LIMIT 10;
 SELECT * FROM agent_config WHERE enabled = 1;
 SELECT * FROM skill WHERE confidence > 0.5;
+SELECT * FROM lesson WHERE status = 1 ORDER BY hit_count DESC;
+SELECT status, COUNT(*) FROM lesson GROUP BY status;   -- growth dashboard
 SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 ```
 
@@ -109,8 +111,9 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 ```
 project root
 ├── src/main/java/...        → Backend source (102 Java files)
-│   ├── tool/impl/           → 19 AI tool implementations
+│   ├── tool/impl/           -> 21 AI tool implementations (incl. lesson growth system)
 │   ├── p2p/                 → P2P remote collaboration
+│   └── service/lesson/      -> Growth system (lesson retrieval/record/review/normalizer)
 │   └── service/impl/        → Core business logic
 ├── frontend/src/            → Vue 3 frontend source
 │   ├── views/               → 10 page views

@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.tool;
 
 import com.example.agentdeepseek.service.SnapshotService;
+import com.example.agentdeepseek.service.lesson.LessonRecorder;
 import com.example.agentdeepseek.tool.permission.ToolExecutionPipeline;
 import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
 import com.example.agentdeepseek.util.OperationDetailGenerator;
@@ -33,18 +34,21 @@ public class ToolExecutor {
     private final ToolExecutionPipeline executionPipeline;
     private final ToolPermissionRegistry permissionRegistry;
     private final OperationDetailGenerator detailGenerator;
+    private final LessonRecorder lessonRecorder;
 
     public ToolExecutor(ToolRegistry toolRegistry, ObjectMapper objectMapper,
                         SnapshotService snapshotService,
                         ToolExecutionPipeline executionPipeline,
                         ToolPermissionRegistry permissionRegistry,
-                        OperationDetailGenerator detailGenerator) {
+                        OperationDetailGenerator detailGenerator,
+                        LessonRecorder lessonRecorder) {
         this.toolRegistry = toolRegistry;
         this.objectMapper = objectMapper;
         this.snapshotService = snapshotService;
         this.executionPipeline = executionPipeline;
         this.permissionRegistry = permissionRegistry;
         this.detailGenerator = detailGenerator;
+        this.lessonRecorder = lessonRecorder;
     }
 
     // ============================================================
@@ -76,6 +80,20 @@ public class ToolExecutor {
         public String getContent() { return content; }
         public boolean isRestricted() { return restricted; }
         public String getOperationSummary() { return operationSummary; }
+
+        /**
+         * 判断工具调用是否失败（供成长体系被动注入、重试逻辑等使用）。
+         * 失败结果的特征是 content 以错误标记前缀开头（见 executeSingleToolCall 各失败分支）。
+         */
+        public boolean isError() {
+            if (content == null) {
+                return true;
+            }
+            return content.startsWith("工具调用失败:")
+                    || content.startsWith("工具参数解析失败:")
+                    || content.startsWith("错误：未知工具")
+                    || content.startsWith("工具执行异常:");
+        }
     }
 
     // ============================================================
@@ -105,6 +123,10 @@ public class ToolExecutor {
                 log.error("执行工具调用失败: {}", toolCallNode, e);
                 String toolCallId = toolCallNode.path("id").asText("unknown");
                 String toolName = toolCallNode.path("function").path("name").asText("unknown");
+                // 📝 成长体系：异步捕获失败经验（不阻塞主流程）
+                lessonRecorder.recordAsync(toolName,
+                        toolCallNode.path("function").path("arguments").asText(""),
+                        "工具调用整体失败: " + e.getMessage());
                 String briefMsg = e.getMessage();
                 if (briefMsg != null && briefMsg.length() > 120) {
                     briefMsg = briefMsg.substring(0, 120) + "...";
@@ -130,6 +152,10 @@ public class ToolExecutor {
         String toolCallId = toolCallNode.path("id").asText();
         if (toolCallId.isEmpty() || "null".equals(toolCallId)) {
             log.error("工具调用id字段无效 (值为'{}'): {}", toolCallId, toolCallNode);
+            // 📝 成长体系：异步捕获失败经验（id 缺失也是失败样本）
+            lessonRecorder.recordAsync("unknown",
+                    toolCallNode.path("function").path("arguments").asText(""),
+                    "工具调用id字段无效: " + toolCallNode);
             return null;
         }
 
@@ -137,6 +163,10 @@ public class ToolExecutor {
         String toolName = functionNode.path("name").asText();
         if (toolName.isEmpty() || "null".equals(toolName)) {
             log.error("工具调用function.name字段无效 (值为'{}'): {}", toolName, toolCallNode);
+            // 📝 成长体系：异步捕获失败经验（工具名为空也是失败样本）
+            lessonRecorder.recordAsync("unknown",
+                    functionNode.path("arguments").asText(""),
+                    "工具调用function.name字段无效: " + toolCallNode);
             return null;
         }
 
@@ -147,6 +177,9 @@ public class ToolExecutor {
         } catch (Exception e) {
             log.error("解析工具参数失败: tool={}, arguments={}", toolName,
                     functionNode.path("arguments"), e);
+            // 📝 成长体系：异步捕获失败经验
+            lessonRecorder.recordAsync(toolName, functionNode.path("arguments").asText(""),
+                    "工具参数解析失败: " + e.getMessage());
             return new ToolCallResult(toolCallId, toolName,
                 "工具参数解析失败: " + e.getMessage());
         }
@@ -155,6 +188,9 @@ public class ToolExecutor {
         Tool tool = toolRegistry.getTool(toolName);
         if (tool == null) {
             log.warn("工具未找到: {}", toolName);
+            // 📝 成长体系：异步捕获失败经验（LLM 调用了未注册工具）
+            lessonRecorder.recordAsync(toolName, functionNode.path("arguments").asText(""),
+                    "未知工具: " + toolName + "（LLM 调用了未注册的工具名）");
             return new ToolCallResult(toolCallId, toolName,
                 "错误：未知工具 \"" + toolName + "\"，请检查工具名称是否正确");
         }
@@ -208,6 +244,9 @@ public class ToolExecutor {
                     isRestricted, displayArgs);
         } catch (Exception e) {
             log.error("工具执行异常: tool={}, arguments={}", toolName, arguments, e);
+            // 📝 成长体系：异步捕获失败经验（执行期异常，最有价值的踩坑来源）
+            lessonRecorder.recordAsync(toolName, arguments.toString(),
+                    "工具执行异常: " + e.getMessage());
             String briefMsg = e.getMessage();
             if (briefMsg != null && briefMsg.length() > 120) {
                 briefMsg = briefMsg.substring(0, 120) + "...";

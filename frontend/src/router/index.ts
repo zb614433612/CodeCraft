@@ -88,6 +88,11 @@ const router = createRouter({
           component: () => import('@/views/McpConfigView.vue'),
           meta: { requiresAdmin: true }
         },
+        {
+          path: 'lesson-manage',
+          name: 'lesson-manage',
+          component: () => import('@/views/LessonManageView.vue')
+        },
 
       ]
     }

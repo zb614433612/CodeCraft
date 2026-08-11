@@ -23,6 +23,9 @@ import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
 import com.example.agentdeepseek.service.ConfigService;
 import com.example.agentdeepseek.service.AttachmentStore;
+import com.example.agentdeepseek.service.lesson.FailureNormalizer;
+import com.example.agentdeepseek.service.lesson.LessonService;
+import com.example.agentdeepseek.service.lesson.LessonReviewService;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.PermissionContext;
@@ -47,6 +50,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.ClientResponse;
@@ -63,6 +67,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -108,6 +113,44 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final SupplementStore supplementStore;
     private final AttachmentStore attachmentStore;
     private final LLMClientManager llmClientManager;
+    private final LessonService lessonService;
+    private final FailureNormalizer failureNormalizer;
+
+    /** 踩坑经验注入去重表：key=conversationId:lessonId:type, value=注入时间戳（毫秒） */
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> lessonHintInjected =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 去重表容量上限，超过时清理过期条目（防内存膨胀） */
+    private static final int LESSON_HINT_DEDUP_MAX = 2000;
+    /** 去重条目有效期（1 小时，超时后可再次注入） */
+    private static final long LESSON_HINT_DEDUP_TTL_MS = 60 * 60 * 1000L;
+
+    // ===== F3 被动反馈：注入追踪表 =====
+    // 记录「注入过解法经验」的会话与经验，工具循环结束时自动验证（baseline 对比防双重计数）
+
+    /** 追踪条目：经验 ID + 错误签名 + 注入时计数基线 */
+    private static class LessonTrackEntry {
+        final Long lessonId;
+        final String errorSignature;
+        final int baselineSuccess;
+        final int baselineFail;
+        final long injectTime;
+
+        LessonTrackEntry(Long lessonId, String errorSignature, int baselineSuccess, int baselineFail) {
+            this.lessonId = lessonId;
+            this.errorSignature = errorSignature;
+            this.baselineSuccess = baselineSuccess;
+            this.baselineFail = baselineFail;
+            this.injectTime = System.currentTimeMillis();
+        }
+    }
+
+    /** 追踪表：conversationId → (lessonId → 条目) */
+    private final java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry>>
+            lessonTrackTable = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 追踪条目 TTL（30 分钟未清算强制清理，防内存膨胀；只用于后台定时清理，清算路径不受限） */
+    private static final long LESSON_TRACK_TTL_MS = 30 * 60 * 1000L;
+    /** 追踪表容量上限：总条目超过时按注入时间清最旧一半（P1-2 防内存膨胀） */
+    private static final int LESSON_TRACK_MAX_ENTRIES = 2000;
 
     @Autowired
     private AgentForkManager agentForkManager;
@@ -117,6 +160,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     @Autowired
     private AgentConfigMapper agentConfigMapper;
+
+    // 📝 成长体系 C2：对话级复盘（工具循环结束后异步提炼踩坑经验，友好提示不抛异常也能捕获）
+    @Autowired
+    private LessonReviewService lessonReviewService;
 
     // 常量定义
     private static final String DATA_PREFIX = "data: ";
@@ -178,9 +225,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                  MessagePersister messagePersister,
                                  ContextBuilder contextBuilder,
                                   ToolLoopManager toolLoopManager,
-                                  SupplementStore supplementStore,
-                                  AttachmentStore attachmentStore,
-                                  LLMClientManager llmClientManager) {
+                                   SupplementStore supplementStore,
+                                   AttachmentStore attachmentStore,
+                                   LLMClientManager llmClientManager,
+                                   LessonService lessonService,
+                                   FailureNormalizer failureNormalizer) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -204,6 +253,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.supplementStore = supplementStore;
         this.attachmentStore = attachmentStore;
         this.llmClientManager = llmClientManager;
+        this.lessonService = lessonService;
+        this.failureNormalizer = failureNormalizer;
     }
 
     // ===== 拆分出的组件 =====
@@ -1481,6 +1532,358 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         return toolLoopManager.extractToolKey(toolName, argsJson);
     }
 
+    // ===== 成长体系：失败经验被动注入 =====
+
+    /**
+     * 工具失败后自动检索经验库，注入相关提示（F1 双通道：解法提示 + 补全引导）。
+     * 设计要点：
+     * 1. 只在失败轮注入（有失败结果才触发），零常驻成本
+     * 2. 一次最多注入「1 条解法 + 1 条补全引导」，避免上下文膨胀
+     * 3. 会话级去重：key=conversationId:lessonId:type，同类型同经验只注入一次；
+     *    解法被补全后再次失败可注入解法（type 不同不受引导去重影响）
+     * 4. 注入「解法」成功后登记 F3 追踪表（循环结束时自动验证）
+     * 5. 全程 try-catch 保护，检索失败绝不影响主流程
+     *
+     * @param messages          当前消息列表（注入到 system 之后、非 system 之前）
+     * @param toolResults       本轮工具执行结果
+     * @param completeToolCalls LLM 返回的 tool_calls 数组（用于提取 arguments）
+     * @param projectRoot       项目根目录（ThreadLocal 已清空时显式传递）
+     * @param conversationId    会话 ID（用于注入去重 + F3 追踪）
+     */
+    private void injectLessonHint(List<Map<String, Object>> messages,
+                                  List<ToolExecutor.ToolCallResult> toolResults,
+                                  JsonNode completeToolCalls,
+                                  String projectRoot,
+                                  Long conversationId) {
+        if (lessonService == null || failureNormalizer == null) {
+            return;
+        }
+        try {
+            for (ToolExecutor.ToolCallResult result : toolResults) {
+                if (result == null || !result.isError()) {
+                    continue;
+                }
+                // 提取该工具调用的 arguments（用于归一化参数 + 二级过滤）
+                String argumentsJson = findArgumentsForToolCall(completeToolCalls, result.getToolCallId());
+                // 归一化：提取错误类别/错误码/结构化参数
+                FailureNormalizer.NormalizedFailure nf = failureNormalizer.normalize(
+                        result.getToolName(), argumentsJson, result.getContent());
+                String projectKey = failureNormalizer.extractProjectKey(projectRoot);
+                // 检索提示（F1 双通道：SOLUTION + HINT）
+                List<LessonService.LessonHint> hints = lessonService.retrieveLessonHints(
+                        projectKey, nf.toolName, nf.errorCode, nf.paramsJson, result.getContent());
+                if (hints.isEmpty()) {
+                    continue;
+                }
+                // 注入当前失败对应的提示（最多 SOLUTION 1 条 + HINT 1 条，均由 retrieveLessonHints 保证）
+                boolean injectedAny = false;
+                for (LessonService.LessonHint hint : hints) {
+                    if (hint == null || hint.text == null || hint.text.isBlank()) {
+                        continue;
+                    }
+                    // 会话级去重：conversationId:lessonId:type
+                    if (!markLessonHintInjected(conversationId, hint.lessonId, hint.type)) {
+                        log.debug("踩坑经验已在本会话注入过同类型提示，跳过: conversationId={}, lessonId={}, type={}",
+                                conversationId, hint.lessonId, hint.type);
+                        continue;
+                    }
+                    Map<String, Object> hintMsg = new HashMap<>();
+                    hintMsg.put("role", "system");
+                    if (LessonService.HINT_TYPE_SOLUTION.equals(hint.type)) {
+                        hintMsg.put("content", "[踩坑经验自动检索] 工具 " + result.getToolName()
+                                + " 执行失败，经验库中存在匹配解法，请判断是否适用当前场景后参考执行：\n" + hint.text
+                                + "\n（若解法有效，可调用 lesson action=feedback 反馈验证；若这是新坑，解决后可调用 lesson action=record 记录）");
+                        // F3 登记：解法注入成功 → 追踪该会话该经验（循环结束时自动验证）
+                        trackLessonInjected(conversationId, hint);
+                    } else {
+                        hintMsg.put("content", "[踩坑经验自动检索] 工具 " + result.getToolName()
+                                + " 执行失败，经验库中有同坑草稿待补全：\n" + hint.text);
+                        // HINT 类型不登记追踪（引导≠应用，不自动验证）
+                    }
+                    // L3 修复：system 消息插入到「所有 system 消息之后、第一条非 system 消息之前」，
+                    // 避免出现在 tool 结果之后（部分 LLM API 对 system 夹在 tool/assistant 之间校验严格）
+                    int insertIdx = 0;
+                    for (int i = 0; i < messages.size(); i++) {
+                        Object role = messages.get(i).get("role");
+                        if (!"system".equals(role)) {
+                            insertIdx = i;
+                            break;
+                        }
+                        insertIdx = i + 1;
+                    }
+                    messages.add(insertIdx, hintMsg);
+                    injectedAny = true;
+                    log.info("踩坑经验被动注入: conversationId={}, tool={}, lessonId={}, type={}, errorCode={}",
+                            conversationId, result.getToolName(), hint.lessonId, hint.type, nf.errorCode);
+                }
+                if (injectedAny) {
+                    break; // 一次失败只注入一轮提示，避免上下文膨胀
+                }
+            }
+        } catch (Exception e) {
+            log.warn("踩坑经验被动注入失败（不影响主流程）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 标记某条经验已在某会话注入；返回 false 表示重复（应跳过）。
+     * key 带 type 维度：同经验「补全引导」和「解法提示」互不干扰（补全后可注入解法）。
+     * 容量治理：超过上限时清理过期（>1小时）条目；仍超限则清空最旧一半（保守兜底）。
+     */
+    private boolean markLessonHintInjected(Long conversationId, Long lessonId, String type) {
+        if (conversationId == null || lessonId == null) {
+            return true; // 无会话上下文时不启用去重
+        }
+        String key = conversationId + ":" + lessonId + ":" + (type == null ? "" : type);
+        long now = System.currentTimeMillis();
+        Long prev = lessonHintInjected.putIfAbsent(key, now);
+        if (prev != null) {
+            return false; // 已注入过同类型
+        }
+        // 容量治理：超过上限时清理过期条目
+        if (lessonHintInjected.size() > LESSON_HINT_DEDUP_MAX) {
+            long cutoff = now - LESSON_HINT_DEDUP_TTL_MS;
+            lessonHintInjected.entrySet().removeIf(e -> e.getValue() < cutoff);
+            // 仍超限（大量活跃会话）：清空最旧一半（最多丢失去重记录，不影响功能）
+            if (lessonHintInjected.size() > LESSON_HINT_DEDUP_MAX) {
+                List<Map.Entry<String, Long>> entries = new ArrayList<>(lessonHintInjected.entrySet());
+                entries.sort(Map.Entry.comparingByValue());
+                int removeCount = entries.size() / 2;
+                for (int i = 0; i < removeCount; i++) {
+                    lessonHintInjected.remove(entries.get(i).getKey());
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 从 tool_calls 数组中按 toolCallId 找到对应的 arguments 字符串
+     */
+    private String findArgumentsForToolCall(JsonNode completeToolCalls, String toolCallId) {
+        if (completeToolCalls == null || !completeToolCalls.isArray() || toolCallId == null) {
+            return null;
+        }
+        for (JsonNode call : completeToolCalls) {
+            if (toolCallId.equals(call.path("id").asText())) {
+                return call.path("function").path("arguments").asText(null);
+            }
+        }
+        return null;
+    }
+
+    // ===== F3 被动反馈：注入追踪与自动验证 =====
+
+    /**
+     * 登记追踪：SOLUTION 类型经验注入成功后，记录该会话该经验（含计数基线）。
+     * 只有「解法」被注入才登记（引导≠应用，不自动验证）。
+     */
+    private void trackLessonInjected(Long conversationId, LessonService.LessonHint hint) {
+        if (conversationId == null || hint == null || hint.lessonId == null) {
+            return;
+        }
+        // P1-2：登记前做容量治理（超上限清最旧一半），防异常中断残留导致内存膨胀
+        enforceLessonTrackCapacity();
+        lessonTrackTable
+                .computeIfAbsent(conversationId, k -> new java.util.concurrent.ConcurrentHashMap<>())
+                .put(hint.lessonId, new LessonTrackEntry(hint.lessonId, hint.errorSignature,
+                        hint.baselineSuccess, hint.baselineFail));
+        log.debug("F3 追踪登记: conversationId={}, lessonId={}, signature={}",
+                conversationId, hint.lessonId, hint.errorSignature);
+    }
+
+    /**
+     * 追踪表容量治理（P1-2）：总条目超过上限时，按注入时间清掉最旧的一半。
+     * 只清「仍在追踪中」的条目（会话早该结束却还挂着，最可能是异常中断残留）。
+     * P3 优化：移除时直捣所属会话 map（避免对全部会话做无谓遍历），并顺手清理空壳会话。
+     */
+    private void enforceLessonTrackCapacity() {
+        int total = countTrackEntries();
+        if (total <= LESSON_TRACK_MAX_ENTRIES) {
+            return;
+        }
+        // 收集所有条目（带所属会话 map），按注入时间排序
+        List<TrackRef> refs = new ArrayList<>();
+        for (java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> m : lessonTrackTable.values()) {
+            for (java.util.Map.Entry<Long, LessonTrackEntry> le : m.entrySet()) {
+                refs.add(new TrackRef(m, le.getKey(), le.getValue()));
+            }
+        }
+        refs.sort(Comparator.comparingLong(r -> r.entry.injectTime));
+        int removeCount = refs.size() / 2;
+        for (int i = 0; i < removeCount; i++) {
+            TrackRef r = refs.get(i);
+            r.sessionMap.remove(r.lessonId, r.entry); // 按实例移除，避免误删同 id 的新条目
+        }
+        // 清理空壳会话 Map（与定时清理一致，防空壳会话残留）
+        lessonTrackTable.entrySet().removeIf(e -> e.getValue().isEmpty());
+        log.warn("F3 追踪表超容量（{} > {}），已清理最旧 {} 条", total, LESSON_TRACK_MAX_ENTRIES, removeCount);
+    }
+
+    /** 追踪条目引用（容量治理排序用）：条目 + 所属会话 map + 条目 key */
+    private static class TrackRef {
+        final java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> sessionMap;
+        final Long lessonId;
+        final LessonTrackEntry entry;
+
+        TrackRef(java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> sessionMap,
+                 Long lessonId, LessonTrackEntry entry) {
+            this.sessionMap = sessionMap;
+            this.lessonId = lessonId;
+            this.entry = entry;
+        }
+    }
+
+    /**
+     * 每轮工具结果检查（F3）：本轮失败项若与追踪中的经验「同错误签名」，判为经验无效 →
+     * 自动 feedback(false) 并从追踪移除（客观事实，优先级最高，不依赖 baseline）。
+     * 调用点：自动/手动路径的工具结果回填后（与 injectLessonHint 并列）。
+     */
+    private void checkLessonTracking(Long conversationId,
+                                     List<ToolExecutor.ToolCallResult> toolResults,
+                                     JsonNode completeToolCalls) {
+        if (conversationId == null || lessonService == null || failureNormalizer == null) {
+            return;
+        }
+        java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> sessionTracks =
+                lessonTrackTable.get(conversationId);
+        if (sessionTracks == null || sessionTracks.isEmpty()) {
+            return;
+        }
+        try {
+            for (ToolExecutor.ToolCallResult result : toolResults) {
+                if (result == null || !result.isError()) {
+                    continue;
+                }
+                String argumentsJson = findArgumentsForToolCall(completeToolCalls, result.getToolCallId());
+                FailureNormalizer.NormalizedFailure nf = failureNormalizer.normalize(
+                        result.getToolName(), argumentsJson, result.getContent());
+                // P1-1：改用「无项目签名」重算——与 LessonHint.errorSignature（crossProjectSignature）
+                // 同算法，保证全局池经验（__global__ 前缀入库签名）也能命中「再次失败 → 判无效」
+                String curSignature = failureNormalizer.fingerprintNoProject(nf);
+                if (curSignature == null || curSignature.isBlank()) {
+                    continue;
+                }
+                // 与追踪条目比对错误签名（无项目签名：tool|category|code|paramsHash）
+                for (LessonTrackEntry entry : sessionTracks.values()) {
+                    if (curSignature.equals(entry.errorSignature)) {
+                        // 同坑再次失败 → 经验无效（客观事实，即使 LLM 之前反馈过也以再次失败为准）
+                        lessonService.feedbackLesson(entry.lessonId, false);
+                        sessionTracks.remove(entry.lessonId);
+                        log.info("F3 自动反馈(无效): conversationId={}, lessonId={}, signature={}",
+                                conversationId, entry.lessonId, curSignature);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("F3 每轮检查失败（不影响主流程）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 工具循环结束清算（F3）：会话结束时对剩余追踪条目自动验证。
+     * baseline 对比防冲突：LLM 已主动 feedback（success/fail 计数比基线变化）→ 跳过；
+     * 计数无变化 → 默认有效 → 自动 feedback(true)。
+     * 语义：注入解法后直到会话结束都没再犯同样的错 ≈ 经验有效。
+     * P3-8：清算路径不再受 TTL 限制（会话正常结束就该立即清算），
+     * TTL 只由后台定时任务兜底清理异常中断的残留条目。
+     */
+
+    // ===== 成长体系 C2：对话级复盘 =====
+
+    /**
+     * 触发对话级复盘（C2）：工具循环自然结束、LLM 输出最终回复后，
+     * 异步扫描本轮工具结果中的「失败信号」（含工具友好提示，不抛异常也能识别），
+     * 命中则调 LLM 提炼根因/解法并沉淀经验。全程异步，绝不阻塞主流程。
+     */
+    private void triggerLessonReview(Long conversationId, Map<String, Object> apiRequest,
+                                     List<Map<String, Object>> messages) {
+        if (lessonReviewService == null) {
+            return;
+        }
+        try {
+            String turnId = (String) apiRequest.get("_turnId");
+            String projectRoot = (String) apiRequest.get("_projectRoot");
+            String model = (String) apiRequest.get("model");
+            LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
+            lessonReviewService.reviewTurnAsync(conversationId, turnId, projectRoot, messages, ctxClient, model);
+        } catch (Exception e) {
+            log.warn("触发对话复盘失败（不影响主流程）: conversationId={}, err={}", conversationId, e.getMessage());
+        }
+    }
+
+    private void settleLessonTracking(Long conversationId) {
+        if (conversationId == null || lessonService == null) {
+            return;
+        }
+        java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> sessionTracks =
+                lessonTrackTable.remove(conversationId);
+        if (sessionTracks == null || sessionTracks.isEmpty()) {
+            return;
+        }
+        for (LessonTrackEntry entry : sessionTracks.values()) {
+            try {
+                com.example.agentdeepseek.model.entity.Lesson current =
+                        lessonService.getLesson(entry.lessonId).orElse(null);
+                if (current == null) {
+                    continue; // 经验已被删除
+                }
+                int curSuccess = current.getSuccessCount() == null ? 0 : current.getSuccessCount();
+                int curFail = current.getFailCount() == null ? 0 : current.getFailCount();
+                if (curSuccess != entry.baselineSuccess || curFail != entry.baselineFail) {
+                    // LLM 已主动反馈过（计数变化）→ 不重复记账
+                    log.debug("F3 清算跳过（LLM 已主动反馈）: lessonId={}", entry.lessonId);
+                    continue;
+                }
+                lessonService.feedbackLesson(entry.lessonId, true);
+                log.info("F3 自动反馈(有效): conversationId={}, lessonId={}", conversationId, entry.lessonId);
+            } catch (Exception e) {
+                log.warn("F3 清算单条失败（不影响其余）: lessonId={}, err={}", entry.lessonId, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * F3 后台兜底清理（P1-2）：定时扫描追踪表，清除超过 TTL 的残留条目。
+     * 会话正常结束由 settleLessonTracking 即时清算，本任务只兜底异常中断
+     * （服务崩溃、流中断、会话未正常结束）留下的过期条目，防内存膨胀。
+     * 每 5 分钟执行一次；全程 try-catch，失败不影响主流程。
+     */
+    @Scheduled(fixedDelay = 5 * 60 * 1000L, initialDelay = 5 * 60 * 1000L)
+    public void cleanExpiredLessonTracks() {
+        try {
+            long cutoff = System.currentTimeMillis() - LESSON_TRACK_TTL_MS;
+            int removed = 0;
+            for (java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> m : lessonTrackTable.values()) {
+                java.util.Iterator<LessonTrackEntry> it = m.values().iterator();
+                while (it.hasNext()) {
+                    LessonTrackEntry e = it.next();
+                    if (e.injectTime < cutoff) {
+                        it.remove();
+                        removed++;
+                    }
+                }
+            }
+            // 清理空的会话 Map，避免空壳会话残留
+            lessonTrackTable.entrySet().removeIf(e -> e.getValue().isEmpty());
+            if (removed > 0) {
+                log.info("F3 定时清理过期追踪: 清理 {} 条, 剩余会话数={}, 剩余条目数={}",
+                        removed, lessonTrackTable.size(), countTrackEntries());
+            }
+        } catch (Exception e) {
+            log.warn("F3 定时清理失败（不影响主流程）: {}", e.getMessage());
+        }
+    }
+
+    /** 统计追踪表总条目数（供日志/容量治理使用） */
+    private int countTrackEntries() {
+        int total = 0;
+        for (java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> m : lessonTrackTable.values()) {
+            total += m.size();
+        }
+        return total;
+    }
+
     // ===== 评委评估（迭代超限处理） =====
 
     /**
@@ -1530,8 +1933,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     ToolLoopManager.JudgeResult result = parseJudgeResult(response);
                     if (result == null) {
                         log.warn("评委响应解析失败，使用默认拒绝策略: {}", response);
+                        // 透传失败原因（如 HTTP 401、重试失败等），避免"评估失败无原因"
+                        String failReason = (response != null && response.startsWith("错误："))
+                                ? response.substring("错误：".length())
+                                : "评委响应格式不正确（未返回有效 JSON）";
                         return Flux.just(createReasoningSSEEvent(
-                                "评委评估解析失败，任务自动终止。"));
+                                "评委评估失败：" + failReason + "，任务自动终止。"));
                     }
 
                     if ("extend".equals(result.judgment)) {
@@ -2099,6 +2506,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                                 tcMessage.path("tool_name").asText("")));
                                                             }
 
+                                                            // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
+                                                            //    避免「触发注入的失败」被误判为「注入后的再次失败」→ 注入即判无效）
+                                                            checkLessonTracking(storageConversationId, innerResults, completeToolCalls);
+
+                                                            // 📝 成长体系：工具失败后被动注入相关经验提示（手动授权路径同样生效，会话级去重）
+                                                            injectLessonHint(messages, innerResults, completeToolCalls, currentProjectRoot, storageConversationId);
+
                                                             // 创建工具结果事件流（先发 resume 恢复前端流）
                                                             List<String> resultEvents = new ArrayList<>();
                                                             resultEvents.add(createResumeEvent());
@@ -2208,6 +2622,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             saveToolMessage(storageConversationId, formattedToolContent);
                                         }
 
+                                        // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
+                                        //    避免「触发注入的失败」被误判为「注入后的再次失败」→ 注入即判无效）
+                                        checkLessonTracking(storageConversationId, toolResults, completeToolCalls);
+
+                                        // 📝 成长体系：工具失败后被动注入相关经验提示（仅失败轮、仅 Top-1、会话级去重、零常驻成本）
+                                        injectLessonHint(messages, toolResults, completeToolCalls, currentProjectRoot, storageConversationId);
+
                                         // 工具结果事件 + 下一轮迭代
                                         Flux<String> resultFlux = Flux.fromIterable(toolResultEvents);
                                         Flux<String> nextIteration = handleToolCallIteration(
@@ -2274,6 +2695,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
                     // 只有在没有检测到工具调用（shouldContinue为true）且流正常完成时才保存助手消息
                     if (shouldContinue.get()) {
+                        // 📝 成长体系 F3：工具循环自然结束（无工具调用、输出最终回复）→ 清算注入追踪
+                        //    剩余追踪条目按 baseline 对比自动反馈有效（LLM 已主动反馈过的跳过）
+                        settleLessonTracking(storageConversationId);
+
+                        // 📝 成长体系 C2：工具循环自然结束 → 异步对话复盘
+                        //    工具把错误包装成友好提示（不抛异常）时自动捕获不触发，由复盘兜底提炼经验
+                        triggerLessonReview(conversationId, apiRequest, messages);
+
                         String fullResponse = responseBuilder.toString();
                         Map<String, String> extracted = contextBuilder.extractContentAndReasoningFromStreamResponse(fullResponse);
                         String content = extracted.get("content");

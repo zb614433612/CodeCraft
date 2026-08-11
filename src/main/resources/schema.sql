@@ -355,6 +355,14 @@ INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_t
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 15;
 
+-- 新增 SETTING 菜单：踩坑经验（成长体系管理页面）
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(16, '踩坑经验', '/lesson-manage', 'BookOutlined', NULL, 10, 'SETTING');
+
+-- 管理员分配踩坑经验菜单
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 16;
+
 -- ============================================================
 -- Agent 后台任务表（用于追踪流式任务状态、支持页面刷新后重连）
 -- ============================================================
@@ -432,3 +440,35 @@ CREATE TABLE IF NOT EXISTS p2p_agent_conversation (
     INDEX idx_pac_conv (conversation_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_pac_peer_agent ON p2p_agent_conversation(peer_id, agent_config_id);
+
+-- ============================================================
+-- 成长体系：踩坑经验表（lesson）
+-- 记录 LLM 执行过程中的失败与解法，支持按需检索（不注入上下文）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS lesson (
+  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+  project_key     VARCHAR(64)  NOT NULL COMMENT '项目标识（隔离第一维度，取项目根目录名）',
+  tool_name       VARCHAR(64)  NOT NULL COMMENT '工具名：command/file_writer/mcp_server_manager...',
+  error_category  VARCHAR(32)  NOT NULL COMMENT '错误类别：COMPILE/DEPENDENCY/NETWORK/AUTH/MCP_HANDSHAKE/SQL/PARAM/ENV/OTHER',
+  error_code      VARCHAR(128) NOT NULL COMMENT '归一化错误码：NoClassDefFoundError/ECONNREFUSED/401...',
+  error_signature VARCHAR(64)  NOT NULL COMMENT '指纹：md5(projectKey|tool|category|code|paramsHash)，同坑去重',
+  symptom         VARCHAR(512) NOT NULL COMMENT '失败现象',
+  root_cause      VARCHAR(1024) COMMENT '根因',
+  solution        VARCHAR(2048) NOT NULL COMMENT '解法（支持{变量占位符}）',
+  params_json     TEXT COMMENT '变量参数JSON：[{"name":"缺失依赖","value":"starter-web"}]',
+  applicable_cond VARCHAR(512) COMMENT '适用条件（自然语言约束）',
+  keywords        VARCHAR(512) COMMENT '标签，空格分隔，兜底检索用',
+  status          TINYINT DEFAULT 0 COMMENT '状态：0=草稿 1=有效 2=隐藏',
+  source          VARCHAR(16) DEFAULT 'auto' COMMENT '来源：auto=自动捕获 / llm=LLM主动记录 / manual=人工沉淀',
+  hit_count       INT DEFAULT 0 COMMENT '被检索命中次数',
+  success_count   INT DEFAULT 0 COMMENT '应用后有效次数',
+  fail_count      INT DEFAULT 0 COMMENT '应用后仍失败次数',
+  created_at      DATETIME NOT NULL COMMENT '创建时间',
+  updated_at      DATETIME NOT NULL COMMENT '更新时间'
+) DEFAULT CHARSET=utf8mb4 COMMENT='踩坑经验表';
+
+-- H2 兼容的索引创建（照 skill 表惯例：内联 INDEX 在 H2 MODE=MySQL 下部分不支持）
+CREATE UNIQUE INDEX IF NOT EXISTS uk_lesson_signature ON lesson(error_signature);
+CREATE INDEX IF NOT EXISTS idx_lesson_scope ON lesson(project_key, tool_name, error_category, error_code);
+CREATE INDEX IF NOT EXISTS idx_lesson_status ON lesson(status);
+CREATE INDEX IF NOT EXISTS idx_lesson_hit ON lesson(hit_count);

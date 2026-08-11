@@ -4,7 +4,11 @@ REM sync-version.bat - Sync version from pom.xml to electron/package.json (Windo
 REM NOTE: keep this file pure ASCII (English comments only) to avoid
 REM GBK/UTF-8 mixed-encoding garbled text in cmd console.
 REM ============================================================
-setlocal
+REM IMPORTANT: DisableDelayedExpansion is REQUIRED here. build.bat calls
+REM this script with enabledelayedexpansion active (inherited by call),
+REM which would swallow every '!' in the node -e script below
+REM (e.g. !j.build) and corrupt the command -> "Expected ')', got '='".
+setlocal DisableDelayedExpansion
 cd /d "%~dp0\.."
 
 REM -------------------- read version from pom.xml --------------------

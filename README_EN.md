@@ -11,15 +11,16 @@
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.). Users interact with AI through a chat interface, and AI automatically invokes **19 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.). Users interact with AI through a chat interface, and AI automatically invokes **21 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
 - 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo with unified LLMClient interface, runtime dynamic switching
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
-- 🧰 **19-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills — covering the full development workflow
+- 🧰 **21-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
 - 🔄 **Auto Error Correction**: Auto-retries on failure, automatically switches alternatives
 - 🎯 **Skill System**: Create reusable skills, learned patterns accumulate confidence
+- 📚 **Growth System (Lesson Knowledge Base)**: Failed tool calls are auto-captured as lessons (per-project, on-demand retrieval); solution hints are injected on recurring errors; a feedback loop promotes/hides experiences automatically
 - 🖥️ **Desktop App**: Electron + built-in JRE, zero-installation ready to use
 - 🌐 **P2P Remote Collaboration**: Peer-to-peer encrypted channels for remote agent invocation between devices
 - 💾 **Snapshot System**: Auto-backup before code changes, support multi-granularity rollback
@@ -71,7 +72,8 @@ CodeCraft
 │   │   ├── AgentForkManager        # Sub-Agent Lifecycle
 │   │   └── CompactionService       # Context Compaction
 │   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 6 Provider impls)
-│   ├── tool/                       # AI Agent Tools (19 tools)
+│   ├── service/lesson/             # Growth System (retrieval/record/review/normalizer)
+│   ├── tool/                       # AI Agent Tools (21 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
 │   │   ├── agent/                  # P2pAgentService, Handlers
 │   │   ├── connection/             # Netty Server/Client, ConnectionPool

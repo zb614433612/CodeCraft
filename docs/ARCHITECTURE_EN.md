@@ -1,14 +1,14 @@
 > 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.1.4 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
+> Version: v1.1.5 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
 
 ## 1. One-Sentence Definition
 
-**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **19 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.).
+**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **21 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.).
 
 ---
 
@@ -189,6 +189,7 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── Conversation / ConversationMessage / CompactionRecord
 │   │   ├── User / Menu / Role / RoleMenu / SysConfig
 │   │   ├── AgentConfig / AgentTask / Skill / SubAgentLog
+│   │   │   ├── Lesson（成长体系：踩坑经验）
 │   │   ├── ScheduleTask / MessageRole
 │   │   └── P2pAgentAuthorization / P2pAgentConversation /
 │   │       P2pChatMessage / P2pKnownPeer
@@ -221,13 +222,18 @@ src/main/java/com/example/agentdeepseek/
 │       ├── ProjectBuildService    # Project build
 │       ├── SkillMatcher           # BM25 + trigger word matching
 │       ├── SkillIndexer           # Skill index builder
+│       ├── lesson/                 # ★Growth System: Lesson Knowledge Base (per-project, zero context cost)
+│       │   ├── LessonService       # CRUD + on-demand retrieval + state machine (38.8KB)
+│       │   ├── LessonRecorder      # Auto-capture drafts / LLM proactive record
+│       │   ├── LessonReviewService # Turn-level async review (root cause/solution, C2)
+│       │   └── FailureNormalizer   # Error-code normalization + signature dedup (error_signature)
 │       └── ...
 ├── tool/                      # ⚡AI Agent Tool System
 │   ├── Tool.java              # Tool interface
 │   ├── ToolRegistry           # Tool registry (singleton)
 │   ├── ToolExecutor           # Tool execution engine
 │   ├── ToolInitializer        # Auto-init all tools on startup
-│   ├── impl/                  # 19 tool implementations
+│   ├── impl/                  # 21 tool implementations (new naming, one tool many actions)
 │   │   ├── File: file_explorer, file_writer
 │   │   ├── Command: command
 │   │   ├── Network: web_search, web_fetch, http_request, check_network
@@ -235,11 +241,13 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── Git: git_query, git_submit, git_branch
 │   │   ├── Agent: agent
 │   │   ├── Skill: skill
+│   │   ├── Lesson: lesson  ★Growth System (search/record/complete/feedback/list)
 │   │   ├── Project: project_info
 │   │   ├── Task: task_manager
-│   │   ├── Interaction: ask_clarification
-│   │   ├── Attachment: chat_attachment
-│   │   └── Schedule: schedule_task
+│   │   ├── Interaction: ask_clarification, chat_attachment, query_tool_history
+│   │   ├── Schedule: schedule_task
+│   │   ├── MCP Manager: mcp_server_manager
+│   │   └── History: query_tool_history
 │   ├── permission/            # Permission control
 │   └── postedit/              # Post-processing pipeline
 ├── log/LogService             # Application-level logging (10.8KB)
@@ -336,6 +344,19 @@ src/main/java/com/example/agentdeepseek/
                           │ status (ENABLED/...) │
                           │ max_execute_count    │
                           └──────────────────────┘
+                          │
+                          │ ┌──────────────────────────────────┐
+                          │ │ lesson (Growth System)            │
+                          │ │ ──────────────────────────────    │
+                          │ │ id (PK)                            │
+                          │ │ project_key (isolation)           │
+                          │ │ tool_name + error_category         │
+                          │ │ error_code + error_signature (UQ) │
+                          │ │ symptom/root_cause/solution        │
+                          │ │ status (0draft/1active/2hidden)    │
+                          │ │ source (auto/llm/manual)           │
+                          │ │ hit/success/fail_count             │
+                          │ └────────────────────────────────────┘
 ```
 
 ---
@@ -352,7 +373,8 @@ src/main/java/com/example/agentdeepseek/
 | **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~500 |
 | **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~750 |
 | **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~2000 |
-| **Tool System** | 19 tools registration/execution/permission/post-edit | tool/ package | ~6000 |
+| **Tool System** | 21 tools registration/execution/permission/post-edit | tool/ package | ~6000 |
+| **Growth System** | Lesson retrieval/auto-capture/review/validation loop | LessonService + LessonTool + FailureNormalizer | ~1200 |
 | **User Permissions** | RBAC, Token auth, menu control | UserServiceImpl + Filter | ~500 |
 | **Scheduled Tasks** | Cron/one-time scheduling, execution tracking | ScheduleTaskScheduler | ~350 |
 | **Skill System** | BM25 matching, Bayesian confidence | SkillMatcher + SkillIndexer | ~400 |

@@ -5,6 +5,32 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.5] - 2026-07-10
+
+### 📚 Growth System: Lesson Knowledge Base
+
+- **New `lesson` built-in tool**: five-in-one — search (retrieve experiences) / record (save experiences) / complete (fill in drafts) / feedback (validate results) / list (inspect the library), with per-project isolation
+- **Auto Capture**: ToolExecutor automatically saves a draft (source=auto) when a tool call fails; LLM proactive records (source=llm), manual curation (source=manual), and turn-level review (source=review) all converge into the same library
+- **Passive Injection**: on tool failure, the knowledge base is auto-searched and the LLM receives a "solution hint + completion guide" (conversation-level dedup, zero standing cost, never blocks the main flow)
+- **Validation Loop**: F3 tracking auto-feedback — if the same error does not recur by the end of the session after a solution was injected, it counts as effective; if it recurs, it counts as ineffective. Experiences promoted to ACTIVE after 2 effective reuses, hidden after 5 consecutive failures
+- **Turn-Level Review (C2)**: after the tool loop ends, an async LLM pass distills root cause / solution, so even friendly non-exception failures get captured
+- **Management UI**: new "踩坑经验" (Lesson) page (/lesson-manage, SETTING menu group) with pagination, details, manual editing, feedback, delete, and a growth dashboard (total/draft/active/hidden/hits/success rate)
+- **Core Agent Prompt**: built-in tool list 20 → 21, added the highest-priority "growth loop" rule (search → apply → record → feedback)
+
+### 🔧 Build Script Fix
+
+- **sync-version.bat**: `setlocal DisableDelayedExpansion` fixes the "Expected ')', got '='" error caused by delayed-expansion swallowing `!` characters (e.g. `!j.build`) in the build.bat call chain
+
+### 🏷️ Version Bump
+
+- Backend: `1.1.4` → `1.1.5`
+- Frontend: `1.1.4` → `1.1.5`
+- Electron: `1.1.4` → `1.1.5`
+- MCP Server handshake version: `1.1.4` → `1.1.5`
+- Build artifact: `code-craft-1.1.4.jar` → `code-craft-1.1.5.jar`
+
+---
+
 ## [1.1.4] - 2026-07-08
 
 ### 🛰️ MCP Bidirectional Support (Model Context Protocol)

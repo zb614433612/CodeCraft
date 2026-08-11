@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v1.1.4 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.5 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -18,7 +18,7 @@
                      └────────────┬─────────────┘
                                   │ implements
                      ┌────────────┴─────────────┐
-                     │  19 个工具实现类           │
+                      │  21 个工具实现类           │
                      │  (@ToolPermission 注解)   │
                      └────────────┬─────────────┘
                                   │ 自动注入 List<Tool>
@@ -323,36 +323,68 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 
 | 工具名 | 分类 | affectsData | pathSensitive | highRisk |
 |--------|------|:-----------:|:-------------:|:--------:|
-| `read_file` | READ | ✓ | ✓ | ✗ |
-| `write_file` | WRITE | ✓ | ✓ | ✗ |
-| `edit_file` | WRITE | ✓ | ✓ | ✗ |
-| `delete_file` | DELETE | ✓ | ✓ | ✓ |
-| `glob_files` | READ | ✗ | ✗ | ✗ |
-| `grep_search` | READ | ✗ | ✗ | ✗ |
-| `run_command` | EXECUTE | ✓ | ✗ | ✓ |
-| `run_server` | EXECUTE | ✓ | ✗ | ✓ |
-| `service_control` | EXECUTE | ✓ | ✗ | ✓ |
+| `file_explorer` | READ | ✗ | ✓ | ✗ |
+| `file_writer` | WRITE | ✓ | ✓ | ✗ |
+| `command` | EXECUTE | ✓ | ✗ | ✓ |
 | `web_search` | NETWORK | ✗ | ✗ | ✗ |
 | `web_fetch` | NETWORK | ✗ | ✗ | ✗ |
 | `http_request` | NETWORK | ✗ | ✗ | ✗ |
 | `check_network` | NETWORK | ✗ | ✗ | ✗ |
 | `execute_sql` | DATABASE | ✓ | ✗ | ✓ |
-| `git_status` | GIT | ✗ | ✗ | ✗ |
-| `git_diff` | GIT | ✗ | ✗ | ✗ |
-| `git_log` | GIT | ✗ | ✗ | ✗ |
-| `git_add` | GIT | ✓ | ✗ | ✗ |
-| `git_commit` | GIT | ✓ | ✗ | ✗ |
-| `git_push` | GIT | ✓ | ✗ | ✓ |
+| `git_query` | GIT | ✗ | ✗ | ✗ |
+| `git_submit` | GIT | ✓ | ✗ | ✓ |
 | `git_branch` | GIT | ✓ | ✗ | ✗ |
-| `fork_agent` | SYSTEM | ✗ | ✗ | ✗ |
-| `collect_agent` | SYSTEM | ✗ | ✗ | ✗ |
-| `inspect_agent` | SYSTEM | ✗ | ✗ | ✗ |
-| `manage_skill` | SYSTEM | ✓ | ✗ | ✗ |
-| `report_skill_result` | SYSTEM | ✓ | ✗ | ✗ |
+| `agent` | SYSTEM | ✗ | ✗ | ✗ |
+| `skill` | SYSTEM | ✓ | ✗ | ✗ |
+| `lesson` | SYSTEM | ✓ | ✗ | ✗ |
 | `project_info` | READ | ✗ | ✗ | ✗ |
-| `read_project_tree` | READ | ✗ | ✗ | ✗ |
 | `task_manager` | SYSTEM | ✓ | ✗ | ✗ |
 | `ask_clarification` | SYSTEM | ✗ | ✗ | ✗ |
+| `chat_attachment` | READ | ✗ | ✗ | ✗ |
+| `mcp_server_manager` | SYSTEM | ✓ | ✗ | ✗ |
+| `schedule_task` | SYSTEM | ✓ | ✗ | ✗ |
+| `query_tool_history` | READ | ✗ | ✗ | ✗ |
+
+> 📌 速查表按当前 21 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
+
+---
+
+## 八·五、成长体系：Lesson 踩坑经验库
+
+`lesson` 工具是成长体系（经验库）的入口，与 `skill`（常驻匹配的工作流模板）互补：**lesson 是「按需检索的失败经验」**，平时零上下文开销，出错时自动命中。
+
+### 8.5.1 数据流
+
+```
+工具执行失败 (ToolExecutor)
+    ↓ 自动捕获草稿 (source=auto)
+LessonDraft 入库（仅现象 + 错误码 + 工具名）
+    ↓ 被动注入（同会话去重，最多 1 次）
+「解法提示 + 补全引导」注入 LLM 上下文
+    ↓
+LLM 应用解法 → 会话结束未再犯 → F3 自动判「有效」→ 经验转正 (ACTIVE)
+LLM 再次失败        → F3 自动判「无效」→ 经验降权/隐藏 (HIDDEN)
+```
+
+### 8.5.2 经验来源（source 四通道）
+
+| source | 触发方式 | 说明 |
+|--------|---------|------|
+| `auto` | 工具执行抛异常 | ToolExecutor 自动捕获草稿（只有现象，无解法） |
+| `llm` | LLM 主动 `lesson action=record` | 一步到位带解法，质量最高 |
+| `manual` | 人工沉淀（前端管理页） | 人工编辑补全 |
+| `review` | 对话级异步复盘 | 工具循环结束后调 LLM 提炼根因/解法（C2） |
+
+### 8.5.3 验证闭环（F3 追踪）
+
+- **有效复用 2 次** → 经验自动转正（草稿 → 有效）
+- **连续失败 5 次** → 经验自动隐藏，不再参与检索
+- **feedback 反馈**：LLM 应用解法后主动 `lesson action=feedback`，加速经验置信度收敛
+- 经验按 `project_key` 隔离，跨项目检索仅命中 `global=true` 的通用经验
+
+### 8.5.4 前端管理
+
+「踩坑经验」管理页（`/lesson-manage`，菜单 SETTING 组）：分页浏览、详情查看、人工编辑补全、反馈验证、删除，以及成长看板（总数/草稿/有效/隐藏/命中次数/成功率）。
 
 ---
 

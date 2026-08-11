@@ -20,10 +20,10 @@ mvn clean package -DskipTests && mvn spring-boot:run
 
 ```bash
 # Windows
-scripts\build.bat v1.1.4
+scripts\build.bat v1.1.5
 
 # Mac / Linux
-./scripts/build.sh v1.1.4
+./scripts/build.sh v1.1.5
 ```
 
 ---
@@ -99,6 +99,8 @@ JDBC URL:  jdbc:h2:file:./data/codecraft
 SELECT * FROM conversation ORDER BY updated_at DESC LIMIT 10;
 SELECT * FROM agent_config WHERE enabled = 1;
 SELECT * FROM skill WHERE confidence > 0.5;
+SELECT * FROM lesson WHERE status = 1 ORDER BY hit_count DESC;
+SELECT status, COUNT(*) FROM lesson GROUP BY status;   -- 成长看板
 SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 ```
 
@@ -109,8 +111,9 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 ```
 项目根目录
 ├── src/main/java/...        → 后端源码（102 个 Java 文件）
-│   ├── tool/impl/           → 19 个 AI 工具实现
+│   ├── tool/impl/           → 21 个 AI 工具实现（含 lesson 成长体系）
 │   ├── p2p/                 → P2P 远程协作
+│   └── service/lesson/      → 成长体系（经验库：检索/记录/复盘/归一化）
 │   └── service/impl/        → 核心业务逻辑
 ├── frontend/src/            → Vue3 前端源码
 │   ├── views/               → 10 个页面视图

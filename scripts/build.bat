@@ -39,6 +39,11 @@ REM ==================== Step 1: ?汾??? ====================
 echo.
 echo [INFO] Step 1/6: ????汾??...
 call scripts\sync-version.bat
+if errorlevel 1 (
+    echo [ERROR] 版本同步失败, 已中止打包。请检查 pom.xml 与 sync-version.bat。
+    echo         否则可能把旧版 JAR 打进新安装包, 风险极高。
+    exit /b 1
+)
 
 REM ==================== Step 2: Maven ???? ====================
 echo.
@@ -126,8 +131,8 @@ if exist "%RELEASE_DIR%" (
     echo.
     echo ?汾: %VERSION%  ^|  ??: Windows
     echo.
-    REM ???? MD5
-    for %%f in ("%RELEASE_DIR%\CodeCraft-Setup-%VERSION%.exe") do (
+    REM ???? MD5 (note: actual artifact is "CodeCraft Setup x.y.z.exe" with spaces)
+    for %%f in ("%RELEASE_DIR%\CodeCraft*%VERSION%.exe") do (
         certutil -hashfile "%%f" MD5 | findstr /v ":" | findstr /v "^$"
     )
 )

@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.1.4 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.5 | 更新：2026-07-08 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 129KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -61,6 +61,10 @@ DeepSeekServiceImpl (22 个依赖)
 │   ├─ SkillService                    → 技能 CRUD
 │   ├─ SkillMatcher                    → 技能匹配
 │   └─ DeepSeekAnalyzer                → AI 分析器
+├─ 成长体系（★v1.1.5 新增）
+│   ├─ LessonService                   → 经验 CRUD + 按需检索 + 状态机
+│   ├─ LessonRecorder                  → 失败自动捕获草稿（source=auto）
+│   └─ LessonReviewService             → 对话级异步复盘（C2）
 ├─ 权限/待处理
 │   ├─ PendingQuestionStore            → 待审批问题存储
 │   ├─ ExecutionTokenManager           → Token 管理
@@ -80,6 +84,7 @@ DeepSeekServiceImpl (22 个依赖)
 │   ├─ 获取 AgentConfig（工具列表、模型、思考模式等）
 │   ├─ 解析 LLM Provider + Client（providerCode > providerId > 默认）
 │   ├─ 加载技能 → SkillMatcher.match()
+│ │   ├─ 加载经验 → LessonService.retrieveRelevant（被动注入，会话级去重）
 │   ├─ 构建 API 请求体（LLMClient.buildRequestBody）
 │   └─ 返回 ConversationContext（含 apiRequest, toolNames, skillMatchEvent）
 ├─ ② toolExecutor.buildToolDefinitions(toolNames)
@@ -126,6 +131,7 @@ DeepSeekServiceImpl (22 个依赖)
 │       │       │   │   ├─ 检查 hasRepeatedCalls() → 连续4次重复 → 终止
 │       │       │   │   ├─ toolExecutor.executeToolCalls()
 │       │       │   │   │   └─ 每个工具 → 快照 → 权限管道 → 执行 → diff统计
+│ │       │   │   │       └─ 工具抛异常 → LessonRecorder 自动捕获草稿（仅现象，source=auto）
 │       │       │   │   ├─ 工具结果追加到消息列表
 │       │       │   │   └─ 递归 handleToolCallIteration(iteration+1)
 │       │       │   │
@@ -135,6 +141,7 @@ DeepSeekServiceImpl (22 个依赖)
 │       │           ├─ WebClientResponseException → 错误事件
 │       │           └─ 通用 Exception → 错误事件
 │       │
+│ │       ├─ 工具循环结束后 → lessonReviewService.reviewAsync（异步复盘，提炼根因/解法，C2）
 │       └─ concatWith(Flux.defer(子Agent自动收集))
 │           ├─ agentForkManager.getPendingAgentCount() > 0 ?
 │           ├─ agentForkManager.collectPendingAgents(timeout=300)
@@ -188,6 +195,7 @@ DeepSeekServiceImpl (22 个依赖)
                                 │       │   ├─ 权限检查         │
                                 │       │   ├─ tool.execute()   │
                                 │       │   └─ diff统计         │
+                                │       │   └─ 失败→自动捕获草稿│
                                 │       └──────────┬───────────┘
                                 │                  │
                                 │       iteration++, 追加结果

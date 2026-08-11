@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v1.1.4 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
+> Version: v1.1.5 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -297,12 +297,55 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `git_branch` | GIT | ✓ | ✗ | ✗ |
 | `agent` | SYSTEM | ✗ | ✗ | ✗ |
 | `skill` | SYSTEM | ✓ | ✗ | ✗ |
+| `lesson` | SYSTEM | ✓ | ✗ | ✗ |
 | `project_info` | READ | ✗ | ✗ | ✗ |
 | `task_manager` | SYSTEM | ✓ | ✗ | ✗ |
 | `ask_clarification` | SYSTEM | ✗ | ✗ | ✗ |
 | `chat_attachment` | READ | ✗ | ✗ | ✗ |
+| `mcp_server_manager` | SYSTEM | ✓ | ✗ | ✗ |
 | `schedule_task` | SYSTEM | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
+
+> 📌 This table tracks the current 21 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
+
+---
+
+## 8.5. Growth System: Lesson Knowledge Base
+
+The `lesson` tool is the entry point of the growth system (knowledge base), complementary to `skill` (standing, always-matched workflow templates): **lessons are "on-demand failure experiences"** — zero standing context cost, auto-hit on errors.
+
+### 8.5.1 Data Flow
+
+```
+Tool execution fails (ToolExecutor)
+    ↓ auto-capture draft (source=auto)
+LessonDraft persisted (symptom + error code + tool name only)
+    ↓ passive injection (dedup per conversation, at most once)
+"Solution hint + completion guide" injected into LLM context
+    ↓
+LLM applies solution → no recurrence by session end → F3 marks "effective" → ACTIVE
+LLM fails again        → F3 marks "ineffective" → demoted/hidden (HIDDEN)
+```
+
+### 8.5.2 Experience Sources (4 channels)
+
+| source | Trigger | Description |
+|--------|---------|-------------|
+| `auto` | Tool call throws | ToolExecutor auto-captures a draft (symptom only, no solution) |
+| `llm` | LLM proactive `lesson action=record` | Solution included in one step, highest quality |
+| `manual` | Human curation (management UI) | Manually edited & completed |
+| `review` | Turn-level async review | After the tool loop, LLM distills root cause / solution (C2) |
+
+### 8.5.3 Validation Loop (F3 Tracking)
+
+- **2 effective reuses** → experience auto-promoted (draft → ACTIVE)
+- **5 consecutive failures** → experience auto-hidden, no longer retrieved
+- **feedback**: LLM calls `lesson action=feedback` after applying a solution to accelerate confidence convergence
+- Experiences are isolated by `project_key`; cross-project retrieval only hits `global=true` generic lessons
+
+### 8.5.4 Management UI
+
+"Lesson" management page (`/lesson-manage`, SETTING menu group): paginated browsing, details, manual editing/completion, feedback, delete, plus a growth dashboard (total/draft/active/hidden/hits/success rate).
 
 ---
 
