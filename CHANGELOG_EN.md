@@ -5,7 +5,7 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
-## [1.1.5] - 2026-07-10
+## [1.1.5] - 2026-08-11
 
 ### 📚 Growth System: Lesson Knowledge Base
 
@@ -31,7 +31,7 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
-## [1.1.4] - 2026-07-08
+## [1.1.4] - 2026-08-10
 
 ### 🛰️ MCP Bidirectional Support (Model Context Protocol)
 

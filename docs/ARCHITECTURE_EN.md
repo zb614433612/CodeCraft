@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.1.5 | Updated: 2026-07-08 | Audience: Developers / AI Collaborators
+> Version: v1.1.5 | Updated: 2026-08-11 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
