@@ -131,8 +131,8 @@ public class DeepSeekConfig {
     public WebClient deepSeekWebClient(WebClient.Builder webClientBuilder) {
         // ===== 连接池配置：核心！预防死连接问题 =====
         ConnectionProvider connectionProvider = ConnectionProvider.builder("deepseek-pool")
-                .maxIdleTime(Duration.ofSeconds(40))       // 空闲40s后客户端主动关闭（比服务端~60s短）
-                .evictInBackground(Duration.ofSeconds(20))  // 每20s后台清理过期连接
+                .maxIdleTime(Duration.ofSeconds(20))       // 空闲20s后客户端主动关闭（服务端 keepalive 实测可能短于预期，缩小死连接窗口）
+                .evictInBackground(Duration.ofSeconds(10))  // 每10s后台清理过期连接
                 .maxLifeTime(Duration.ofMinutes(5))         // 连接最大存活5分钟，强制轮换
                 .build();
 

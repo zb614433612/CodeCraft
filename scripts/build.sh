@@ -93,7 +93,7 @@ else
             log_info "正在裁剪 JRE（约 30 秒）..."
             rm -rf "$JRE_DIR"
             if "$JLINK" \
-                --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+                --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
                 --strip-debug --compress 2 --no-header-files --no-man-pages \
                 --output "$JRE_DIR"; then
                 log_info "JRE 裁剪完成 ($(du -sh "$JRE_DIR" | cut -f1))"

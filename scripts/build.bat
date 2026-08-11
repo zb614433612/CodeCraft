@@ -86,7 +86,7 @@ if exist "%JRE_DIR%\bin\java.exe" (
         echo [INFO] ????ü? JRE??? 30 ??...
         if exist "%JRE_DIR%" rmdir /s /q "%JRE_DIR%"
         "!JLINK!" ^
-            --add-modules java.base,java.logging,java.sql,java.xml,java.naming,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
+            --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
               --strip-debug --compress 2 --no-header-files --no-man-pages ^
             --output "%JRE_DIR%"
         if %errorlevel% equ 0 (

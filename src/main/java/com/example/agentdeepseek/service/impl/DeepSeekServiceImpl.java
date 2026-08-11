@@ -1972,10 +1972,59 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     }
                 })
                 .onErrorResume(e -> {
-                    log.error("评委评估调用失败", e);
-                    return Flux.just(createReasoningSSEEvent(
-                            "评委评估调用失败，任务自动终止。错误: " + e.getMessage()));
+                    log.error("评委评估调用失败，启用降级判定", e);
+                    // 降级判定：评委 API 不可用（网络/DNS/HTTP 等异常）时不直接终止任务，
+                    // 参考子 Agent 评委逻辑：检查最近是否有实质进展（成功的工具调用）
+                    boolean hasProgress = judgeFallbackHasProgress(messages);
+                    if (hasProgress) {
+                        // 检测到进展 → 宽松策略：少量扩展迭代继续执行，避免网络抖动误杀任务
+                        int additional = 5;
+                        int newMaxIterations = maxIterations + additional;
+                        int newTotalGranted = judgeGrantedIterations.merge(conversationId, additional, Integer::sum);
+                        if (newTotalGranted >= MAX_JUDGE_GRANTED_ITERATIONS) {
+                            log.warn("评委降级扩展累计 {} 次，达到上限，强制结束", newTotalGranted);
+                            return Flux.just(createReasoningSSEEvent(
+                                    "任务迭代次数已超出评委允许的最大扩展额度（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次），自动终止。"));
+                        }
+                        log.warn("评委降级判定：检测到实质进展，继续执行 +{}，累计扩展 {}", additional, newTotalGranted);
+                        String extendEvent = createReasoningSSEEvent(
+                                "**🤖 评委评估：调用失败，已降级为本地判定（检测到任务进展，继续执行）**\n\n" +
+                                        "**失败原因：** " + e.getMessage() + "\n\n" +
+                                        "**判定依据：** 最近有成功的工具调用，判定任务有进展\n\n" +
+                                        "**增加 " + additional + " 次迭代**（已累计扩展 " + newTotalGranted + "/" + MAX_JUDGE_GRANTED_ITERATIONS + " 次）");
+                        return Flux.just(extendEvent)
+                                .concatWith(handleToolCallIteration(
+                                        conversationId, storageConversationId, initialApiRequest,
+                                        messages, iteration, newMaxIterations));
+                    } else {
+                        log.warn("评委降级判定：最近无成功工具调用，终止任务");
+                        String rejectEvent = createReasoningSSEEvent(
+                                "**🤖 评委评估：调用失败，已降级为本地判定（任务终止）**\n\n" +
+                                        "**失败原因：** " + e.getMessage() + "\n\n" +
+                                        "**判定依据：** 最近无成功的工具调用，判定任务无进展");
+                        return Flux.just(rejectEvent);
+                    }
                 });
+    }
+
+    /**
+     * 评委降级判定：检查最近是否有实质进展（成功的工具调用）
+     * <p>
+     * 评委 API 调用失败（DNS/网络/HTTP 异常等）时使用本地启发式逻辑，
+     * 避免一次网络抖动直接终止整个任务。与 AgentForkManager 的子 Agent 评委降级逻辑一致。
+     * </p>
+     */
+    private boolean judgeFallbackHasProgress(List<Map<String, Object>> messages) {
+        for (int i = messages.size() - 1; i >= Math.max(0, messages.size() - 6); i--) {
+            Map<String, Object> msg = messages.get(i);
+            if ("tool".equals(msg.get("role"))) {
+                String content = (String) msg.get("content");
+                if (content != null && !content.contains("错误") && !content.contains("失败")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

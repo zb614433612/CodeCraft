@@ -97,8 +97,8 @@ public class LLMWebClientManager {
 
         // 连接池配置（与 DeepSeekConfig 保持一致）
         ConnectionProvider connectionProvider = ConnectionProvider.builder("llm-pool-" + config.getCode())
-                .maxIdleTime(Duration.ofSeconds(40))
-                .evictInBackground(Duration.ofSeconds(20))
+                .maxIdleTime(Duration.ofSeconds(20))
+                .evictInBackground(Duration.ofSeconds(10))
                 .maxLifeTime(Duration.ofMinutes(5))
                 .build();
 
