@@ -562,12 +562,39 @@ function formatParams(paramsJson?: string) {
 </script>
 
 <style scoped>
+/* ===== 页面容器 ===== */
+/* L5 修复：min-height:100% → height:100% + overflow-y:auto（对齐 SkillManage/ScheduleTask 等页面模式）。
+   原因：min-height 会让页面被内容撑高、依赖外层 main-content 滚动，Electron 下滚动条不可靠，
+   数据超 10 条时看不到底部（分页器被裁剪）；height:100% + 自身滚动条自包含、稳定。 */
 .lesson-manage {
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  min-height: 100%;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+/* 滚动条美化（对齐 AgentConfigView 风格） */
+.lesson-manage::-webkit-scrollbar {
+  width: 6px;
+}
+.lesson-manage::-webkit-scrollbar-track {
+  background: transparent;
+}
+.lesson-manage::-webkit-scrollbar-thumb {
+  background: #dcd8ea;
+  border-radius: 3px;
+}
+.lesson-manage::-webkit-scrollbar-thumb:hover {
+  background: #c4bce0;
+}
+[data-theme="dark"] .lesson-manage::-webkit-scrollbar-thumb {
+  background: #3a3850;
+}
+[data-theme="dark"] .lesson-manage::-webkit-scrollbar-thumb:hover {
+  background: #4a4860;
 }
 
 /* ===== 头部 ===== */
