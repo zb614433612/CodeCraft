@@ -55,6 +55,29 @@ public class ToolExecutor {
     // 工具调用结果
     // ============================================================
 
+    /**
+     * 工具业务错误前缀：工具不抛异常、直接返回友好错误字符串（如参数缺失校验）。
+     * 供 isError() 与执行后统一捕获使用；与 LessonReviewService.FRIENDLY_FAILURE_PATTERNS 保持对齐，
+     * 避免「工具返回业务错误 → 成长体系漏捕获」的盲区。
+     */
+    private static final List<String> BUSINESS_ERROR_PREFIXES = List.of(
+            "【参数缺失】", "【缺少参数】", "【参数错误】", "【命令未找到】",
+            "【执行异常】", "【启动失败】", "【权限不足】", "【文件不存在】",
+            "【收集失败】", "【错误】");
+
+    /** 工具返回的业务错误（不抛异常，直接返回友好错误字符串）判定 */
+    private static boolean isBusinessError(String content) {
+        if (content == null || content.isEmpty()) {
+            return false;
+        }
+        for (String prefix : BUSINESS_ERROR_PREFIXES) {
+            if (content.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static class ToolCallResult {
         private final String toolCallId;
         private final String toolName;
@@ -92,7 +115,8 @@ public class ToolExecutor {
             return content.startsWith("工具调用失败:")
                     || content.startsWith("工具参数解析失败:")
                     || content.startsWith("错误：未知工具")
-                    || content.startsWith("工具执行异常:");
+                    || content.startsWith("工具执行异常:")
+                    || isBusinessError(content);
         }
     }
 
@@ -206,7 +230,9 @@ public class ToolExecutor {
                 log.info("🔧 智能补齐 action={} for tool={}, 推断依据: {}",
                         actionFix.getInferredAction(), toolName, actionFix.getReason());
             } else {
-                // 无法自动补齐，返回精确的修复指导
+                // 无法自动补齐，返回精确的修复指导（同为失败样本：LLM 漏传 action 且无法推断）
+                lessonRecorder.recordAsync(toolName, functionNode.path("arguments").asText(""),
+                        "工具[" + toolName + "] 缺少必填参数 action 且无法自动推断: " + actionFix.getGuidanceMessage());
                 return new ToolCallResult(toolCallId, toolName, actionFix.getGuidanceMessage());
             }
         }
@@ -233,6 +259,11 @@ public class ToolExecutor {
             Long userId = ToolContext.getUserId();
             String result = executionPipeline.execute(tool, toolName, arguments,
                     executionMode, conversationId, userId);
+
+            // 📝 成长体系：工具不抛异常、直接返回业务错误（如【参数缺失】校验）也捕获失败经验
+            if (isBusinessError(result)) {
+                lessonRecorder.recordAsync(toolName, arguments.toString(), result);
+            }
 
             // 工具执行后：计算文件改动统计
             if (isFileModifyingTool(toolName) && filePathStr != null) {

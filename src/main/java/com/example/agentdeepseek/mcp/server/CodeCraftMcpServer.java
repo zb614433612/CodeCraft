@@ -28,7 +28,7 @@ public class CodeCraftMcpServer implements ServletContextInitializer {
 
     /** MCP Server 名称与版本（用于 initialize 握手） */
     private static final String SERVER_NAME = "codecraft";
-    private static final String SERVER_VERSION = "1.1.5";
+    private static final String SERVER_VERSION = "1.1.6";
 
     private final McpServerProperties props;
     private final McpToolHandler toolHandler;

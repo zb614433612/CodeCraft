@@ -18,14 +18,14 @@ public interface LessonMapper {
 
     String COLUMNS = "id, project_key, tool_name, error_category, error_code, error_signature, " +
             "symptom, root_cause, solution, params_json, applicable_cond, keywords, " +
-            "status, source, hit_count, success_count, fail_count, created_at, updated_at";
+            "status, source, hit_count, success_count, fail_count, type, goal, env_params, created_at, updated_at";
 
     @Insert("INSERT INTO lesson (project_key, tool_name, error_category, error_code, error_signature, " +
             "symptom, root_cause, solution, params_json, applicable_cond, keywords, " +
-            "status, source, hit_count, success_count, fail_count, created_at, updated_at) " +
+            "status, source, hit_count, success_count, fail_count, type, goal, env_params, created_at, updated_at) " +
             "VALUES (#{projectKey}, #{toolName}, #{errorCategory}, #{errorCode}, #{errorSignature}, " +
             "#{symptom}, #{rootCause}, #{solution}, #{paramsJson}, #{applicableCond}, #{keywords}, " +
-            "#{status}, #{source}, #{hitCount}, #{successCount}, #{failCount}, #{createdAt}, #{updatedAt})")
+            "#{status}, #{source}, #{hitCount}, #{successCount}, #{failCount}, #{type}, #{goal}, #{envParams}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Lesson lesson);
 
@@ -48,6 +48,9 @@ public interface LessonMapper {
         @Result(property = "hitCount", column = "hit_count"),
         @Result(property = "successCount", column = "success_count"),
         @Result(property = "failCount", column = "fail_count"),
+        @Result(property = "type", column = "type"),
+        @Result(property = "goal", column = "goal"),
+        @Result(property = "envParams", column = "env_params"),
         @Result(property = "createdAt", column = "created_at"),
         @Result(property = "updatedAt", column = "updated_at")
     })
@@ -59,7 +62,7 @@ public interface LessonMapper {
     Optional<Lesson> selectBySignature(@Param("signature") String signature);
 
     /**
-     * 第一级硬过滤：project_key 必填 + tool_name/error_category/error_code 可选精确匹配
+     * 第一级硬过滤：project_key 必填 + tool_name/error_category/error_code/type 可选精确匹配
      * F6 全局共享池：project_key IN (当前项目, '__global__')，项目内经验优先，全局经验兜底
      * 排序：项目内优先 → 有效优先 → 命中次数 → 成功率（贝叶斯平滑，防除零）
      */
@@ -69,6 +72,7 @@ public interface LessonMapper {
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='errorCategory != null and errorCategory != \"\"'> AND error_category = #{errorCategory}</if>" +
             "<if test='errorCode != null and errorCode != \"\"'> AND error_code = #{errorCode}</if>" +
+            "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
             " ORDER BY CASE WHEN project_key = #{projectKey} THEN 0 ELSE 1 END, " +
             "status DESC, hit_count DESC, " +
             "(success_count + 1.0) / (success_count + fail_count + 2.0) DESC " +
@@ -79,6 +83,7 @@ public interface LessonMapper {
                                 @Param("toolName") String toolName,
                                 @Param("errorCategory") String errorCategory,
                                 @Param("errorCode") String errorCode,
+                                @Param("type") String type,
                                 @Param("limit") int limit);
 
     /**
@@ -91,10 +96,12 @@ public interface LessonMapper {
             "SELECT " + COLUMNS + " FROM lesson " +
             "WHERE project_key IN (#{projectKey}, '" + Lesson.GLOBAL_PROJECT_KEY + "') AND status IN (0, 1)" +
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
+            "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
             " AND (symptom LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\' " +
             " OR root_cause LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\' " +
             " OR solution LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\' " +
-            " OR keywords LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\')" +
+            " OR keywords LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\'" +
+            " OR goal LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\')" +
             " ORDER BY CASE WHEN project_key = #{projectKey} THEN 0 ELSE 1 END, " +
             "status DESC, hit_count DESC, " +
             "(success_count + 1.0) / (success_count + fail_count + 2.0) DESC " +
@@ -104,6 +111,7 @@ public interface LessonMapper {
     List<Lesson> selectFuzzy(@Param("projectKey") String projectKey,
                               @Param("toolName") String toolName,
                               @Param("keyword") String keyword,
+                              @Param("type") String type,
                               @Param("limit") int limit);
 
     /** 检索命中计数（原子） */
@@ -131,6 +139,7 @@ public interface LessonMapper {
     /**
      * 补全/更新经验内容（LLM 模板提炼：把草稿完善成「模板+变量」结构）
      * 只更新非空字段，status 保持草稿（转正仍由反馈闭环驱动）
+     * L2：goal 可选更新（DETOUR 检索维度补全，只补空不覆盖）
      */
     @Update("<script>" +
             "UPDATE lesson SET updated_at = #{updatedAt}" +
@@ -139,6 +148,7 @@ public interface LessonMapper {
             "<if test='paramsJson != null'> , params_json = #{paramsJson}</if>" +
             "<if test='applicableCond != null'> , applicable_cond = #{applicableCond}</if>" +
             "<if test='keywords != null'> , keywords = #{keywords}</if>" +
+            "<if test='goal != null'> , goal = #{goal}</if>" +
             " WHERE id = #{id}" +
             "</script>")
     int updateContent(@Param("id") Long id,
@@ -147,6 +157,7 @@ public interface LessonMapper {
                       @Param("paramsJson") String paramsJson,
                       @Param("applicableCond") String applicableCond,
                       @Param("keywords") String keywords,
+                      @Param("goal") String goal,
                       @Param("updatedAt") java.time.LocalDateTime updatedAt);
 
     /**
@@ -179,6 +190,7 @@ public interface LessonMapper {
             "<if test='status != null'> AND status = #{status}</if>" +
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='errorCode != null and errorCode != \"\"'> AND error_code = #{errorCode}</if>" +
+            "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
             " ORDER BY status DESC, hit_count DESC, updated_at DESC " +
             "LIMIT #{size} OFFSET #{offset}" +
             "</script>")
@@ -187,6 +199,7 @@ public interface LessonMapper {
                             @Param("status") Integer status,
                             @Param("toolName") String toolName,
                             @Param("errorCode") String errorCode,
+                            @Param("type") String type,
                             @Param("offset") int offset,
                             @Param("size") int size);
 
@@ -198,11 +211,13 @@ public interface LessonMapper {
             "<if test='status != null'> AND status = #{status}</if>" +
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='errorCode != null and errorCode != \"\"'> AND error_code = #{errorCode}</if>" +
+            "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
             "</script>")
     long countByFilter(@Param("projectKey") String projectKey,
                        @Param("status") Integer status,
                        @Param("toolName") String toolName,
-                       @Param("errorCode") String errorCode);
+                       @Param("errorCode") String errorCode,
+                       @Param("type") String type);
 
     /**
      * 经验库统计（成长看板）：总数 / 各状态数 / 总命中 / 成功失败 / 来源分布
@@ -220,6 +235,7 @@ public interface LessonMapper {
             "COALESCE(SUM(CASE WHEN source = 'auto' THEN 1 ELSE 0 END), 0) AS auto_count, " +
             "COALESCE(SUM(CASE WHEN source = 'llm' THEN 1 ELSE 0 END), 0) AS llm_count, " +
             "COALESCE(SUM(CASE WHEN source = 'manual' THEN 1 ELSE 0 END), 0) AS manual_count, " +
+            "COALESCE(SUM(CASE WHEN type = 'DETOUR' THEN 1 ELSE 0 END), 0) AS detour_count, " +
             "COALESCE(SUM(CASE WHEN created_at &gt;= #{since} THEN 1 ELSE 0 END), 0) AS recent_count " +
             "FROM lesson WHERE 1=1" +
             "<if test='projectKey != null and projectKey != \"\"'> AND project_key IN (#{projectKey}, '" + Lesson.GLOBAL_PROJECT_KEY + "')</if>" +
@@ -230,4 +246,28 @@ public interface LessonMapper {
     /** 物理删除（管理操作：确认误录/废弃经验） */
     @Delete("DELETE FROM lesson WHERE id = #{id}")
     int deleteById(@Param("id") Long id);
+
+    /**
+     * P0 归一化管线：LLM 语义归一化结果回写增强草稿（只补空不覆盖，与 F2 合并语义一致）。
+     * 并发安全：WHERE error_code = 'UNKNOWN' 保证只更新「规则通道落空」的草稿——
+     * 若 C2/LLM 已补全（error_code 已非 UNKNOWN），本更新影响 0 行，不会覆盖。
+     * root_cause 仅补空；error_category 仅当旧值为 UNKNOWN/OTHER 时补（避免覆盖已有分类）。
+     * H1 修复：error_code 变动时同步重算 error_signature（由 Service 传入新指纹）——
+     * 保证内容与指纹一致，后续 C2 复盘等通道用新 error_code 算指纹时可命中合并，防同坑双条。
+     *
+     * @return 实际更新行数（0=无需回写或已被其他通道补全）
+     */
+    @Update("UPDATE lesson SET " +
+            "error_category = CASE WHEN error_category IN ('OTHER','UNKNOWN') THEN #{errorCategory} ELSE error_category END, " +
+            "error_code = CASE WHEN error_code = 'UNKNOWN' THEN #{errorCode} ELSE error_code END, " +
+            "root_cause = CASE WHEN root_cause IS NULL OR root_cause = '' THEN #{rootCause} ELSE root_cause END, " +
+            "error_signature = CASE WHEN error_code = 'UNKNOWN' THEN #{signature} ELSE error_signature END, " +
+            "updated_at = #{updatedAt} " +
+            "WHERE id = #{id} AND error_code = 'UNKNOWN'")
+    int updateNormalized(@Param("id") Long id,
+                         @Param("errorCategory") String errorCategory,
+                         @Param("errorCode") String errorCode,
+                         @Param("rootCause") String rootCause,
+                         @Param("signature") String signature,
+                         @Param("updatedAt") java.time.LocalDateTime updatedAt);
 }

@@ -23,9 +23,12 @@ import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
 import com.example.agentdeepseek.service.ConfigService;
 import com.example.agentdeepseek.service.AttachmentStore;
+import com.example.agentdeepseek.model.entity.Lesson;
 import com.example.agentdeepseek.service.lesson.FailureNormalizer;
 import com.example.agentdeepseek.service.lesson.LessonService;
 import com.example.agentdeepseek.service.lesson.LessonReviewService;
+import com.example.agentdeepseek.service.lesson.LessonDetourService;
+import com.example.agentdeepseek.service.lesson.DetourBlockParser;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.PermissionContext;
@@ -164,6 +167,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     // 📝 成长体系 C2：对话级复盘（工具循环结束后异步提炼踩坑经验，友好提示不抛异常也能捕获）
     @Autowired
     private LessonReviewService lessonReviewService;
+
+    // 📝 成长体系 C3：弯路通道（信号扫描 + LLM 判定提炼 + 【方案取舍】块解析入库）
+    @Autowired
+    private LessonDetourService lessonDetourService;
+
+    @Autowired
+    private DetourBlockParser detourBlockParser;
 
     // 常量定义
     private static final String DATA_PREFIX = "data: ";
@@ -1344,6 +1354,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 同时将语言指令注入到最后一条用户消息内容中
         contextBuilder.injectLanguageIntoLastUserMessage(messages);
 
+        // 📝 成长体系 P2：任务启动 DETOUR 弯路预警（新用户消息进入工具循环前，按任务关键词检索弯路经验并注入 system 提示）
+        String toolProjectRoot = (String) initialApiRequest.get("_projectRoot");
+        injectDetourHintAtTaskStart(messages, toolProjectRoot, storageConversationId);
+
         // 初始化评委扩展计数器
         judgeGrantedIterations.put(conversationId, 0);
 
@@ -1810,6 +1824,122 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         } catch (Exception e) {
             log.warn("触发对话复盘失败（不影响主流程）: conversationId={}, err={}", conversationId, e.getMessage());
         }
+    }
+
+    /**
+     * 触发弯路通道（C3）：工具循环自然结束、最终回复已追加到 messages 后调用。
+     * ① 先解析【方案取舍】块（LLM 主动汇报 → 直接入库 DETOUR，短路 C3 提炼）；
+     * ② 未命中块 → 信号扫描（用户否定 / LLM 自述换方案）→ 命中则异步 LLM 判定提炼。
+     * 全程异步，绝不阻塞主流程。
+     */
+    private void triggerDetourReview(Long conversationId, Map<String, Object> apiRequest,
+                                     List<Map<String, Object>> messages) {
+        if (lessonDetourService == null) {
+            return;
+        }
+        try {
+            String turnId = (String) apiRequest.get("_turnId");
+            String projectRoot = (String) apiRequest.get("_projectRoot");
+            String model = (String) apiRequest.get("model");
+            LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
+            String projectKey = failureNormalizer.extractProjectKey(projectRoot);
+
+            // ① 【方案取舍】块：LLM 主动汇报 → 直接入库（source=llm），短路 C3 提炼
+            String finalAnswer = extractFinalAssistantContent(messages);
+            DetourBlockParser.DetourBlock block = detourBlockParser.parse(finalAnswer);
+            if (block != null) {
+                lessonDetourService.recordDetourBlock(projectKey, block);
+                log.info("方案取舍块入库 DETOUR: project={}, goal={}", projectKey, block.getGoal());
+                return;
+            }
+
+            // ② 信号扫描 → 异步判定提炼（无信号零成本跳过）
+            lessonDetourService.detourReviewAsync(conversationId, turnId, projectKey, messages, ctxClient, model);
+        } catch (Exception e) {
+            log.warn("触发弯路通道失败（不影响主流程）: conversationId={}, err={}", conversationId, e.getMessage());
+        }
+    }
+
+    /** 提取最后一条 assistant 消息的 content（供【方案取舍】块解析） */
+    private String extractFinalAssistantContent(List<Map<String, Object>> messages) {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Map<String, Object> msg = messages.get(i);
+            if ("assistant".equals(msg.get("role"))) {
+                Object content = msg.get("content");
+                if (content != null && !String.valueOf(content).isBlank()) {
+                    return String.valueOf(content);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * P2 任务启动 DETOUR 自动注入：新用户消息进入工具循环前，
+     * 用用户消息关键词检索弯路经验（type=detour），命中则在 system 区注入弯路预警。
+     * 同步检索（DB 毫秒级，不阻塞）；会话级去重（同会话只注入一次）。
+     * 定位：工具循环入口（executeSemiStreamingToolCycle）语言指令注入后调用。
+     */
+    private void injectDetourHintAtTaskStart(List<Map<String, Object>> messages,
+                                             String projectRoot, Long conversationId) {
+        if (lessonService == null || messages == null || messages.isEmpty()) {
+            return;
+        }
+        try {
+            // H2 修复：去重标记移到「成功注入后」——未命中弯路经验时不占用去重 key，
+            // 避免「首轮无匹配、后续轮任务才相关」的会话中预警机制彻底失效
+            // 取最新一条 user 消息作为任务目标关键词
+            String userText = null;
+            for (int i = messages.size() - 1; i >= 0; i--) {
+                if ("user".equals(messages.get(i).get("role"))) {
+                    Object c = messages.get(i).get("content");
+                    if (c != null && !String.valueOf(c).isBlank()) {
+                        userText = String.valueOf(c);
+                        break;
+                    }
+                }
+            }
+            if (userText == null) {
+                return;
+            }
+            // 关键词截断（任务描述通常较长，取前 80 字足够命中目标维度）
+            String keyword = userText.length() > 80 ? userText.substring(0, 80) : userText;
+            String projectKey = failureNormalizer.extractProjectKey(projectRoot);
+            String result = lessonService.searchLessons(projectKey, null, null, keyword, null, Lesson.TYPE_DETOUR);
+            if (result == null || !result.startsWith("📚")) {
+                return; // 无弯路经验命中（"📭 未找到"不注入）
+            }
+            // 注入 system 消息（所有 system 之后、第一条非 system 之前）
+            Map<String, Object> hintMsg = new HashMap<>();
+            hintMsg.put("role", "system");
+            hintMsg.put("content", "[踩坑经验-弯路预警] 当前任务与历史弯路经验相关，规划方案前请参考以下「已知不可行方案」：\n" + result);
+            int insertIdx = 0;
+            for (int i = 0; i < messages.size(); i++) {
+                Object role = messages.get(i).get("role");
+                if (!"system".equals(role)) {
+                    insertIdx = i;
+                    break;
+                }
+                insertIdx = i + 1;
+            }
+            messages.add(insertIdx, hintMsg);
+            // H2：仅在成功注入后占用去重 key（复用 lessonHintInjected 表，key 带 detour 前缀）
+            if (conversationId != null) {
+                markDetourHintInjected(conversationId);
+            }
+            log.info("任务启动弯路预警注入: conversationId={}, project={}, userLen={}",
+                    conversationId, projectKey, userText.length());
+        } catch (Exception e) {
+            log.warn("任务启动弯路预警注入失败（不影响主流程）: {}", e.getMessage());
+        }
+    }
+
+    /** P2 会话级去重：同会话只注入一次任务启动弯路预警 */
+    private boolean markDetourHintInjected(Long conversationId) {
+        String key = conversationId + ":detour-start";
+        long now = System.currentTimeMillis();
+        Long prev = lessonHintInjected.putIfAbsent(key, now);
+        return prev == null;
     }
 
     private void settleLessonTracking(Long conversationId) {
@@ -2778,6 +2908,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             assistantMessage.put("reasoning_content", reasoning);
                         }
                         messages.add(assistantMessage);
+
+                        // 📝 成长体系 C3：弯路通道（最终回复已追加到 messages 后触发——
+                        //    先解析【方案取舍】块直接入库短路，再信号扫描异步判定提炼）
+                        triggerDetourReview(conversationId, apiRequest, messages);
                     }
                 })
                 .doOnError(error -> {

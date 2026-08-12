@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.service.lesson;
 
 import com.example.agentdeepseek.mapper.LessonMapper;
+import com.example.agentdeepseek.mapper.LessonRuleMapper;
 import com.example.agentdeepseek.model.entity.Lesson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,7 +10,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.util.DigestUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -39,11 +42,21 @@ public class LessonService {
     private final LessonMapper lessonMapper;
     private final FailureNormalizer normalizer;
     private final ObjectMapper objectMapper;
+    /** P0：LLM 语义归一化兜底（指标：LLM 调用/缓存命中/回写次数） */
+    private final LessonNormalizerService normalizerService;
+    /** P2：规则自学习表（看板统计候选/转正数 + 惰性淘汰） */
+    private final LessonRuleMapper ruleMapper;
+    /** P2：规则表容量上限（超限时淘汰「候选+从未被提取命中」的最旧规则；替代时间淘汰） */
+    @org.springframework.beans.factory.annotation.Value("${lesson.rule.max-size:10000}")
+    private long ruleMaxSize;
 
-    public LessonService(LessonMapper lessonMapper, FailureNormalizer normalizer, ObjectMapper objectMapper) {
+    public LessonService(LessonMapper lessonMapper, FailureNormalizer normalizer, ObjectMapper objectMapper,
+                         LessonNormalizerService normalizerService, LessonRuleMapper ruleMapper) {
         this.lessonMapper = lessonMapper;
         this.normalizer = normalizer;
         this.objectMapper = objectMapper;
+        this.normalizerService = normalizerService;
+        this.ruleMapper = ruleMapper;
     }
 
     // ============================================================
@@ -70,6 +83,7 @@ public class LessonService {
     /**
      * 记录一条踩坑经验。
      * 同指纹（同项目+同工具+同错误码+同参数）已存在时：不新增行，命中次数 +1，返回已有记录。
+     * 默认类型 FAILURE（失败经验）。
      *
      * @return 入库（或命中已有）的 lesson，含 id
      */
@@ -78,18 +92,25 @@ public class LessonService {
                                String paramsJson, String applicableCond, String keywords,
                                String source) {
         return recordLessonWithResult(projectKey, toolName, errorCategory, errorCode,
-                symptom, rootCause, solution, paramsJson, applicableCond, keywords, source).lesson;
+                symptom, rootCause, solution, paramsJson, applicableCond, keywords, source,
+                null, null).lesson;
     }
 
     /**
      * 记录一条踩坑经验（返回是否新增/是否合并标志，供 LLM 工具区分「新建/合并/仅命中」）。
      * 并发安全：insert 时捕获唯一键冲突（两个线程同时先查后插的竞态），降级为查已有记录。
      * F2 解法合并：去重命中且「旧记录无解法、新记录有解法」时，用新内容补全旧草稿（只补空，不覆盖）。
+     * <p>
+     * P1 指纹分叉：type=DETOUR（弯路经验）时指纹 = md5(projectKey|detour|normalizedGoal)，
+     * 与 FAILURE 的工具维度指纹分叉（goal 维度去重），互不影响。
+     *
+     * @param type 经验类型：Lesson.TYPE_FAILURE（默认）/ Lesson.TYPE_DETOUR；null/空白按 FAILURE
+     * @param goal DETOUR 专用：任务目标（检索维度 + 指纹维度）；FAILURE 忽略
      */
     public RecordResult recordLessonWithResult(String projectKey, String toolName, String errorCategory, String errorCode,
                                                String symptom, String rootCause, String solution,
                                                String paramsJson, String applicableCond, String keywords,
-                                               String source) {
+                                               String source, String type, String goal) {
         if (projectKey == null || projectKey.isBlank()) projectKey = normalizer.extractProjectKey();
         if (toolName == null || toolName.isBlank()) toolName = "unknown";
         // P3-5：空解法统一写占位符（与 LessonRecorder 自动捕获通道一致），
@@ -97,18 +118,25 @@ public class LessonService {
         if (solution == null || solution.isBlank()) solution = Lesson.PLACEHOLDER_SOLUTION;
         String category = errorCategory == null || errorCategory.isBlank() ? "OTHER" : errorCategory;
         String code = errorCode == null || errorCode.isBlank() ? "UNKNOWN" : errorCode;
+        // P1：类型归一化（null/空白 → FAILURE；未知值 → FAILURE 防污染）
+        String effType = Lesson.TYPE_DETOUR.equals(type) ? Lesson.TYPE_DETOUR : Lesson.TYPE_FAILURE;
 
         // L2 修复：params 统一归一化（校验格式 + 按 name 排序 + value 截断），
         // 保证自动捕获（FailureNormalizer）与手动记录（LLM）跨通道指纹一致
         String normalizedParams = normalizeParamsJson(paramsJson);
 
-        // 组装归一化结果用于指纹
+        // 组装归一化结果用于指纹（FAILURE 走工具维度；DETOUR 走 goal 维度分叉）
         FailureNormalizer.NormalizedFailure nf = new FailureNormalizer.NormalizedFailure();
         nf.toolName = toolName;
         nf.errorCategory = category;
         nf.errorCode = code;
         nf.paramsJson = normalizedParams;
-        String signature = normalizer.fingerprint(projectKey, nf);
+        String signature;
+        if (Lesson.TYPE_DETOUR.equals(effType)) {
+            signature = detourFingerprint(projectKey, goal);
+        } else {
+            signature = normalizer.fingerprint(projectKey, nf);
+        }
 
         // 新记录内容（用于可能的合并）
         String newSolution = truncate(solution, 2048);
@@ -116,6 +144,8 @@ public class LessonService {
         String newParams = "[]".equals(normalizedParams) ? null : normalizedParams;
         String newCond = (applicableCond == null || applicableCond.isBlank()) ? null : truncate(applicableCond, 512);
         String newKeywords = (keywords == null || keywords.isBlank()) ? null : truncate(keywords, 512);
+        // L2：DETOUR 目标（检索维度，合并时补全空 goal 用）
+        String newGoal = (goal == null || goal.isBlank()) ? null : truncate(goal, 256);
         boolean newHasSolution = newSolution != null && !newSolution.isBlank()
                 && !Lesson.PLACEHOLDER_SOLUTION.equals(newSolution.trim());
 
@@ -124,8 +154,9 @@ public class LessonService {
             Lesson hit = existing.get();
             lessonMapper.incrementHitCount(hit.getId(), LocalDateTime.now());
             // F2 解法合并：旧记录无可用解法、新记录有解法 → 用新内容补全旧草稿（只补空，不覆盖）
+            // L2：DETOUR goal 补全（旧 goal 空、新 goal 非空）
             boolean merged = mergeIfDraft(hit, newHasSolution, newRootCause, newSolution, newParams,
-                    newCond, newKeywords, signature);
+                    newCond, newKeywords, newGoal, signature);
             if (merged) {
                 hit = lessonMapper.selectById(hit.getId()).orElse(hit);
             }
@@ -151,6 +182,11 @@ public class LessonService {
         lesson.setHitCount(0);
         lesson.setSuccessCount(0);
         lesson.setFailCount(0);
+        // P1：类型与目标（DETOUR 弯路经验维度）
+        lesson.setType(effType);
+        lesson.setGoal(Lesson.TYPE_DETOUR.equals(effType) ? (goal == null ? "" : truncate(goal, 256)) : null);
+        // P2：环境参数（记录时自动附加当前 os，供检索异环境降权；env 不参与指纹）
+        lesson.setEnvParams(buildEnvParams());
         lesson.setCreatedAt(now);
         lesson.setUpdatedAt(now);
 
@@ -167,7 +203,7 @@ public class LessonService {
                 Lesson hit = concurrent.get();
                 lessonMapper.incrementHitCount(hit.getId(), LocalDateTime.now());
                 boolean merged = mergeIfDraft(hit, newHasSolution, newRootCause, newSolution, newParams,
-                        newCond, newKeywords, signature);
+                        newCond, newKeywords, newGoal, signature);
                 if (merged) {
                     hit = lessonMapper.selectById(hit.getId()).orElse(hit);
                 }
@@ -180,19 +216,28 @@ public class LessonService {
     /**
      * F2 解法合并（P2-3 提取，正常命中与 DuplicateKey 竞态命中共用）：
      * 旧记录无可用解法、新记录有解法 → 用新内容补全旧草稿（只补空，不覆盖）。
+     * L2：DETOUR 检索维度精化——旧 goal 为空、新 goal 非空 → 补全（只补空不覆盖）。
      *
      * @return true=已用新内容补全旧草稿
      */
     private boolean mergeIfDraft(Lesson hit, boolean newHasSolution,
                                  String newRootCause, String newSolution, String newParams,
-                                 String newCond, String newKeywords, String signature) {
+                                 String newCond, String newKeywords, String newGoal, String signature) {
+        boolean updated = false;
+        // F2：旧无可用解法、新有解法 → 补全
         if (!hit.hasUsableSolution() && newHasSolution) {
             lessonMapper.updateContent(hit.getId(), newRootCause, newSolution, newParams,
-                    newCond, newKeywords, LocalDateTime.now());
+                    newCond, newKeywords, newGoal, LocalDateTime.now());
             log.info("踩坑经验解法合并: id={}, signature={}", hit.getId(), signature);
-            return true;
+            updated = true;
+        } else if (newGoal != null && (hit.getGoal() == null || hit.getGoal().isBlank())) {
+            // L2：DETOUR 目标补全（旧 goal 空、新 goal 非空；F2 已合并解法时 goal 随 updateContent 一起补）
+            lessonMapper.updateContent(hit.getId(), null, null, null, null, null,
+                    newGoal, LocalDateTime.now());
+            log.info("DETOUR goal 补全: id={}, goal={}", hit.getId(), newGoal);
+            updated = true;
         }
-        return false;
+        return updated;
     }
 
     // ============================================================
@@ -201,25 +246,40 @@ public class LessonService {
 
     /**
      * 三级漏斗检索：
-     * ① 硬过滤（project_key 必填 + tool_name/error_code 精确匹配，走复合索引）
+     * ① 硬过滤（project_key 必填 + tool_name/error_code/type 精确匹配，走复合索引）
      * ② 参数等值比对（params 同名项 value 必须一致，这是「一个参数差天差地别」的解法）
-     * ③ LIKE 兜底（①+② 无命中时，用关键词模糊搜 symptom/root_cause/solution/keywords）
+     * ③ LIKE 兜底（①+② 无命中时，用关键词模糊搜 symptom/root_cause/solution/keywords/goal）
      *
      * @param paramsJson 当前场景参数 [{name,value},...]，可为 null
+     * @param type       经验类型过滤：Lesson.TYPE_DETOUR / Lesson.TYPE_FAILURE / null=全部（P1）
      * @return 格式化检索结果文本（供 LLM 直接阅读）
      */
     public String searchLessons(String projectKey, String toolName, String errorCode,
-                                String keyword, String paramsJson) {
+                                String keyword, String paramsJson, String type) {
         if (projectKey == null || projectKey.isBlank()) projectKey = normalizer.extractProjectKey();
         String tool = (toolName == null || toolName.isBlank()) ? null : toolName;
         String code = (errorCode == null || errorCode.isBlank()) ? null : errorCode;
         String kw = (keyword == null || keyword.isBlank()) ? null : keyword;
+        // P1：type 归一化（未知值视为不过滤）
+        String effType = Lesson.TYPE_DETOUR.equals(type) || Lesson.TYPE_FAILURE.equals(type) ? type : null;
 
         // 第一级：硬过滤
-        List<Lesson> candidates = lessonMapper.selectByScope(projectKey, tool, null, code, SEARCH_LIMIT);
+        // P2 修复：DETOUR 弯路经验的检索维度是 goal/keywords（无错误码维度），
+        // 直接走 LIKE 兜底——避免「按项目+类型全捞」导致无关关键词误命中
+        // （原三级漏斗中第三级 LIKE 只在候选为空时执行，DETOUR 场景候选恒非空，缺口必然触发）
+        // M2 修复：DETOUR 检索忽略 tool 维度（DETOUR 记录 tool_name='detour'，
+        // 传 tool_name 会被 selectFuzzy 的 AND tool_name 过滤掉导致恒空）
+        List<Lesson> candidates;
+        if (Lesson.TYPE_DETOUR.equals(effType)) {
+            candidates = (kw != null)
+                    ? lessonMapper.selectFuzzy(projectKey, null, escapeLikeKeyword(kw), effType, SEARCH_LIMIT)
+                    : List.of();
+        } else {
+            candidates = lessonMapper.selectByScope(projectKey, tool, null, code, effType, SEARCH_LIMIT);
+        }
 
-        // 第二级：参数等值比对（候选非空时执行）
-        if (!candidates.isEmpty()) {
+        // 第二级：参数等值比对（候选非空时执行；DETOUR 无参数维度，跳过）
+        if (!candidates.isEmpty() && !Lesson.TYPE_DETOUR.equals(effType)) {
             List<Lesson> filtered = filterByParams(candidates, paramsJson);
             if (!filtered.isEmpty()) {
                 candidates = filtered;
@@ -227,9 +287,9 @@ public class LessonService {
             // 若参数过滤后为空：说明「同错误码但参数不符」，不算命中，交给第三级兜底
         }
 
-        // 第三级：LIKE 兜底（仅当硬过滤无结果或参数全部不符时）
-        if (candidates.isEmpty() && kw != null) {
-            candidates = lessonMapper.selectFuzzy(projectKey, tool, escapeLikeKeyword(kw), SEARCH_LIMIT);
+        // 第三级：LIKE 兜底（仅当硬过滤无结果或参数全部不符时；DETOUR 已在第一级走 LIKE）
+        if (candidates.isEmpty() && kw != null && !Lesson.TYPE_DETOUR.equals(effType)) {
+            candidates = lessonMapper.selectFuzzy(projectKey, tool, escapeLikeKeyword(kw), effType, SEARCH_LIMIT);
         }
 
         if (candidates.isEmpty()) {
@@ -239,7 +299,8 @@ public class LessonService {
                     + "  3. 这是新坑的话，可用 lesson action=record 记录，后续遇到就能查到";
         }
 
-        // 命中计数 + 截取 Top-K
+        // P2：环境兼容排序（同 os/通用经验优先，异环境经验降权）后截取 Top-K
+        sortByEnvCompat(candidates);
         List<Lesson> top = candidates.subList(0, Math.min(candidates.size(), RESULT_TOP_K));
         for (Lesson l : top) {
             lessonMapper.incrementHitCount(l.getId(), LocalDateTime.now());
@@ -334,6 +395,70 @@ public class LessonService {
         return keyword.replace("\\", "\\\\")
                 .replace("%", "\\%")
                 .replace("_", "\\_");
+    }
+
+    /**
+     * P1：DETOUR 弯路经验指纹 = md5(projectKey|detour|normalizedGoal)。
+     * goal 维度去重（同一目标的弯路经验只保留一条，方案迭代时 hit+1 合并）。
+     * normalizedGoal：去标点/空白、转小写（M6 修复：不做长度截断——
+     * 两个不同长目标若共享前 N 字符会被误合并（误合并丢信息比不合并更危险），完整哈希保准）。
+     */
+    private String detourFingerprint(String projectKey, String goal) {
+        String normalizedGoal = normalizeGoal(goal);
+        String raw = projectKey + "|detour|" + normalizedGoal;
+        return DigestUtils.md5DigestAsHex(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 归一化 goal：去空白 + ASCII/全角/中文标点、转小写（M6 修复：不截断，完整哈希防误合并） */
+    private String normalizeGoal(String goal) {
+        if (goal == null) {
+            return "";
+        }
+        // \p{Punct} 只覆盖 ASCII 标点，需补全角（\uFF00-\uFFEF：！＂等）与 CJK 标点（\u3000-\u303F：。、【】等）
+        return goal.trim().toLowerCase()
+                .replaceAll("[\\s\\p{Punct}\\u3000-\\u303F\\uFF00-\\uFFEF]+", "");
+    }
+
+    // ============================================================
+    // P2 环境参数（记录时自动附加 os；检索异环境降权不淘汰，避免误杀通用经验）
+    // ============================================================
+
+    /** 检测当前操作系统（归一化：windows/linux/mac/unknown） */
+    private String detectOs() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (os.contains("win")) return "windows";
+        if (os.contains("mac") || os.contains("darwin")) return "mac";
+        if (os.contains("linux")) return "linux";
+        return "unknown";
+    }
+
+    /** 构建环境参数 JSON（当前 os） */
+    private String buildEnvParams() {
+        try {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("os", detectOs());
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            return "{\"os\":\"unknown\"}";
+        }
+    }
+
+    /** 环境兼容排序：通用经验（无 env）> 同 os 经验 > 异环境经验（P2，在截取 Top-K 前调用） */
+    private void sortByEnvCompat(List<Lesson> lessons) {
+        String currentOs = detectOs();
+        lessons.sort((a, b) -> envScore(b, currentOs) - envScore(a, currentOs));
+    }
+
+    /** 环境兼容分：通用=1 / 同环境=2 / 异环境=0 */
+    private int envScore(Lesson lesson, String currentOs) {
+        String env = lesson.getEnvParams();
+        if (env == null || env.isBlank()) {
+            return 1;
+        }
+        if (env.contains("\"os\":\"" + currentOs + "\"")) {
+            return 2;
+        }
+        return 0;
     }
 
     private String buildResultText(List<Lesson> lessons) {
@@ -439,7 +564,8 @@ public class LessonService {
         String effCond = (applicableCond == null || applicableCond.isBlank()) ? null : truncate(applicableCond, 512);
         String effKeywords = (keywords == null || keywords.isBlank()) ? null : truncate(keywords, 512);
 
-        lessonMapper.updateContent(id, effRootCause, effSolution, effParams, effCond, effKeywords, LocalDateTime.now());
+        lessonMapper.updateContent(id, effRootCause, effSolution, effParams, effCond, effKeywords,
+                null, LocalDateTime.now());
         Lesson updated = lessonMapper.selectById(id).orElse(lesson);
 
         StringBuilder sb = new StringBuilder();
@@ -518,8 +644,8 @@ public class LessonService {
         String tool = (toolName == null || toolName.isBlank()) ? null : toolName;
         String code = (errorCode == null || errorCode.isBlank()) ? null : errorCode;
 
-        // ① 硬过滤
-        List<Lesson> candidates = lessonMapper.selectByScope(projectKey, tool, null, code, SEARCH_LIMIT);
+        // ① 硬过滤（P1：被动注入面向工具失败场景，只查 FAILURE 类型；DETOUR 由任务规划时主动 search 命中）
+        List<Lesson> candidates = lessonMapper.selectByScope(projectKey, tool, null, code, Lesson.TYPE_FAILURE, SEARCH_LIMIT);
         // ② 参数等值比对
         if (!candidates.isEmpty()) {
             List<Lesson> filtered = filterByParams(candidates, paramsJson);
@@ -530,7 +656,7 @@ public class LessonService {
         // ③ LIKE 兜底（M1 修复：用失败现象前 30 字做关键词模糊搜，覆盖错误码归一化不一致）
         if (candidates.isEmpty() && symptom != null && !symptom.isBlank()) {
             String kw = symptom.length() > 30 ? symptom.substring(0, 30) : symptom;
-            List<Lesson> fuzzy = lessonMapper.selectFuzzy(projectKey, tool, escapeLikeKeyword(kw), SEARCH_LIMIT);
+            List<Lesson> fuzzy = lessonMapper.selectFuzzy(projectKey, tool, escapeLikeKeyword(kw), Lesson.TYPE_FAILURE, SEARCH_LIMIT);
             if (!fuzzy.isEmpty()) {
                 candidates = fuzzy;
             }
@@ -538,6 +664,8 @@ public class LessonService {
         if (candidates.isEmpty()) {
             return List.of();
         }
+        // P2：环境兼容排序（同 os/通用经验优先，异环境经验降权）——F1 双通道遍历前
+        sortByEnvCompat(candidates);
 
         // F1 双通道：解法提示 + 补全引导（两者互斥取不同记录）
         Lesson solutionHint = null;
@@ -679,12 +807,12 @@ public class LessonService {
     // ============================================================
 
     /**
-     * 分页查询（管理页面）：project_key 必填，status/tool_name/error_code 可选过滤
+     * 分页查询（管理页面）：project_key 必填，status/tool_name/error_code/type 可选过滤
      *
      * @return Map 含 items（当前页列表）与 total（总条数）
      */
     public Map<String, Object> pageQuery(String projectKey, Integer status, String toolName,
-                                         String errorCode, int page, int size) {
+                                         String errorCode, String type, int page, int size) {
         // 管理页面：projectKey 留空 = 查询全部项目（管理通道不受项目隔离限制，
         // 避免 LLM 记录经验的项目（根目录名）与页面默认查询不一致导致查不到数据）
         if (projectKey != null && projectKey.isBlank()) projectKey = null;
@@ -695,10 +823,11 @@ public class LessonService {
         List<Lesson> items = lessonMapper.selectPage(projectKey, status,
                 (toolName == null || toolName.isBlank()) ? null : toolName,
                 (errorCode == null || errorCode.isBlank()) ? null : errorCode,
-                offset, safeSize);
+                type, offset, safeSize);
         long total = lessonMapper.countByFilter(projectKey, status,
                 (toolName == null || toolName.isBlank()) ? null : toolName,
-                (errorCode == null || errorCode.isBlank()) ? null : errorCode);
+                (errorCode == null || errorCode.isBlank()) ? null : errorCode,
+                type);
 
         Map<String, Object> result = new HashMap<>();
         result.put("items", items);
@@ -736,6 +865,32 @@ public class LessonService {
         stats.put("llmCount", toLong(raw.get("llm_count")));
         stats.put("manualCount", toLong(raw.get("manual_count")));
         stats.put("recent7d", toLong(raw.get("recent_count")));
+        // P0 归一化管线指标（规则通道增强 + LLM 兜底效果）
+        stats.put("ruleMatchCount", normalizer.getRuleMatchCount());
+        stats.put("normLlmCallCount", normalizerService.getLlmCallCount());
+        stats.put("normCacheHitCount", normalizerService.getCacheHitCount());
+        stats.put("normBackfillCount", normalizerService.getBackfillCount());
+        // P2 规则自学习闭环（容量检查 + 候选/转正/使用度统计；替代时间淘汰）
+        try {
+            long ruleTotal = ruleMapper.count();
+            if (ruleTotal > ruleMaxSize) {
+                int removed = ruleMapper.deleteUnusedCandidates((int) (ruleTotal - ruleMaxSize));
+                if (removed > 0) {
+                    log.info("看板触发规则容量淘汰未使用候选: {} 条", removed);
+                }
+            }
+            stats.put("ruleTotalCount", ruleMapper.count());
+            // L1 修复：候选数用 countCandidates（status=0 且非 manual），与容量淘汰语义一致
+            stats.put("ruleCandidateCount", ruleMapper.countCandidates());
+            stats.put("ruleActiveCount", ruleMapper.countActive());
+            stats.put("ruleMatchHitTotal", ruleMapper.sumMatchHits());
+        } catch (Exception e) {
+            log.debug("规则统计失败（不影响看板）: {}", e.getMessage());
+            stats.put("ruleTotalCount", 0L);
+            stats.put("ruleCandidateCount", 0L);
+            stats.put("ruleActiveCount", 0L);
+            stats.put("ruleMatchHitTotal", 0L);
+        }
         return stats;
     }
 

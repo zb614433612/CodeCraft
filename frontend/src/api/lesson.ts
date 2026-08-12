@@ -19,6 +19,8 @@ export interface LessonData {
   hitCount?: number
   successCount?: number
   failCount?: number
+  type?: string // FAILURE=失败经验 / DETOUR=弯路经验（P1）
+  goal?: string // DETOUR 专用：任务目标
   createdAt?: string
   updatedAt?: string
 }
@@ -45,7 +47,13 @@ export interface LessonStats {
   autoCount: number
   llmCount: number
   manualCount: number
+  detourCount: number // P1：弯路经验数
   recent7d: number
+  // P0 归一化管线指标
+  ruleMatchCount?: number
+  normLlmCallCount?: number
+  normCacheHitCount?: number
+  normBackfillCount?: number
 }
 
 /** 分页查询 */
@@ -54,6 +62,7 @@ export async function pageLessons(params: {
   status?: number
   toolName?: string
   errorCode?: string
+  type?: string // P1：FAILURE / DETOUR
   page?: number
   size?: number
 }) {
@@ -62,6 +71,7 @@ export async function pageLessons(params: {
   if (params.status !== undefined && params.status !== null && params.status !== '') query.set('status', String(params.status))
   if (params.toolName) query.set('toolName', params.toolName)
   if (params.errorCode) query.set('errorCode', params.errorCode)
+  if (params.type) query.set('type', params.type)
   query.set('page', String(params.page ?? 1))
   query.set('size', String(params.size ?? 10))
   return request<LessonPageResult>(`/lessons?${query}`)

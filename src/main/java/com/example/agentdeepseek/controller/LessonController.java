@@ -41,9 +41,10 @@ public class LessonController {
             @RequestParam(required = false) Integer status,
             @RequestParam(required = false) String toolName,
             @RequestParam(required = false) String errorCode,
+            @RequestParam(required = false) String type,
             @RequestParam(required = false, defaultValue = "1") int page,
             @RequestParam(required = false, defaultValue = "10") int size) {
-        return ApiResponse.success(lessonService.pageQuery(projectKey, status, toolName, errorCode, page, size));
+        return ApiResponse.success(lessonService.pageQuery(projectKey, status, toolName, errorCode, type, page, size));
     }
 
     /**

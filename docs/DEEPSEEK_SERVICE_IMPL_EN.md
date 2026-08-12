@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v1.1.5 | Updated: 2026-08-11 | Audience: Developers / AI Collaborators
+> Version: v1.1.6 | Updated: 2026-08-12 | Audience: Developers / AI Collaborators
 > This document dissects the 129KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -60,7 +60,7 @@ DeepSeekServiceImpl (21 dependencies)
 │   ├─ SkillService                    → Skill CRUD
 │   ├─ SkillMatcher                    → Skill matching
 │   └─ DeepSeekAnalyzer                → AI analyzer
-├─ Growth System (★new in v1.1.5)
+├─ Growth System (★new in v1.1.5, evolved in v1.1.6: P0 normalization / P1 detour channel / P2 env awareness)
 │   ├─ LessonService                   → CRUD + on-demand retrieval + state machine
 │   ├─ LessonRecorder                  → Auto-capture drafts on failure (source=auto)
 │   └─ LessonReviewService             → Turn-level async review (C2)

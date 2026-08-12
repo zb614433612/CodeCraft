@@ -24,13 +24,17 @@ public class LessonRecorder {
 
     private final LessonService lessonService;
     private final FailureNormalizer normalizer;
+    /** P0：LLM 语义归一化兜底（规则通道落空时异步增强草稿，不阻塞主流程） */
+    private final LessonNormalizerService normalizerService;
 
     /** 单线程 + 有界队列（500），队列满时静默丢弃（记录日志），绝不阻塞工具返回 */
     private final ExecutorService executor;
 
-    public LessonRecorder(LessonService lessonService, FailureNormalizer normalizer) {
+    public LessonRecorder(LessonService lessonService, FailureNormalizer normalizer,
+                          LessonNormalizerService normalizerService) {
         this.lessonService = lessonService;
         this.normalizer = normalizer;
+        this.normalizerService = normalizerService;
         this.executor = new ThreadPoolExecutor(
                 1, 1, 0L, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(500),
@@ -77,6 +81,12 @@ public class LessonRecorder {
                     nf.paramsJson, null, null, Lesson.SOURCE_AUTO);
 
             log.info("踩坑经验自动捕获完成: id={}, {}", lesson.getId(), nf);
+
+            // P0：规则通道落空（errorCode=UNKNOWN 或类别=OTHER）时，触发 LLM 语义归一化兜底
+            // 异步增强草稿（缓存命中零 LLM 成本；未命中则后台调 LLM 后回写），绝不阻塞主流程
+            if ("UNKNOWN".equals(lesson.getErrorCode()) || "OTHER".equals(lesson.getErrorCategory())) {
+                normalizerService.normalizeAsync(projectKey, lesson.getId(), toolName, argumentsJson, errorMessage);
+            }
         } catch (Exception e) {
             log.warn("踩坑经验自动捕获失败（不影响主流程）: tool={}, err={}", toolName, e.getMessage());
         }

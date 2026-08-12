@@ -463,9 +463,59 @@ CREATE TABLE IF NOT EXISTS lesson (
   hit_count       INT DEFAULT 0 COMMENT '被检索命中次数',
   success_count   INT DEFAULT 0 COMMENT '应用后有效次数',
   fail_count      INT DEFAULT 0 COMMENT '应用后仍失败次数',
+  type            VARCHAR(16) DEFAULT 'FAILURE' COMMENT '经验类型：FAILURE=失败经验 / DETOUR=弯路经验（P1）',
+  goal            VARCHAR(256) COMMENT 'DETOUR 专用：任务目标（检索维度，P1）',
+  env_params      VARCHAR(512) COMMENT '环境参数 JSON：{"os":"windows"}（P2：记录时自动附加，检索异环境降权）',
   created_at      DATETIME NOT NULL COMMENT '创建时间',
   updated_at      DATETIME NOT NULL COMMENT '更新时间'
 ) DEFAULT CHARSET=utf8mb4 COMMENT='踩坑经验表';
+
+-- P1 弯路通道：已有库兼容（H2 2.x ADD COLUMN IF NOT EXISTS）
+ALTER TABLE lesson ADD COLUMN IF NOT EXISTS type VARCHAR(16) DEFAULT 'FAILURE' COMMENT '经验类型：FAILURE=失败经验 / DETOUR=弯路经验';
+ALTER TABLE lesson ADD COLUMN IF NOT EXISTS goal VARCHAR(256) COMMENT 'DETOUR 专用：任务目标（检索维度）';
+CREATE INDEX IF NOT EXISTS idx_lesson_type ON lesson(project_key, type);
+-- P2 环境参数检索：已有库兼容
+ALTER TABLE lesson ADD COLUMN IF NOT EXISTS env_params VARCHAR(512) COMMENT '环境参数 JSON：{"os":"windows"}';
+
+-- ============================================================
+-- P0 归一化管线：LLM 语义归一化缓存表
+-- key = md5(toolName|errorText前512)，不含参数（类别/错误码与参数解耦）
+-- 命中缓存直接回写草稿，避免重复调 LLM；TTL 由 Service 清理（默认 7 天）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS lesson_norm_cache (
+  cache_key       VARCHAR(64)  PRIMARY KEY COMMENT '缓存键：md5(toolName|errorText前512)',
+  error_category  VARCHAR(32)  NOT NULL COMMENT '语义归一化错误类别',
+  error_code      VARCHAR(128) NOT NULL COMMENT '语义归一化稳定短码',
+  tool_name       VARCHAR(64)  NOT NULL COMMENT '工具名',
+  root_cause      VARCHAR(1024) COMMENT '根因（LLM 提炼，可空）',
+  solution        VARCHAR(2048) COMMENT '解法（可空：归一化不强求解法，主要靠 C2 复盘）',
+  created_at      DATETIME NOT NULL COMMENT '创建时间',
+  updated_at      DATETIME NOT NULL COMMENT '最后命中时间'
+) DEFAULT CHARSET=utf8mb4 COMMENT='归一化缓存表';
+
+-- ============================================================
+-- P0 归一化管线：规则自学习表（P0 简化版：只沉淀不淘汰）
+-- LLM 归一化成功时沉淀 (报错文本片段 → 类别+短码)；提取时规则表优先命中
+-- 同一 text_pattern 的 LLM 结果一致 ≥2 次 → status 转正（P2 完整闭环）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS lesson_rule (
+  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+  text_pattern    VARCHAR(512) NOT NULL COMMENT '报错文本包含片段（转小写归一化）',
+  error_category  VARCHAR(32)  NOT NULL COMMENT '错误类别',
+  error_code      VARCHAR(128) NOT NULL COMMENT '稳定短码',
+  hit_count       INT DEFAULT 0 COMMENT '沉淀次数（同 pattern 再次被 LLM 产出时 +1）',
+  match_hit_count INT DEFAULT 0 COMMENT '提取命中次数（归一化时实际匹配到该规则时 +1，P2 使用度追踪）',
+  source          VARCHAR(16) DEFAULT 'llm' COMMENT '来源：llm=LLM沉淀 / manual=人工',
+  status          TINYINT DEFAULT 0 COMMENT '状态：0=候选 1=转正',
+  created_at      DATETIME NOT NULL,
+  updated_at      DATETIME NOT NULL
+) DEFAULT CHARSET=utf8mb4 COMMENT='归一化规则自学习表';
+-- P2 使用度追踪：已有库兼容（match_hit_count 列）
+ALTER TABLE lesson_rule ADD COLUMN IF NOT EXISTS match_hit_count INT DEFAULT 0 COMMENT '提取命中次数（归一化时实际匹配到该规则时 +1）';
+-- L3 修复：text_pattern 唯一约束（防并发重复插入；learnRule 捕获 DuplicateKey 降级计数转正）
+CREATE UNIQUE INDEX IF NOT EXISTS uk_rule_pattern ON lesson_rule(text_pattern);
+-- L6 修复：删除冗余非唯一索引（uk_rule_pattern 唯一索引已覆盖 text_pattern 查询用途；已有库兼容清理）
+DROP INDEX IF EXISTS idx_rule_pattern;
 
 -- H2 兼容的索引创建（照 skill 表惯例：内联 INDEX 在 H2 MODE=MySQL 下部分不支持）
 CREATE UNIQUE INDEX IF NOT EXISTS uk_lesson_signature ON lesson(error_signature);

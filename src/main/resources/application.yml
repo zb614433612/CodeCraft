@@ -209,6 +209,97 @@ deepseek:
       - "mcp_server_manager"
       - "lesson"
 
+# ==================== 成长体系（Lesson）配置 ====================
+lesson:
+  # 错误码字典：报错文本特征 → 稳定短码 + 错误类别（顺序即优先级，正则匹配，忽略大小写）
+  error-dictionary:
+    entries:
+      # ---- 命令执行（command）----
+      - tool: command
+        pattern: "不是内部或外部命令|command not found|Cannot run program"
+        code: CMD_NOT_FOUND
+        category: ENV
+      - tool: command
+        pattern: "权限不足|permission denied|Access denied|Unauthorized"
+        code: PERMISSION_DENIED
+        category: AUTH
+      - tool: command
+        pattern: "文件不存在|No such file|does not exist|No such directory"
+        code: FILE_NOT_FOUND
+        category: ENV
+      - tool: command
+        pattern: "Address already in use|端口.*占用|Port .* in use"
+        code: PORT_IN_USE
+        category: ENV
+      - tool: command
+        pattern: "Could not (resolve|find) (dependency|artifact|class)"
+        code: MAVEN_DEP_RESOLVE
+        category: DEPENDENCY
+      - tool: command
+        pattern: "BUILD FAILURE"
+        code: MAVEN_BUILD_FAIL
+        category: COMPILE
+      - tool: command
+        pattern: "Cannot resolve symbol|compilation failed"
+        code: COMPILE_FAILED
+        category: COMPILE
+      - tool: command
+        pattern: "npm ERR! code (ENOENT|EACCES|EADDRINUSE|ETIMEDOUT|ERESOLVE)"
+        code: NPM_ERR
+        category: ENV
+      - tool: command
+        pattern: "fatal:"
+        code: GIT_FATAL
+        category: OTHER
+      # ---- 通用（不限定工具）----
+      - tool: ""
+        pattern: "ECONNREFUSED|Connection refused|connect timed out"
+        code: ECONNREFUSED
+        category: NETWORK
+      - tool: ""
+        pattern: "UnknownHost|Network is unreachable"
+        code: NETWORK_UNREACHABLE
+        category: NETWORK
+      - tool: ""
+        pattern: "SocketTimeout|timed out"
+        code: TIMEOUT
+        category: NETWORK
+      - tool: ""
+        pattern: "NoClassDefFoundError"
+        code: NoClassDefFoundError
+        category: DEPENDENCY
+      - tool: ""
+        pattern: "ClassNotFoundException"
+        code: ClassNotFoundException
+        category: DEPENDENCY
+  # P0 归一化管线配置（LLM 语义归一化兜底）
+  normalize:
+    enabled: true              # 归一化管线总开关
+    llm-fallback: true         # LLM 兜底开关（false=纯规则模式）
+    cache-ttl-days: 7          # 归一化缓存有效期（天）
+    cache-max: 20000           # 缓存容量上限（超限清理最旧）
+    queue-size: 500            # 异步归一化队列大小（满则丢弃+日志）
+    llm-timeout-ms: 30000      # LLM 归一化调用超时（毫秒）
+  # P1 弯路通道（C3）配置
+  detour:
+    enabled: true              # C3 弯路通道总开关
+    signal-a: true             # 信号 A（用户否定/纠正）开关
+    signal-b: true             # 信号 B（LLM 自述换方案）开关
+    signal-c: true             # 信号 C（工具序列辅助）开关
+    queue-size: 200            # 异步提炼队列大小（满则丢弃+日志）
+    llm-timeout-ms: 60000      # LLM 判定+提炼调用超时（毫秒）
+  # P2 规则自学习表容量（超限时淘汰「候选+从未被提取命中」的最旧规则；
+  # 替代时间淘汰——用户长期不碰项目不误杀经验）
+  rule:
+    max-size: 10000            # 规则表容量上限（条）
+  # 弯路信号词表（可选覆盖；不配则用 DetourSignalDetector 内置默认词表）
+  # detour-signals:
+  #   signal-a: ["不对", "不行"]
+  #   signal-a-change: ["换一种", "换方案"]
+  #   signal-a-result: ["实现不了"]
+  #   signal-b-strong: ["改用", "换成"]
+  #   signal-b-medium: ["重新实现", "重写"]
+
 # ==================== P2P 远程连接配置 ====================
 p2p:
   # 是否启用 P2P 功能

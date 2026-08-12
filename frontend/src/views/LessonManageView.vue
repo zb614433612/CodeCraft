@@ -89,6 +89,13 @@
           </span>
         </div>
       </div>
+      <div class="stat-card stat-card--hit">
+        <div class="stat-card-icon">🔀</div>
+        <div class="stat-card-body">
+          <span class="stat-card-num">{{ stats.detourCount ?? 0 }}</span>
+          <span class="stat-card-label">弯路经验</span>
+        </div>
+      </div>
     </div>
 
     <!-- ===== 工具栏 ===== -->
@@ -111,6 +118,16 @@
           <a-select-option :value="0">草稿</a-select-option>
           <a-select-option :value="1">有效</a-select-option>
           <a-select-option :value="2">隐藏</a-select-option>
+        </a-select>
+        <a-select
+          v-model:value="query.type"
+          placeholder="全部类型"
+          allow-clear
+          style="width: 120px"
+          @change="handleSearch"
+        >
+          <a-select-option value="FAILURE">失败经验</a-select-option>
+          <a-select-option value="DETOUR">弯路经验</a-select-option>
         </a-select>
         <a-input
           v-model:value="query.toolName"
@@ -157,7 +174,12 @@
       >
         <!-- 类别 -->
         <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'errorCategory'">
+          <!-- 类型 -->
+          <template v-if="column.key === 'type'">
+            <a-tag :color="record.type === 'DETOUR' ? 'purple' : 'default'">{{ record.type === 'DETOUR' ? '🔀 弯路' : '失败' }}</a-tag>
+          </template>
+          <!-- 类别 -->
+          <template v-else-if="column.key === 'errorCategory'">
             <a-tag :color="categoryColor(record.errorCategory)">{{ record.errorCategory }}</a-tag>
           </template>
           <!-- 状态 -->
@@ -220,6 +242,10 @@
         <a-descriptions-item label="ID">{{ detail.id }}</a-descriptions-item>
         <a-descriptions-item label="项目">{{ detail.projectKey }}</a-descriptions-item>
         <a-descriptions-item label="工具">{{ detail.toolName }}</a-descriptions-item>
+        <a-descriptions-item label="类型">
+          <a-tag :color="detail.type === 'DETOUR' ? 'purple' : 'default'">{{ detail.type === 'DETOUR' ? '🔀 弯路经验' : '失败经验' }}</a-tag>
+          <template v-if="detail.goal"><span class="detail-goal">目标：{{ detail.goal }}</span></template>
+        </a-descriptions-item>
         <a-descriptions-item label="类别">
           <a-tag :color="categoryColor(detail.errorCategory)">{{ detail.errorCategory }}</a-tag>
           <a-tag color="blue">{{ detail.errorCode }}</a-tag>
@@ -303,7 +329,8 @@ const query = reactive({
   projectKey: '',
   status: undefined as number | undefined,
   toolName: '',
-  errorCode: ''
+  errorCode: '',
+  type: undefined as string | undefined // P1：FAILURE / DETOUR
 })
 
 const pagination = computed(() => ({
@@ -333,6 +360,7 @@ const editingId = ref<number | null>(null)
 // ===== 列定义 =====
 const columns = [
   { title: 'ID', dataIndex: 'id', key: 'id', width: 70 },
+  { title: '类型', dataIndex: 'type', key: 'type', width: 80 },
   { title: '类别', dataIndex: 'errorCategory', key: 'errorCategory', width: 110 },
   { title: '错误码', dataIndex: 'errorCode', key: 'errorCode', width: 170, ellipsis: true },
   { title: '工具', dataIndex: 'toolName', key: 'toolName', width: 100 },
@@ -364,6 +392,7 @@ async function fetchList() {
       status: query.status,
       toolName: query.toolName || undefined,
       errorCode: query.errorCode || undefined,
+      type: query.type,
       page: page.value,
       size: size.value
     })
@@ -395,6 +424,7 @@ function handleReset() {
   query.status = undefined
   query.toolName = ''
   query.errorCode = ''
+  query.type = undefined
   page.value = 1
   loadAll()
 }
@@ -601,9 +631,10 @@ function formatParams(paramsJson?: string) {
 }
 
 /* ===== 统计看板 ===== */
+/* L4 修复：auto-fit 自适应列数——卡片数变化（如新增弯路经验卡）时自动换行平衡，不再固定 8 列 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
 }
 .stat-card {
@@ -763,15 +794,8 @@ function formatParams(paramsJson?: string) {
 }
 
 /* ===== 响应式 ===== */
-@media (max-width: 1400px) {
-  .stats-grid {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
+/* L4 修复：stats-grid 用 auto-fit 自适应，移除固定列数断点覆盖（避免 9 卡在断点下失衡） */
 @media (max-width: 768px) {
-  .stats-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
   .page-header {
     flex-direction: column;
     align-items: flex-start;

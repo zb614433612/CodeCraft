@@ -94,6 +94,12 @@ public class LessonTool implements Tool {
         keyword.put("description", "【search 可选】关键词（现象/解法/标签模糊匹配），如 编译 依赖 端口。search 至少提供 keyword 或 error_code 之一。");
         properties.set("keyword", keyword);
 
+        // === search 专用（P1）===
+        ObjectNode type = objectMapper.createObjectNode();
+        type.put("type", "string");
+        type.put("description", "【search 可选】经验类型过滤：FAILURE=失败经验 / DETOUR=弯路经验（新任务规划方案前查弯路经验用）/ 不传=全部。");
+        properties.set("type", type);
+
         ObjectNode params = objectMapper.createObjectNode();
         params.put("type", "array");
         ObjectNode paramItems = objectMapper.createObjectNode();
@@ -194,12 +200,14 @@ public class LessonTool implements Tool {
             return "【参数不足】search 至少需要提供 keyword（关键词）或 error_code（错误码）之一，"
                     + "建议同时传 tool_name（工具名）提高精度。示例：\n"
                     + "  lesson action=search tool_name=command error_code=NoClassDefFoundError\n"
-                    + "  lesson action=search keyword=\"编译 依赖\"";
+                    + "  lesson action=search keyword=\"编译 依赖\"\n"
+                    + "  lesson action=search type=detour keyword=\"登录 改造\"（P1：新任务规划方案前查弯路经验）";
         }
 
         String projectKey = resolveProjectKey(args);
         String paramsJson = args.has("params") ? args.path("params").toString() : null;
-        return lessonService.searchLessons(projectKey, toolName, errorCode, keyword, paramsJson);
+        String type = args.path("type").asText("");
+        return lessonService.searchLessons(projectKey, toolName, errorCode, keyword, paramsJson, type);
     }
 
     // ============================================================
@@ -231,7 +239,7 @@ public class LessonTool implements Tool {
         LessonService.RecordResult recordResult = lessonService.recordLessonWithResult(
                 projectKey, toolName, errorCategory, errorCode,
                 symptom, rootCause, solution, paramsJson, applicableCond, keywords,
-                Lesson.SOURCE_LLM);
+                Lesson.SOURCE_LLM, null, null);
         Lesson lesson = recordResult.lesson;
 
         StringBuilder sb = new StringBuilder();

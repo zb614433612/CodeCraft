@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.1.5 | 更新：2026-08-11 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.6 | 更新：2026-08-12 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 129KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -61,7 +61,7 @@ DeepSeekServiceImpl (22 个依赖)
 │   ├─ SkillService                    → 技能 CRUD
 │   ├─ SkillMatcher                    → 技能匹配
 │   └─ DeepSeekAnalyzer                → AI 分析器
-├─ 成长体系（★v1.1.5 新增）
+├─ 成长体系（★v1.1.5 新增，v1.1.6 进化：P0 归一化 / P1 弯路通道 / P2 环境感知）
 │   ├─ LessonService                   → 经验 CRUD + 按需检索 + 状态机
 │   ├─ LessonRecorder                  → 失败自动捕获草稿（source=auto）
 │   └─ LessonReviewService             → 对话级异步复盘（C2）

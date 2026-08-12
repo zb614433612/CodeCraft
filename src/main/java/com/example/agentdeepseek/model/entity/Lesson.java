@@ -32,6 +32,11 @@ public class Lesson {
     /** 来源：对话级复盘（C2，工具循环结束后 LLM 提炼，友好提示不抛异常也能捕获） */
     public static final String SOURCE_REVIEW = "review";
 
+    /** 经验类型：失败经验（默认，原逻辑不变） */
+    public static final String TYPE_FAILURE = "FAILURE";
+    /** 经验类型：弯路经验（P1 C3：方案 A 不可行、换方案 B 成功；goal 维度指纹/检索） */
+    public static final String TYPE_DETOUR = "DETOUR";
+
     /** 全局共享池项目标识：通用坑（与项目无关）记录到这里，所有项目检索时兜底可见 */
     public static final String GLOBAL_PROJECT_KEY = "__global__";
 
@@ -81,6 +86,12 @@ public class Lesson {
     private Integer successCount;
     /** 应用后仍失败次数 */
     private Integer failCount;
+    /** 经验类型：FAILURE=失败经验（默认）/ DETOUR=弯路经验（P1） */
+    private String type;
+    /** DETOUR 专用：任务目标（检索维度，P1） */
+    private String goal;
+    /** 环境参数 JSON：{"os":"windows"}（P2：记录时自动附加，检索异环境降权） */
+    private String envParams;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

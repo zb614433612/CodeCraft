@@ -5,6 +5,29 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.6] - 2026-08-12
+
+### 📚 Growth System: Lesson Knowledge Base Evolution (P0 Normalization + P1 Detour Channel + P2 Environment Awareness)
+
+- **P0 Error Normalization Pipeline**: new "Error Code Dictionary" (configured in application.yml, regex-matches error text → stable short code + error category); when no rule matches, LLM semantic normalization is the fallback (`LessonNormalizerService`, async queue + `lesson_norm_cache` cache, cache hits skip the LLM call)
+- **P1 Detour Channel (DETOUR)**: experience type split (FAILURE failure experiences / DETOUR detour experiences); detour experiences are fingerprinted by task goal dimension; at task start the system auto-searches detour experiences and injects a "detour warning" system hint (conversation-level dedup); the 【方案取舍】 (Plan Trade-off) block in the LLM's final reply is auto-parsed and saved; signal scanning (user negation/correction, LLM self-reported plan change, tool-sequence signals) + async LLM judgment & distillation (C3)
+- **P2 Environment-Aware Retrieval**: the OS environment is auto-attached when recording (env_params); retrieval ranks "generic > same-OS > different-OS" without killing generic experiences
+- **P2 Rule Self-Learning Table**: new `lesson_rule` table distills "error text fragment → category + short code" rules (auto-saved when LLM normalization succeeds, unique index prevents concurrent duplicates); rule table takes priority at extraction; dashboard enforces capacity cap by evicting the oldest "candidate & never-extracted" rules (replacement over time)
+- **Management UI**: experience list gains a "Type" column and filter (FAILURE/DETOUR), detail shows type and goal, dashboard gains a "Detour Experiences" card; dashboard adds normalization metrics (rule match / LLM call / cache hit / backfill) and rule stats (total/candidate/active/usage)
+- **lesson tool**: `search` gains a `type` parameter (FAILURE / DETOUR filter); examples include detour experience lookup
+- **Core Agent Prompt Slimming**: heavy redundancy removed (tool lists now defer to function definitions), new P1 planning convention — "search detour experiences before planning a new task" and the 【方案取舍】 block output spec (auto-saved as type=detour)
+- **Database**: `lesson` table gains type / goal / env_params columns (H2-compatible ALTER TABLE ADD COLUMN IF NOT EXISTS); new tables `lesson_norm_cache` and `lesson_rule` with indexes
+
+### 🏷️ Version Bump
+
+- Backend: `1.1.5` → `1.1.6`
+- Frontend: `1.1.5` → `1.1.6`
+- Electron: `1.1.5` → `1.1.6`
+- MCP Server handshake version: `1.1.5` → `1.1.6`
+- Build artifact: `code-craft-1.1.5.jar` → `code-craft-1.1.6.jar`
+
+---
+
 ## [1.1.5] - 2026-08-11
 
 ### 📚 Growth System: Lesson Knowledge Base

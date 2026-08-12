@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v1.1.5 | 更新：2026-08-11 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.6 | 更新：2026-08-12 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---

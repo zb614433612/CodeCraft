@@ -45,6 +45,8 @@ public class LessonReviewService {
     private final FailureNormalizer normalizer;
     private final ObjectMapper objectMapper;
     private final LLMClientManager llmClientManager;
+    /** P0：LLM 语义归一化兜底（C2 提炼的类别/短码反哺缓存，其他通道受益） */
+    private final LessonNormalizerService normalizerService;
 
     /** 单线程 + 有界队列（200），队列满时静默丢弃，绝不阻塞主流程 */
     private final ExecutorService executor;
@@ -73,6 +75,8 @@ public class LessonReviewService {
             Pattern.compile("【执行异常】"),
             Pattern.compile("【启动失败】"),
             Pattern.compile("【参数错误】"),
+            Pattern.compile("【参数缺失】"),
+            Pattern.compile("【缺少参数】"),
             Pattern.compile("【权限不足】"),
             Pattern.compile("【文件不存在】"),
             Pattern.compile("退出码[：:]\\s*[1-9]\\d*"),
@@ -82,16 +86,30 @@ public class LessonReviewService {
             Pattern.compile("command not found|不是内部或外部命令"),
             Pattern.compile("Cannot run program"));
 
+    /**
+     * P0 启发式失败信号词（正则库未命中时的低置信兜底触发）。
+     * 是否值得沉淀由 LLM worthRecord 判定过滤，避免误报污染经验库。
+     */
+    private static final List<Pattern> HEURISTIC_FAILURE_PATTERNS = List.of(
+            Pattern.compile("失败|错误|异常|无法|不能|拒绝|超时|未找到|不存在|缺失|缺少"),
+            Pattern.compile("error|fail|exception|timeout|denied|refused|not found", Pattern.CASE_INSENSITIVE));
+
+    /** 成功语境词：启发式判定时排除（如「修复成功」「无错误」，防误报） */
+    private static final List<Pattern> SUCCESS_CONTEXT_PATTERNS = List.of(
+            Pattern.compile("成功|完成|无错误|无异常|修复成功|no error|no exception|success", Pattern.CASE_INSENSITIVE));
+
     // ============================================================
     // 构造与线程池
     // ============================================================
 
     public LessonReviewService(LessonService lessonService, FailureNormalizer normalizer,
-                               ObjectMapper objectMapper, LLMClientManager llmClientManager) {
+                               ObjectMapper objectMapper, LLMClientManager llmClientManager,
+                               LessonNormalizerService normalizerService) {
         this.lessonService = lessonService;
         this.normalizer = normalizer;
         this.objectMapper = objectMapper;
         this.llmClientManager = llmClientManager;
+        this.normalizerService = normalizerService;
         this.executor = new ThreadPoolExecutor(
                 1, 1, 0L, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(200),
@@ -170,7 +188,7 @@ public class LessonReviewService {
         }
     }
 
-    /** 失败信号检测：框架错误前缀 OR 友好提示失败模式 */
+    /** 失败信号检测：框架错误前缀 OR 友好提示失败模式 OR P0 启发式（低置信兜底） */
     private boolean hasFailureSignal(String content) {
         if (content == null || content.isBlank()) {
             return false;
@@ -182,6 +200,26 @@ public class LessonReviewService {
             }
         }
         for (Pattern p : FRIENDLY_FAILURE_PATTERNS) {
+            if (p.matcher(text).find()) {
+                return true;
+            }
+        }
+        // P0 启发式兜底：正则未命中时，命中失败词且无成功语境 → 低置信触发（LLM worthRecord 过滤）
+        return hasHeuristicFailureSignal(text);
+    }
+
+    /**
+     * P0 启发式失败信号：命中失败词 且 不含成功语境。
+     * 仅用于「低置信补触发」——是否值得沉淀交给 LLM 判定（worthRecord 过滤），
+     * 避免新格式报错因正则覆盖不全而完全漏网。
+     */
+    private boolean hasHeuristicFailureSignal(String text) {
+        for (Pattern success : SUCCESS_CONTEXT_PATTERNS) {
+            if (success.matcher(text).find()) {
+                return false;
+            }
+        }
+        for (Pattern p : HEURISTIC_FAILURE_PATTERNS) {
             if (p.matcher(text).find()) {
                 return true;
             }
@@ -325,7 +363,10 @@ public class LessonReviewService {
                 reviewDedup.clear(); // 仍超限则整体清理（防内存膨胀优先）
             }
         }
-        String key = conversationId + ":" + (turnId == null ? "no-turn" : turnId);
+        // M4 修复：conversationId 为 null 时用唯一后缀——否则不同会话共享 "null:xxx" 幂等键，
+        // 先复盘的那轮会误吞后续所有会话的复盘机会（漏沉淀）。null 场景罕见，宁重复不复用。
+        String key = (conversationId == null ? "conv-" + System.nanoTime() : conversationId)
+                + ":" + (turnId == null ? "no-turn" : turnId);
         Long prev = reviewDedup.putIfAbsent(key, System.currentTimeMillis());
         return prev == null;
     }
@@ -360,19 +401,31 @@ public class LessonReviewService {
             String applicableCond = nullableText(review.get("applicableCond"));
             String keywords = nullableText(review.get("keywords"));
 
-            // 2. 以第一个失败工具为准归一化（结构化字段稳定，指纹与自动捕获一致）
-            FailedToolCall first = failures.get(0);
-            FailureNormalizer.NormalizedFailure nf = normalizer.normalize(
-                    first.toolName, first.argumentsJson, first.content);
-            String symptom = "工具[" + nf.toolName + "] 执行失败: " + nf.symptom;
+            // P0 链路 B：LLM 提炼的归一化字段（短码规范保证跨通道指纹一致——D4）。
+            // 类别/错误码用 LLM 有效值覆盖规则通道结果（归一化核心价值）；
+            // 工具名始终用实际失败工具名（LLM 输出 toolName 可能幻觉，不采纳）。
+            String effCategory = validateCategory(review.get("errorCategory"));
+            String effCode = nullableText(review.get("errorCode"));
 
-            // 3. 入库（recordLessonWithResult 自带同坑去重；与自动捕获草稿同指纹时自动合并补全解法）
-            Lesson lesson = lessonService.recordLessonWithResult(
-                    projectKey, nf.toolName, nf.errorCategory, nf.errorCode,
-                    symptom, rootCause, solution, nf.paramsJson, applicableCond, keywords,
-                    Lesson.SOURCE_REVIEW).lesson;
-            log.info("对话复盘沉淀经验: id={}, conversationId={}, tool={}, code={}, source={}",
-                    lesson.getId(), conversationId, nf.toolName, nf.errorCode, lesson.getSource());
+            // P0：逐个失败归一化 + 入库（不再只取第一个失败工具）
+            // 同坑由 error_signature 指纹去重（同工具+同类别+同错误码+同参数 → 第二次仅 hit+1），
+            // 不同坑分别沉淀；LLM 提炼的根因/解法为整轮级别，各条共享（合理：同一轮的经验）
+            for (FailedToolCall fc : failures) {
+                FailureNormalizer.NormalizedFailure nf = normalizer.normalize(
+                        fc.toolName, fc.argumentsJson, fc.content);
+                // LLM 有效字段覆盖规则通道结果（无效则回退规则通道值）
+                String category = effCategory != null ? effCategory : nf.errorCategory;
+                String code = (effCode != null && !effCode.isBlank()) ? effCode : nf.errorCode;
+                String symptom = "工具[" + nf.toolName + "] 执行失败: " + nf.symptom;
+                Lesson lesson = lessonService.recordLessonWithResult(
+                        projectKey, nf.toolName, category, code,
+                        symptom, rootCause, solution, nf.paramsJson, applicableCond, keywords,
+                        Lesson.SOURCE_REVIEW, null, null).lesson;
+                // P0 链路 B：复盘结果反哺归一化缓存（同一错误后续零 LLM 成本）
+                normalizerService.cacheNormalization(nf.toolName, fc.content, category, code, rootCause);
+                log.info("对话复盘沉淀经验: id={}, conversationId={}, tool={}, code={}, source={}",
+                        lesson.getId(), conversationId, nf.toolName, lesson.getErrorCode(), lesson.getSource());
+            }
         } catch (Exception e) {
             log.warn("对话复盘执行失败（不影响主流程）: conversationId={}, err={}", conversationId, e.getMessage());
         }
@@ -394,14 +447,17 @@ public class LessonReviewService {
         List<Map<String, Object>> reviewMessages = new ArrayList<>();
         Map<String, Object> sysMsg = new HashMap<>();
         sysMsg.put("role", "system");
+        // P0：prompt 扩展——输出 errorCategory/errorCode（共用短码规范，与归一化兜底跨通道一致 D4）
         sysMsg.put("content", "你是踩坑经验提炼助手。下面是一轮 AI 助手执行任务时的工具调用记录（可能包含失败）。请判断：\n"
                 + "1. 是否出现了值得沉淀的踩坑经验（工具报错、命令失败、重试后成功等）；\n"
                 + "2. 若值得沉淀，提炼：rootCause 根因（为什么失败）、solution 解法（如何解决，写成可复用的操作步骤或修改要点）、"
-                + "applicableCond 适用条件（什么场景下该解法适用）、keywords 检索标签（3~5 个词，空格分隔）。\n"
+                + "applicableCond 适用条件（什么场景下该解法适用）、keywords 检索标签（3~5 个词，空格分隔）、"
+                + "errorCategory + errorCode（按短码规范：" + LessonNormalizerService.SHORT_CODE_RULE + "）。\n"
                 + "注意：全程正常成功（无任何失败）不要沉淀；AI 已通过 lesson 工具主动记录过的也不要重复沉淀。\n"
                 + "只输出一个 JSON 对象，不要输出任何其他文字。格式："
                 + "{\"record\": true或false, \"rootCause\": \"根因或null\", \"solution\": \"解法或null\", "
-                + "\"applicableCond\": \"适用条件或null\", \"keywords\": \"标签或null\"}");
+                + "\"applicableCond\": \"适用条件或null\", \"keywords\": \"标签或null\", "
+                + "\"errorCategory\": \"类别或null\", \"errorCode\": \"短码或null\"}");
         reviewMessages.add(sysMsg);
 
         Map<String, Object> userMsg = new HashMap<>();
@@ -456,6 +512,23 @@ public class LessonReviewService {
         }
         String text = node.asText().trim();
         return text.isEmpty() || "null".equalsIgnoreCase(text) ? null : text;
+    }
+
+    /**
+     * P0：类别枚举校验（与 LessonNormalizerService.normalizeCategory 同口径）。
+     * LLM 输出不在枚举内 → null（调用方回退规则通道值，防止污染指纹）。
+     */
+    private static String validateCategory(JsonNode node) {
+        String text = nullableText(node);
+        if (text == null) {
+            return null;
+        }
+        String c = text.toUpperCase();
+        return switch (c) {
+            case "COMPILE", "DEPENDENCY", "NETWORK", "AUTH", "MCP_HANDSHAKE",
+                 "SQL", "PARAM", "ENV", "OTHER" -> c;
+            default -> null;
+        };
     }
 
     private static String truncate(String s, int maxLen) {

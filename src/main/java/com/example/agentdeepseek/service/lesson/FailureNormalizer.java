@@ -1,5 +1,7 @@
 package com.example.agentdeepseek.service.lesson;
 
+import com.example.agentdeepseek.mapper.LessonRuleMapper;
+import com.example.agentdeepseek.model.entity.LessonRule;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +13,7 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -27,9 +30,50 @@ import java.util.regex.Pattern;
 public class FailureNormalizer {
 
     private final ObjectMapper objectMapper;
+    /** P0：错误码字典（规则通道第一优先级，类别+错误码联动带出，减少 UNKNOWN/OTHER 落空） */
+    private final ErrorCodeDictionary dictionary;
+    /** P0：规则自学习表（LLM 沉淀的报错文本特征，优先级最高；转正规则优先） */
+    private final LessonRuleMapper ruleMapper;
 
-    public FailureNormalizer(ObjectMapper objectMapper) {
+    /** 指标：规则表命中次数（T6 看板：归一化落空率 / 自学习效果） */
+    private final java.util.concurrent.atomic.AtomicLong ruleMatchCount = new java.util.concurrent.atomic.AtomicLong();
+
+    /** L4 修复：规则表 TTL 内存缓存（60s 刷新，避免每次 normalize 全表 selectAll 的 N+1 式 DB 负载） */
+    private volatile List<LessonRule> ruleCache;
+    private volatile long ruleCacheTime;
+    private static final long RULE_CACHE_TTL_MS = 60_000L;
+
+    /**
+     * 加载规则表（带 TTL 缓存；规则插入/转正/淘汰后最多 60s 生效，可接受）。
+     * L5 修复：双检锁 synchronized——并发下多线程同时观察到缓存过期时只让一个线程执行 selectAll，
+     * 避免重复全表查询与刷新窗口期读到不一致引用。
+     */
+    private List<LessonRule> loadRules() {
+        long now = System.currentTimeMillis();
+        List<LessonRule> cache = ruleCache;
+        if (cache == null || now - ruleCacheTime > RULE_CACHE_TTL_MS) {
+            synchronized (this) {
+                cache = ruleCache;
+                if (cache == null || System.currentTimeMillis() - ruleCacheTime > RULE_CACHE_TTL_MS) {
+                    cache = ruleMapper.selectAll();
+                    ruleCache = cache;
+                    ruleCacheTime = System.currentTimeMillis();
+                }
+            }
+        }
+        return cache;
+    }
+
+    public FailureNormalizer(ObjectMapper objectMapper, ErrorCodeDictionary dictionary,
+                             LessonRuleMapper ruleMapper) {
         this.objectMapper = objectMapper;
+        this.dictionary = dictionary;
+        this.ruleMapper = ruleMapper;
+    }
+
+    /** 规则表命中次数（指标访问） */
+    public long getRuleMatchCount() {
+        return ruleMatchCount.get();
     }
 
     /** 归一化结果 */
@@ -95,32 +139,46 @@ public class FailureNormalizer {
 
     /**
      * 归一化失败信息：提取错误码、错误类别、现象摘要、结构化参数
+     * <p>
+     * P0 二级管线 · 规则通道（四级优先级，根因优先）：
+     * ⓪ 规则表优先（LLM 自学习沉淀的文本特征，转正规则优先）
+     * ① 错误码字典（类别+错误码联动带出）——先匹配 Caused-by 根因文本，再全文
+     * ② 正则错误码——先匹配 Caused-by 根因文本（取根因而非表层异常），再全文
+     * ③ 正则类别（全文匹配——类别信号可能出现在报错头部）
      */
     public NormalizedFailure normalize(String toolName, String argumentsJson, String errorMessage) {
         NormalizedFailure failure = new NormalizedFailure();
-        failure.toolName = toolName == null ? "unknown" : toolName;
+        failure.toolName = (toolName == null || toolName.isBlank()) ? "unknown" : toolName;
         String msg = errorMessage == null ? "" : errorMessage;
 
-        // 1. 错误类别（按正则库顺序匹配）
-        String category = "OTHER";
-        for (CategoryPattern cp : CATEGORY_PATTERNS) {
-            if (cp.pattern().matcher(msg).find()) {
-                category = cp.category();
-                break;
-            }
-        }
-        failure.errorCategory = category;
+        // P0-⓪：规则表优先（LLM 沉淀特征，转正优先；匹配失败静默降级）
+        // 命中计数在 matchRule 内部完成（ruleMatchCount + match_hit_count 使用度）
+        LessonRule ruleHit = matchRule(msg);
+        if (ruleHit != null) {
+            failure.errorCategory = ruleHit.getErrorCategory();
+            failure.errorCode = truncate(ruleHit.getErrorCode(), 128);
+        } else {
+            // Caused-by 根因文本（无 Caused by 时等于原文）
+            String codeSource = extractRootCauseText(msg);
+            boolean hasRootCause = !codeSource.equals(msg);
 
-        // 2. 错误码（优先具体异常类，其次 errno/HTTP 码）
-        String errorCode = null;
-        for (Pattern p : ERROR_CODE_PATTERNS) {
-            Matcher m = p.matcher(msg);
-            if (m.find()) {
-                errorCode = m.group(1);
-                break;
+            // P0-①：根因文本优先（字典 → 正则）——根因比表层 BUILD FAILURE 等更具体
+            ErrorCodeDictionary.DictEntry hit = dictionary.match(failure.toolName, codeSource);
+            String code = hit != null ? hit.getCode() : matchErrorCode(codeSource);
+            if (hit == null && code == null && hasRootCause) {
+                // 根因文本无结果 → 退全文（字典 → 正则）
+                hit = dictionary.match(failure.toolName, msg);
+                code = hit != null ? hit.getCode() : matchErrorCode(msg);
+            }
+            if (hit != null) {
+                failure.errorCategory = hit.getCategory();
+                failure.errorCode = truncate(hit.getCode(), 128);
+            } else {
+                failure.errorCode = code == null ? "UNKNOWN" : truncate(code, 128);
+                // P0-②：正则类别（全文匹配——类别信号可能出现在报错头部）
+                failure.errorCategory = matchCategory(msg);
             }
         }
-        failure.errorCode = errorCode == null ? "UNKNOWN" : truncate(errorCode, 128);
 
         // 3. 现象摘要
         failure.symptom = truncate(msg, 512);
@@ -129,6 +187,74 @@ public class FailureNormalizer {
         failure.paramsJson = extractParams(argumentsJson);
 
         return failure;
+    }
+
+    /** 正则错误码提取（优先具体异常类，其次 errno/HTTP 码） */
+    private String matchErrorCode(String text) {
+        for (Pattern p : ERROR_CODE_PATTERNS) {
+            Matcher m = p.matcher(text);
+            if (m.find()) {
+                return m.group(1);
+            }
+        }
+        return null;
+    }
+
+    /** 正则类别匹配（按正则库顺序） */
+    private String matchCategory(String text) {
+        for (CategoryPattern cp : CATEGORY_PATTERNS) {
+            if (cp.pattern().matcher(text).find()) {
+                return cp.category();
+            }
+        }
+        return "OTHER";
+    }
+
+    /**
+     * 规则表匹配：报错文本（转小写）包含规则片段即命中；转正规则优先于候选。
+     * 命中时同步计数 match_hit_count（使用度追踪，P2 淘汰依据——替代时间淘汰）。
+     * 数据量小（自学习初期），全量加载内存 contains 匹配；异常静默降级（不影响主流程）。
+     */
+    private LessonRule matchRule(String errorText) {
+        try {
+            String lower = errorText.toLowerCase();
+            // L4 修复：走 TTL 缓存加载（不再每次全表 selectAll）
+            List<LessonRule> rules = loadRules();
+            LessonRule best = null;
+            for (LessonRule r : rules) {
+                if (r.getTextPattern() == null || r.getTextPattern().isBlank()
+                        || !lower.contains(r.getTextPattern())) {
+                    continue;
+                }
+                // 转正规则优先；同为候选取先插入的
+                if (best == null || (r.getStatus() == LessonRule.STATUS_ACTIVE
+                        && best.getStatus() != LessonRule.STATUS_ACTIVE)) {
+                    best = r;
+                }
+            }
+            if (best != null) {
+                ruleMatchCount.incrementAndGet();
+                // P2 使用度计数（同步 UPDATE 单行，失败静默不影响主流程）
+                try {
+                    ruleMapper.incrementMatchHit(best.getId(), LocalDateTime.now());
+                } catch (Exception hitErr) {
+                    log.debug("规则命中计数失败（不影响主流程）: {}", hitErr.getMessage());
+                }
+            }
+            return best;
+        } catch (Exception e) {
+            log.debug("规则表匹配失败（降级字典/正则）: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 提取 Caused-by 根因文本：取最后一个 "Caused by:" 之后的内容。
+     * 无 Caused by 时返回原文（与旧逻辑兼容）。
+     */
+    private String extractRootCauseText(String msg) {
+        int idx = msg.lastIndexOf("Caused by:");
+        return idx >= 0 ? msg.substring(idx + "Caused by:".length()) : msg;
     }
 
     /**
