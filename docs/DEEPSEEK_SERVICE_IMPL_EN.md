@@ -1,12 +1,12 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v1.1.6 | Updated: 2026-08-12 | Audience: Developers / AI Collaborators
-> This document dissects the 129KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
+> Version: v1.1.6 | Updated: 2026-08-13 | Audience: Developers / AI Collaborators
+> This document dissects the 187KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
 
-## 1. Why Is It a 129KB Monolith?
+## 1. Why Is It a 187KB Monolith?
 
 ```
 DeepSeekServiceImpl responsibilities (ideally split into 4-5 classes):
@@ -126,7 +126,7 @@ Entry: streamChat(ChatRequest)
 │       │       │   ├─ Async pre-compact (compactionService.asyncPrecompress)
 │       │       │   │
 │       │       │   ├─ If finish_reason == "tool_calls":
-│       │       │   │   ├─ Check hasRepeatedCalls() → 4 consecutive → terminate
+│       │       │   │   ├─ Check hasRepeatedCalls() → 3 consecutive → flag for Judge
 │       │       │   │   ├─ toolExecutor.executeToolCalls()
 │       │       │   │   │   └─ Per tool → snapshot → permission pipeline → execute → diff
 │       │       │   │   │   │   │   │   │   │   │       └─ Tool throws → LessonRecorder auto-captures draft (symptom only, source=auto)
@@ -229,10 +229,10 @@ Entry: streamChat(ChatRequest)
 
 ```
 Detection logic (in ToolLoopManager):
-  1. Extract last 4 tool messages
+  1. Extract recent consecutive tool messages (threshold=3)
   2. Calculate tool name + key params for each (extractToolKey)
-  3. If all identical → declared dead loop
-  4. Return terminate event, stop continuing
+  3. If all identical → flagged as suspected dead loop (for Judge context)
+  4. Main loop over-iteration → Judge decides terminate or continue
 ```
 
 ### 6.2 Judge Mechanism (evaluateWithJudge)
@@ -348,7 +348,7 @@ Judges and sub-agents use the same LLM Provider as the main Agent, propagated vi
 
 | Issue | Location | Recommendation |
 |-------|----------|---------------|
-| 129KB monolith | Overall | Split into 4 classes |
+| 187KB monolith | Overall | Split into 4 classes |
 | SSE event building scattered | `create*Event()` methods | Extract to `SseEventBuilder` |
 | `evaluateWithJudge` logic | ~100 lines | Delegated to ToolLoopManager, but call chain remains |
 | Sub-agent collection logic | Tail of `executeSemiStreamingToolCycle` | Extract to `SubAgentCollector` |

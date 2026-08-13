@@ -390,7 +390,7 @@ codecraft:
 ### 11.2 各 Phase 验证结果
 
 - **P3（Server）**：initialize 握手 ✅；tools/list 返回 7 个默认白名单工具 ✅；tools/call 执行 check_network 成功 ✅；白名单外工具拒绝 ✅
-- **P4（Client）**：自连自身，19 内置 + 7 selftest_ 外部 = 26 个工具注册 ✅；/api/tools/registry 可见带【MCP-前缀】描述 ✅
+- **P4（Client）**：自连自身，19 内置 + 7 selftest_ 外部 = 26 个工具注册 ✅（v1.1.4 当时；当前为 21 个内置工具）；/api/tools/registry 可见带【MCP-前缀】描述 ✅
 - **P5/P6（API+前端）**：列表 API 三态（FAILED/CONNECTED/DISABLED）✅；重复前缀冲突跳过（registeredToolCount=0）✅；disconnect 后工具清零 ✅；mvn compile 全通过（含前端 vite build）✅
 - **P7（权限）**：SAFE 档位 → category=READ/affectsData=false ✅；HIGH_RISK 档位 → category=EXECUTE/affectsData=true/highRisk=true ✅；disconnect 同步注销权限元数据 ✅
 - **P8（端到端）**：完整调用链路（Client → Server → 内置工具 → 返回）往返执行成功 ✅（临时 main 类验证，结果含「网络连通性检测结果」报告）

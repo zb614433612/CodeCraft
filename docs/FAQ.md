@@ -29,7 +29,7 @@ kill -9 <PID>
 
 **检查**：
 1. 访问 `http://localhost:8084` → 左侧「配置」→ 检查 API Key
-2. 或检查 `application-local.yml` 中 `deepseek.api-key` 是否正确
+2. 确认该 Provider 已启用且模型列表配置正确
 3. 查看日志 `logs/app.log` 中是否有 `401 Unauthorized` 错误
 
 ---
@@ -64,7 +64,7 @@ del data\codecraft.lock.db   # Windows
 
 ### Q5：AI 一直循环调用同一个工具不停止
 
-**原因**：触发了死循环检测阈值（连续 4 轮相同工具调用）。
+**原因**：触发了重复调用检测（连续 3 次相同工具 + 相同关键参数），并经过评委评估。
 
 **解决**：
 - 等待系统自动终止（会显示终止原因）

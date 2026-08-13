@@ -1,7 +1,7 @@
-> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.1.6 | Updated: 2026-08-12 | Audience: Developers / AI Collaborators
+> Version: v1.1.6 | Updated: 2026-08-13 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -32,7 +32,7 @@
 │ │          Spring Boot 3.4 Backend (src/main/java/)                   │ │
 │ │                       │                                             │ │
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
-│ │ │        Controller Layer (16 Controllers)    │                      │ │
+│ │ │        Controller Layer (21 Controllers)    │                      │ │
 │ │ │ DeepSeekController / GitController /       │                      │ │
 │ │ │ P2pController / SnapshotController / ...   │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
@@ -40,7 +40,7 @@
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
 │ │ │         Service Core Layer                  │                      │ │
 │ │ │                                            │                      │ │
-│ │ │  DeepSeekServiceImpl (129KB, Core Engine)  │                      │ │
+│ │ │  DeepSeekServiceImpl (187KB, Core Engine)  │                      │ │
 │ │ │   ├─ ToolLoopManager (Tool Loop / Loop Detection)                 │ │
 │ │ │   ├─ AgentForkManager (Sub-Agent Mgmt)     │                      │ │
 │ │ │   ├─ CompactionService (Context Compaction)│                      │ │
@@ -91,8 +91,8 @@ User Input Message
 │    │ └─ Repeat until AI no longer requests tool calls              │    │
 │    │                                                               │    │
 │    │ Safety Mechanisms:                                            │    │
-│    │ ├─ Infinite Loop Detection: 4 consecutive identical tool     │    │
-│    │ │   calls → terminate                                         │    │
+│    │ ├─ Infinite Loop Detection: 3 consecutive identical tool+params → flagged for Judge     │    │
+│    │ │   calls → flagged by Judge                                         │    │
 │    │ ├─ Judge Mechanism: exceeds max iterations → Judge evaluates │    │
 │    │ │   whether to continue                                       │    │
 │    │ └─ User Cancel Detection: check interruption each round       │    │
@@ -159,7 +159,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── NetworkToolConfig      # Proxy/Network config
 │   ├── OpenApiConfig          # Swagger/OpenAPI docs
 │   └── SpaConfig              # SPA routing fallback
-├── controller/                # REST API Controllers (16)
+├── controller/                # REST API Controllers (21)
 │   ├── DeepSeekController     # ★Core: Chat, Agent task status
 │   ├── ConversationController # Conversation CRUD
 │   ├── GitController          # Git operations
@@ -167,7 +167,11 @@ src/main/java/com/example/agentdeepseek/
 │   ├── SnapshotController     # Snapshot management
 │   ├── SkillController        # Skill CRUD
 │   ├── AgentConfigController  # Agent config management
-│   ├── ToolRegistryController # Tool registry query
+│   ├── LLMProviderController  # LLM Provider CRUD
+│ │   ├── McpServerController    # MCP server management
+│ │   ├── LessonController       # Lesson (experience) management
+│ │   ├── PromptOptimizeController # Prompt optimization
+│ │   ├── ToolRegistryController # Tool registry query
 │   ├── ProjectController      # Project file browsing
 │   ├── ProjectBuildController # Project build/compile
 │   ├── UserController         # User management
@@ -178,26 +182,28 @@ src/main/java/com/example/agentdeepseek/
 │   └── ScheduleTaskController # Scheduled tasks
 ├── filter/                    # TokenAuthenticationFilter
 ├── initializer/               # UserInitializer (first-launch admin setup)
-├── mapper/                    # MyBatis Mapper Interfaces (26)
-│   ├── ConversationMapper / ConversationMessageMapper
+├── mapper/                    # MyBatis Mapper Interfaces (21)
+│   ├── ConversationMapper / ConversationMessageMapper / CompactionMapper
 │   ├── AgentConfigMapper / SkillMapper / SubAgentLogMapper
 │   ├── UserMapper / MenuMapper / RoleMapper / RoleMenuMapper
 │   ├── ScheduleTaskMapper / SysConfigMapper
-│   └── P2p* (4: Auth/Session/Message/KnownPeer)
+│   └── ProviderConfigMapper (LLM Provider) / McpServerMapper (MCP)
+│ │   ├── LessonMapper / LessonNormCacheMapper / LessonRuleMapper (Growth)
+│ │   └── P2p* (4: Auth/Session/Message/KnownPeer)
 ├── model/
-│   ├── entity/                # Database Entities (14)
+│   ├── entity/                # Database Entities (23)
 │   │   ├── Conversation / ConversationMessage / CompactionRecord
 │   │   ├── User / Menu / Role / RoleMenu / SysConfig
 │   │   ├── AgentConfig / AgentTask / Skill / SubAgentLog
-│   │   │   ├── Lesson（成长体系：踩坑经验）
-│   │   ├── ScheduleTask / MessageRole
-│   │   └── P2pAgentAuthorization / P2pAgentConversation /
-│   │       P2pChatMessage / P2pKnownPeer
+│   │   ├── ScheduleTask / MessageRole / ProviderConfig / McpServerConfig
+│ │   │   ├── Lesson / LessonNormCache / LessonRule（Growth System）
+│ │   │   └── P2pAgentAuthorization / P2pAgentConversation /
+│ │   │       P2pChatMessage / P2pKnownPeer
 │   ├── dto/                   # Request/Response DTOs
 │   └── vo/                    # View Objects
 ├── p2p/                       # ⚡P2P Remote Collaboration Subsystem
-│   ├── controller/P2pController   # REST API (19.8KB)
-│   ├── agent/P2pAgentService      # Agent remote invocation (33.4KB)
+│   ├── controller/P2pController   # REST API (39.7KB)
+│   ├── agent/P2pAgentService      # Agent remote invocation (34.9KB)
 │   ├── connection/                # P2pServer / P2pClient / ConnectionPool
 │   ├── message/                   # HandshakeHandler / MessageRouter
 │   ├── protocol/                  # MessageType / P2pConstants / Codecs
@@ -211,22 +217,27 @@ src/main/java/com/example/agentdeepseek/
 │   ├── DeepSeekService        # Core chat service interface
 │   ├── ShellDiscoveryService  # Smart Shell discovery (Win/Mac/Linux multi-shell)
 │   └── impl/
-│       ├── DeepSeekServiceImpl    # ★★★Core Engine (129KB)
+│       ├── DeepSeekServiceImpl    # ★★★Core Engine (187KB)
 │       ├── ToolLoopManager        # Tool loop (dead loop / judge / cancel)
 │       ├── AgentForkManager       # Sub-agent lifecycle
 │       ├── CompactionService      # Context compaction (3-tier + async)
 │       ├── ContextBuilder         # Message assembly + Token estimation
 │       ├── AgentEventBus          # Agent event bus (SSE push)
 │       ├── MessagePersister       # Async message persistence
-│       ├── SnapshotService        # Code snapshot backup/rollback (19.8KB)
+│       ├── SnapshotService        # Code snapshot backup/rollback (32.2KB)
 │       ├── ProjectBuildService    # Project build
 │       ├── SkillMatcher           # BM25 + trigger word matching
 │       ├── SkillIndexer           # Skill index builder
 │       ├── lesson/                 # ★Growth System: Lesson Knowledge Base (per-project, zero context cost)
-│       │   ├── LessonService       # CRUD + on-demand retrieval + state machine (38.8KB)
+│       │   ├── LessonService       # CRUD + on-demand retrieval + state machine (48KB)
 │       │   ├── LessonRecorder      # Auto-capture drafts / LLM proactive record
 │       │   ├── LessonReviewService # Turn-level async review (root cause/solution, C2)
 │       │   └── FailureNormalizer   # Error-code normalization + signature dedup (error_signature)
+│ │       │   ├── LessonNormalizerService # P0 normalization pipeline (rules + LLM fallback + cache)
+│ │       │   ├── LessonDetourService # P1 detour extraction & persistence (C3)
+│ │       │   ├── DetourSignalDetector # Detour signal scanning
+│ │       │   ├── DetourBlockParser  # 【方案取舍】block parser
+│ │       │   └── ErrorCodeDictionary # Error-code dictionary (yml config)
 │       └── ...
 ├── tool/                      # ⚡AI Agent Tool System
 │   ├── Tool.java              # Tool interface
@@ -250,9 +261,9 @@ src/main/java/com/example/agentdeepseek/
 │   │   └── History: query_tool_history
 │   ├── permission/            # Permission control
 │   └── postedit/              # Post-processing pipeline
-├── log/LogService             # Application-level logging (10.8KB)
+├── log/LogService             # Application-level logging (11KB)
 └── util/                      # Utility classes
-    ├── CommandUtils           # Smart Shell discovery + Command execution (13.9KB)
+    ├── CommandUtils           # Smart Shell discovery + Command execution (22.2KB)
     ├── DiffUtil               # LCS diff calculation
     ├── FileEncodingDetector   # Encoding detection (10.2KB)
     └── ...
@@ -349,13 +360,38 @@ src/main/java/com/example/agentdeepseek/
                           │ │ lesson (Growth System)            │
                           │ │ ──────────────────────────────    │
                           │ │ id (PK)                            │
-                          │ │ project_key (isolation)           │
+                          │ │ project_key (isolation)
+│                           │ │ type (FAILURE/DETOUR)               │
+│                           │ │ goal (detour task goal)             │
+│                           │ │ env_params (env-aware retrieval)    │           │
                           │ │ tool_name + error_category         │
                           │ │ error_code + error_signature (UQ) │
                           │ │ symptom/root_cause/solution        │
                           │ │ status (0draft/1active/2hidden)    │
-                          │ │ source (auto/llm/manual)           │
-                          │ │ hit/success/fail_count             │
+                          │ │ source (auto/llm/manual/review)           │
+                          │ │ hit/success/fail_count
+
+┌──────────────────┐      ┌──────────────────────┐
+│  llm_provider    │      │  mcp_server          │
+│ ──────────────── │      │ ───────────────────  │
+│ id (PK)          │      │ id (PK)              │
+│ code (UQ), name  │      │ name (UQ)            │
+│ base_url, api_key│      │ type (http/stdio)    │
+│ default_model    │      │ command/url          │
+│ request_template │      │ headers, tool_prefix │
+│ enabled          │      │ permission_level     │
+└──────────────────┘      │ enabled/auto_register │
+                          └──────────────────────┘
+
+┌────────────────────────┐   ┌──────────────────────────┐
+│ lesson_norm_cache      │   │ lesson_rule              │
+│ ────────────────────── │   │ ───────────────────────  │
+│ id (PK)                │   │ id (PK)                  │
+│ cache_key (UQ, md5)    │   │ pattern (error text)     │
+│ category / error_code  │   │ category / error_code    │
+│ expires_at             │   │ status (candidate/active)│
+└────────────────────────┘   │ match_hit_count (usage)  │
+                             └──────────────────────────┘             │
                           │ └────────────────────────────────────┘
 ```
 
@@ -365,31 +401,31 @@ src/main/java/com/example/agentdeepseek/
 
 | Module | One-Liner | Key Class | Est. Lines |
 |--------|----------|-----------|------------|
-| **AI Core Engine** | Conversation mgmt, API calls, tool loop | DeepSeekServiceImpl | ~3000 |
-| **Tool Loop** | Dead loop detection, judge, SSE events | ToolLoopManager | ~450 |
-| **Sub-Agent Mgmt** | fork/collect/inspect lifecycle | AgentForkManager | ~1400 |
-| **Shell Discovery** | Smart shell detection (Win/Mac/Linux) | ShellDiscoveryService | ~200 |
-| **Context Compaction** | LLM summary compression + async pre-compact | CompactionService | ~550 |
-| **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~500 |
-| **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~750 |
-| **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~2000 |
-| **Tool System** | 21 tools registration/execution/permission/post-edit | tool/ package | ~6000 |
-| **Growth System** | Lesson retrieval/auto-capture/review/validation loop | LessonService + LessonTool + FailureNormalizer | ~1200 |
+| **AI Core Engine** | Conversation mgmt, API calls, tool loop | DeepSeekServiceImpl | ~4600 |
+| **Tool Loop** | Dead loop detection, judge, SSE events | ToolLoopManager | ~560 |
+| **Sub-Agent Mgmt** | fork/collect/inspect lifecycle | AgentForkManager | ~1600 |
+| **Shell Discovery** | Smart shell detection (Win/Mac/Linux) | ShellDiscoveryService | ~260 |
+| **Context Compaction** | LLM summary compression + async pre-compact | CompactionService | ~640 |
+| **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~900 |
+| **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~800 |
+| **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~5000 |
+| **Tool System** | 21 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
+| **Growth System** | Retrieval/capture/review/normalization/detour | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **User Permissions** | RBAC, Token auth, menu control | UserServiceImpl + Filter | ~500 |
 | **Scheduled Tasks** | Cron/one-time scheduling, execution tracking | ScheduleTaskScheduler | ~350 |
-| **Skill System** | BM25 matching, Bayesian confidence | SkillMatcher + SkillIndexer | ~400 |
-| **Multi-LLM Provider** | Provider CRUD, client routing, hot refresh | LLMClientManager + LLMClient + 6 implementations | ~1500 |
+| **Skill System** | BM25 matching, Bayesian confidence | SkillMatcher + SkillIndexer | ~250 |
+| **Multi-LLM Provider** | Provider CRUD, client routing, hot refresh | LLMClientManager + LLMClient + 5 implementations | ~1600 |
 
 ---
 
 ## 8. Key Conventions & Notes
 
 1. **API Port**: Default `8084` (`server.port` in application.yml)
-2. **H2 Console**: `http://localhost:8084/h2-console`, JDBC URL: `jdbc:h2:file:./data/codecraft`
+2. **H2 Console**: `http://localhost:8084/h2-console`, JDBC URL: `jdbc:h2:file:./data/codecraft;MODE=MySQL;DB_CLOSE_DELAY=-1` (user `sa`, empty password)
 3. **Default Admin**: Auto-created by `UserInitializer` on first launch
 4. **Password Encryption**: MD5 (32-bit), not bcrypt — upgrade recommended for security-sensitive scenarios
 5. **Tool Return Format**: Unified `ApiResponse<T>`, code referenced from `ResponseEnum`
-6. **SSE Event Types**: `thinking` / `text` / `tool_start` / `tool_result` / `error` / `done`
+6. **SSE Events**: OpenAI-compatible streaming format (`choices[].delta.content` / `reasoning_content`) + custom events `tool_call_start` / `ask_user` / `skill_match`
 7. **Sub-Agent Concurrency Limit**: 20 (hardcoded in AgentForkManager)
 8. **Tool Loop Max Iterations**: 50
 9. **Snapshot Quota**: 500MB limit, auto-clean to 300MB when exceeded
@@ -401,7 +437,7 @@ src/main/java/com/example/agentdeepseek/
 
 | Issue | Severity | Recommendation |
 |-------|----------|---------------|
-| DeepSeekServiceImpl 129KB monolith | 🔴 High | Split into ChatOrchestrator / ToolLoopEngine / ResponseStreamer |
+| DeepSeekServiceImpl 187KB monolith | 🔴 High | Split into ChatOrchestrator / ToolLoopEngine / ResponseStreamer |
 | MD5 password storage | 🔴 High | Upgrade to bcrypt or argon2 |
 | Frontend lacks tests | 🟡 Medium | Add Vitest unit tests for core components |
 | snapshots/ directory bloat | 🟡 Medium | Add periodic cleanup or Git-based snapshots |
@@ -418,7 +454,7 @@ CodeCraft supports multiple LLM platforms. Core components:
 - **llm_provider table**: Stores Provider config (code/name/baseUrl/apiKey/defaultModel/requestTemplate, etc.)
 - **LLMClient Interface**: Unified abstraction layer; all Providers must implement it (buildRequestBody/streamChat/extractContent, etc.)
 - **LLMClientManager**: Core manager for Provider registration, routing (resolveClientByCode/resolveClientByProviderId), hot refresh
-- **6 Provider Implementations**: DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / AbstractLLMClient
+- **5 Provider Implementations**: DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient (+ AbstractLLMClient abstract base)
 - **Agent Binding**: agent_config table gains provider_id/provider_code fields; each Agent can be bound to a specific Provider
 - **Frontend Dynamic Switching**: CodeAssistantView supports runtime Provider switching with automatic model list refresh
 - **Provider Routing Priority**: Frontend dynamic providerCode > Agent config providerId > First available Provider

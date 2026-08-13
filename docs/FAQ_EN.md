@@ -39,15 +39,15 @@
 
 ---
 
-## Q4: Wrong DeepSeek API Key, what to do?
+## Q4: Wrong LLM API Key, what to do?
 
-**Answer**: API Key can be modified in the Settings page.
+**Answer**: Providers and API Keys are managed in the「Provider Config」page (stored in the `llm_provider` table).
 
 **Steps**:
-1. Click the settings gear icon in the left menu
-2. Go to the "System Config" page
-3. Find "DeepSeek API Key", enter the correct key
-4. Click Save
+1. Open `http://localhost:8084`
+2. Go to 「Config」→「Provider Config」in the left menu
+3. Add or edit the Provider and enter the correct API Key
+4. Click Save — changes take effect immediately (hot refresh)
 
 ---
 

@@ -287,7 +287,7 @@ This enables "shared context across multiple invocations of the same remote Agen
 ```
 p2p/
 ├── agent/                          # Agent remote invocation business logic
-│   ├── P2pAgentService             # ★Core: auth/invoke/response (33.4KB)
+│   ├── P2pAgentService             # ★Core: auth/invoke/response (34.9KB)
 │   ├── AgentAuthGrantHandler       # Handle incoming auth grant
 │   ├── AgentAuthCancelHandler      # Handle incoming auth cancel
 │   ├── AgentInvokeHandler          # Handle incoming invoke request
@@ -316,7 +316,7 @@ p2p/
 │   ├── ChatMessageHandler          # Chat message handler
 │   └── DisconnectNotifyHandler     # Disconnect notification handler
 ├── service/P2pChatService          # Chat message persistence
-├── controller/P2pController        # REST API (19.8KB)
+├── controller/P2pController        # REST API (39.7KB)
 └── config/P2pConfig                 # Configuration (port/cert path etc.)
 ```
 

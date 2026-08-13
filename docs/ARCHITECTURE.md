@@ -1,14 +1,14 @@
-> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.1.6 | 更新：2026-08-12 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.6 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
 
 ## 一、一句话定义
 
-**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 19 种工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作，支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等）动态切换。
+**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 21 种内置工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等）动态切换，并可通过 MCP 双向接入外部工具生态。
 
 ---
 
@@ -31,7 +31,7 @@
 │ │          Spring Boot 3.4 后端 (src/main/java/)                      │ │
 │ │                       │                                             │ │
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
-│ │ │        Controller 层（16 个）               │                      │ │
+│ │ │        Controller 层（21 个）               │                      │ │
 │ │ │ DeepSeekController / GitController /       │                      │ │
 │ │ │ P2pController / SnapshotController / ...   │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
@@ -39,7 +39,7 @@
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
 │ │ │         Service 核心层                     │                      │ │
 │ │ │                                            │                      │ │
-│ │ │  DeepSeekServiceImpl (129KB, 核心引擎)     │                      │ │
+│ │ │  DeepSeekServiceImpl (187KB, 核心引擎)     │                      │ │
 │ │ │   ├─ ToolLoopManager (工具循环/死循环检测) │                      │ │
 │ │ │   ├─ AgentForkManager (子Agent管理)        │                      │ │
 │ │ │   ├─ CompactionService (上下文压缩)        │                      │ │
@@ -90,7 +90,7 @@
 │    │ └─ 重复直到 AI 不再请求工具调用                               │    │
 │    │                                                               │    │
 │    │ 安全机制：                                                    │    │
-│    │ ├─ 死循环检测：连续 4 轮相同工具调用 → 终止                   │    │
+│    │ ├─ 死循环检测：连续 3 次相同工具+关键参数 → 标记并交由评委评估                   │    │
 │    │ ├─ 评委机制：超最大迭代 → Judge 评估是否继续                  │    │
 │    │ └─ 用户取消检测：每轮检查是否被中断                           │    │
 │    └──────────────────────────────────────────────────────────────┘    │
@@ -155,15 +155,19 @@ src/main/java/com/example/agentdeepseek/
 │   ├── NetworkToolConfig      # 代理/网络配置
 │   ├── OpenApiConfig          # Swagger/OpenAPI 文档
 │   └── SpaConfig              # 单页应用路由回退
-├── controller/                # REST API 控制器（16 个）
+├── controller/                # REST API 控制器（21 个）
 │   ├── DeepSeekController     # ★核心：聊天、Agent 任务状态
 │   ├── ConversationController # 会话 CRUD
 │   ├── GitController          # Git 操作（status/diff/commit...）
-│   ├── P2pController          # P2P 远程协作
+│   ├── P2pController          # P2P 远程协作（39.7KB，最大控制器）
 │   ├── SnapshotController     # 快照管理
 │   ├── SkillController        # 技能 CRUD
 │   ├── AgentConfigController  # Agent 配置管理
-│   ├── ToolRegistryController # 工具注册表查询
+│   ├── LLMProviderController  # LLM Provider CRUD
+│ │   ├── McpServerController    # MCP 服务器管理
+│ │   ├── LessonController       # 踩坑经验管理
+│ │   ├── PromptOptimizeController # 提示词优化
+│ │   ├── ToolRegistryController # 工具注册表查询
 │   ├── ProjectController      # 项目文件浏览
 │   ├── ProjectBuildController # 项目构建/编译
 │   ├── UserController         # 用户管理
@@ -174,19 +178,23 @@ src/main/java/com/example/agentdeepseek/
 │   └── ScheduleTaskController # 定时任务
 ├── filter/                    # TokenAuthenticationFilter（Token 鉴权拦截器）
 ├── initializer/               # UserInitializer（首次启动初始化管理员）
-├── mapper/                    # MyBatis Mapper 接口（26 个）
-│   ├── ConversationMapper / ConversationMessageMapper
+├── mapper/                    # MyBatis Mapper 接口（21 个）
+│   ├── ConversationMapper / ConversationMessageMapper / CompactionMapper
 │   ├── AgentConfigMapper / SkillMapper / SubAgentLogMapper
 │   ├── UserMapper / MenuMapper / RoleMapper / RoleMenuMapper
 │   ├── ScheduleTaskMapper / SysConfigMapper
-│   └── P2p* (4个：授权/会话/消息/已知节点)
+│   └── ProviderConfigMapper（LLM Provider）/ McpServerMapper（MCP）
+│ │   ├── LessonMapper / LessonNormCacheMapper / LessonRuleMapper（成长体系）
+│ │   └── P2p* (4个：授权/会话/消息/已知节点)
 ├── model/
-│   ├── entity/                # 数据库实体（14 个）
+│   ├── entity/                # 数据库实体（23 个）
 │   │   ├── Conversation / ConversationMessage / CompactionRecord
 │   │   ├── User / Menu / Role / RoleMenu / SysConfig
 │   │   ├── AgentConfig / AgentTask / Skill / SubAgentLog
-│   │   ├── ScheduleTask / MessageRole
-│   │   └── P2pAgentAuthorization / P2pAgentConversation / P2pChatMessage / P2pKnownPeer
+│   │   ├── ScheduleTask / MessageRole / ProviderConfig / McpServerConfig
+│ │   │   ├── Lesson / LessonNormCache / LessonRule（成长体系）
+│ │   │   └── P2pAgentAuthorization / P2pAgentConversation / P2pChatMessage / P2pKnownPeer
+
 │   ├── dto/                   # 请求/响应 DTO
 │   │   ├── ChatRequest / ChatResponse
 │   │   ├── ForkAgentRequest / CollectAgentRequest / InspectAgentRequest
@@ -196,8 +204,8 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── DirectoryEntry / ProjectTreeNode
 │   └── SubAgentResult         # 子Agent结构化执行结果
 ├── p2p/                       # ⚡P2P 远程协作子系统
-│   ├── controller/P2pController   # REST API（19.8KB，最大控制器）
-│   ├── agent/P2pAgentService      # Agent 远程调用核心（33.4KB）
+│   ├── controller/P2pController   # REST API（39.7KB，最大控制器）
+│   ├── agent/P2pAgentService      # Agent 远程调用核心（34.9KB）
 │   ├── connection/                # P2pServer / P2pClient / ConnectionPool / PeerInfo
 │   ├── message/                   # HandshakeHandler / MessageRouter / MessageFrame
 │   ├── protocol/                  # MessageType / P2pConstants / 编解码器
@@ -212,14 +220,14 @@ src/main/java/com/example/agentdeepseek/
 │   ├── DeepSeekService        # 核心聊天服务接口
 │   ├── ShellDiscoveryService  # Shell 自动发现（Windows/macOS/Linux 多 Shell 支持）
 │   ├── impl/
-│   │   ├── DeepSeekServiceImpl    # ★★★核心引擎（129KB，最复杂文件）
+│   │   ├── DeepSeekServiceImpl    # ★★★核心引擎（187KB，最复杂文件）
 │   │   ├── ToolLoopManager        # 工具调用循环（死循环检测/评委/取消）
 │   │   ├── AgentForkManager       # 子Agent生命周期（fork/collect/inspect）
 │   │   ├── CompactionService      # 上下文压缩（三级决策 + 异步预压缩）
 │   │   ├── ContextBuilder         # 消息上下文组装 + Token估算
 │   │   ├── AgentEventBus          # Agent 事件总线（SSE 推送）
 │   │   ├── MessagePersister       # 消息异步持久化
-│   │   ├── SnapshotService        # 代码快照备份/回滚（19.8KB）
+│   │   ├── SnapshotService        # 代码快照备份/回滚（32.2KB）
 │   │   ├── ProjectBuildService    # 项目编译构建
 │   │   ├── SkillMatcher           # BM25 + 触发词匹配
 │   │   ├── SkillIndexer           # 技能索引构建
@@ -227,10 +235,15 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── AttachmentReaderService # 附件文件读取服务
 │   │   └── ... (User/Config/Menu/Role 等 CRUD 服务)
 │   ├── lesson/                 # ★成长体系：踩坑经验库（按项目隔离，零上下文开销）
-│   │   ├── LessonService       # 经验 CRUD + 按需检索 + 状态机（38.8KB）
-│   │   ├── LessonRecorder      # 失败自动捕获草稿 / LLM 主动记录
-│   │   ├── LessonReviewService # 对话级异步复盘（提炼根因/解法，C2）
-│   │   └── FailureNormalizer   # 错误码归一化 + 指纹去重（error_signature）
+│   │   ├── LessonService       # 经验 CRUD + 按需检索 + 状态机（48KB）
+│ │   │   ├── LessonRecorder      # 失败自动捕获草稿 / LLM 主动记录
+│ │   │   ├── LessonReviewService # 对话级异步复盘（提炼根因/解法，C2）
+│ │   │   ├── FailureNormalizer   # 错误码归一化 + 指纹去重（error_signature）
+│ │   │   ├── LessonNormalizerService # P0 归一化管线（规则+LLM 兜底+缓存）
+│ │   │   ├── LessonDetourService # P1 弯路经验提炼入库（C3）
+│ │   │   ├── DetourSignalDetector # 弯路信号扫描（用户否定/换方案/工具序列）
+│ │   │   ├── DetourBlockParser  # 【方案取舍】块解析
+│ │   │   └── ErrorCodeDictionary # 错误码字典（yml 配置加载）
 │   └── SkillService / UserService / ConfigService / ...
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
@@ -254,7 +267,7 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── 交互工具: AskClarificationTool, ChatAttachmentTool, QueryToolHistoryTool
 │   │   ├── 定时任务: ScheduleTaskTool
 │   │   ├── MCP 管理: McpServerManagerTool
-│   │   └── 分析工具: DeepSeekAnalyzer
+│   │   └── 辅助组件: DeepSeekAnalyzer（非流式 LLM 分析器，评委/子Agent 调用）
 │   ├── permission/            # 权限控制
 │   │   ├── ToolPermission / ToolPermissionMetadata / ToolPermissionRegistry
 │   │   ├── ToolExecutionPipeline (三层防护)
@@ -265,9 +278,9 @@ src/main/java/com/example/agentdeepseek/
 │       ├── PostEditPipeline   # 编排 Formatter + Diagnostic
 │       ├── Formatter          # 代码格式化（Java/Python/JS/TS...）
 │       └── Diagnostic         # 编译诊断（lint/语法检查）
-├── log/LogService             # 应用级日志服务（10.8KB）
+├── log/LogService             # 应用级日志服务（11KB）
 └── util/                      # 工具类
-    ├── CommandUtils           # 智能 Shell 发现 + 命令执行（13.9KB）
+    ├── CommandUtils           # 智能 Shell 发现 + 命令执行（22.2KB）
     ├── DiffUtil               # LCS 差异计算
     ├── FileEncodingDetector   # 编码检测（10.2KB）
     ├── OperationDetailGenerator # 操作详情生成
@@ -366,14 +379,39 @@ src/main/java/com/example/agentdeepseek/
                           │ lesson（成长体系：踩坑经验）      │
                           │ ──────────────────────────────  │
                           │ id (PK)                          │
-                          │ project_key (隔离维度)           │
+                          │ project_key (隔离维度)
+│                           │ type (FAILURE/DETOUR 分型)
+│                           │ goal (弯路经验任务目标)
+│                           │ env_params (记录环境，检索降权)           │
                           │ tool_name + error_category       │
                           │ error_code + error_signature(UQ) │
                           │ symptom/root_cause/solution      │
                           │ status (0草稿/1有效/2隐藏)       │
-                          │ source (auto/llm/manual)         │
+                          │ source (auto/llm/manual/review)         │
                           │ hit/success/fail_count           │
                           └──────────────────────────────────┘
+
+┌──────────────────┐      ┌──────────────────────┐
+│  llm_provider    │      │  mcp_server          │
+│ ──────────────── │      │ ───────────────────  │
+│ id (PK)          │      │ id (PK)              │
+│ code (UQ), name  │      │ name (UQ)            │
+│ base_url, api_key│      │ type (http/stdio)    │
+│ default_model    │      │ command/url          │
+│ request_template │      │ headers, tool_prefix │
+│ enabled          │      │ permission_level     │
+└──────────────────┘      │ enabled/auto_register │
+                          └──────────────────────┘
+
+┌────────────────────────┐   ┌──────────────────────────┐
+│ lesson_norm_cache      │   │ lesson_rule              │
+│ ────────────────────── │   │ ───────────────────────  │
+│ id (PK)                │   │ id (PK)                  │
+│ cache_key (UQ, md5)    │   │ pattern (报错文本片段)    │
+│ category / error_code  │   │ category / error_code    │
+│ expires_at             │   │ status (候选/转正)       │
+└────────────────────────┘   │ match_hit_count (使用度) │
+└──────────────────────────┘
 ```
 
 ---
@@ -382,33 +420,33 @@ src/main/java/com/example/agentdeepseek/
 
 | 模块 | 一句话职责 | 关键类 | 行数估算 |
 |------|-----------|--------|----------|
-| **AI 核心引擎** | 对话管理、API 调用、工具循环 | DeepSeekServiceImpl | ~3000 |
-| **工具循环** | 死循环检测、评委评估、SSE 事件 | ToolLoopManager | ~450 |
-| **子Agent管理** | fork/collect/inspect 生命周期 | AgentForkManager | ~1400 |
-| **Shell 发现** | 智能检测最佳 Shell（Win/Mac/Linux） | ShellDiscoveryService | ~200 |
-| **上下文压缩** | LLM 摘要压缩 + 异步预压缩 | CompactionService | ~550 |
-| **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~500 |
-| **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~750 |
-| **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~2000 (整个p2p包) |
-| **工具系统** | 21 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~6000 |
-| **成长体系** | 踩坑经验检索/自动捕获/复盘/验证闭环 | LessonService + LessonTool + FailureNormalizer | ~1200 |
+| **AI 核心引擎** | 对话管理、API 调用、工具循环 | DeepSeekServiceImpl | ~4600 |
+| **工具循环** | 死循环检测、评委评估、SSE 事件 | ToolLoopManager | ~560 |
+| **子Agent管理** | fork/collect/inspect 生命周期 | AgentForkManager | ~1600 |
+| **Shell 发现** | 智能检测最佳 Shell（Win/Mac/Linux） | ShellDiscoveryService | ~260 |
+| **上下文压缩** | LLM 摘要压缩 + 异步预压缩 | CompactionService | ~640 |
+| **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~900 |
+| **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~800 |
+| **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~5000 (整个p2p包) |
+| **工具系统** | 21 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
+| **成长体系** | 经验检索/自动捕获/复盘/归一化/弯路提炼 | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |
-| **技能系统** | BM25 匹配、贝叶斯置信度 | SkillMatcher + SkillIndexer | ~400 |
-| **多LLM Provider** | Provider CRUD、客户端路由、热刷新 | LLMClientManager + LLMClient + 6个实现 | ~1500 |
+| **技能系统** | BM25 匹配、贝叶斯置信度 | SkillMatcher + SkillIndexer | ~250 |
+| **多LLM Provider** | Provider CRUD、客户端路由、热刷新 | LLMClientManager + LLMClient + 5个实现 | ~1600 |
 
 ---
 
 ## 八、关键约定与注意事项
 
 1. **API 端口**: 默认 `8084`（application.yml 中 `server.port`）
-2. **H2 控制台**: `http://localhost:8084/h2-console`，JDBC URL: `jdbc:h2:file:./data/codecraft`
+2. **H2 控制台**: `http://localhost:8084/h2-console`，JDBC URL: `jdbc:h2:file:./data/codecraft;MODE=MySQL;DB_CLOSE_DELAY=-1`（用户名 `sa`，密码空）
 3. **默认管理员**: 首次启动由 `UserInitializer` 自动创建
 4. **密码加密**: MD5（32位），非 bcrypt——安全敏感场景需升级
 5. **工具返回格式**: 统一使用 `ApiResponse<T>`，code 参考 `ResponseEnum`
-6. **SSE 事件类型**: `thinking` / `text` / `tool_start` / `tool_result` / `error` / `done`
-7. **子Agent 并发上限**: 5 个（在 AgentForkManager 中硬编码）
-8. **工具循环最大迭代**: 50 轮
+6. **SSE 事件**: OpenAI 兼容流式格式（`choices[].delta.content` / `reasoning_content`）+ 自定义事件 `tool_call_start` / `ask_user` / `skill_match`
+7. **子Agent 并发上限**: 20 个（AgentForkManager.MAX_CONCURRENT_AGENTS）
+8. **工具循环最大迭代**: 主循环 50 轮（评委可扩展，累计上限 +100 次）；子Agent 默认 30 轮
 9. **快照配额**: 500MB 上限，超限自动清理至 300MB
 10. **Token 估算系数**: 中文 ~1.5、英文 ~1.0、数字 ~0.5、emoji ~0.5（见 tokenCalculator.ts + TokenEstimator.java）
 
@@ -418,7 +456,7 @@ src/main/java/com/example/agentdeepseek/
 
 | 问题 | 严重程度 | 建议 |
 |------|---------|------|
-| DeepSeekServiceImpl 129KB 单体 | 🔴 高 | 拆分为 ChatOrchestrator / ToolLoopEngine / ResponseStreamer |
+| DeepSeekServiceImpl 187KB 单体 | 🔴 高 | 拆分为 ChatOrchestrator / ToolLoopEngine / ResponseStreamer |
 | 密码 MD5 存储 | 🔴 高 | 升级 bcrypt 或 argon2 |
 | 前端缺少测试 | 🟡 中 | 至少为核心组件补充 Vitest 单元测试 |
 | snapshots/ 目录膨胀 | 🟡 中 | 增加定期清理机制或切换到 Git-based 快照 |
@@ -435,7 +473,7 @@ CodeCraft 支持多种 LLM 平台，核心组件：
 - **llm_provider 表**：存储 Provider 配置（code/name/baseUrl/apiKey/defaultModel/requestTemplate 等）
 - **LLMClient 接口**：统一抽象层，所有 Provider 必须实现（buildRequestBody/streamChat/extractContent 等）
 - **LLMClientManager**：核心管理器，负责 Provider 注册、路由（resolveClientByCode/resolveClientByProviderId）、热刷新
-- **6 个 Provider 实现**：DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / AbstractLLMClient
+- **5 个 Provider 实现**：DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient（+ AbstractLLMClient 抽象基类）
 - **Agent 绑定**：agent_config 表新增 provider_id/provider_code 字段，每个 Agent 可绑定特定 Provider
 - **前端动态切换**：CodeAssistantView 支持运行时切换 Provider，自动刷新模型列表
 - **Provider 路由优先级**：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider

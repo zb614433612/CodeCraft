@@ -9,15 +9,9 @@
 # - 比系统环境变量更直观，不需要修改系统配置
 # ============================================================
 
-# DeepSeek API 密钥（必须配置）
-deepseek:
-  api-key: sk-你的API密钥
-
-# Milvus 向量数据库（可选）
-milvus:
-  host: localhost
-  port: 19530
-  token: 你的Milvus认证token
+# ⚠️ 注意：LLM Provider / API Key 不在此文件配置！
+# 请启动后在页面「配置 → Provider 配置」中添加（存储于 llm_provider 表），
+# 支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等平台。
 
 # 代理配置（可选，国内访问海外 API 时使用）
 network-tool:

@@ -67,11 +67,11 @@ CodeCraft
 ├── src/main/java/.../              # Java Backend (Spring Boot 3.4)
 │   ├── controller/                 # REST API Controllers (17)
 │   ├── service/impl/               # Core Business Logic
-│   │   ├── DeepSeekServiceImpl     # ★ AI Engine Core (129KB)
+│   │   ├── DeepSeekServiceImpl     # ★ AI Engine Core (187KB)
 │   │   ├── ToolLoopManager         # Tool Call Loop Engine
 │   │   ├── AgentForkManager        # Sub-Agent Lifecycle
 │   │   └── CompactionService       # Context Compaction
-│   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 6 Provider impls)
+│   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 5 Provider impls)
 │   ├── service/lesson/             # Growth System (retrieval/record/review/normalizer)
 │   ├── tool/                       # AI Agent Tools (21 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
@@ -80,22 +80,22 @@ CodeCraft
 │   │   ├── protocol/               # MessageFrame, MessageType
 │   │   ├── security/               # TlsHelper, CryptoHelper
 │   │   └── signaling/              # QR Code Signaling, Connection String
-│   ├── model/entity/               # Database Entities (15, incl. ProviderConfig)
-│   ├── mapper/                     # MyBatis Mappers (26)
+│   ├── model/entity/               # Database Entities (23, incl. ProviderConfig/McpServerConfig/Lesson)
+│   ├── mapper/                     # MyBatis Mappers (21)
 │   └── config/                     # Spring Configuration
 ├── frontend/                       # Vue 3 Frontend (TypeScript)
 │   ├── src/
-│   │   ├── views/                  # Page Views (10)
+│   │   ├── views/                  # Page Views (14)
 │   │   │   ├── CodeAssistantView   # ★ Main Chat + Coding Interface
 │   │   │   ├── AgentConfigView     # Agent Configuration Management
 │   │   │   └── ...
-│   │   ├── components/             # Common Components (13)
+│   │   ├── components/             # Common Components (16)
 │   │   │   ├── ChatView            # Chat Message Rendering (SSE)
 │   │   │   ├── AgentPanel          # Sub-Agent Status Panel
 │   │   │   ├── FileTree            # File Browser
 │   │   │   ├── GitSidebar          # Git Diff/Commit Sidebar
 │   │   │   └── ...
-│   │   └── api/                    # API Call Modules (18, incl. llm-provider API)
+│   │   └── api/                    # API Call Modules (21, incl. llm-provider API)
 │   └── ...
 ├── electron/                       # Electron Desktop Shell
 ├── docs/                           # Project Documentation
@@ -113,7 +113,7 @@ CodeCraft
     └── build.sh                    # macOS/Linux One-Click Build
 ```
 
-## 🧰 Tool Ecosystem (19 Tools)
+## 🧰 Tool Ecosystem (21 Tools)
 
 | Category | Tool | Typical Usage |
 |----------|------|--------------|
@@ -130,6 +130,9 @@ CodeCraft
 | **Interaction** | `ask_clarification` | Clarify ambiguous requirements |
 | **Attachment** | `chat_attachment` | Read PDF/Word/Excel attachments |
 | **Schedule** | `schedule_task` | Scheduled task management |
+| **History** | `query_tool_history` | Query tool call history in current session |
+| **Lesson** | `lesson` | Pitfall experience knowledge base (search/record/complete/feedback/list) |
+| **MCP** | `mcp_server_manager` | Manage MCP servers (create/delete/connect/disconnect/refresh) |
 
 ## 🎯 Skill System
 
@@ -157,7 +160,7 @@ Main Agent (user conversation)
 
 | Layer | Technology | Notes |
 |-------|-----------|-------|
-| **Backend** | Spring Boot 3.4 + MyBatis-Plus | Java 17 |
+| **Backend** | Spring Boot 3.4 + MyBatis | Java 17 |
 | **AI Communication** | WebFlux + SSE | Streaming output |
 | **Multi-LLM Support** | LLMClient Abstraction Layer | DeepSeek / OpenAI / Anthropic / Ollama / MiMo |
 | **Database** | H2 (Embedded) | Zero-config deployment |

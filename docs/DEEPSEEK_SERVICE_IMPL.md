@@ -1,12 +1,12 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.1.6 | 更新：2026-08-12 | 受众：开发者 / AI 协作伙伴
-> 本文档解剖 129KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
+> 版本：v1.1.6 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
+> 本文档解剖 187KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
 
-## 一、为什么它是 129KB 的单体怪兽？
+## 一、为什么它是 187KB 的单体怪兽？
 
 ```
 DeepSeekServiceImpl 承担的职责（理想情况下应拆分为 4~5 个类）：
@@ -234,10 +234,10 @@ DeepSeekServiceImpl (22 个依赖)
 
 ```
 检测逻辑（在 ToolLoopManager 中实现）：
-  1. 提取最近 4 条 tool 消息
+  1. 提取最近连续 tool 消息（threshold=3，即连续 3 条相同）
   2. 计算每条的工具名 + 关键参数（extractToolKey）
-  3. 如果全部相同 → 判定为死循环
-  4. 返回终止事件，不再继续
+  3. 如果全部相同 → 判定为疑似死循环（用于评委评估上下文）
+  4. 主循环超迭代后由评委（Judge）决定终止或继续
 ```
 
 ### 6.2 评委机制（evaluateWithJudge）
@@ -353,7 +353,7 @@ prepareConversationContext()
 
 | 问题 | 位置 | 建议 |
 |------|------|------|
-| 129KB 单体类 | 整体 | 按职责拆分为 4 个类 |
+| 187KB 单体类 | 整体 | 按职责拆分为 4 个类 |
 | SSE 事件构建方法散落 | `create*Event()` 方法 | 抽到 `SseEventBuilder` |
 | `evaluateWithJudge` 逻辑 | ~100 行 | 已委托 ToolLoopManager，但调用链仍在 |
 | 子Agent收集逻辑 | `executeSemiStreamingToolCycle` 尾部 | 抽到 `SubAgentCollector` |

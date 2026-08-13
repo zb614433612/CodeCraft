@@ -74,13 +74,15 @@ application-local.yml  >  application.yml  >  Code defaults
     (highest)              (base config)       (lowest)
 ```
 
-For local dev, copy the template:
+For local overrides (proxy/datasource etc.), copy the template:
 ```bash
 cp application-local.yml.example application-local.yml
-# Edit and fill in deepseek.api-key
+# Edit overrides as needed (API Key is NOT here, see "LLM Provider" below)
 ```
 
 This file is in `.gitignore` and will not be committed.
+
+> 💡 **LLM Provider / API Key**: configured via Web UI「Config → Provider Config」(stored in `llm_provider` table), no longer read from env vars or config files.
 
 ---
 
@@ -110,15 +112,15 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 
 ```
 project root
-├── src/main/java/...        → Backend source (102 Java files)
+├── src/main/java/...        → Backend source (253 Java files)
 │   ├── tool/impl/           -> 21 AI tool implementations (incl. lesson growth system)
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/lesson/      -> Growth system (lesson retrieval/record/review/normalizer)
 │   └── service/impl/        → Core business logic
 ├── frontend/src/            → Vue 3 frontend source
-│   ├── views/               → 10 page views
-│   ├── components/          → 13 common components
-│   └── api/                 → 17 API call modules
+│   ├── views/               → 14 page views
+│   ├── components/          → 16 common components
+│   └── api/                 → 21 API call modules
 ├── electron/                → Electron desktop shell
 ├── data/                    → H2 database files (runtime)
 ├── logs/                    → Log files (runtime)
@@ -142,8 +144,8 @@ project root
 ## Quick Verification
 
 ```bash
-# Health check
-curl http://localhost:8084/actuator/health
+# Liveness check (opening the home page confirms it)
+curl http://localhost:8084/
 
 # Get registered tool list (requires login token)
 curl -H "Authorization: Bearer <token>" http://localhost:8084/api/tools

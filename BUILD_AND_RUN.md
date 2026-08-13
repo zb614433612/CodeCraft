@@ -9,7 +9,7 @@
 >
 > 本文档仅供**开发者**或**需要自行构建**的用户参考。
 > 
-> ?? **懒人通道**：如果只是想快速打包，直接使用一键脚本：
+> 💡 **懒人通道**：如果只是想快速打包，直接使用一键脚本：
 > - Windows：`scripts\build.bat [版本号]`
 > - Mac/Linux：`./scripts/build.sh [版本号]`
 > 
@@ -25,7 +25,6 @@
 | npm | 10+ | 随 Node.js 安装 |
 | H2 Database | 嵌入式 | 启动时自动创建，无需额外安装 |
 | Caffeine | 3.x（内置） | 本地缓存，已替代 Redis，无需额外配置 |
-| Milvus | 可选 | 向量数据库（可选依赖，不配置不影响核心功能） |
 
 ---
 
@@ -46,33 +45,24 @@ CodeCraft 需要配置至少一个 LLM Provider 才能正常使用。支持 Deep
 
 配置保存后即时生效，所有聊天请求将使用选定的 Provider 调用对应的大模型 API。
 
-> ?? 支持添加多个 Provider，运行时可在聊天界面随时切换。每个 Agent 也可以绑定特定的 Provider。
+> 💡 支持添加多个 Provider，运行时可在聊天界面随时切换。每个 Agent 也可以绑定特定的 Provider。
 > 详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
-
-**备用方式：环境变量或配置文件**
-
-如不方便通过页面配置，也可通过以下方式：
-
-- **环境变量**：设置 `DEEPSEEK_API_KEY=sk-你的API密钥`（兜底配置，仅 DeepSeek）
-- **配置文件**：在 `src/main/resources/application.yml` 中修改 `deepseek.api-key`（兜底配置，仅 DeepSeek）
-
-> 注意：页面配置的 LLM Provider 优先级最高，会覆盖环境变量和配置文件中的 Key。
+>
+> ⚠️ API Key 统一通过页面「Provider 配置」管理并存储在数据库中（`llm_provider` 表），代码已不再从环境变量或配置文件读取 API Key。
 
 ### 其他配置（可选）
 
-- **Milvus 向量数据库**：默认连接 `localhost:19530`，可在 `application.yml` 中修改
 - **代理配置**：如果需要通过代理访问外部网络，可在 `application.yml` 的 `network-tool.proxy` 中配置
 - **服务器端口**：默认 `8084`，可通过环境变量 `SERVER_PORT` 或修改 `application.yml` 中的 `server.port`
 
-> ?? **首次运行前**：项目启动时会自动加载 `application-local.yml`（优先级高于 `application.yml`）。
-> 请复制模板文件 `application-local.yml.example` 为 `application-local.yml`，并填入你的 API Key（作为兜底配置）：
+> 💡 **可选配置**：项目启动时会自动加载 `application-local.yml`（Spring Boot local profile，优先级高于 `application.yml`）。
+> 如需覆盖本地配置（如代理、数据源），可复制根目录模板 `application-local.yml.example` 为 `application-local.yml`：
 > ```bash
 > cp application-local.yml.example application-local.yml
-> # 然后编辑 application-local.yml，填入 deepseek.api-key
 > ```
 > 该文件已在 `.gitignore` 中排除，不会提交到 Git。
 >
-> 推荐通过页面「Provider 配置」添加 LLM Provider，支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等多种模型。
+> ⚠️ 注意：API Key **不通过** `application-local.yml` 配置——请在页面「Provider 配置」中添加 LLM Provider（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等多种模型）。
 
 ---
 
@@ -90,8 +80,8 @@ mvn spring-boot:run
 
 后端启动后访问 `http://localhost:8084` 即可打开前端页面。
 
-> **默认登录账号**：`admin` / `123456` ??
-> ?? 首次登录后请务必在「用户管理」中修改密码，确保安全！
+> **默认登录账号**：`admin` / `123456` ✅
+> ⚠️ 首次登录后请务必在「用户管理」中修改密码，确保安全！
 
 > 第一次构建时 `frontend-maven-plugin` 会自动下载 Node.js 和 npm 并编译前端代码。
 > 若不需要编译前端可跳过：`mvn clean package -DskipTests -DskipFrontend=true`
@@ -101,7 +91,7 @@ mvn spring-boot:run
 ```bash
 cd frontend
 npm install
-npm run dev          # 开发服务器，端口 5173，代理 API 到 8084
+npm run dev          # 开发服务器，端口 5173（默认无 API 代理；前端使用相对路径 /api，如需代理请自行配置 vite proxy）
 ```
 
 前端开发模式下需先启动后端（`mvn spring-boot:run`）。
@@ -140,7 +130,7 @@ mvn clean package -DskipTests -DskipFrontend=true
 
 ---
 
-# ?? Windows 打包
+# 🪟 Windows 打包
 
 ## Windows：打包为 EXE 安装程序（NSIS）
 
@@ -211,19 +201,19 @@ electron/release/
 > - ? **无需安装 Java** — JRE 已内置在 EXE 中
 > - ? 后端 JAR 已内置，无需额外放置
 > - ? 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒），然后加载前端页面
-> - ?? H2 数据库文件默认存储在 `./data/codecraft`，无需额外配置；如需连接远程 Milvus，请修改 application.yml
+> - 💡 H2 数据库文件默认存储在 `./data/codecraft`，无需额外配置
 
 ---
 
 ---
 
-# ?? macOS 打包
+# 🍎 macOS 打包
 
 ## macOS：打包为 DMG 磁盘映像
 
 打包后的 DMG **自带 JRE 运行环境**，目标机器无需安装 Java。
 
-> ?? **重要提示**：DMG 打包**只能在 macOS 上执行**，无法在 Windows 或 Linux 上交叉打包。因为 DMG 创建依赖 macOS 的 `hdiutil` 系统工具。
+> ⚠️ **重要提示**：DMG 打包**只能在 macOS 上执行**，无法在 Windows 或 Linux 上交叉打包。因为 DMG 创建依赖 macOS 的 `hdiutil` 系统工具。
 
 ### 前置条件
 
@@ -243,7 +233,7 @@ electron/release/
 
 4. **裁剪 macOS 版内置 JRE**（首次或 JDK 版本变更时需要）：
 
-   > ?? 必须使用 **macOS 版 JDK** 来裁剪，裁剪出的 JRE 仅能在 macOS 上运行。
+   > ⚠️ 必须使用 **macOS 版 JDK** 来裁剪，裁剪出的 JRE 仅能在 macOS 上运行。
 
    ```bash
    cd electron
@@ -326,7 +316,7 @@ electron/release/
 > - ? **无需安装 Java** — JRE 已内置在 .app 中
 > - ? 后端 JAR 已内置，无需额外放置
 > - ? 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒），然后加载前端页面
-> - ?? H2 数据库文件默认存储在 `~/Library/Application Support/CodeCraft/data`，无需额外配置
+> - 💡 H2 数据库文件默认存储在 `~/Library/Application Support/CodeCraft/data`，无需额外配置
 
 ### macOS 代码签名（可选）
 
@@ -359,7 +349,7 @@ npm run dist:mac
 
 ---
 
-# ?? Linux 打包
+# 🐧 Linux 打包
 
 ## Linux：打包为 AppImage / deb
 
@@ -465,10 +455,12 @@ codecraft/
 │   │       ├── config/         # 配置类
 │   │       ├── controller/     # REST API 控制器（含 LLM Provider 等 API）
 │   │       ├── mapper/         # 数据访问层
+│ │   │       ├── mcp/             # MCP 双向（client/server）
 │   │       ├── model/          # DTO、实体（含 ProviderConfig）、VO
 │   │       ├── scheduler/      # 定时任务
 │   │       ├── service/        # 业务逻辑层
-│   │       │   └── llm/        # LLM 客户端层（LLMClient + 6 个 Provider 实现）
+│   │       │   ├── llm/        # LLM 客户端层（LLMClient + 5 个 Provider 实现）
+│ │   │       │   └── lesson/     # 成长体系（经验库：检索/记录/复盘/归一化）
 │   │       ├── tool/           # AI Agent 工具（21 个工具）
 │   │       └── util/           # 工具类
 │   └── main/resources/         # 配置文件和静态资源

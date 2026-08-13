@@ -52,18 +52,16 @@ After starting the backend, open `http://localhost:8084`:
 
 You can add multiple Providers and switch between them at runtime. See [LLM Provider System](docs/LLM_PROVIDER_SYSTEM.md).
 
-**Option B: Config file (fallback for DeepSeek only)**
+**Option B: Local override config (optional)**
 
 ```bash
-# 1. Copy local config template
+# Copy local config template for overriding proxy/datasource etc.
 cp application-local.yml.example application-local.yml
-
-# 2. Edit application-local.yml and fill in your API Key
-# deepseek:
-#   api-key: sk-your-key-here
 ```
 
-This file is in `.gitignore` and will not be committed. The Web UI Provider config takes priority over this file.
+This file is in `.gitignore` and will not be committed.
+
+> ⚠️ Note: API Key is **NOT** configured in this file. Add LLM Providers via the Web UI「Provider Config」page (stored in `llm_provider` table).
 
 ### 2.2 Start Backend
 
@@ -83,7 +81,7 @@ npm install     # First time only
 npm run dev     # Hot reload at http://localhost:5173
 ```
 
-Frontend dev server proxies API requests to `http://localhost:8084`.
+Frontend uses relative `/api` paths; the dev server has no built-in proxy — configure a vite proxy yourself if needed.
 
 ### 2.4 Start Electron (Optional)
 
@@ -146,19 +144,19 @@ npm run dist:linux
 
 ```
 project root
-├── src/main/java/...        → Backend source (102 Java files)
-│   ├── tool/impl/           → 19 AI tool implementations
+├── src/main/java/...        → Backend source (253 Java files)
+│   ├── tool/impl/           → 21 AI tool implementations
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/impl/        → Core business logic
-│   └── service/llm/         → ★ LLM Client Layer (LLMClient + 6 Provider impls)
+│   └── service/llm/         → ★ LLM Client Layer (LLMClient + 5 Provider impls)
 ├── src/main/resources/
 │   ├── application.yml      → Base configuration
 │   ├── application-local.yml.example → Local config template
 │   └── schema.sql           → Database schema (H2 DDL)
 ├── frontend/src/            → Vue 3 frontend source
-│   ├── views/               → 10 page views
-│   ├── components/          → 13 common components
-│   └── api/                 → 17 API call modules
+│   ├── views/               → 14 page views
+│   ├── components/          → 16 common components
+│   └── api/                 → 21 API call modules
 ├── electron/                → Electron desktop shell
 ├── data/                    → H2 database files (runtime)
 ├── logs/                    → Log files (runtime)

@@ -38,7 +38,7 @@ scripts\build.bat v1.1.6
 | **H2 JDBC URL** | `jdbc:h2:file:./data/codecraft` |
 | **默认账号** | `admin` / `123456` |
 | **Swagger UI** | `http://localhost:8084/swagger-ui.html` |
-| **前端热更新端口** | `5173`（代理 API 到 8084） |
+| **前端热更新端口** | `5173`（前端使用相对路径 `/api`，默认无代理，需自行配置 vite proxy） |
 | **日志文件** | `logs/app.log` |
 
 ---
@@ -74,13 +74,15 @@ application-local.yml  >  application.yml  >  代码默认值
     (最高)                  (基础配置)          (最低)
 ```
 
-本地开发时复制模板：
+本地如需覆盖配置（代理/数据源等），复制根目录模板：
 ```bash
 cp application-local.yml.example application-local.yml
-# 编辑填入 deepseek.api-key
+# 编辑填入需要覆盖的配置项（注意：API Key 不在配置文件中，见下方「LLM Provider」）
 ```
 
 此文件已在 `.gitignore` 中，不会提交。
+
+> 💡 **LLM Provider / API Key**：统一通过页面「配置 → Provider 配置」添加（存储于 `llm_provider` 表），不再从环境变量或配置文件读取。
 
 ---
 
@@ -110,15 +112,15 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 
 ```
 项目根目录
-├── src/main/java/...        → 后端源码（102 个 Java 文件）
+├── src/main/java/...        → 后端源码（253 个 Java 文件）
 │   ├── tool/impl/           → 21 个 AI 工具实现（含 lesson 成长体系）
 │   ├── p2p/                 → P2P 远程协作
 │   └── service/lesson/      → 成长体系（经验库：检索/记录/复盘/归一化）
 │   └── service/impl/        → 核心业务逻辑
 ├── frontend/src/            → Vue3 前端源码
-│   ├── views/               → 10 个页面视图
-│   ├── components/          → 13 个通用组件
-│   └── api/                 → 17 个 API 调用模块
+│   ├── views/               → 14 个页面视图
+│   ├── components/          → 16 个通用组件
+│   └── api/                 → 21 个 API 调用模块
 ├── electron/                → Electron 桌面壳
 ├── data/                    → H2 数据库文件（运行时）
 ├── logs/                    → 日志文件（运行时）
@@ -142,8 +144,8 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 ## 快速验证
 
 ```bash
-# 健康检查
-curl http://localhost:8084/actuator/health
+# 服务存活检查（打开首页即可确认）
+curl http://localhost:8084/
 
 # 获取已注册工具列表（需登录后带 Token）
 curl -H "Authorization: Bearer <token>" http://localhost:8084/api/tools

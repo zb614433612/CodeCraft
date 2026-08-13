@@ -171,7 +171,7 @@ codecraft/
 │   │       ├── model/            # DTO、实体（含 ProviderConfig）、VO
 │   │       ├── scheduler/        # 定时任务
 │   │       ├── service/          # 业务逻辑层
-│   │       │   ├── llm/          # LLM 客户端层（LLMClient 接口 + 6 个 Provider 实现）
+│   │       │   ├── llm/          # LLM 客户端层（LLMClient 接口 + 5 个 Provider 实现）
 │   │       │   └── lesson/       # 成长体系（经验库：检索/记录/复盘/失败归一化）
 │   │       ├── tool/             # AI Agent 工具（21 个工具）
 │   │       │   ├── impl/         # 工具实现
@@ -197,7 +197,7 @@ codecraft/
 ├── BUILD_AND_RUN.md              # 构建与运行指南
 ├── CHANGELOG.md                   # 版本更新日志
 ├── .gitignore                    # Git 忽略规则
-└── application-local.yml.example # 本地配置模板
+└── application-local.yml.example # 本地覆盖配置模板（API Key 请用页面「Provider 配置」添加）
 ```
 
 ---

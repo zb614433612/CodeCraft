@@ -327,7 +327,7 @@ MessageRouter
 ```
 p2p/
 ├── agent/                          # Agent 远程调用业务逻辑
-│   ├── P2pAgentService             # ★核心：授权/调用/响应 (33.4KB)
+│   ├── P2pAgentService             # ★核心：授权/调用/响应 (34.9KB)
 │   ├── AgentAuthGrantHandler       # 处理对方发来的授权
 │   ├── AgentAuthCancelHandler      # 处理对方发来的取消授权
 │   ├── AgentInvokeHandler          # 处理对方发来的调用请求
@@ -357,7 +357,7 @@ p2p/
 │   ├── DisconnectNotifyHandler     # 断开通知处理
 │   └── MessageHandler              # 处理器接口
 ├── service/P2pChatService          # 聊天消息持久化
-├── controller/P2pController        # REST API (19.8KB)
+├── controller/P2pController        # REST API (39.7KB)
 └── config/P2pConfig                 # 配置（端口/证书路径等）
 ```
 
