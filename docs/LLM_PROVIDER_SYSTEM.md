@@ -1,18 +1,18 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v1.1.6 | 更新：2026-08-12 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.7 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
 
 ## 一、系统概述
 
-CodeCraft 支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等），用户可以在运行时动态切换不同的 LLM Provider，每个 Agent 也可以绑定特定的 Provider。
+CodeCraft 支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等），用户可以在运行时动态切换不同的 LLM Provider，每个 Agent 也可以绑定特定的 Provider。
 
 ### 1.1 核心特性
 
-- **多 Provider 支持**：支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo 等主流 LLM 平台
+- **多 Provider 支持**：支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax 等主流 LLM 平台
 - **动态切换**：前端运行时可随时切换 Provider，无需重启服务
 - **Agent 绑定**：每个 Agent 可以绑定特定的 Provider 和模型
 - **统一接口**：所有 Provider 通过统一的 `LLMClient` 接口调用，屏蔽平台差异
@@ -283,6 +283,7 @@ public class LLMClientManager {
 | Anthropic | `AnthropicClient` | `anthropic` | Claude API 格式，支持 thinking 参数 |
 | Ollama | `OllamaClient` | `ollama` | 本地 Ollama 服务 |
 | MiMo | `MiMoClient` | `mimo` | 小米 MiMo 模型 |
+| MiniMax | `MiniMaxClient` | `minimax` | MiniMax API（OpenAI 兼容，thinking adaptive + reasoning_split） |
 | 自定义 | `OpenAIClient` | `custom` | 最小 OpenAI 兼容模式 |
 
 ---

@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 BUILD_AND_RUN](./BUILD_AND_RUN.md)
 # Build & Run Guide (Lazy Channel)
 
-> Applicable version: v1.1.6+
+> Applicable version: v1.1.7+
 
 ## TL;DR
 
@@ -9,10 +9,10 @@
 
 ```bash
 # Windows
-scripts\build.bat v1.1.6
+scripts\build.bat v1.1.7
 
 # Mac / Linux
-./scripts/build.sh v1.1.6
+./scripts/build.sh v1.1.7
 ```
 
 ### One-click Run
@@ -40,7 +40,7 @@ mvn spring-boot:run
 
 ### 2.1 Configuration
 
-CodeCraft supports multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.).
+CodeCraft supports multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
 
 **Option A: Configure via Web UI (Recommended)**
 

@@ -360,6 +360,10 @@ public class LLMClientManager {
                 var wc = webClientManager.getOrCreate(config);
                 yield new MiMoClient(wc, objectMapper, config.getCode());
             }
+            case "minimax" -> {
+                var wc = webClientManager.getOrCreate(config);
+                yield new MiniMaxClient(wc, objectMapper, config.getCode());
+            }
             default -> {
                 log.warn("未知的 request_template: {}，回退到 DeepSeekClient", template);
                 var wc = webClientManager.getOrCreate(config);

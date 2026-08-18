@@ -95,6 +95,8 @@ MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的�
    └────────────────┘          └──────────────────┘
 ```
 
+> 📌 **图示说明**：LLM 层现已包含 **MiniMax**（M3 / M2.x 系列，OpenAI 兼容 + adaptive thinking + reasoning_split）在内的 6 个 Provider 实现（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax），详见 `LLM_PROVIDER_SYSTEM.md`。
+
 **核心思路**：两个方向都通过「适配器」桥接到现有 Tool 接口，业务侧（LLM 调用、权限、审计、快照）完全复用，新增代码集中在 mcp 包内，与现有代码解耦。
 
 ---

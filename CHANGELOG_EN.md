@@ -5,6 +5,30 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.7] - 2026-08-18
+
+### 🌐 New MiniMax LLM Provider
+
+- **New MiniMaxClient**: Supports MiniMax API (OpenAI-compatible protocol), covering M3 flagship / M2.7 / M2.5 / M2.1 / M2 model family
+- **Thinking Mode Mapping**: `non-thinking` → `thinking.type=disabled`, `thinking` → `enabled`, `thinking_max` → `adaptive` (M3 adaptive deep thinking; M2.x server ignores disabled)
+- **Output Parameter Compatibility**: `max_tokens` automatically converted to `max_completion_tokens` (MiniMax deprecated max_tokens), default 65536
+- **reasoning_split Switch**: Splits thinking content into `reasoning_content` field, avoiding `<think>` tag mixing into body; natively compatible with AbstractLLMClient's default delta.reasoning_content parsing
+- **Authentication**: Authorization: Bearer $MINIMAX_API_KEY (same as DeepSeek / OpenAI, reusing getAuthHeader / getAuthHeaderPrefix routing)
+- **Routing Integration**: LLMClientManager adds `case "minimax"` → instantiates MiniMaxClient; LLMWebClientManager auth header comment updated for minimax (shares Authorization + Bearer with deepseek/openai)
+- **Frontend Option**: ConfigView / ProviderConfigView Provider dropdown adds `minimax` (purple theme #4a36e0, emoji 🔮); templateLabel / providerEmoji / templateStyle all synchronized
+- **Documentation Sync**: README.md / README_EN.md / docs/ARCHITECTURE(_EN).md / BUILD_AND_RUN(_EN).md / docs/LLM_PROVIDER_SYSTEM(_EN).md / docs/MCP_SYSTEM.md — 7 documents synchronized to add MiniMax, Provider impls count 5 → 6
+- **Keywords**: Project root README keyword list adds `minimax`
+
+### 🏷️ Version
+
+- Backend: `1.1.6` → `1.1.7`
+- Frontend: `1.1.6` → `1.1.7`
+- Electron: `1.1.6` → `1.1.7`
+- MCP Server handshake version: `1.1.6` → `1.1.7`
+- Build artifact: `code-craft-1.1.6.jar` → `code-craft-1.1.7.jar`
+
+---
+
 ## [1.1.6] - 2026-08-12
 
 ### 📚 Growth System: Lesson Knowledge Base Evolution (P0 Normalization + P1 Detour Channel + P2 Environment Awareness)

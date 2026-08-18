@@ -143,6 +143,7 @@
                     <a-select-option value="anthropic">Anthropic</a-select-option>
                     <a-select-option value="ollama">Ollama</a-select-option>
                     <a-select-option value="mimo">MiMo（小米）</a-select-option>
+                    <a-select-option value="minimax">MiniMax</a-select-option>
                     <a-select-option value="custom">自定义</a-select-option>
                   </a-select>
                 </a-form-item>
@@ -209,14 +210,14 @@ function avatarGradient(id?: number, name?: string): string {
 }
 
 function providerEmoji(code: string): string {
-  const map: Record<string, string> = { deepseek: '🔍', openai: '🤖', anthropic: '🧠', ollama: '🦙', mimo: '📱', custom: '⚙️' }
+  const map: Record<string, string> = { deepseek: '🔍', openai: '🤖', anthropic: '🧠', ollama: '🦙', mimo: '📱', minimax: '🔮', custom: '⚙️' }
   return map[code] || '🔌'
 }
 
 function templateLabel(template: string): string {
   const map: Record<string, string> = {
     deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', ollama: 'Ollama',
-    mimo: 'MiMo', custom: '自定义', qwen: '通义千问', glm: '智谱 GLM', moonshot: 'Moonshot',
+    mimo: 'MiMo', minimax: 'MiniMax', custom: '自定义', qwen: '通义千问', glm: '智谱 GLM', moonshot: 'Moonshot',
   }
   return map[template] || template
 }
@@ -228,6 +229,7 @@ function templateStyle(template: string): Record<string, string> {
     anthropic: { bg: 'rgba(245,158,11,0.1)', color: '#d97706', border: '1px solid rgba(245,158,11,0.25)' },
     ollama: { bg: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.25)' },
     mimo: { bg: 'rgba(255,105,0,0.1)', color: '#ff6900', border: '1px solid rgba(255,105,0,0.25)' },
+    minimax: { bg: 'rgba(74,54,224,0.1)', color: '#4a36e0', border: '1px solid rgba(74,54,224,0.25)' },
     custom: { bg: 'rgba(107,114,128,0.1)', color: '#6b7280', border: '1px solid rgba(107,114,128,0.25)' },
     qwen: { bg: 'rgba(6,182,212,0.1)', color: '#0891b2', border: '1px solid rgba(6,182,212,0.25)' },
     glm: { bg: 'rgba(6,182,212,0.1)', color: '#0891b2', border: '1px solid rgba(6,182,212,0.25)' },

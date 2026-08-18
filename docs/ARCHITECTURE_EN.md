@@ -1,14 +1,14 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.1.6 | Updated: 2026-08-13 | Audience: Developers / AI Collaborators
+> Version: v1.1.7 | Updated: 2026-08-13 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
 
 ## 1. One-Sentence Definition
 
-**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **21 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.).
+**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **21 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
 
 ---
 
@@ -137,7 +137,7 @@ Main Agent (running in user session)
 | **Database** | H2 (Embedded) | Desktop app needs zero-config deployment, no MySQL required |
 | **Cache** | Caffeine | Replaces Redis, zero-dependency out of the box |
 | **AI Communication** | WebFlux + SSE | Supports streaming output, users see AI typing in real-time |
-| **Multi-LLM Support** | LLMClient Abstraction | Unified interface for DeepSeek/OpenAI/Anthropic/Ollama/MiMo, runtime dynamic switching |
+| **Multi-LLM Support** | LLMClient Abstraction | Unified interface for DeepSeek/OpenAI/Anthropic/Ollama/MiMo/MiniMax, runtime dynamic switching |
 | **P2P Network** | Netty + JSON | High-performance async IO, JSON debugging friendly |
 | **P2P Signaling** | QR Code + ZXing | No manual address entry, scan to pair devices |
 | **P2P Security** | TLS + BouncyCastle | Self-signed certificates + AES encryption, end-to-end secure channel |
@@ -454,7 +454,7 @@ CodeCraft supports multiple LLM platforms. Core components:
 - **llm_provider table**: Stores Provider config (code/name/baseUrl/apiKey/defaultModel/requestTemplate, etc.)
 - **LLMClient Interface**: Unified abstraction layer; all Providers must implement it (buildRequestBody/streamChat/extractContent, etc.)
 - **LLMClientManager**: Core manager for Provider registration, routing (resolveClientByCode/resolveClientByProviderId), hot refresh
-- **5 Provider Implementations**: DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient (+ AbstractLLMClient abstract base)
+- **6 Provider Implementations**: DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / MiniMaxClient (+ AbstractLLMClient abstract base)
 - **Agent Binding**: agent_config table gains provider_id/provider_code fields; each Agent can be bound to a specific Provider
 - **Frontend Dynamic Switching**: CodeAssistantView supports runtime Provider switching with automatic model list refresh
 - **Provider Routing Priority**: Frontend dynamic providerCode > Agent config providerId > First available Provider

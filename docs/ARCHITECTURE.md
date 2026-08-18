@@ -1,14 +1,14 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.1.6 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.7 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
 
 ## 一、一句话定义
 
-**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 21 种内置工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo 等）动态切换，并可通过 MCP 双向接入外部工具生态。
+**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 21 种内置工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）动态切换，并可通过 MCP 双向接入外部工具生态。
 
 ---
 
@@ -50,7 +50,7 @@
 │ │ └─────────────────────┬──────────────────────┘                      │ │
 │ └───────────────────────┼─────────────────────────────────────────────┘ │
 └─────────────────────────┼──────────────────────────────────────────────┘
-                    LLM Provider API (DeepSeek/OpenAI/Anthropic/Ollama/MiMo)
+                    LLM Provider API (DeepSeek/OpenAI/Anthropic/Ollama/MiMo/MiniMax)
 ```
 
 ---
@@ -133,7 +133,7 @@
 | **数据库** | H2 (嵌入式) | 桌面应用需零配置部署，无需用户安装 MySQL |
 | **缓存** | Caffeine | 替代 Redis，同样为了零依赖开箱即用 |
 | **AI 通信** | WebFlux + SSE | 支持流式输出，用户可实时看到 AI 打字效果 |
-| **多LLM支持** | LLMClient 抽象层 | 统一接口适配 DeepSeek/OpenAI/Anthropic/Ollama/MiMo，运行时动态切换 |
+| **多LLM支持** | LLMClient 抽象层 | 统一接口适配 DeepSeek/OpenAI/Anthropic/Ollama/MiMo/MiniMax，运行时动态切换 |
 | **P2P 网络** | Netty + JSON | 高性能异步 IO，JSON 调试友好 |
 | **P2P 信令** | 二维码 + ZXing | 免手动输入地址，扫码即可配对设备 |
 | **P2P 安全** | TLS + BouncyCastle | 自签名证书 + AES 加密，端到端安全通道 |
@@ -473,7 +473,7 @@ CodeCraft 支持多种 LLM 平台，核心组件：
 - **llm_provider 表**：存储 Provider 配置（code/name/baseUrl/apiKey/defaultModel/requestTemplate 等）
 - **LLMClient 接口**：统一抽象层，所有 Provider 必须实现（buildRequestBody/streamChat/extractContent 等）
 - **LLMClientManager**：核心管理器，负责 Provider 注册、路由（resolveClientByCode/resolveClientByProviderId）、热刷新
-- **5 个 Provider 实现**：DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient（+ AbstractLLMClient 抽象基类）
+- **6 个 Provider 实现**：DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / MiniMaxClient（+ AbstractLLMClient 抽象基类）
 - **Agent 绑定**：agent_config 表新增 provider_id/provider_code 字段，每个 Agent 可绑定特定 Provider
 - **前端动态切换**：CodeAssistantView 支持运行时切换 Provider，自动刷新模型列表
 - **Provider 路由优先级**：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider

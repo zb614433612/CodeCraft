@@ -5,6 +5,30 @@
 
 ---
 
+## [1.1.7] - 2026-08-18
+
+### 🌐 新增 MiniMax LLM Provider
+
+- **新增 MiniMaxClient**：支持 MiniMax API（OpenAI 兼容协议），覆盖 M3 旗舰 / M2.7 / M2.5 / M2.1 / M2 系列模型
+- **thinking 模式适配**：`non-thinking` → `thinking.type=disabled`，`thinking` → `enabled`，`thinking_max` → `adaptive`（M3 自适应深度思考；M2.x 系列服务端忽略 disabled）
+- **输出参数兼容**：`max_tokens` 自动转 `max_completion_tokens`（MiniMax 已弃用 max_tokens），默认 65536
+- **reasoning_split 开关**：将思考内容拆分到 `reasoning_content` 字段，避免 `<think>` 标签混入正文，与 AbstractLLMClient 默认 delta.reasoning_content 解析天然契合
+- **认证**：Authorization: Bearer $MINIMAX_API_KEY（与 DeepSeek / OpenAI 一致，复用 getAuthHeader / getAuthHeaderPrefix 路由）
+- **路由接入**：LLMClientManager 新增 `case "minimax"` → 实例化 MiniMaxClient；LLMWebClientManager 认证头注释同步补充 minimax（与 deepseek/openai 共用 Authorization + Bearer）
+- **前端选项**：ConfigView / ProviderConfigView 的 Provider 下拉新增 `minimax`（紫色主题色 #4a36e0，emoji 🔮）；templateLabel / providerEmoji / templateStyle 全套同步
+- **文档同步**：README.md / README_EN.md / docs/ARCHITECTURE(_EN).md / BUILD_AND_RUN(_EN).md / docs/LLM_PROVIDER_SYSTEM(_EN).md / docs/MCP_SYSTEM.md 等共 7 份文档同步新增 MiniMax，Provider 实现数 5 → 6
+- **关键词**：项目根 README 关键词列表新增 `minimax`
+
+### 🏷️ 版本号
+
+- 后端：`1.1.6` → `1.1.7`
+- 前端：`1.1.6` → `1.1.7`
+- Electron：`1.1.6` → `1.1.7`
+- MCP Server 握手版本：`1.1.6` → `1.1.7`
+- 打包产物：`code-craft-1.1.6.jar` → `code-craft-1.1.7.jar`
+
+---
+
 ## [1.1.6] - 2026-08-12
 
 ### 📚 成长体系：经验库进化（P0 归一化 + P1 弯路通道 + P2 环境感知）

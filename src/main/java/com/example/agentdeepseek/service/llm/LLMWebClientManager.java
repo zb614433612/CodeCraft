@@ -180,8 +180,9 @@ public class LLMWebClientManager {
     /**
      * 按 Provider 模板获取认证头名称
      * <ul>
-     *   <li>deepseek / openai → Authorization</li>
+     *   <li>deepseek / openai / minimax → Authorization</li>
      *   <li>anthropic → x-api-key</li>
+     *   <li>mimo → api-key（MiMo 自定义头）</li>
      *   <li>ollama / custom → 无（返回 Authorization 但无前缀时跳过）</li>
      * </ul>
      */
@@ -191,16 +192,16 @@ public class LLMWebClientManager {
         return switch (template.toLowerCase()) {
             case "anthropic" -> "x-api-key";
             case "mimo" -> "api-key";
-            default -> "Authorization"; // deepseek, openai, ollama, custom
+            default -> "Authorization"; // deepseek, openai, minimax, ollama, custom
         };
     }
 
     /**
      * 按 Provider 模板获取认证头值前缀
      * <ul>
-     *   <li>deepseek / openai → "Bearer "</li>
+     *   <li>deepseek / openai / minimax → "Bearer "</li>
      *   <li>anthropic → null（无前缀，直接放 apiKey）</li>
-     *   <li>ollama → null（无认证）</li>
+     *   <li>mimo / ollama → null（无认证或自定义头）</li>
      * </ul>
      */
     private String getAuthHeaderPrefix(ProviderConfig config) {
@@ -208,7 +209,7 @@ public class LLMWebClientManager {
         if (template == null) template = config.getCode();
         return switch (template.toLowerCase()) {
             case "anthropic", "mimo", "ollama", "custom" -> null;
-            default -> "Bearer ";
+            default -> "Bearer "; // deepseek, openai, minimax
         };
     }
 }

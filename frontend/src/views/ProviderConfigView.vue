@@ -124,6 +124,7 @@
                   <a-select v-model:value="formData.requestTemplate" class="form-input" :getPopupContainer="trigger => trigger.parentElement">
                     <a-select-option value="deepseek">DeepSeek（兼容 OpenAI）</a-select-option>
                     <a-select-option value="openai">OpenAI</a-select-option>
+                    <a-select-option value="minimax">MiniMax</a-select-option>
                     <a-select-option value="anthropic">Anthropic (Claude)</a-select-option>
                     <a-select-option value="ollama">Ollama（本地）</a-select-option>
                     <a-select-option value="custom">自定义</a-select-option>
@@ -191,7 +192,7 @@ function avatarGradient(id?: number, name?: string): string {
 }
 
 function providerEmoji(code: string): string {
-  const map: Record<string, string> = { deepseek: '🔍', openai: '🤖', anthropic: '🧠', ollama: '🦙', custom: '⚙️' }
+  const map: Record<string, string> = { deepseek: '🔍', openai: '🤖', anthropic: '🧠', ollama: '🦙', mimo: '📱', minimax: '🔮', custom: '⚙️' }
   return map[code] || '🔌'
 }
 
@@ -203,6 +204,8 @@ function templateLabel(template: string): string {
     anthropic: 'Claude',
     ollama: 'Ollama',
     custom: '自定义',
+    mimo: 'MiMo',
+    minimax: 'MiniMax',
     qwen: '通义千问',
     glm: '智谱 GLM',
     moonshot: 'Moonshot',
@@ -218,6 +221,8 @@ function templateStyle(template: string): Record<string, string> {
     anthropic: { bg: 'rgba(245,158,11,0.1)', color: '#d97706', border: '1px solid rgba(245,158,11,0.25)' },
     ollama: { bg: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.25)' },
     custom: { bg: 'rgba(107,114,128,0.1)', color: '#6b7280', border: '1px solid rgba(107,114,128,0.25)' },
+    mimo: { bg: 'rgba(255,105,0,0.1)', color: '#ff6900', border: '1px solid rgba(255,105,0,0.25)' },
+    minimax: { bg: 'rgba(74,54,224,0.1)', color: '#4a36e0', border: '1px solid rgba(74,54,224,0.25)' },
     qwen: { bg: 'rgba(6,182,212,0.1)', color: '#0891b2', border: '1px solid rgba(6,182,212,0.25)' },
     glm: { bg: 'rgba(6,182,212,0.1)', color: '#0891b2', border: '1px solid rgba(6,182,212,0.25)' },
     moonshot: { bg: 'rgba(6,182,212,0.1)', color: '#0891b2', border: '1px solid rgba(6,182,212,0.25)' },

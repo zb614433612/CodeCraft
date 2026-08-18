@@ -6,15 +6,15 @@
   <img src="https://img.shields.io/badge/Spring_Boot-3.4-blue" alt="Spring Boot 3.4">
   <img src="https://img.shields.io/badge/Vue-3.4-42b883" alt="Vue 3.4">
   <img src="https://img.shields.io/badge/Electron-34.5-47848f" alt="Electron 34.5">
-  <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Ollama%20%7C%20MiMo-4f46e5" alt="Multi-LLM">
+  <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Ollama%20%7C%20MiMo%20%7C%20MiniMax-4f46e5" alt="Multi-LLM">
 </p>
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.). Users interact with AI through a chat interface, and AI automatically invokes **21 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **21 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
-- 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo with unified LLMClient interface, runtime dynamic switching
+- 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
 - 🧰 **21-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
@@ -56,7 +56,7 @@ mvn clean package -DskipTests && mvn spring-boot:run
 
 ### First Launch Configuration
 
-After the first launch, go to **Settings → System Config**, add an **LLM Provider** (supports DeepSeek / OpenAI / Anthropic / Ollama / MiMo, etc.) to start using AI features.
+After the first launch, go to **Settings → System Config**, add an **LLM Provider** (supports DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.) to start using AI features.
 
 Default admin account: `admin` / `123456`
 
@@ -71,7 +71,7 @@ CodeCraft
 │   │   ├── ToolLoopManager         # Tool Call Loop Engine
 │   │   ├── AgentForkManager        # Sub-Agent Lifecycle
 │   │   └── CompactionService       # Context Compaction
-│   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 5 Provider impls)
+│   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 6 Provider impls)
 │   ├── service/lesson/             # Growth System (retrieval/record/review/normalizer)
 │   ├── tool/                       # AI Agent Tools (21 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
@@ -162,7 +162,7 @@ Main Agent (user conversation)
 |-------|-----------|-------|
 | **Backend** | Spring Boot 3.4 + MyBatis | Java 17 |
 | **AI Communication** | WebFlux + SSE | Streaming output |
-| **Multi-LLM Support** | LLMClient Abstraction Layer | DeepSeek / OpenAI / Anthropic / Ollama / MiMo |
+| **Multi-LLM Support** | LLMClient Abstraction Layer | DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax |
 | **Database** | H2 (Embedded) | Zero-config deployment |
 | **Cache** | Caffeine | In-memory, zero-dependency |
 | **Frontend** | Vue 3 + TypeScript + Vite | Composition API |
