@@ -12,10 +12,17 @@ public class PendingQuestion {
     private final String question;
     private final CompletableFuture<String> future;
     private final long createdAt;
+    /** 所属会话ID（用于授权后同步清除 agent_task 表待审批字段，防止重连重复弹窗） */
+    private final Long conversationId;
 
     public PendingQuestion(String uuid, String question) {
+        this(uuid, question, null);
+    }
+
+    public PendingQuestion(String uuid, String question, Long conversationId) {
         this.uuid = uuid;
         this.question = question;
+        this.conversationId = conversationId;
         this.future = new CompletableFuture<>();
         this.createdAt = System.currentTimeMillis();
     }
@@ -34,5 +41,9 @@ public class PendingQuestion {
 
     public long getCreatedAt() {
         return createdAt;
+    }
+
+    public Long getConversationId() {
+        return conversationId;
     }
 }

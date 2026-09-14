@@ -257,8 +257,8 @@
         </div>
       </transition>
 
-      <!-- 流式加载指示器 -->
-      <div v-if="isSending &amp;&amp; streamStatus" class="stream-indicator">
+      <!-- 流式加载指示器（hasRunningTask：前台流式/后台任务/重连恢复都显示，让「后台输出中...」在切回时可见） -->
+      <div v-if="hasRunningTask &amp;&amp; streamStatus" class="stream-indicator">
         <span class="stream-pulse-dot"></span>
         <span class="stream-indicator-text">{{ streamStatus }}</span>
         <span class="stream-elapsed" v-if="elapsedTime > 0">{{ formatElapsed(elapsedTime) }}</span>
@@ -285,6 +285,12 @@
         </div>
       </div>
 
+      <!-- P3：后台授权等待角标（其他会话有授权请求待处理时提示，切过去即可处理） -->
+      <div v-if="pendingQuestionCount > 0" class="bg-permission-tip" @click="showTaskDropdown = false">
+        <span class="bg-permission-tip-icon">🔒</span>
+        {{ pendingQuestionCount }} 个后台任务正在等待授权
+      </div>
+
       <!-- ask_user 问答面板 -->
       <div v-if="pendingQuestion" class="ask-user-panel">
         <!-- 权限授权面板（askType=permission） -->
@@ -292,6 +298,8 @@
           <div class="ask-user-header">
             <span class="ask-user-header-icon">🔒</span>
             需要授权
+            <!-- P3：归属 Agent 标识（防误授权——明确"来自谁"） -->
+            <span v-if="pendingQuestion.agentName" class="ask-user-agent-tag">来自 {{ pendingQuestion.agentName }}</span>
           </div>
           <div class="ask-user-question" v-html="formatQuestion(pendingQuestion.question)"></div>
           <div class="permission-btn-grid">
@@ -319,6 +327,8 @@
           <div class="ask-user-header">
             <span class="ask-user-header-icon">💬</span>
             需要确认
+            <!-- P3：归属 Agent 标识 -->
+            <span v-if="pendingQuestion.agentName" class="ask-user-agent-tag">来自 {{ pendingQuestion.agentName }}</span>
           </div>
           <div class="ask-user-question" v-html="formatQuestion(pendingQuestion.question)"></div>
           <div class="ask-user-input-row">
@@ -431,7 +441,7 @@
           <a-button
             class="attach-btn"
             @click="triggerFileUpload"
-            :disabled="isSending"
+            :disabled="hasRunningTask"
             title="上传附件"
           >
             <PaperClipOutlined />
@@ -440,7 +450,7 @@
             v-model:value="inputMessage"
             placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送）"
             :auto-size="{ minRows: 1, maxRows: 8 }"
-            :disabled="isSending || isOptimizing"
+            :disabled="hasRunningTask || isOptimizing"
             @keydown.enter.exact.prevent="sendMessage"
             @keydown.shift.enter="handleShiftEnter"
           />
@@ -454,7 +464,7 @@
             <LoadingOutlined v-else spin />
           </a-button>
           <a-button
-            v-if="isSending"
+            v-if="hasActiveStream"
             class="stop-btn"
             @click="stopStreaming"
           >
@@ -777,6 +787,7 @@ import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
 import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment, supplementRequest, optimizePrompt } from '@/api/chat'
+import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 import { setConfig } from '@/api/config'
 import type { SkillMatchInfo } from '@/utils/sse-client'
 import type { AgentStreamEvent } from '@/utils/sse-client'
@@ -881,6 +892,26 @@ const currentAgentConfigId = ref<number | null>(null)
 const currentAgentWorkDir = ref<string>('')
 const skillsRefreshKey = ref(0)
 
+// ===== Phase 18 P3：Agent 列表（授权归属标识 + 后台任务完成通知需要按 agentConfigId 查名称/工作目录）=====
+const agentOptions = ref<AgentConfig[]>([])
+const fetchAgentList = async () => {
+  try {
+    const res = await listAgentConfigs()
+    if (res.code === 200 && res.data) {
+      agentOptions.value = res.data
+    }
+  } catch (e) {
+    console.warn('加载 Agent 列表失败:', e)
+  }
+}
+/** 按 agentConfigId 查询 Agent 元信息（名称/工作目录），查不到时降级为占位 */
+const getAgentMeta = (agentConfigId: number | null | undefined): { name: string; workDir: string } => {
+  const a = agentOptions.value.find(x => x.id === agentConfigId)
+  return { name: a?.name || `Agent#${agentConfigId ?? '?'}`, workDir: a?.workDir || '' }
+}
+// 组件初始化时拉取一次 Agent 列表（授权归属标识/完成通知需要）
+fetchAgentList()
+
 // Agent 运行时配置（computed，确保响应式追踪）
 const agentRuntime = computed(() => ({
   model: agentSelectorRef.value?.runtime?.model || 'deepseek-v4-flash',
@@ -981,9 +1012,36 @@ const saveAgentSnapshot = (agentId: number) => {
 const loadAgentSnapshot = (agentId: number): AgentSnapshotData | null => {
   return agentSnapshots.value[agentId] || null
 }
-const onStreamComplete = (convId: string, agentId: number | null) => {
-  // 从后台流式列表中移除
-  backgroundStreams.value = backgroundStreams.value.filter(s => s.convId !== convId)
+const onStreamComplete = (convId: string, agentId: number | null, completed = false, abortCtrl?: AbortController | null) => {
+  // 三轮审查深修：按「本流」精确移除——同一会话可能并存多个后台流条目（P2 双流：
+  // 前台流切走转后台 → 切回再派新任务再切走），按 convId 全量移除会把仍在运行的
+  // 其他后台流一并摘除 → hasActiveStream 查不到 → 停止按钮失效、状态残留。
+  // 传 abortCtrl 时仅移除「本流」条目；不传（旧调用兜底）保持按会话移除。
+  backgroundStreams.value = backgroundStreams.value.filter(s =>
+    abortCtrl ? (s.convId !== convId || s.abortController !== abortCtrl) : s.convId !== convId
+  )
+  // filter 之后判断「该会话是否还有任何活跃流」：
+  // - 前台流式（sendingStates）：后台流结束不得误清仍在运行的前台流状态（授权弹窗/任务看板）
+  // - 后台流（backgroundStreams）：移除本流后若还有其他后台流，同样不清理
+  // 两者皆无才清理执行状态（原 H2「filter 前判断」在全量移除语义下导致后台流结束永不清理，状态残留）
+  const isLastStream = !sendingStates.has(convId) && !backgroundStreams.value.some(s => s.convId === convId)
+  // H1 修复：只清理「执行状态」（状态文字/活跃任务），不再无条件 clearConvState——
+  // 1. 保留任务清单 taskItemsMap：任务看板是历史记录，前台流式正常结束后也应保留（P2 前行为）
+  // 2. 不删 sendingStates：前台流式结束时 sendMessage finally 已 setSending(false)，
+  //    若同一会话刚有新的前台流（setSending(true)），这里删除会误清新流的锁
+  // 3. activeTaskMap 在任务结束后清掉（重连状态已无用），重连路径也会 setActiveTask 覆盖
+  if (isLastStream) {
+    streamStatusMap.delete(convId)
+    activeTaskMap.delete(convId)
+    // P3：任务结束后清掉该会话的待审批问题（已处理或已随流结束失效，防止残留弹窗/角标）
+    pendingQuestions.delete(convId)
+  }
+  // P3：后台任务完成通知——仅正常完成（completed=true，sendMessage try 正常走完）且非当前会话才提示；
+  // 用户中止（__USER_ABORT__）/发送失败路径 completed=false，不误报「已完成」
+  if (completed && convId !== currentConversationId.value) {
+    const meta = getAgentMeta(agentId)
+    message.success(`🤖 ${meta.name} 的后台任务已完成`)
+  }
 }
 
 const onAgentChange = (agentId: number | null | undefined, agent: any) => {
@@ -1007,10 +1065,13 @@ const onAgentChange = (agentId: number | null | undefined, agent: any) => {
   }
 
   // 第三步：重置当前会话状态（不停止后台流式）
-  isSending.value = false
+  // P2：按会话清理——前台流已转后台（sending 不锁），状态文字清空（后台流的 SSE 事件会实时更新该会话状态）
+  // P3：不清 pendingQuestion——Map 化后弹窗自动切到新会话；旧会话若有后台授权请求，
+  //     保留在 map 中，切回时自动恢复显示 + 角标提示
+  const oldConvId = currentConversationId.value
+  setSending(oldConvId, false)
+  setStreamStatus(oldConvId, '')
   stopAbortController.value = null
-  streamStatus.value = ''
-  pendingQuestion.value = null
 
   // 第四步：更新当前 Agent
   currentAgentConfigId.value = agentId ?? null
@@ -1044,10 +1105,18 @@ const onAgentChange = (agentId: number | null | undefined, agent: any) => {
     fileTreeLoadPath.value = ''
   }
 
-  // 第七步：恢复流式状态（如果新 Agent 有后台流式在运行）
-  if (agentId && backgroundStreams.value.some(s => s.agentConfigId === agentId)) {
-    isSending.value = true
-    streamStatus.value = '后台输出中...'
+  // 第七步：恢复流式状态（如果新 Agent 的当前会话有后台流式在运行）
+  // P2：显示「后台输出中...」提示；2026-08-14 需求变更：hasRunningTask 检测到后台任务时输入框自动锁定
+  //（有任务在执行的智能体限制输入，任务结束 onStreamComplete 移除后台流后自动解锁）
+  if (agentId && currentConversationId.value && backgroundStreams.value.some(s => s.convId === currentConversationId.value)) {
+    setStreamStatus(currentConversationId.value, '后台输出中...')
+  }
+
+  // 第八步（P3，F4 修复）：切回 Agent 后检查该会话是否有活跃后台任务（页面刷新后的场景），
+  // 有则重连恢复事件流 + 授权弹窗。checkAndReconnect 内部已跳过「已有后台流」的会话，不会双流。
+  // 异步执行不阻塞切换；任务已完成时只是无害的一次查询。
+  if (agentId && currentConversationId.value && !currentConversationId.value.startsWith('local-')) {
+    checkAndReconnect(currentConversationId.value)
   }
 }
 
@@ -1907,7 +1976,45 @@ const conversations = ref<Conversation[]>([])
 const messages = ref<Record<string, ChatMessage[]>>({})
 const currentConversationId = ref<string>('')
 const inputMessage = ref('')
-const isSending = ref(false)
+
+// ===== Phase 18 P2：发送/流式状态按会话隔离（Map 化）=====
+// 原全局单值 isSending 会导致：Agent 有后台任务时切过去锁死输入框、后台任务结束误关当前会话锁。
+// 改造：sendingStates 按 conversationId 记录「前台流式」状态（isSending 仅指前台流式）；
+//      输入框锁定由 hasRunningTask 统一判断（前台流式 + 后台流 + 重连中 + 活跃任务），
+//      2026-08-14 需求变更：有任务在执行的智能体输入框锁定，无任务的智能体输入框可用（原「后台任务不锁输入框」已废弃）。
+const sendingStates = reactive(new Map<string, boolean>())
+const setSending = (convId: string | null | undefined, val: boolean) => {
+  if (!convId) return
+  if (val) sendingStates.set(convId, true)
+  else sendingStates.delete(convId)
+}
+/** 当前会话是否正在前台流式（模板 261/268/434/443/457/514/516 直接读；补充需求面板等 UI 仍以「前台流式」为准） */
+const isSending = computed(() => sendingStates.get(currentConversationId.value) ?? false)
+/** 当前会话是否有活跃流（前台流式 或 该会话后台运行中）——停止按钮显示依据 */
+const hasActiveStream = computed(() => {
+  const convId = currentConversationId.value
+  if (!convId) return false
+  if (sendingStates.get(convId)) return true
+  return backgroundStreams.value.some(s => s.convId === convId)
+})
+/**
+ * 当前会话是否有任务在执行——输入框锁定依据（2026-08-14 需求修复）
+ * 四源判断：前台流式（sendingStates）｜后台流（backgroundStreams，切换 Agent 后继续跑的）｜
+ * 重连中（reconnectingConvIds，页面刷新/切回时恢复事件流）｜重连恢复的活跃任务（activeTaskMap）
+ * 任一命中即视为「有任务在执行」→ 锁定输入框；全部清空（onStreamComplete/重连 finally 移除）才解锁。
+ * 与 isSending 的区别：isSending 仅指前台流式（补充需求面板等 UI 依赖此语义），
+ * hasRunningTask 额外覆盖「切走后仍在后台执行 / 重连恢复中」的任务，避免切回智能体时任务还在跑却解锁输入框。
+ */
+const hasRunningTask = computed(() => {
+  const convId = currentConversationId.value
+  if (!convId) return false
+  if (sendingStates.get(convId)) return true
+  if (backgroundStreams.value.some(s => s.convId === convId)) return true
+  if (reconnectingConvIds.has(convId)) return true
+  if (activeTaskMap.get(convId)) return true
+  return false
+})
+
 const isOptimizing = ref(false)
 const isLoadingConversations = ref(false)
 const isLoadingMessages = ref(false)
@@ -1985,15 +2092,61 @@ const stopAbortController = ref<AbortController | null>(null)
 // 当用户点击「应用」时更新此值，触发文件树加载
 const fileTreeLoadPath = ref('')
 const showDirBrowser = ref(false)
-const pendingQuestion = ref<{ uuid: string; question: string; askType?: string; toolName?: string; filePath?: string; fullDetail?: string } | null>(null)
+// ===== Phase 18 P3：待审批问题按会话隔离（Map 化）=====
+// 原全局单值 pendingQuestion 会导致：Agent1 后台要授权时弹窗覆盖 Agent2 的弹窗（误授权风险）。
+// 改造：pendingQuestions 按 conversationId 存储，弹窗只显示「当前会话」的待审批问题；
+//      后台 Agent 的授权请求保留在它自己会话的 map 里，切回时自动弹窗，且可做角标提示。
+interface PendingQuestion {
+  uuid: string
+  question: string
+  askType?: string
+  toolName?: string
+  filePath?: string
+  fullDetail?: string
+  /** P3 新增：归属 Agent 名（防误授权——弹窗展示"来自谁"） */
+  agentName?: string
+  /** P3 新增：归属会话工作目录（授权文件联动按此解析，不再错用当前 Agent 目录） */
+  workDir?: string
+}
+const pendingQuestions = reactive(new Map<string, PendingQuestion>())
+const setPendingQuestion = (convId: string | null | undefined, q: PendingQuestion | null) => {
+  if (!convId) return
+  if (q) pendingQuestions.set(convId, q)
+  else pendingQuestions.delete(convId)
+}
+/** 当前会话的待审批问题（模板直接读；切会话自动切换显示对应会话的授权请求） */
+const pendingQuestion = computed(() => pendingQuestions.get(currentConversationId.value) ?? null)
+/** P3：非当前会话的待审批问题数量（后台授权等待角标） */
+const pendingQuestionCount = computed(() => {
+  const cur = currentConversationId.value
+  let count = 0
+  for (const [convId, q] of pendingQuestions) {
+    if (convId !== cur && q) count++
+  }
+  return count
+})
 const pendingQuestionAnswer = ref('')
 const pendingShowCustomInput = ref(false)
+// P3：切换会话时清空答案输入与自定义输入展开态（避免把上个会话的答案带到新会话）
+watch(currentConversationId, () => {
+  pendingQuestionAnswer.value = ''
+  pendingShowCustomInput.value = false
+})
 // 补充需求状态
 const showSupplementInput = ref(false)
 const supplementMessage = ref('')
 const supplementSending = ref(false)
 const supplementInputRef = ref<InstanceType<typeof HTMLInputElement> | null>(null)
-const streamStatus = ref('')
+// ===== Phase 18 P2：流式状态按会话隔离（Map 化）=====
+// 原全局单值 streamStatus 会导致：后台流的「执行工具中...」覆盖前台会话的状态文字。
+const streamStatusMap = reactive(new Map<string, string>())
+const setStreamStatus = (convId: string | null | undefined, val: string) => {
+  if (!convId) return
+  if (val) streamStatusMap.set(convId, val)
+  else streamStatusMap.delete(convId)
+}
+/** 当前会话的流式状态文字（模板 261/263 直接读） */
+const streamStatus = computed(() => streamStatusMap.get(currentConversationId.value) ?? '')
 const taskStartTime = ref<number | null>(null)
 const elapsedTime = ref(0)
 let elapsedTimer: ReturnType<typeof setInterval> | null = null
@@ -2036,11 +2189,23 @@ interface TaskItem {
   priority?: 'HIGH' | 'MEDIUM' | 'LOW'
   depends_on?: string[]
 }
-const taskItems = ref<TaskItem[]>([])
+// ===== Phase 18 P2：任务清单按会话隔离（Map 化）=====
+// 原全局单值 taskItems 会导致：不同 Agent 的 T1/T2 按编号互相覆盖、后台流事件污染当前看板。
+const taskItemsMap = reactive(new Map<string, TaskItem[]>())
+const getTaskItems = (convId: string | null | undefined): TaskItem[] => {
+  if (!convId) return []
+  return taskItemsMap.get(convId) ?? []
+}
+const setTaskItems = (convId: string | null | undefined, items: TaskItem[]) => {
+  if (!convId) return
+  taskItemsMap.set(convId, items)
+}
+/** 当前会话的任务清单（模板 519/520/598/601/605 直接读） */
+const taskItems = computed(() => getTaskItems(currentConversationId.value))
 const completedTaskCount = computed(() => taskItems.value.filter(t => t.status === 'completed').length)
 const showTaskDropdown = ref(false)
 const showMoreSettings = ref(false)
-// 「执行中」的任务：当 isSending 或 activeTask 时，第一个 pending 任务视为 executing
+// 「执行中」的任务：当 isSending 或 activeTask 时，第一个 pending 任务视为 executing（均按当前会话计算）
 const executingTaskId = computed(() => {
   if (!isSending.value && !activeTask.value) return null
   const first = taskItems.value.find(t => t.status === 'pending')
@@ -2053,9 +2218,39 @@ const toggleTaskDropdown = () => {
     showTaskDropdown.value = !showTaskDropdown.value
   }
 }
-// 清除任务清单（新消息或刷新页面时调用）
-const clearTaskList = () => { taskItems.value = [] }
-const activeTask = ref<{ taskId: number; status: string; iteration: number; eventCount: number; pendingQuestionUuid?: string; pendingQuestionText?: string } | null>(null)
+// 清除任务清单（新消息或刷新页面时调用——只清当前会话，不影响其他 Agent 的看板）
+const clearTaskList = () => {
+  if (currentConversationId.value) taskItemsMap.delete(currentConversationId.value)
+}
+// ===== Phase 18 P2：活跃任务按会话隔离（Map 化）=====
+interface ActiveTaskInfo {
+  taskId: number
+  status: string
+  iteration: number
+  eventCount: number
+  pendingQuestionUuid?: string
+  pendingQuestionText?: string
+  seq?: number
+}
+const activeTaskMap = reactive(new Map<string, ActiveTaskInfo>())
+const setActiveTask = (convId: string | null | undefined, task: ActiveTaskInfo | null) => {
+  if (!convId) return
+  if (task) activeTaskMap.set(convId, task)
+  else activeTaskMap.delete(convId)
+}
+/** 当前会话的活跃任务（重连状态，模板/逻辑按当前会话读取） */
+const activeTask = computed(() => activeTaskMap.get(currentConversationId.value) ?? null)
+// ===== Phase 18 P2 M1：会话状态统一清理（防 Map 内存泄漏 + 会话ID复用污染）=====
+// 删除会话、后台任务结束时调用；否则本地会话频繁创建/删除会让 4 个 Map 无限增长，
+// 且被删除会话的 ID 复用后残留状态（旧任务看板/状态文字）会在新会话里重新显示
+const clearConvState = (convId: string | null | undefined) => {
+  if (!convId) return
+  sendingStates.delete(convId)
+  streamStatusMap.delete(convId)
+  taskItemsMap.delete(convId)
+  activeTaskMap.delete(convId)
+  pendingQuestions.delete(convId)  // P3：待审批问题随会话删除一并清理
+}
 
 // Markdown 渲染缓存（避免历史消息重复解析 markdown，性能优化）
 // key=content原文, value=渲染后的HTML，最大缓存200条
@@ -2529,6 +2724,8 @@ const deleteConversation = (id: string) => {
           await deleteConversationApi(Number(id))
         }
         conversations.value = conversations.value.filter(c => c.id !== id)
+        // M1：删除会话时清理按会话隔离的状态 Map（防内存泄漏 + 会话ID复用污染）
+        clearConvState(id)
         if (currentConversationId.value === id) {
           const remaining = conversations.value.filter(c => !c.isLocal)
           currentConversationId.value = remaining[0]?.id || ''
@@ -2595,31 +2792,32 @@ const saveContextModeToServer = (mode: string) => {
   setConfig('context_mode', mode).catch(() => { /* 静默失败，settingsStore 已更新 */ })
 }
 
-// 停止流式响应（只停止当前Agent的流式，其他Agent的后台流式不受影响）
+// 停止流式响应（只停止当前会话的流式，其他会话/Agent 的后台流式不受影响）
 const stopStreaming = () => {
-  const currentAgentId = currentAgentConfigId.value
   const currentConvId = currentConversationId.value
 
   // 收集要取消的后端任务ID
   const cancelIds: number[] = []
 
-  // 停止当前会话的流式（stopAbortController 中的流式）
+  // 停止当前会话的前台流式（stopAbortController 中的流式）
   if (stopAbortController.value) {
     stopAbortController.value.abort()
     stopAbortController.value = null
   }
 
-  // 停止后台流式中属于当前 Agent 的流式
-  backgroundStreams.value = backgroundStreams.value.filter(bg => {
-    if (bg.agentConfigId === currentAgentId) {
-      bg.abortController.abort()
-      if (bg.realSessionId) {
-        cancelIds.push(bg.realSessionId)
+  // 停止当前会话的后台流式（P2：按会话取消，不再按 Agent 一锅端——切换 Agent 后不会误杀其他会话的后台任务）
+  if (currentConvId) {
+    backgroundStreams.value = backgroundStreams.value.filter(bg => {
+      if (bg.convId === currentConvId) {
+        bg.abortController.abort()
+        if (bg.realSessionId) {
+          cancelIds.push(bg.realSessionId)
+        }
+        return false
       }
-      return false
-    }
-    return true
-  })
+      return true
+    })
+  }
 
   // 从 currentStreamSessionId 获取（最直接的路径）
   if (currentStreamSessionId.value) {
@@ -2658,9 +2856,9 @@ const stopStreaming = () => {
     cancelTask(id)
   }
 
-  // 立即重置当前 UI 状态
-  isSending.value = false
-  streamStatus.value = ''
+  // 立即重置当前会话的 UI 状态（P2：按会话清理，不影响其他会话）
+  setSending(currentConvId, false)
+  setStreamStatus(currentConvId, '')
 }
 
 
@@ -2741,7 +2939,9 @@ const submitPendingAnswer = async () => {
   const answer = pendingQuestionAnswer.value.trim()
   try {
     await submitAnswer(q.uuid, answer, 'approve')
-    pendingQuestion.value = null
+    // 三轮审查修复：pendingQuestion 是只读 computed（无 setter），赋值静默失效（弹窗残留/重复提交）；
+    // 必须通过 setPendingQuestion 操作底层的 Map
+    setPendingQuestion(currentConversationId.value, null)
     pendingQuestionAnswer.value = ''
     pendingShowCustomInput.value = false
     cleanupPermissionPanel()
@@ -2765,14 +2965,15 @@ const handlePermissionAction = async (action: string) => {
   if (permissionLock.value || !pendingQuestion.value) return
   const q = pendingQuestion.value
   // 立即加锁并清空面板，防止 SSE 流重复推送覆盖
+  // （三轮审查修复：pendingQuestion 为只读 computed，赋值失效；改走 setPendingQuestion 操作 Map）
   permissionLock.value = true
-  pendingQuestion.value = null
+  setPendingQuestion(currentConversationId.value, null)
   // 对于 custom 类型，需要用户输入了内容
   if (action === 'custom') {
     if (!pendingQuestionAnswer.value.trim()) {
       message.warning('请输入您的消息')
       permissionLock.value = false
-      pendingQuestion.value = q
+      setPendingQuestion(currentConversationId.value, q)
       return
     }
   }
@@ -2792,7 +2993,8 @@ const handlePermissionAction = async (action: string) => {
     }
   } catch (e: any) {
     message.error('操作失败: ' + (e.message || '未知错误'))
-    pendingQuestion.value = q
+    // 三轮审查修复：恢复被清空的授权问题（只读 computed 赋值失效，改走 setPendingQuestion）
+    setPendingQuestion(currentConversationId.value, q)
   } finally {
     permissionLock.value = false
   }
@@ -2826,7 +3028,9 @@ watch(() => pendingQuestion.value, async (q) => {
   const filePath = q.filePath
   if (!filePath || tool !== 'file_writer') return
   // 自动分屏并打开文件
-  const projectRoot = agentRuntime.value.workDir
+  // P5 修复：优先用归属会话的工作目录（q.workDir），不再错用当前 Agent 的 workDir——
+  // 否则后台 Agent 的授权弹窗打开的文件路径会拼到当前 Agent 目录下（展示与授权对象错位）
+  const projectRoot = q.workDir || agentRuntime.value.workDir
   if (!projectRoot) return
   const isAbs = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
   const absPath = isAbs ? filePath : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
@@ -3045,7 +3249,9 @@ const optimizeMessage = async () => {
 // 发送消息
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
-  if (!text || isSending.value) return
+  // ★ 2026-08-14：守卫改用 hasRunningTask——输入框 disabled 后 Enter 等路径虽不会触发，
+  //   双保险防止「切回智能体后任务仍在后台执行」时误发新消息造成同会话双流冲突
+  if (!text || hasRunningTask.value) return
 
   // 检查工作目录是否已设置（Agent 配置或全局设置均可）
   if (!agentRuntime.value.workDir && !settingsStore.projectRoot) {
@@ -3117,12 +3323,12 @@ const sendMessage = async () => {
   //    否则 Ant Design Vue 的 a-textarea 在 disabled 状态下不响应 v-model 变化，
   //    导致输入框直到流式结束后（isSending=false）才显示为空
   await nextTick()
-  isSending.value = true
+  setSending(convId, true)
   // ★ 重置 currentStreamSessionId，确保新会话的 SSE 流能设置新的真实 sessionId
   // 否则上一次流式残留的值会导致补充需求发到旧的会话
   currentStreamSessionId.value = null
   startElapsedTimer()
-  streamStatus.value = '正在连接...'
+  setStreamStatus(convId, '正在连接...')
 
   // 添加占位的助手消息
   const assistantMsg: ChatMessage = {
@@ -3147,6 +3353,9 @@ const sendMessage = async () => {
   stopAbortController.value = abortCtrl
   // 记录当前流式信息，用于停止时直接取消后端任务
   activeStreamInfo.value = { convId }
+  // H1 修复：标记流式是否「正常完成」——try 正常走完才置 true；
+  // 用户中止（__USER_ABORT__）/发送失败路径保持 false，onStreamComplete 据此不误报「后台任务已完成」
+  let streamCompleted = false
 
   try {
     const sessionId = convId.startsWith('local-') ? undefined : parseInt(convId)
@@ -3180,11 +3389,11 @@ const sendMessage = async () => {
         currentStreamSessionId.value = event.sessionId
       }
       if (event.type === 'thinking') {
-        streamStatus.value = '思考分析中...'
+        setStreamStatus(convId, '思考分析中...')
         // 检测工具调用结果标记，分离存储
         const markerIdx = event.data.indexOf('----工具调用:----')
         if (markerIdx !== -1) {
-          streamStatus.value = '执行工具中...'
+          setStreamStatus(convId, '执行工具中...')
           const contentStart = event.data.indexOf('\n', markerIdx)
           const toolContent = contentStart !== -1
             ? event.data.substring(contentStart + 1).trim()
@@ -3209,9 +3418,9 @@ const sendMessage = async () => {
                 toolName: resolvedToolName
               })
             }
-            // 解析 task_manager 工具的任务清单
+            // 解析 task_manager 工具的任务清单（P2：按会话隔离）
             console.log('[TaskList] toolContent:', toolContent.substring(0, 200))
-            parseTaskManagerResult(toolContent)
+            parseTaskManagerResult(toolContent, convId)
           }
         } else {
           thinkingContent += event.data
@@ -3222,7 +3431,7 @@ const sendMessage = async () => {
         scheduleMessageUpdate(convId, assistantMsg.id)
       } else if (event.type === 'tool_call_start') {
         // 工具调用开始事件：创建 pending 条目，显示加载动画
-        streamStatus.value = '执行工具中...'
+        setStreamStatus(convId, '执行工具中...')
         const tcData = event.data as { tools: string[]; summaries: string[] }
         const tools = tcData.tools || []
         const summaries = tcData.summaries || []
@@ -3237,7 +3446,7 @@ const sendMessage = async () => {
         }
         scheduleMessageUpdate(convId, assistantMsg.id)
       } else if (event.type === 'content') {
-        streamStatus.value = '正在生成回答...'
+        setStreamStatus(convId, '正在生成回答...')
         // 实时更新消息内容
         if (event.data) {
           // thinking→content 切换时，若已有内容则补换行（与历史消息加载 processMessageGroups 逻辑一致）
@@ -3276,12 +3485,30 @@ const sendMessage = async () => {
         }
       } else if (event.type === 'ask_user') {
         try {
-          pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification', toolName: event.data.toolName, filePath: event.data.filePath, fullDetail: event.data.fullDetail }
+          // P3：按会话写入待审批问题（Map 化）——切走后该会话的授权请求保留，切回自动恢复弹窗
+          const isCurrentConv = convId === currentConversationId.value
+          // 后台流时从 backgroundStreams 取归属 agentConfigId（切走时已记录）
+          const bg = backgroundStreams.value.find(s => s.convId === convId)
+          const meta = getAgentMeta(bg?.agentConfigId ?? currentAgentConfigId.value)
+          setPendingQuestion(convId, {
+            uuid: event.data.uuid,
+            question: event.data.question,
+            askType: event.data.askType || 'clarification',
+            toolName: event.data.toolName,
+            filePath: event.data.filePath,
+            fullDetail: event.data.fullDetail,
+            agentName: meta.name,
+            workDir: meta.workDir || agentRuntime.value.workDir
+          })
           pendingQuestionAnswer.value = ''
+          // 后台任务等待授权时提示用户（不弹窗到当前界面，防误授权）
+          if (!isCurrentConv) {
+            message.info(`🤖 ${meta.name} 的后台任务正在等待授权，切换过去即可处理`)
+          }
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
         }
-        } else if (event.type === 'skill_match') {
+      } else if (event.type === 'skill_match') {
           const skills = event.data as SkillMatchInfo[]
           if (skills.length > 0) {
             assistantMsg.matchedSkills = skills.map(s => ({
@@ -3302,7 +3529,7 @@ const sendMessage = async () => {
     const toolResultsText = (assistantMsg.toolResults || []).map(r => r.content).join('')
     assistantMsg.tokenCount = estimateTokenCount(fullContent) + (fullThinking ? estimateTokenCount(fullThinking) : 0) + estimateTokenCount(toolResultsText)
     assistantMsg.isStreaming = false
-    streamStatus.value = ''
+    setStreamStatus(convId, '')
     flushMessageUpdate(convId, assistantMsg.id)
 
     // 查询快照，匹配当前消息的 turnId
@@ -3316,11 +3543,13 @@ const sendMessage = async () => {
     if (conv && !conv.isLocal) {
       // 从后端刷新获取标题
     }
+    // H1 修复：try 正常走完（流式完整结束无异常/无中止）才标记完成
+    streamCompleted = true
   } catch (error: any) {
     if (error.message === '__USER_ABORT__') {
       console.log('用户中断流式响应')
       assistantMsg.isStreaming = false
-      streamStatus.value = ''
+      setStreamStatus(convId, '')
       flushMessageUpdate(convId, assistantMsg.id)
       // 如果已经获取到真实会话ID，提前迁移 convId，避免 finally 中迁移触发 checkAndReconnect 重连
       if (realSessionId) {
@@ -3334,11 +3563,11 @@ const sendMessage = async () => {
     console.error('发送消息失败:', error)
     assistantMsg.content = error.message || '发送失败，请重试'
     assistantMsg.isStreaming = false
-    streamStatus.value = ''
+    setStreamStatus(convId, '')
     flushMessageUpdate(convId, assistantMsg.id)
     message.error('发送失败: ' + (error.message || '未知错误'))
   } finally {
-    isSending.value = false
+    setSending(convId, false)
     // ★ 兜底清空输入框：确保消息发送后输入条一定被清空
     //    （第 2257 行已有 inputMessage.value = ''，但若发送过程中出现异常提前 return，
     //      或 Vue 响应式更新时序问题导致视图未更新，这里再次清空确保万无一失）
@@ -3346,14 +3575,15 @@ const sendMessage = async () => {
       inputMessage.value = ''
     }
     stopElapsedTimer()
-    streamStatus.value = ''
+    setStreamStatus(convId, '')
     stopAbortController.value = null
     // 清除 activeStreamInfo（流式已结束，可能是正常结束或被 stopStreaming 提前清掉）
     if (activeStreamInfo.value?.convId === convId) {
       activeStreamInfo.value = null
     }
-    // 通知后台流式管理：当前流式已结束
-    onStreamComplete(convId, currentAgentConfigId.value)
+    // 通知后台流式管理：当前流式已结束（H1：携带是否正常完成标志——中止/失败不误报完成通知；
+    // 三轮审查：携带 abortCtrl 精确移除本流条目，避免误删同会话其他仍在运行的后台流）
+    onStreamComplete(convId, currentAgentConfigId.value, streamCompleted, abortCtrl)
     scrollToBottom()
     // 流式结束后统一迁移 convId（避免流式过程中数组引用变动导致内容重复）
     if (convId.startsWith('local-') && realSessionId) {
@@ -3386,11 +3616,15 @@ const handleShiftEnter = () => {
 
 // ===== 后台任务重连 =====
 
-const reconnectToTaskStream = async (convId: number) => {
-  streamStatus.value = '任务恢复中...'
-  isSending.value = true
+const reconnectToTaskStream = async (convId: number, cursor = 0) => {
+  setStreamStatus(String(convId), '任务恢复中...')
+  // P2：重连是「该会话后台任务恢复前台查看」，不锁输入框（后台任务不阻塞派新任务；用户发新消息会走正常取消/排队流程）
   startElapsedTimer()
   const stringConvId = String(convId)
+
+  // 游标续传模式下历史事件（seq <= cursor）不再重放，先强制刷新 DB 完整内容作为续接基线，
+  // 后续增量 content/thinking 追加到该基线上（根治重放历史内容导致的一句话重复两次）
+  await fetchMessages(stringConvId, true)
 
   // 确保消息数组存在
   if (!messages.value[stringConvId]) {
@@ -3431,12 +3665,12 @@ const reconnectToTaskStream = async (convId: number) => {
   stopAbortController.value = abortCtrl
 
   try {
-    for await (const event of taskStream(convId, abortCtrl)) {
+    for await (const event of taskStream(convId, abortCtrl, cursor)) {
       if (event.type === 'thinking') {
         const data = typeof event.data === 'string' ? event.data : ''
         const markerIdx = data.indexOf('----工具调用:----')
         if (markerIdx !== -1) {
-          streamStatus.value = '执行工具中...'
+          setStreamStatus(stringConvId, '执行工具中...')
           const contentStart = data.indexOf('\n', markerIdx)
           const toolContent = contentStart !== -1
             ? data.substring(contentStart + 1).trim()
@@ -3454,7 +3688,7 @@ const reconnectToTaskStream = async (convId: number) => {
                 content: toolContent
               })
             }
-            parseTaskManagerResult(toolContent)
+            parseTaskManagerResult(toolContent, stringConvId)
           }
         } else {
           // 普通 thinking 内容：Replay Sink 重放的历史内容已在 thinkingContent 中，跳过重复追加
@@ -3467,7 +3701,7 @@ const reconnectToTaskStream = async (convId: number) => {
         // 携带思考消息ID，更新 DOM 后自动滚动到底部
         scheduleMessageUpdate(stringConvId, targetMsg.id)
       } else if (event.type === 'content') {
-        streamStatus.value = '正在生成回答...'
+        setStreamStatus(stringConvId, '正在生成回答...')
         // thinking→content 切换时，若已有内容则补换行（与历史消息加载 processMessageGroups 逻辑一致）
         if (lastEventType === 'thinking' && targetMsg.content) {
           targetMsg.content = (targetMsg.content || '') + '\n' + event.data
@@ -3477,11 +3711,25 @@ const reconnectToTaskStream = async (convId: number) => {
         lastEventType = 'content'
         scheduleMessageUpdate(stringConvId)
       } else if (event.type === 'ask_user') {
-        streamStatus.value = '等待用户授权...'
-        pendingQuestion.value = { uuid: event.data.uuid, question: event.data.question, askType: event.data.askType || 'clarification', toolName: event.data.toolName, filePath: event.data.filePath, fullDetail: event.data.fullDetail }
-        pendingQuestionAnswer.value = ''
+        setStreamStatus(stringConvId, '等待用户授权...')
+        // P3：重连路径也按会话写入（带归属标识）
+        const bg = backgroundStreams.value.find(s => s.convId === stringConvId)
+        const meta = getAgentMeta(bg?.agentConfigId ?? currentAgentConfigId.value)
+        setPendingQuestion(stringConvId, {
+          uuid: event.data.uuid,
+          question: event.data.question,
+          askType: event.data.askType || 'clarification',
+          toolName: event.data.toolName,
+          filePath: event.data.filePath,
+          fullDetail: event.data.fullDetail,
+          agentName: meta.name,
+          workDir: meta.workDir || agentRuntime.value.workDir
+        })
+        if (stringConvId === currentConversationId.value) {
+          pendingQuestionAnswer.value = ''
+        }
       } else if (event.type === 'resume') {
-        streamStatus.value = '继续执行中...'
+        setStreamStatus(stringConvId, '继续执行中...')
       } else if (event.type === 'complete') {
         break
       }
@@ -3491,7 +3739,7 @@ const reconnectToTaskStream = async (convId: number) => {
     if (targetMsg) {
       targetMsg.isStreaming = false
     }
-    streamStatus.value = ''
+    setStreamStatus(stringConvId, '')
     flushMessageUpdate(stringConvId, targetMsg.id)
   } catch (error: any) {
     if (error?.name === 'AbortError') {
@@ -3500,36 +3748,60 @@ const reconnectToTaskStream = async (convId: number) => {
       console.warn('重连任务流失败:', error)
     }
   } finally {
-    streamStatus.value = ''
-    isSending.value = false
+    setStreamStatus(stringConvId, '')
     stopElapsedTimer()
-    activeTask.value = null
+    setActiveTask(stringConvId, null)
     stopAbortController.value = null
     // 任务可能已完成或有新消息，从 DB 强制刷新最新消息列表（绕过缓存）
     await fetchMessages(stringConvId, true)
   }
 }
 
+// H3 修复：重连防重入标志（reconnectToTaskStream 建立的流不记录在 backgroundStreams，
+// 原「backgroundStreams.some」防重入对重连流无效——快速切换 Agent（B→A→B）会对同一会话
+// 发起多个并发重连 → 重复事件流/重复 complete 处理/消息内容重复。标志在重连流真正结束后才清除）
+// ★ 2026-08-14：改为 reactive Set——hasRunningTask（输入框锁定）依赖该标志，
+//   非响应式 Set 的 add/delete 不会触发 computed 重算，重连开始/结束期间输入框无法正确锁定/解锁
+const reconnectingConvIds = reactive(new Set<string>())
+
 const checkAndReconnect = async (convId: string) => {
   if (convId.startsWith('local-')) return
   // 如果该会话已经在后台流式运行中，跳过重连（避免双流式冲突）
   if (backgroundStreams.value.some(s => s.convId === convId)) return
-  const task = await checkActiveTask(parseInt(convId))
-  if (task.active) {
-    activeTask.value = task as any
-    // 如果有待审批问题，立即展示审批对话框（页面刷新后重连）
-    if (task.pendingQuestionUuid) {
-      pendingQuestion.value = { uuid: task.pendingQuestionUuid, question: task.pendingQuestionText || '请确认是否执行以上操作', askType: 'permission' }
-      pendingQuestionAnswer.value = ''
-      message.info('检测到有待审批的操作，请确认')
+  // H3：重连进行中（checkActiveTask 或 reconnectToTaskStream 未结束）则跳过，防并发双流
+  if (reconnectingConvIds.has(convId)) return
+  reconnectingConvIds.add(convId)
+  try {
+    const task = await checkActiveTask(parseInt(convId))
+    if (task.active) {
+      setActiveTask(convId, task as any)
+      // 如果有待审批问题，立即展示审批对话框（页面刷新后重连；P3：按会话写入 + 带归属标识）
+      if (task.pendingQuestionUuid) {
+        const meta = getAgentMeta(currentAgentConfigId.value)
+        setPendingQuestion(convId, {
+          uuid: task.pendingQuestionUuid,
+          question: task.pendingQuestionText || '请确认是否执行以上操作',
+          askType: 'permission',
+          agentName: meta.name,
+          workDir: meta.workDir || agentRuntime.value.workDir
+        })
+        pendingQuestionAnswer.value = ''
+        message.info('检测到有待审批的操作，请确认')
+      }
+      if (task.status === 'running') {
+        // 任务仍在运行，携带已消费游标连接事件流（只接收增量事件，历史内容已由 DB 兜底）
+        // H3：await 重连流结束——标志在 finally 清理，期间重复 checkAndReconnect 被拦截
+        await reconnectToTaskStream(parseInt(convId), task.seq || 0)
+      } else {
+        // 任务已完成/失败/取消，清除 activeTask（数据已在 DB 中）
+        setActiveTask(convId, null)
+      }
     }
-    if (task.status === 'running') {
-      // 任务仍在运行，连接事件流追踪进度
-      reconnectToTaskStream(parseInt(convId))
-    } else {
-      // 任务已完成/失败/取消，清除 activeTask（数据已在 DB 中）
-      activeTask.value = null
-    }
+  } catch (e) {
+    // 网络抖动/后端不可达：不抛未处理异常，仅记录（重连失败不阻断 UI）
+    console.warn('检查后台任务失败:', e)
+  } finally {
+    reconnectingConvIds.delete(convId)
   }
 }
 
@@ -4309,8 +4581,12 @@ onUnmounted(() => {
 })
 
 // 当首次加载完会话列表且选中了会话后，检查活跃任务
-// ===== 任务清单解析 =====
-const parseTaskManagerResult = (content: string) => {
+// ===== 任务清单解析（P2：按会话隔离——不同 Agent 的 T1/T2 不再互相覆盖） =====
+const parseTaskManagerResult = (content: string, convId?: string) => {
+  // 无 convId 时退回当前会话（兼容旧调用）
+  const targetConvId = convId ?? currentConversationId.value
+  if (!targetConvId) return
+
   // 优先解析结构化 JSON（---TASK_JSON--- 分隔）
   const jsonMarkerIdx = content.indexOf('---TASK_JSON---')
   if (jsonMarkerIdx !== -1) {
@@ -4318,7 +4594,7 @@ const parseTaskManagerResult = (content: string) => {
     try {
       const parsed = JSON.parse(jsonStr)
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const existing = taskItems.value
+        const existing = getTaskItems(targetConvId)
         for (const item of parsed) {
           const idx = existing.findIndex(t => t.id === item.id)
           const st = item.status === 'completed' ? 'completed' as const : 'pending' as const
@@ -4336,7 +4612,7 @@ const parseTaskManagerResult = (content: string) => {
             })
           }
         }
-        taskItems.value = [...existing]
+        setTaskItems(targetConvId, [...existing])
         return
       }
     } catch (e) {
@@ -4348,41 +4624,41 @@ const parseTaskManagerResult = (content: string) => {
   const completeMatch = content.match(/✅\s*任务\s+(T\d+)\s*已完成/)
   if (completeMatch) {
     const tid = completeMatch[1]
-    const existing = taskItems.value
+    const existing = getTaskItems(targetConvId)
     const found = existing.find(t => t.id === tid)
-    if (found) { found.status = 'completed'; taskItems.value = [...existing] }
+    if (found) { found.status = 'completed'; setTaskItems(targetConvId, [...existing]) }
     return
   }
   // 处理 reopen 操作: "🔄 任务 T1 已重新打开"
   const reopenMatch = content.match(/🔄\s*任务\s+(T\d+)\s*已重新打开/)
   if (reopenMatch) {
     const tid = reopenMatch[1]
-    const existing = taskItems.value
+    const existing = getTaskItems(targetConvId)
     const found = existing.find(t => t.id === tid)
-    if (found) { found.status = 'pending'; taskItems.value = [...existing] }
+    if (found) { found.status = 'pending'; setTaskItems(targetConvId, [...existing]) }
     return
   }
   // 处理批量操作结果（兼容）
   const batchMatch = content.match(/✅\s*批量完成任务：(.+)/)
   if (batchMatch) {
     const ids = batchMatch[1].split(',').map(s => s.trim())
-    const existing = taskItems.value
+    const existing = getTaskItems(targetConvId)
     for (const tid of ids) {
       const found = existing.find(t => t.id === tid)
       if (found) found.status = 'completed'
     }
-    taskItems.value = [...existing]
+    setTaskItems(targetConvId, [...existing])
     return
   }
   const batchReopenMatch = content.match(/🔄\s*批量重开任务：(.+)/)
   if (batchReopenMatch) {
     const ids = batchReopenMatch[1].split(',').map(s => s.trim())
-    const existing = taskItems.value
+    const existing = getTaskItems(targetConvId)
     for (const tid of ids) {
       const found = existing.find(t => t.id === tid)
       if (found) found.status = 'pending'
     }
-    taskItems.value = [...existing]
+    setTaskItems(targetConvId, [...existing])
     return
   }
   if (!content.includes('任务清单') && !content.includes('任务 ')) return
@@ -4404,16 +4680,16 @@ const parseTaskManagerResult = (content: string) => {
     parsedTasks.push({ id, description: cleaned, status: isCompleted ? 'completed' : 'pending' })
   }
   if (parsedTasks.length > 0) {
-    const existing = taskItems.value
+    const existing = getTaskItems(targetConvId)
     if (existing.length > 0) {
       for (const newTask of parsedTasks) {
         const idx = existing.findIndex(t => t.id === newTask.id)
         if (idx !== -1) existing[idx].status = newTask.status
         else existing.push(newTask)
       }
-      taskItems.value = [...existing]
+      setTaskItems(targetConvId, [...existing])
     } else {
-      taskItems.value = parsedTasks
+      setTaskItems(targetConvId, parsedTasks)
     }
   }
 }
@@ -6286,6 +6562,32 @@ watch(currentConversationId, (newId) => {
   gap: 8px;
 }
 .ask-user-header-icon { font-size: 18px; line-height: 1; }
+/* P3：后台授权等待角标 */
+.bg-permission-tip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #d48806;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.bg-permission-tip-icon { font-size: 14px; }
+/* P3：授权归属 Agent 标识 */
+.ask-user-agent-tag {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: auto;
+}
 .ask-user-question {
   font-size: 14px;
   color: var(--text-2);

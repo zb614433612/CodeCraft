@@ -5,6 +5,53 @@
 
 ---
 
+## [1.1.8] - 2026-09-14
+
+### 🤝 新增：智能体互相调用（Agent-to-Agent Invocation）
+
+- **新增 `agent_invoke` 内置工具（第 22 个）**：智能体 A 在执行中委托另一个智能体 B（agent_config 实例）——B 以自身身份（角色/模型/工作目录/工具集）在独立会话中执行；支持 `create_session`（新建会话）/ `continue_session`（按会话 ID 继续）/ `poll`（查结果）/ `cancel`（取消）
+- **委托即授权**：manual 模式下批准一次 `agent_invoke` 即视为显式委托授权，B 执行期间免弹窗；信任沿调用链传递（环检测 + 深度 ≤ 3 防死循环）；A 停止任务级联取消 B 的委托任务
+- **透明可审计**：B 的委托会话出现在其会话列表（名称带「[A 委托]」前缀）；agent_task 增加 caller 溯源；委托结果与【工具轨迹摘要】如实返回
+- **接入**：MCP 暴露白名单新增 `agent_invoke`；核心 Agent 提示词新增「智能体互调」使用规则；新增 `docs/AGENT_INVOKE_DESIGN.md` 设计文档
+
+### 🗄️ 新增：外部数据库连接（数据管理）
+
+- **「数据库连接」管理页**（SETTING 菜单）：配置 MySQL / PostgreSQL / H2 外部业务库；密码 AES-256-GCM 加密存储（复用 P2P CryptoHelper）、API 不回显明文；支持测试连接、启用/停用
+- **`execute_sql` 支持 `connection` 参数**：不传连 CodeCraft 系统库（向后兼容）；传连接名称/id 连外部业务库，查询结果标注目标库防混淆
+- **后端**：新增 `db_connection` 表、DbConnectionController / Mapper / Entity、service/dbconnection（DbConnectionService / DbConnectionManager / CredentialCipher）；pom 新增 mysql-connector-j、postgresql 驱动
+- **前端**：新增 DbConnectionView 页面与 db-connection API
+
+### 🚦 优化：LLM 限流与重试（P4）
+
+- **全局并发限流**：按 DeepSeek 官方并发模型（v4-pro 500 / v4-flash 2500，账号粒度）重构为单一全局并发信号量（移除 QPS 令牌桶与 per-provider 分桶），占满时排队等待，超时报「Provider 繁忙」
+- **429/5xx 指数退避重试**：最多 3 次尝试（1s → 2s → 4s，封顶 10s）；流式安全——仅响应头阶段错误重试，不重复流式数据
+
+### 📚 优化：经验库检索（P1）
+
+- **错误码别名归一化**：新增 canonical-aliases 映射（如 CMD_ENCODING_MISMATCH → CMD_ENCODING），同义错误码统一为 canonical 形态，防同坑多码碎片
+- **检索增强**：`lesson` 工具 keyword 支持空格分隔多关键词模糊匹配；`error_code` 可传原始报错文本，系统自动归一化对齐
+
+### 🖥️ 优化：运行日志页
+
+- 支持**选中复制**与**导出**日志
+
+### 🛠️ 修复与调整
+
+- **桌面端启动脚本**：start.bat / start.sh 动态扫描 `target` 下最新 `code-craft-*.jar`（消除 JAR 名版本写死漂移，与 main.js 逻辑一致）
+- **前端**：切回智能体后输入框锁定修复；会话恢复、菜单图标（数据库连接）等配套调整
+- **MCP Server 握手版本修复**：`1.1.6`（1.1.7 升级遗漏）→ `1.1.8`
+
+### 🏷️ 版本号
+
+- 后端：`1.1.7` → `1.1.8`
+- 前端：`1.1.7` → `1.1.8`
+- Electron：`1.1.7` → `1.1.8`
+- MCP Server 握手版本：`1.1.6` → `1.1.8`（修复 1.1.7 遗漏）
+- 打包产物：`code-craft-1.1.7.jar` → `code-craft-1.1.8.jar`
+- 说明文档：README(_EN) / BUILD_AND_RUN(_EN) / docs（TOOL_SYSTEM、ARCHITECTURE、MCP_SYSTEM 等）同步至 v1.1.8
+
+---
+
 ## [1.1.7] - 2026-08-18
 
 ### 🌐 新增 MiniMax LLM Provider

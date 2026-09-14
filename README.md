@@ -41,6 +41,9 @@
 ### 🧠 多 Agent 并行协作（Multi-Agent System）
 可创建不同角色的 AI Agent（Coding Agent、Code Reviewer、Software Architect 等），每个 Agent 独立配置系统提示词（System Prompt）、工具集和模型参数。主 Agent 执行复杂任务时，自动进行 **Task Decomposition（任务拆解）**，召唤多个子 Agent 后台并行执行，最多 20 个并发协作——典型的多 Agent 框架（Multi-Agent Framework）架构。
 
+### 🤝 智能体互相调用（Agent-to-Agent Invocation）
+Agent 之间可**任务委托**：智能体 A 在执行中通过 `agent_invoke` 工具调用智能体 B，B 以自身身份（自己的角色/模型/工作目录/工具集）在**独立会话**中执行——支持 `create_session`（为 B 新建会话）与 `continue_session`（按会话 ID 让 B 带着历史继续干）。**委托即授权**：用户批准一次委托后，B 执行期间免弹窗（信任沿调用链传递，环检测 + 深度 ≤3 防死循环）；A 停止任务会级联取消 B 的委托任务。B 的委托会话会出现在其会话列表（名称带「[A 委托]」前缀），透明可审计。详见 `docs/AGENT_INVOKE_DESIGN.md`。
+
 ### 🌐 多 LLM Provider 支持（Multi-LLM Platform）
 支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax 等主流 LLM 平台。通过统一的 LLMClient 抽象层屏蔽不同平台的 API 差异，前端运行时可随时切换 Provider，无需重启服务。每个 Agent 可以绑定特定的 Provider 和模型，Provider 配置变更后自动热刷新客户端缓存。详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
 
@@ -68,8 +71,11 @@ AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按�
 ### 👥 用户管理与权限（Multi-User / RBAC）
 完整的账户体系：注册登录、Token 鉴权（JWT）、角色权限控制（RBAC）、菜单可见性管理、初始管理员自动创建。
 
-### 🧰 21 个工具生态（Tool Use / Function Calling）
-文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理等 8 大类 21 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
+### 🧰 22 个工具生态（Tool Use / Function Calling）
+文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理等 8 大类 22 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
+
+### 🗄️ 数据管理（外部数据库连接）
+在「数据库连接」管理页配置 MySQL / PostgreSQL / H2 外部业务库（密码 AES-256-GCM 加密存储、支持测试连接），AI 即可通过 `execute_sql` 的 `connection` 参数直接查询外部业务库——不传 `connection` 时仍连 CodeCraft 系统库，向后兼容。
 
 ### 🛰️ MCP 生态接入（Model Context Protocol）
 **双向 MCP 支持**：作为 Client 连接外部 MCP Server（GitHub、数据库、浏览器自动化等），外部工具动态注册进工具池供 AI 调用（支持 http/stdio 双传输、工具名前缀防冲突、权限档位映射）；作为 Server 对外暴露内置工具，供 Claude Desktop / Cursor 等客户端连接。前端提供「MCP 服务器」管理页（连接/断开/刷新/状态监控）。详见 `docs/MCP_SYSTEM.md`。
@@ -172,8 +178,10 @@ codecraft/
 │   │       ├── scheduler/        # 定时任务
 │   │       ├── service/          # 业务逻辑层
 │   │       │   ├── llm/          # LLM 客户端层（LLMClient 接口 + 6 个 Provider 实现）
-│   │       │   └── lesson/       # 成长体系（经验库：检索/记录/复盘/失败归一化）
-│   │       ├── tool/             # AI Agent 工具（21 个工具）
+│   │       │   ├── lesson/       # 成长体系（经验库：检索/记录/复盘/失败归一化）
+│   │       │   ├── agentinvoke/  # 智能体互调（委托执行/信任链）
+│   │       │   └── dbconnection/ # 外部数据库连接（配置/加密/连接管理）
+│   │       ├── tool/             # AI Agent 工具（22 个工具）
 │   │       │   ├── impl/         # 工具实现
 │   │       │   ├── permission/   # 工具权限控制
 │   │       │   └── postedit/     # 工具后处理（格式化、检查）

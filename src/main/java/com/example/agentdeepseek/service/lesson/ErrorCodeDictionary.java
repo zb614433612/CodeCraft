@@ -84,4 +84,23 @@ public class ErrorCodeDictionary {
         }
         return null;
     }
+
+    // ============================================================
+    // P1：错误码别名规范化（canonical 化——同义码归一，防同坑多码碎片）
+    // ============================================================
+
+    /** 错误码别名映射（配置 lesson.error-dictionary.canonical-aliases，如 CMD_ENCODING_MISMATCH → CMD_ENCODING） */
+    private java.util.LinkedHashMap<String, String> canonicalAliases = new java.util.LinkedHashMap<>();
+
+    /**
+     * 规范化错误码：命中别名映射时返回 canonical 码，否则原样返回（null 透传）。
+     * 应用点：归一化输出（FailureNormalizer）/ 记录入库（LessonService）/ 检索入口。
+     */
+    public String canonicalize(String code) {
+        if (code == null || code.isBlank() || canonicalAliases.isEmpty()) {
+            return code;
+        }
+        String mapped = canonicalAliases.get(code.trim());
+        return mapped != null ? mapped : code;
+    }
 }

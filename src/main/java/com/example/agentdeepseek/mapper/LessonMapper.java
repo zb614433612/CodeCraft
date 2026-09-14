@@ -63,6 +63,7 @@ public interface LessonMapper {
 
     /**
      * 第一级硬过滤：project_key 必填 + tool_name/error_category/error_code/type 可选精确匹配
+     * P0-1：error_code 匹配大小写不敏感（UPPER 化）——LLM 传小写/混大小写短码均可命中（数据量小无索引压力）。
      * F6 全局共享池：project_key IN (当前项目, '__global__')，项目内经验优先，全局经验兜底
      * 排序：项目内优先 → 有效优先 → 命中次数 → 成功率（贝叶斯平滑，防除零）
      */
@@ -71,11 +72,11 @@ public interface LessonMapper {
             "WHERE project_key IN (#{projectKey}, '" + Lesson.GLOBAL_PROJECT_KEY + "') AND status IN (0, 1)" +
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='errorCategory != null and errorCategory != \"\"'> AND error_category = #{errorCategory}</if>" +
-            "<if test='errorCode != null and errorCode != \"\"'> AND error_code = #{errorCode}</if>" +
+            "<if test='errorCode != null and errorCode != \"\"'> AND UPPER(error_code) = UPPER(#{errorCode})</if>" +
             "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
             " ORDER BY CASE WHEN project_key = #{projectKey} THEN 0 ELSE 1 END, " +
-            "status DESC, hit_count DESC, " +
-            "(success_count + 1.0) / (success_count + fail_count + 2.0) DESC " +
+            "status DESC, (success_count + 1.0) / (success_count + fail_count + 2.0) DESC, " +
+            "hit_count DESC " +
             "LIMIT #{limit}" +
             "</script>")
     @ResultMap("lessonResultMap")
@@ -87,30 +88,38 @@ public interface LessonMapper {
                                 @Param("limit") int limit);
 
     /**
-     * 第三级兜底模糊检索：project_key 必填 + 关键词 LIKE 匹配
-     * F6 全局共享池：project_key IN (当前项目, '__global__')，项目内优先
-     * 覆盖 symptom/root_cause/solution/keywords 四字段（H2 无 FULLTEXT，用 LIKE 顶住，量级小无压力）
-     * 注：ESCAPE '\' 配合 Service 层 escapeLikeKeyword 转义，防止 % _ 被当通配符
+     * 第三级兜底模糊检索（P0 重构：多词 OR 匹配 + 大小写不敏感）。
+     * project_key 必填 + 关键词列表任一命中（每词跨 symptom/root_cause/solution/keywords/goal 五字段 OR）；
+     * F6 全局共享池：project_key IN (当前项目, '__global__')，项目内优先。
+     * 覆盖 H2 无 FULLTEXT 的缺口，量级小无压力；字段匹配统一 LOWER 化消除大小写差异失配；
+     * 词内 % _ \ 由 Service 层 escapeLikeKeyword 转义 + ESCAPE '\' 防通配符注入。
+     * 排序：项目内优先 → 有效优先 → 命中次数 → 成功率（贝叶斯平滑）；「词命中数」精排由 Service 层完成。
      */
     @Select("<script>" +
             "SELECT " + COLUMNS + " FROM lesson " +
             "WHERE project_key IN (#{projectKey}, '" + Lesson.GLOBAL_PROJECT_KEY + "') AND status IN (0, 1)" +
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
-            " AND (symptom LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\' " +
-            " OR root_cause LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\' " +
-            " OR solution LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\' " +
-            " OR keywords LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\'" +
-            " OR goal LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\')" +
+            "<if test='keywords != null and keywords.size() > 0'>" +
+            " AND (" +
+            "<foreach collection='keywords' item='w' separator=' OR '>" +
+            "(LOWER(symptom) LIKE CONCAT('%', LOWER(#{w}), '%') ESCAPE '\\' " +
+            " OR LOWER(root_cause) LIKE CONCAT('%', LOWER(#{w}), '%') ESCAPE '\\' " +
+            " OR LOWER(solution) LIKE CONCAT('%', LOWER(#{w}), '%') ESCAPE '\\' " +
+            " OR LOWER(keywords) LIKE CONCAT('%', LOWER(#{w}), '%') ESCAPE '\\' " +
+            " OR LOWER(goal) LIKE CONCAT('%', LOWER(#{w}), '%') ESCAPE '\\')" +
+            "</foreach>" +
+            ")" +
+            "</if>" +
             " ORDER BY CASE WHEN project_key = #{projectKey} THEN 0 ELSE 1 END, " +
-            "status DESC, hit_count DESC, " +
-            "(success_count + 1.0) / (success_count + fail_count + 2.0) DESC " +
+            "status DESC, (success_count + 1.0) / (success_count + fail_count + 2.0) DESC, " +
+            "hit_count DESC " +
             "LIMIT #{limit}" +
             "</script>")
     @ResultMap("lessonResultMap")
     List<Lesson> selectFuzzy(@Param("projectKey") String projectKey,
                               @Param("toolName") String toolName,
-                              @Param("keyword") String keyword,
+                              @Param("keywords") List<String> keywords,
                               @Param("type") String type,
                               @Param("limit") int limit);
 
@@ -191,6 +200,7 @@ public interface LessonMapper {
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='errorCode != null and errorCode != \"\"'> AND error_code = #{errorCode}</if>" +
             "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
+            "<if test='zeroHit != null and zeroHit'> AND hit_count = 0</if>" +
             " ORDER BY status DESC, hit_count DESC, updated_at DESC " +
             "LIMIT #{size} OFFSET #{offset}" +
             "</script>")
@@ -200,6 +210,7 @@ public interface LessonMapper {
                             @Param("toolName") String toolName,
                             @Param("errorCode") String errorCode,
                             @Param("type") String type,
+                            @Param("zeroHit") Boolean zeroHit,
                             @Param("offset") int offset,
                             @Param("size") int size);
 
@@ -212,12 +223,14 @@ public interface LessonMapper {
             "<if test='toolName != null and toolName != \"\"'> AND tool_name = #{toolName}</if>" +
             "<if test='errorCode != null and errorCode != \"\"'> AND error_code = #{errorCode}</if>" +
             "<if test='type != null and type != \"\"'> AND type = #{type}</if>" +
+            "<if test='zeroHit != null and zeroHit'> AND hit_count = 0</if>" +
             "</script>")
     long countByFilter(@Param("projectKey") String projectKey,
                        @Param("status") Integer status,
                        @Param("toolName") String toolName,
                        @Param("errorCode") String errorCode,
-                       @Param("type") String type);
+                       @Param("type") String type,
+                       @Param("zeroHit") Boolean zeroHit);
 
     /**
      * 经验库统计（成长看板）：总数 / 各状态数 / 总命中 / 成功失败 / 来源分布
@@ -242,6 +255,39 @@ public interface LessonMapper {
             "</script>")
     Map<String, Object> selectStats(@Param("projectKey") String projectKey,
                                     @Param("since") java.time.LocalDateTime since);
+
+    // ============================================================
+    // P2：管理操作——聚类查询 + 归并更新
+    // ============================================================
+
+    /**
+     * P2：聚类查询——同 project+tool+category+code 的重复组（管理员归并入口）。
+     * 排除 DETOUR（其去重为 goal 维度，不按工具/码聚类）；返回分组键 + 条数 + 代表 id。
+     * 排序：条数降序（重复越多的组越靠前）。
+     */
+    @Select("<script>" +
+            "SELECT project_key, tool_name, error_category, error_code, COUNT(*) AS cnt, MIN(id) AS sample_id " +
+            "FROM lesson WHERE (type IS NULL OR type != 'DETOUR')" +
+            "<if test='projectKey != null and projectKey != \"\"'> AND project_key = #{projectKey}</if>" +
+            " GROUP BY project_key, tool_name, error_category, error_code" +
+            " HAVING COUNT(*) > 1" +
+            " ORDER BY cnt DESC, project_key, tool_name, error_code" +
+            " LIMIT #{limit}" +
+            "</script>")
+    List<Map<String, Object>> selectClusterGroups(@Param("projectKey") String projectKey,
+                                                  @Param("limit") int limit);
+
+    /** P2：归并结果回写（计数汇聚 + canonical 码 + 新签名） */
+    @Update("UPDATE lesson SET hit_count = #{hitCount}, success_count = #{successCount}, " +
+            "fail_count = #{failCount}, error_code = #{errorCode}, error_signature = #{signature}, " +
+            "updated_at = #{updatedAt} WHERE id = #{id}")
+    int updateMerged(@Param("id") Long id,
+                     @Param("hitCount") int hitCount,
+                     @Param("successCount") int successCount,
+                     @Param("failCount") int failCount,
+                     @Param("errorCode") String errorCode,
+                     @Param("signature") String signature,
+                     @Param("updatedAt") java.time.LocalDateTime updatedAt);
 
     /** 物理删除（管理操作：确认误录/废弃经验） */
     @Delete("DELETE FROM lesson WHERE id = #{id}")

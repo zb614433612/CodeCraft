@@ -20,10 +20,10 @@ mvn clean package -DskipTests && mvn spring-boot:run
 
 ```bash
 # Windows
-scripts\build.bat v1.1.7
+scripts\build.bat v1.1.8
 
 # Mac / Linux
-./scripts/build.sh v1.1.7
+./scripts/build.sh v1.1.8
 ```
 
 ---

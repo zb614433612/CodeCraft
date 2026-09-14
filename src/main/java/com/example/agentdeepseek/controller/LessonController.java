@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -42,9 +43,10 @@ public class LessonController {
             @RequestParam(required = false) String toolName,
             @RequestParam(required = false) String errorCode,
             @RequestParam(required = false) String type,
+            @RequestParam(required = false) Boolean zeroHit,
             @RequestParam(required = false, defaultValue = "1") int page,
             @RequestParam(required = false, defaultValue = "10") int size) {
-        return ApiResponse.success(lessonService.pageQuery(projectKey, status, toolName, errorCode, type, page, size));
+        return ApiResponse.success(lessonService.pageQuery(projectKey, status, toolName, errorCode, type, zeroHit, page, size));
     }
 
     /**
@@ -67,6 +69,31 @@ public class LessonController {
     public ApiResponse<Map<String, Object>> getStats(
             @RequestParam(required = false) String projectKey) {
         return ApiResponse.success(lessonService.getStats(projectKey));
+    }
+
+    /**
+     * P2：聚类查询——重复组列表（管理页归并入口）
+     */
+    @GetMapping("/clusters")
+    @Operation(summary = "查询重复经验组（聚类归并）")
+    public ApiResponse<List<Map<String, Object>>> listClusters(
+            @RequestParam(required = false) String projectKey,
+            @RequestParam(required = false, defaultValue = "50") int limit) {
+        return ApiResponse.success(lessonService.listClusters(projectKey, limit));
+    }
+
+    /**
+     * P2：归并执行——把同组多条合并为一条（计数汇聚 + canonical 码 + 新指纹）
+     */
+    @PostMapping("/merge")
+    @Operation(summary = "归并重复经验组")
+    public ApiResponse<String> mergeGroup(@RequestBody Map<String, String> body) {
+        String result = lessonService.mergeGroup(body.get("projectKey"), body.get("toolName"),
+                body.get("errorCategory"), body.get("errorCode"));
+        if (result.startsWith("参数不足") || result.startsWith("无需合并")) {
+            return ApiResponse.error(400, result);
+        }
+        return ApiResponse.success(result, "归并完成");
     }
 
     /**

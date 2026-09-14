@@ -154,6 +154,8 @@ export async function checkActiveTask(conversationId: number): Promise<{
   status?: string
   iteration?: number
   eventCount?: number
+  /** 当前最新事件序号：重连时作为 cursor 传给 taskStream，只接收增量事件 */
+  seq?: number
   pendingQuestionUuid?: string
   pendingQuestionText?: string
 }> {
@@ -168,16 +170,19 @@ export async function checkActiveTask(conversationId: number): Promise<{
 
 /**
  * 订阅后台任务的事件流（用于页面刷新后重连）
- * 返回 SSE 事件流，格式与 streamChat 一致
+ * 返回 SSE 事件流，格式与 streamChat 一致。
+ * @param cursor 已消费的事件序号游标：后端跳过 seq <= cursor 的历史事件只推增量（游标续传），
+ *               历史内容由前端 fetchMessages(force=true) 从数据库兜底，避免历史重放导致重复弹窗/重复追加
  */
 export async function* taskStream(
   conversationId: number,
-  abortController?: AbortController
+  abortController?: AbortController,
+  cursor = 0
 ): AsyncGenerator<StreamChatEvent, void, unknown> {
   const controller = abortController ?? new AbortController()
 
   try {
-    yield* readSseStream(`/api/deepseek/task/${conversationId}/stream`, {
+    yield* readSseStream(`/api/deepseek/task/${conversationId}/stream?cursor=${cursor}`, {
       signal: controller.signal
     })
   } catch (e) {

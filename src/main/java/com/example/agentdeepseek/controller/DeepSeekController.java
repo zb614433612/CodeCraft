@@ -118,7 +118,13 @@ public class DeepSeekController {
         }
 
         pendingQuestionStore.remove(uuid);
-        log.info("用户回答了问题: uuid={}, action={}, answer={}", uuid, action, answer);
+        // 同步清除 agent_task 表的待审批问题（防止重连时 checkActiveTask 返回过期 uuid 重复弹窗；
+        // 此前清表只靠流内 flatMapMany 异步执行，存在授权后切页仍读到脏数据的窗口）
+        Long conversationId = pq.getConversationId();
+        if (conversationId != null) {
+            deepSeekService.clearPendingQuestion(conversationId);
+        }
+        log.info("用户回答了问题: uuid={}, action={}, answer={}, conversationId={}", uuid, action, answer, conversationId);
         return Map.of("success", true);
     }
 
@@ -174,6 +180,8 @@ public class DeepSeekController {
             result.put("status", task.getStatus());
             result.put("iteration", task.getIteration());
             result.put("eventCount", task.getEventCount());
+            // 当前最新事件序号：前端重连时作为 cursor，后端只推 seq > cursor 的增量事件
+            result.put("seq", deepSeekService.getLatestEventSeq(conversationId));
             if (task.getPendingQuestionUuid() != null) {
                 result.put("pendingQuestionUuid", task.getPendingQuestionUuid());
                 result.put("pendingQuestionText", task.getPendingQuestionText());
@@ -185,14 +193,18 @@ public class DeepSeekController {
 
     /**
      * 订阅后台任务的事件流（用于页面刷新后重连）
-     * 返回 SSE 流，与 /chat/stream 格式一致
+     * 返回 SSE 流，与 /chat/stream 格式一致。
+     * cursor 为已消费的事件序号：后端跳过 seq &lt;= cursor 的历史事件只推增量（游标续传），
+     * 历史内容由前端从数据库消息记录兜底。
      */
-    @Operation(summary = "订阅任务事件流", description = "重连到正在执行的后台任务，接收实时事件")
+    @Operation(summary = "订阅任务事件流", description = "重连到正在执行的后台任务，携带 cursor 只接收增量事件")
     @GetMapping(value = "/task/{conversationId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<String>> subscribeTask(@PathVariable Long conversationId) {
-        return deepSeekService.subscribeToTask(conversationId)
+    public Flux<ServerSentEvent<String>> subscribeTask(
+            @PathVariable Long conversationId,
+            @RequestParam(value = "cursor", required = false, defaultValue = "0") long cursor) {
+        return deepSeekService.subscribeToTask(conversationId, cursor)
                 .map(chunk -> ServerSentEvent.builder(chunk).build())
-                .doOnCancel(() -> log.info("任务事件流客户端断开: conversationId={}", conversationId));
+                .doOnCancel(() -> log.info("任务事件流客户端断开: conversationId={}, cursor={}", conversationId, cursor));
     }
 
     /**

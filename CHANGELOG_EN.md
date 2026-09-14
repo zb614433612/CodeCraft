@@ -5,6 +5,53 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [1.1.8] - 2026-09-14
+
+### 🤝 New: Agent-to-Agent Invocation
+
+- **New `agent_invoke` built-in tool (the 22nd)**: Agent A delegates a task to Agent B (an agent_config instance) mid-execution — B works in an independent session as itself (own role/model/work dir/toolset); supports `create_session` / `continue_session` / `poll` / `cancel`
+- **Delegation as authorization**: one approval of `agent_invoke` in manual mode counts as explicit delegation consent; B then runs without further prompts; trust propagates along the call chain (cycle detection + max depth 3); stopping A cascades cancellation to B's delegated task
+- **Transparent & auditable**: B's delegated session appears in its conversation list (name carries the "[A 委托]" prefix); agent_task gains caller provenance; B's real result and tool-trace summary are returned as-is
+- **Integration**: `agent_invoke` added to the MCP exposure whitelist; core agent prompt gains A2A usage rules; new design doc `docs/AGENT_INVOKE_DESIGN.md`
+
+### 🗄️ New: External Database Connections (Data Management)
+
+- **"DB Connections" management page** (SETTING menu): configure external MySQL / PostgreSQL / H2 business databases; passwords stored AES-256-GCM encrypted (reuses P2P CryptoHelper), never echoed via API; test-connection and enable/disable supported
+- **`execute_sql` gains a `connection` parameter**: omitted = CodeCraft system DB (backward compatible); otherwise connects to the named external business DB, and results label the target DB
+- **Backend**: new `db_connection` table, DbConnectionController / Mapper / Entity, service/dbconnection (DbConnectionService / DbConnectionManager / CredentialCipher); pom adds mysql-connector-j & postgresql drivers
+- **Frontend**: new DbConnectionView page and db-connection API
+
+### 🚦 Optimization: LLM Rate Limiting & Retry (P4)
+
+- **Global concurrency limit**: rebuilt around DeepSeek's official concurrency model (v4-pro 500 / v4-flash 2500 per account) as a single global semaphore (QPS token bucket & per-provider buckets removed); queued wait when full, "Provider busy" on timeout
+- **429/5xx exponential backoff retry**: up to 3 attempts (1s → 2s → 4s, capped at 10s); stream-safe — only header-stage errors are retried, no duplicated stream data
+
+### 📚 Optimization: Lesson Retrieval (P1)
+
+- **Error-code alias normalization**: new canonical-aliases mapping (e.g. CMD_ENCODING_MISMATCH → CMD_ENCODING) unifies synonymous codes to avoid same-pit fragmentation
+- **Retrieval improvements**: `lesson` keyword supports space-separated multi-word fuzzy matching; `error_code` accepts raw error text and is auto-normalized
+
+### 🖥️ Optimization: Runtime Log Page
+
+- Supports **select-to-copy** and **log export**
+
+### 🛠️ Fixes & Adjustments
+
+- **Desktop launchers**: start.bat / start.sh now dynamically scan the latest `code-craft-*.jar` in `target` (removes hardcoded JAR-name drift, aligned with main.js logic)
+- **Frontend**: input-box lock fix after switching back to an agent; session-restore and menu-icon (DB connections) adjustments
+- **MCP Server handshake version fix**: `1.1.6` (missed in the 1.1.7 bump) → `1.1.8`
+
+### 🏷️ Version
+
+- Backend: `1.1.7` → `1.1.8`
+- Frontend: `1.1.7` → `1.1.8`
+- Electron: `1.1.7` → `1.1.8`
+- MCP Server handshake version: `1.1.6` → `1.1.8` (fixes the 1.1.7 miss)
+- Build artifact: `code-craft-1.1.7.jar` → `code-craft-1.1.8.jar`
+- Documentation: README(_EN) / BUILD_AND_RUN(_EN) / docs (TOOL_SYSTEM, ARCHITECTURE, MCP_SYSTEM, etc.) synced to v1.1.8
+
+---
+
 ## [1.1.7] - 2026-08-18
 
 ### 🌐 New MiniMax LLM Provider

@@ -11,16 +11,18 @@
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **21 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **22 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
 - 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
-- 🧰 **21-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons — covering the full development workflow
+- 🧰 **22-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
+- 🤝 **Agent-to-Agent Invocation**: Agents can delegate tasks to other agent instances in independent sessions (create/continue); delegation = authorization, max depth 3
 - 🔄 **Auto Error Correction**: Auto-retries on failure, automatically switches alternatives
 - 🎯 **Skill System**: Create reusable skills, learned patterns accumulate confidence
 - 📚 **Growth System (Lesson Knowledge Base)**: Failed tool calls are auto-captured as lessons (per-project, on-demand retrieval); solution hints are injected on recurring errors; a feedback loop promotes/hides experiences automatically
+- 🗄️ **Data Management**: Connect external MySQL / PostgreSQL / H2 databases on the "DB Connections" page; AI queries them via the `execute_sql` connection parameter
 - 🖥️ **Desktop App**: Electron + built-in JRE, zero-installation ready to use
 - 🌐 **P2P Remote Collaboration**: Peer-to-peer encrypted channels for remote agent invocation between devices
 - 💾 **Snapshot System**: Auto-backup before code changes, support multi-granularity rollback
@@ -65,7 +67,7 @@ Default admin account: `admin` / `123456`
 ```
 CodeCraft
 ├── src/main/java/.../              # Java Backend (Spring Boot 3.4)
-│   ├── controller/                 # REST API Controllers (17)
+│   ├── controller/                 # REST API Controllers (21)
 │   ├── service/impl/               # Core Business Logic
 │   │   ├── DeepSeekServiceImpl     # ★ AI Engine Core (187KB)
 │   │   ├── ToolLoopManager         # Tool Call Loop Engine
@@ -73,19 +75,21 @@ CodeCraft
 │   │   └── CompactionService       # Context Compaction
 │   ├── service/llm/                # ★ LLM Client Layer (LLMClient + 6 Provider impls)
 │   ├── service/lesson/             # Growth System (retrieval/record/review/normalizer)
-│   ├── tool/                       # AI Agent Tools (21 tools)
+│   ├── service/agentinvoke/        # Agent-to-Agent Invocation (delegation/trust chain)
+│   ├── service/dbconnection/       # External DB connections (config/AES-GCM/manager)
+│   ├── tool/                       # AI Agent Tools (22 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
 │   │   ├── agent/                  # P2pAgentService, Handlers
 │   │   ├── connection/             # Netty Server/Client, ConnectionPool
 │   │   ├── protocol/               # MessageFrame, MessageType
 │   │   ├── security/               # TlsHelper, CryptoHelper
 │   │   └── signaling/              # QR Code Signaling, Connection String
-│   ├── model/entity/               # Database Entities (23, incl. ProviderConfig/McpServerConfig/Lesson)
-│   ├── mapper/                     # MyBatis Mappers (21)
+│   ├── model/entity/               # Database Entities (24, incl. ProviderConfig/McpServerConfig/Lesson)
+│   ├── mapper/                     # MyBatis Mappers (22)
 │   └── config/                     # Spring Configuration
 ├── frontend/                       # Vue 3 Frontend (TypeScript)
 │   ├── src/
-│   │   ├── views/                  # Page Views (14)
+│   │   ├── views/                  # Page Views (15)
 │   │   │   ├── CodeAssistantView   # ★ Main Chat + Coding Interface
 │   │   │   ├── AgentConfigView     # Agent Configuration Management
 │   │   │   └── ...
@@ -95,7 +99,7 @@ CodeCraft
 │   │   │   ├── FileTree            # File Browser
 │   │   │   ├── GitSidebar          # Git Diff/Commit Sidebar
 │   │   │   └── ...
-│   │   └── api/                    # API Call Modules (21, incl. llm-provider API)
+│   │   └── api/                    # API Call Modules (22, incl. llm-provider API)
 │   └── ...
 ├── electron/                       # Electron Desktop Shell
 ├── docs/                           # Project Documentation
@@ -121,9 +125,10 @@ CodeCraft
 | **File** | `file_writer` | Create, edit, delete files |
 | **Command** | `command` | Execute commands, start/stop/list/logs services |
 | **Network** | `web_search` / `web_fetch` / `http_request` / `check_network` | Web search, page fetch, API calls, connectivity check |
-| **Database** | `execute_sql` | Database query and modification |
+| **Database** | `execute_sql` | Database query and modification (system DB or configured external connection) |
 | **Git** | `git_query` / `git_submit` / `git_branch` | Git status, diff, log, add, commit, push, branch management |
 | **Agent** | `agent` | Sub-agent fork, collect, inspect |
+| **Agent** | `agent_invoke` | Agent-to-agent delegation: invoke/poll/cancel, independent session |
 | **Skill** | `skill` | Skill CRUD and result reporting |
 | **Project** | `project_info` | Maven/npm project structure and dependencies |
 | **Task** | `task_manager` | Task lifecycle management |
@@ -133,6 +138,10 @@ CodeCraft
 | **History** | `query_tool_history` | Query tool call history in current session |
 | **Lesson** | `lesson` | Pitfall experience knowledge base (search/record/complete/feedback/list) |
 | **MCP** | `mcp_server_manager` | Manage MCP servers (create/delete/connect/disconnect/refresh) |
+
+## 🗄️ Data Management (External DB Connections)
+
+Configure external MySQL / PostgreSQL / H2 business databases on the "DB Connections" page (passwords AES-256-GCM encrypted; test-connection supported). AI then targets them via the `execute_sql` `connection` parameter — omit it to use the built-in CodeCraft system DB (backward compatible).
 
 ## 🎯 Skill System
 
@@ -155,6 +164,10 @@ Main Agent (user conversation)
     │         ... (up to 20 concurrent)
     └── batch_collect → Summarize all results
 ```
+
+## 🤝 Agent-to-Agent Invocation
+
+Agents can also **delegate** tasks: Agent A calls another agent instance B (agent_config) through the `agent_invoke` tool — B works in an **independent session** as itself (own role / model / work dir / toolset). Supports `create_session` / `continue_session` / `poll` / `cancel`. **Delegation = authorization**: a single approval covers B's whole run (trust propagates along the chain, cycle detection + depth ≤ 3); stopping A cascades cancellation to B. B's delegated sessions appear in its conversation list (prefixed with "[A 委托]"). See `docs/AGENT_INVOKE_DESIGN.md`.
 
 ## 📝 Tech Stack
 

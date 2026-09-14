@@ -276,11 +276,96 @@ public class LogService {
         return new String(correctOrder, StandardCharsets.UTF_8);
     }
 
+    /**
+     * 导出指定日期的完整日志内容（按文件名顺序拼接该日期的所有归档文件 + 当前活跃文件）
+     *
+     * @param date 日期（yyyy-MM-dd）；为空时取最新可用日期
+     * @return 导出结果（日期、文件名列表、内容、行数、字符数）；无可用文件时为空结果
+     */
+    public ExportResult exportByDate(String date) {
+        Path logDir = getLogDir();
+        if (!Files.isDirectory(logDir)) return ExportResult.empty();
+
+        final String targetDate;
+        if (date != null && !date.isBlank()) {
+            // 严格校验日期格式，防止非法参数
+            if (!date.matches("\\d{4}-\\d{2}-\\d{2}")) return ExportResult.empty();
+            targetDate = date;
+        } else {
+            List<String> dates = getAvailableDates();
+            if (dates.isEmpty()) return ExportResult.empty();
+            targetDate = dates.get(0);
+        }
+
+        // 收集该日期的归档文件（按序号排序）
+        List<Path> logFiles = new ArrayList<>();
+        try (Stream<Path> dirStream = Files.list(logDir)) {
+            dirStream.forEach(p -> {
+                String name = p.getFileName().toString();
+                if (name.matches("app\\." + targetDate + "\\.\\d+\\.log$")) {
+                    logFiles.add(p);
+                }
+            });
+        } catch (IOException e) {
+            log.warn("导出日志时读取目录失败: {}", e.getMessage());
+            return ExportResult.empty();
+        }
+        Collections.sort(logFiles);
+
+        // 追加当前活跃文件 app.log：目标日期为今天，或 app.log 的最后修改日期等于目标日期（应用停更时日志仍留在 app.log 中）
+        Path appLog = logDir.resolve("app.log");
+        if (Files.isRegularFile(appLog)) {
+            boolean include = targetDate.equals(LocalDate.now().format(DATE_FMT));
+            if (!include) {
+                try {
+                    LocalDate mtime = Files.getLastModifiedTime(appLog).toInstant()
+                            .atZone(ZoneId.systemDefault()).toLocalDate();
+                    include = mtime.format(DATE_FMT).equals(targetDate);
+                } catch (IOException ignored) {}
+            }
+            if (include) {
+                logFiles.add(appLog);
+            }
+        }
+
+        if (logFiles.isEmpty()) return ExportResult.empty();
+
+        StringBuilder sb = new StringBuilder();
+        List<String> fileNames = new ArrayList<>();
+        int lineCount = 0;
+        for (Path file : logFiles) {
+            try {
+                String content = Files.readString(file, StandardCharsets.UTF_8);
+                sb.append(content);
+                // 文件末尾无换行时补一个，避免拼接处粘连
+                if (!content.isEmpty() && !content.endsWith("\n")) {
+                    sb.append('\n');
+                    lineCount++;
+                }
+                fileNames.add(file.getFileName().toString());
+                for (int i = 0; i < content.length(); i++) {
+                    if (content.charAt(i) == '\n') lineCount++;
+                }
+            } catch (IOException e) {
+                log.warn("导出日志时读取文件失败: {}", file, e);
+            }
+        }
+
+        return new ExportResult(targetDate, fileNames, sb.toString(), lineCount, sb.length());
+    }
+
     public record LogLine(String date, String fileName, int lineNumber, String content) {}
 
     public record SearchResult(String date, List<LogLine> lines, long total, int page, int size) {
         public static SearchResult empty() {
             return new SearchResult("", List.of(), 0, 1, 20);
+        }
+    }
+
+    /** 导出结果 */
+    public record ExportResult(String date, List<String> fileNames, String content, int lineCount, int charCount) {
+        public static ExportResult empty() {
+            return new ExportResult("", List.of(), "", 0, 0);
         }
     }
 }

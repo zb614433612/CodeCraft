@@ -13,7 +13,7 @@ MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的�
 | 方向 | 含义 | 价值 |
 |------|------|------|
 | **MCP Client** | CodeCraft 作为客户端，连接外部 MCP Server（GitHub、数据库、浏览器自动化等），将外部工具拉取进现有 ToolRegistry | 让 DeepSeek/OpenAI 等模型直接调用海量 MCP 生态工具，无需逐个手写 |
-| **MCP Server** | CodeCraft 作为服务端，把内置 21 个工具（文件/Git/命令/搜索等）暴露为 MCP 服务 | 让 Claude Desktop、Cursor 等 MCP 客户端连接 CodeCraft，复用其工具能力 |
+| **MCP Server** | CodeCraft 作为服务端，把内置 22 个工具（文件/Git/命令/搜索等）暴露为 MCP 服务 | 让 Claude Desktop、Cursor 等 MCP 客户端连接 CodeCraft，复用其工具能力 |
 
 ---
 
@@ -70,7 +70,7 @@ MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的�
 │  │ DeepSeek     │◄────►│  ToolRegistry ◄── ToolInitializer     │  │
 │  │ OpenAI       │      │  ToolExecutor（解析/执行/智能补齐）     │  │
 │  │ Anthropic    │      │  ToolExecutionPipeline（三层权限防护）  │  │
-│  │ Ollama/MiMo  │      │  21 个内置工具（@Component 自动注册）  │  │
+│  │ Ollama/MiMo  │      │  22 个内置工具（@Component 自动注册）  │  │
 │  └──────────────┘      └──────────────┬───────────────────────┘  │
 │                                       │                          │
 │          ┌────────────────────────────┼───────────────────┐      │
@@ -163,7 +163,7 @@ public class McpToolAdapter implements Tool {
 
 ```
 应用启动
-  → ToolInitializer 注册 21 个内置工具
+  → ToolInitializer 注册 22 个内置工具
   → McpClientManager（ApplicationRunner，order 靠后）
       → 读 mcp_server 表 enabled=1
       → for each server:
@@ -233,7 +233,7 @@ mcp/server/
 | 默认状态 | 工具 |
 |---------|------|
 | ✅ 默认暴露（只读） | `file_explorer`(read/glob/grep/tree)、`git_query`、`web_search`、`web_fetch`、`http_request`、`check_network`、`project_info` |
-| 🔒 需显式开启（写/执行） | `file_writer`、`command`、`git_submit`、`git_branch`、`execute_sql`、`agent`、`skill`、`task_manager`、`chat_attachment`、`schedule_task` |
+| 🔒 需显式开启（写/执行） | `file_writer`、`command`、`git_submit`、`git_branch`、`execute_sql`、`agent`、`agent_invoke`、`skill`、`task_manager`、`chat_attachment`、`schedule_task` |
 
 配置项（application.yml 段）：
 ```yaml

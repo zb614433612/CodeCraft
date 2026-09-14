@@ -15,10 +15,14 @@ import org.springframework.util.DigestUtils;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 踩坑经验服务
@@ -38,6 +42,24 @@ public class LessonService {
     private static final int SEARCH_LIMIT = 10;
     /** 最终展示条数 */
     private static final int RESULT_TOP_K = 3;
+    /** P0-2：模糊检索候选上限（多词 OR 命中面更大，多取一些供词命中数精排） */
+    private static final int FUZZY_SEARCH_LIMIT = 20;
+    /** P0-2：模糊检索最大词数（多词 OR 上限，防 SQL 条件膨胀；数据量小无压力） */
+    private static final int MAX_FUZZY_WORDS = 10;
+
+    /** P0-2：中文单字虚词集（2-gram 首/尾字命中即丢弃，过滤跨界噪声词） */
+    private static final Set<Character> CN_STOP_CHARS = Set.of(
+            '我', '你', '他', '她', '它', '们', '的', '了', '着', '是', '在', '和', '与', '及',
+            '把', '被', '请', '让', '就', '都', '也', '还', '又', '吗', '呢', '吧', '啊', '呀',
+            '么', '这', '那', '哪', '谁', '什', '怎', '帮', '并', '或', '而', '且', '以', '之');
+
+    /** P0-2：英文停用词集（ASCII 段整词过滤） */
+    private static final Set<String> EN_STOP_WORDS = Set.of(
+            "the", "a", "an", "and", "or", "for", "with", "that", "this", "these", "those",
+            "is", "are", "was", "were", "be", "been", "to", "of", "in", "on", "at", "by",
+            "it", "its", "as", "not", "no", "do", "does", "did", "can", "could", "should",
+            "would", "please", "help", "need", "want", "make", "let", "get", "use", "using",
+            "from", "into", "than", "then", "when", "where", "which", "what", "how", "why");
 
     private final LessonMapper lessonMapper;
     private final FailureNormalizer normalizer;
@@ -117,7 +139,8 @@ public class LessonService {
         // 保证 hasUsableSolution()/newHasSolution 对「无解法记录」的判定口径统一
         if (solution == null || solution.isBlank()) solution = Lesson.PLACEHOLDER_SOLUTION;
         String category = errorCategory == null || errorCategory.isBlank() ? "OTHER" : errorCategory;
-        String code = errorCode == null || errorCode.isBlank() ? "UNKNOWN" : errorCode;
+        // P1-B：错误码 canonical 化（同义码归一——如 CMD_ENCODING_MISMATCH → CMD_ENCODING；防同坑多码碎片）
+        String code = normalizer.canonicalizeCode(errorCode == null || errorCode.isBlank() ? "UNKNOWN" : errorCode);
         // P1：类型归一化（null/空白 → FAILURE；未知值 → FAILURE 防污染）
         String effType = Lesson.TYPE_DETOUR.equals(type) ? Lesson.TYPE_DETOUR : Lesson.TYPE_FAILURE;
 
@@ -245,10 +268,10 @@ public class LessonService {
     // ============================================================
 
     /**
-     * 三级漏斗检索：
-     * ① 硬过滤（project_key 必填 + tool_name/error_code/type 精确匹配，走复合索引）
-     * ② 参数等值比对（params 同名项 value 必须一致，这是「一个参数差天差地别」的解法）
-     * ③ LIKE 兜底（①+② 无命中时，用关键词模糊搜 symptom/root_cause/solution/keywords/goal）
+     * 三级漏斗检索（P0/P1 增强版）：
+     * ① 硬过滤（project_key 必填 + tool_name/error_code 精确匹配，错误码先归一化+别名对齐）
+     * ② 参数等值比对（候选非空时过滤；宽松策略——不符不淘汰）
+     * ③ 模糊兜底（多词拆解 OR + 大小写不敏感 + 词命中数精排）
      *
      * @param paramsJson 当前场景参数 [{name,value},...]，可为 null
      * @param type       经验类型过滤：Lesson.TYPE_DETOUR / Lesson.TYPE_FAILURE / null=全部（P1）
@@ -256,26 +279,64 @@ public class LessonService {
      */
     public String searchLessons(String projectKey, String toolName, String errorCode,
                                 String keyword, String paramsJson, String type) {
+        return doSearch(projectKey, toolName, errorCode, keyword, paramsJson, type, false).text;
+    }
+
+    /**
+     * P1-D：LLM 主动 search 专用入口——在结果文本之上附带「命中引用」（有解法的 Top 条目），
+     * 供 LessonTool 经 ToolContext 会话通道投递、主循环并入 F3 追踪（检索采用后自动验证）。
+     */
+    public SearchOutcome searchLessonsForTool(String projectKey, String toolName, String errorCode,
+                                              String keyword, String paramsJson, String type) {
+        return doSearch(projectKey, toolName, errorCode, keyword, paramsJson, type, true);
+    }
+
+    /** P1-D：search 结构化结果（文本 + 命中引用） */
+    public static class SearchOutcome {
+        public final String text;
+        public final List<SearchHitTrack> hits;
+
+        public SearchOutcome(String text, List<SearchHitTrack> hits) {
+            this.text = text;
+            this.hits = hits;
+        }
+    }
+
+    private SearchOutcome doSearch(String projectKey, String toolName, String errorCode,
+                                   String keyword, String paramsJson, String type, boolean collectHits) {
         if (projectKey == null || projectKey.isBlank()) projectKey = normalizer.extractProjectKey();
         String tool = (toolName == null || toolName.isBlank()) ? null : toolName;
-        String code = (errorCode == null || errorCode.isBlank()) ? null : errorCode;
+        String rawCode = (errorCode == null || errorCode.isBlank()) ? null : errorCode;
         String kw = (keyword == null || keyword.isBlank()) ? null : keyword;
         // P1：type 归一化（未知值视为不过滤）
         String effType = Lesson.TYPE_DETOUR.equals(type) || Lesson.TYPE_FAILURE.equals(type) ? type : null;
 
+        // P0-1：检索入口 error_code 归一化对齐（LLM 常传原始报错文本/异常类名，与库内归一化短码体系错位）：
+        //  ① 先经归一化管线转换（"command not found" → CMD_NOT_FOUND，与入库端同一体系）
+        //  ② 转换不出稳定短码时禁用精确码维度，原文交给模糊兜底
+        String normalizedCode = rawCode == null ? null : normalizeQueryErrorCode(tool, rawCode);
+        boolean codeUsable = normalizedCode != null && !"UNKNOWN".equalsIgnoreCase(normalizedCode);
+        String exactCode = codeUsable ? normalizedCode : null;
+
         // 第一级：硬过滤
-        // P2 修复：DETOUR 弯路经验的检索维度是 goal/keywords（无错误码维度），
-        // 直接走 LIKE 兜底——避免「按项目+类型全捞」导致无关关键词误命中
-        // （原三级漏斗中第三级 LIKE 只在候选为空时执行，DETOUR 场景候选恒非空，缺口必然触发）
+        // P2 修复：DETOUR 弯路经验的检索维度是 goal/keywords（无错误码维度），直接走模糊检索
+        // P0-3 修复：不再用「整串 LIKE」（自然语言长句与 goal 短句必然失配），改走拆词 OR 匹配
         // M2 修复：DETOUR 检索忽略 tool 维度（DETOUR 记录 tool_name='detour'，
         // 传 tool_name 会被 selectFuzzy 的 AND tool_name 过滤掉导致恒空）
         List<Lesson> candidates;
         if (Lesson.TYPE_DETOUR.equals(effType)) {
             candidates = (kw != null)
-                    ? lessonMapper.selectFuzzy(projectKey, null, escapeLikeKeyword(kw), effType, SEARCH_LIMIT)
+                    ? fuzzySearch(projectKey, null, kw, effType, FUZZY_SEARCH_LIMIT)
                     : List.of();
         } else {
-            candidates = lessonMapper.selectByScope(projectKey, tool, null, code, effType, SEARCH_LIMIT);
+            candidates = exactCode != null
+                    ? lessonMapper.selectByScope(projectKey, tool, null, exactCode, effType, SEARCH_LIMIT)
+                    : List.of();
+            // P0-1②：原文再试一次精确（覆盖「LLM 直接传库内短码——字典不识别短码字面」与大小写差异）
+            if (candidates.isEmpty() && rawCode != null
+                    && (exactCode == null || !rawCode.equals(exactCode))) {
+                candidates = lessonMapper.selectByScope(projectKey, tool, null, rawCode, effType, SEARCH_LIMIT);
+            }
         }
 
         // 第二级：参数等值比对（候选非空时执行；DETOUR 无参数维度，跳过）
@@ -284,19 +345,22 @@ public class LessonService {
             if (!filtered.isEmpty()) {
                 candidates = filtered;
             }
-            // 若参数过滤后为空：说明「同错误码但参数不符」，不算命中，交给第三级兜底
+            // 若参数过滤后为空：保留原候选展示（宽松策略——参数不符不淘汰，交由 LLM 结合「适用条件」判断）
         }
 
-        // 第三级：LIKE 兜底（仅当硬过滤无结果或参数全部不符时；DETOUR 已在第一级走 LIKE）
-        if (candidates.isEmpty() && kw != null && !Lesson.TYPE_DETOUR.equals(effType)) {
-            candidates = lessonMapper.selectFuzzy(projectKey, tool, escapeLikeKeyword(kw), effType, SEARCH_LIMIT);
+        // 第三级：模糊兜底（P0：多词 OR；kw 为空时用原始 error_code 文本兜底，不再直接「未找到」）
+        if (candidates.isEmpty() && !Lesson.TYPE_DETOUR.equals(effType)) {
+            String fuzzyKw = kw != null ? kw : rawCode;
+            if (fuzzyKw != null) {
+                candidates = fuzzySearch(projectKey, tool, fuzzyKw, effType, FUZZY_SEARCH_LIMIT);
+            }
         }
 
         if (candidates.isEmpty()) {
-            return "📭 未找到匹配的踩坑经验。可尝试：\n"
+            return new SearchOutcome("📭 未找到匹配的踩坑经验。可尝试：\n"
                     + "  1. 减少过滤条件（不传 tool_name / error_code，只传 keyword）\n"
                     + "  2. 用更通用的关键词（如错误码、异常类名、报错关键字）\n"
-                    + "  3. 这是新坑的话，可用 lesson action=record 记录，后续遇到就能查到";
+                    + "  3. 这是新坑的话，可用 lesson action=record 记录，后续遇到就能查到", List.of());
         }
 
         // P2：环境兼容排序（同 os/通用经验优先，异环境经验降权）后截取 Top-K
@@ -305,7 +369,19 @@ public class LessonService {
         for (Lesson l : top) {
             lessonMapper.incrementHitCount(l.getId(), LocalDateTime.now());
         }
-        return buildResultText(top);
+        String text = buildResultText(top);
+        if (!collectHits) {
+            return new SearchOutcome(text, List.of());
+        }
+        // P1-D：收集命中引用（仅「有可用解法」条目——与 F3 SOLUTION 追踪语义一致）
+        List<SearchHitTrack> hits = new ArrayList<>();
+        for (Lesson l : top) {
+            if (l.hasUsableSolution()) {
+                hits.add(new SearchHitTrack(l.getId(), crossProjectSignature(l),
+                        nz(l.getSuccessCount()), nz(l.getFailCount())));
+            }
+        }
+        return new SearchOutcome(text, hits);
     }
 
     /**
@@ -395,6 +471,202 @@ public class LessonService {
         return keyword.replace("\\", "\\\\")
                 .replace("%", "\\%")
                 .replace("_", "\\_");
+    }
+
+    // ============================================================
+    // P0 检索增强：入口错误码归一化对齐 + 多词拆解模糊检索
+    // ============================================================
+
+    /**
+     * P0-1：检索入口错误码归一化——LLM 传入的文本（原始报错/异常类名）经归一化管线
+     * （规则表 → 字典 → 正则，与入库端同一体系）转为库内稳定短码。
+     * 返回 "UNKNOWN"/null 表示无法转换（调用方禁用精确码维度，改用模糊兜底）。
+     */
+    private String normalizeQueryErrorCode(String toolName, String rawCode) {
+        // P1-B：先走别名映射（LLM 可能直接传别名形态的码，如 HTTP_404_NOT_FOUND → HTTP_404）
+        String canonical = normalizer.canonicalizeCode(rawCode);
+        if (canonical != null && !canonical.equals(rawCode)) {
+            return canonical;
+        }
+        try {
+            FailureNormalizer.NormalizedFailure nf = normalizer.normalize(
+                    toolName == null ? "" : toolName, null, rawCode);
+            return nf == null ? null : nf.errorCode;
+        } catch (Exception e) {
+            log.debug("检索入口错误码归一化失败，按原文处理: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * P0-2：模糊检索封装——拆词 → 多词 OR 查询 → 按命中词数稳定排序。
+     * 全链路大小写不敏感（SQL LOWER + 此处小写比对）；词内通配符已转义。
+     */
+    private List<Lesson> fuzzySearch(String projectKey, String toolName, String rawText, String type, int limit) {
+        List<String> words = splitFuzzyKeywords(rawText);
+        if (words.isEmpty()) {
+            return List.of();
+        }
+        List<String> escaped = new ArrayList<>(words.size());
+        for (String w : words) {
+            escaped.add(escapeLikeKeyword(w));
+        }
+        List<Lesson> hits = lessonMapper.selectFuzzy(projectKey, toolName, escaped, type, limit);
+        if (hits.size() > 1) {
+            // 稳定排序：命中词数多者优先（同词数保持 SQL 排序：项目内 → 有效 → 命中数）
+            hits.sort(Comparator.comparingInt((Lesson l) -> -countMatchedWords(l, words)));
+        }
+        return hits;
+    }
+
+    /**
+     * P0-2：拆词——空白/标点切段；ASCII 段整词保留（滤英文停用词）；中文段切 2-gram
+     * （首/尾字为虚词的单字过滤，降低跨界噪声）；去重后取前 MAX_FUZZY_WORDS 个。
+     * P2：包级可见静态（供验证类直测）。
+     */
+    static List<String> splitFuzzyKeywords(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        String[] segments = text.split("[\\s\\p{Punct}\\u3000-\\u303F\\uFF00-\\uFFEF]+");
+        Set<String> words = new LinkedHashSet<>();
+        for (String seg : segments) {
+            if (seg.isEmpty()) {
+                continue;
+            }
+            boolean ascii = seg.chars().allMatch(c -> c < 128);
+            if (ascii) {
+                String w = seg.toLowerCase(Locale.ROOT);
+                if (w.length() >= 2 && !EN_STOP_WORDS.contains(w)) {
+                    words.add(w);
+                }
+            } else {
+                // 中文（含混合）段：2-gram 滑窗（长度为 2 的段自然生成自身）
+                for (int i = 0; i + 2 <= seg.length(); i++) {
+                    String bg = seg.substring(i, i + 2);
+                    if (CN_STOP_CHARS.contains(bg.charAt(0)) || CN_STOP_CHARS.contains(bg.charAt(1))) {
+                        continue;
+                    }
+                    words.add(bg);
+                }
+            }
+            if (words.size() >= MAX_FUZZY_WORDS) {
+                break;
+            }
+        }
+        if (words.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>(words);
+        return result.size() > MAX_FUZZY_WORDS ? new ArrayList<>(result.subList(0, MAX_FUZZY_WORDS)) : result;
+    }
+
+    /** P0-2：统计经验文本（五字段）命中的查询词数（小写比对，与 SQL LOWER 语义一致；供相关度排序） */
+    private int countMatchedWords(Lesson lesson, List<String> words) {
+        String text = ((lesson.getSymptom() == null ? "" : lesson.getSymptom()) + "\n"
+                + (lesson.getRootCause() == null ? "" : lesson.getRootCause()) + "\n"
+                + (lesson.getSolution() == null ? "" : lesson.getSolution()) + "\n"
+                + (lesson.getKeywords() == null ? "" : lesson.getKeywords()) + "\n"
+                + (lesson.getGoal() == null ? "" : lesson.getGoal())).toLowerCase(Locale.ROOT);
+        int count = 0;
+        for (String w : words) {
+            if (!w.isEmpty() && text.contains(w.toLowerCase(Locale.ROOT))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // ============================================================
+    // P1-C：入库前浅查重（review 通道降压——相似合并优先于新建）
+    // ============================================================
+
+    /**
+     * P1-C：同坑浅查重——同 project+tool+category+code 已有「项目内」条目时，
+     * 把新提炼内容「补空合并」进既有条目（只补空不覆盖），返回合并目标；
+     * 无既有条目返回 null（调用方走正常新建/签名去重）。
+     * 用于高产的复盘通道：经验库中已有同类坑时不再新建条目，防碎片累积。
+     */
+    public Lesson mergeIntoExisting(String projectKey, String toolName, String category, String code,
+                                    String rootCause, String solution, String paramsJson,
+                                    String applicableCond, String keywords) {
+        if (projectKey == null || projectKey.isBlank()) projectKey = normalizer.extractProjectKey();
+        String pKey = projectKey;
+        List<Lesson> existing = lessonMapper.selectByScope(pKey, toolName, category, code,
+                        Lesson.TYPE_FAILURE, 5).stream()
+                .filter(l -> pKey.equals(l.getProjectKey())) // 只合并项目内条目（不污染全局池）
+                .collect(java.util.stream.Collectors.toList());
+        if (existing.isEmpty()) {
+            return null;
+        }
+        // 选合并目标：有可用解法优先 → 命中高 → id 小（P2：与 mergeGroup 共用 pickMergeTarget）
+        Lesson target = pickMergeTarget(existing);
+        // 只补空（不覆盖既有内容）
+        String newRc = isBlankText(target.getRootCause()) && !isBlankText(rootCause) ? truncate(rootCause, 1024) : null;
+        String newSol = !target.hasUsableSolution() && !isBlankText(solution)
+                && !Lesson.PLACEHOLDER_SOLUTION.equals(solution.trim()) ? truncate(solution, 2048) : null;
+        String newCond = isBlankText(target.getApplicableCond()) && !isBlankText(applicableCond)
+                ? truncate(applicableCond, 512) : null;
+        String newKw = isBlankText(target.getKeywords()) && !isBlankText(keywords) ? truncate(keywords, 512) : null;
+        String normParams = normalizeParamsJson(paramsJson);
+        String newParams = (isBlankText(target.getParamsJson()) || "[]".equals(target.getParamsJson()))
+                && !"[]".equals(normParams) ? normParams : null;
+        if (newRc != null || newSol != null || newCond != null || newKw != null || newParams != null) {
+            lessonMapper.updateContent(target.getId(), newRc, newSol, newParams, newCond, newKw,
+                    null, LocalDateTime.now());
+            log.info("经验入库浅查重合并（补空）: targetId={}, tool={}, code={}", target.getId(), toolName, code);
+            return lessonMapper.selectById(target.getId()).orElse(target);
+        }
+        log.info("经验入库浅查重命中（既有条目已完整，不新建）: targetId={}, tool={}, code={}",
+                target.getId(), toolName, code);
+        return target;
+    }
+
+    /** 空串/null 判定（浅查重补空用） */
+    private boolean isBlankText(String s) {
+        return s == null || s.isBlank();
+    }
+
+    // ============================================================
+    // P1-D：LLM 主动 search 命中追踪（工具线程投递 → 主循环登记 F3）
+    // ============================================================
+
+    /** search 命中追踪引用（工具线程产出，主循环消费并登记 F3 追踪表） */
+    public static class SearchHitTrack {
+        public final Long lessonId;
+        public final String errorSignature;
+        public final int baselineSuccess;
+        public final int baselineFail;
+
+        public SearchHitTrack(Long lessonId, String errorSignature, int baselineSuccess, int baselineFail) {
+            this.lessonId = lessonId;
+            this.errorSignature = errorSignature;
+            this.baselineSuccess = baselineSuccess;
+            this.baselineFail = baselineFail;
+        }
+    }
+
+    /** 待登记队列：conversationId（原始）→ 命中引用列表；工具线程写入，主循环 drain */
+    private final Map<Long, List<SearchHitTrack>> pendingSearchTracks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** P1-D：工具线程投递 search 命中（LessonTool 经 ToolContext 取 conversationId 调用；best-effort，容量超限整体清理防泄漏） */
+    public void registerSearchHits(Long conversationId, List<SearchHitTrack> hits) {
+        if (conversationId == null || hits == null || hits.isEmpty()) {
+            return;
+        }
+        if (pendingSearchTracks.size() > 500) {
+            pendingSearchTracks.clear();
+        }
+        pendingSearchTracks.computeIfAbsent(conversationId, k -> new ArrayList<>()).addAll(hits);
+    }
+
+    /** P1-D：主循环领取并清空（drain）本会话的 search 命中引用 */
+    public List<SearchHitTrack> drainSearchHits(Long conversationId) {
+        if (conversationId == null) {
+            return List.of();
+        }
+        List<SearchHitTrack> hits = pendingSearchTracks.remove(conversationId);
+        return hits == null ? List.of() : hits;
     }
 
     /**
@@ -653,10 +925,10 @@ public class LessonService {
                 candidates = filtered;
             }
         }
-        // ③ LIKE 兜底（M1 修复：用失败现象前 30 字做关键词模糊搜，覆盖错误码归一化不一致）
+        // ③ 模糊兜底（P0-2：失败现象交拆词器处理——多词 OR + 大小写不敏感，
+        //    覆盖「错误码归一化不一致」与「整串 LIKE 失配」两类缺口）
         if (candidates.isEmpty() && symptom != null && !symptom.isBlank()) {
-            String kw = symptom.length() > 30 ? symptom.substring(0, 30) : symptom;
-            List<Lesson> fuzzy = lessonMapper.selectFuzzy(projectKey, tool, escapeLikeKeyword(kw), Lesson.TYPE_FAILURE, SEARCH_LIMIT);
+            List<Lesson> fuzzy = fuzzySearch(projectKey, tool, symptom, Lesson.TYPE_FAILURE, FUZZY_SEARCH_LIMIT);
             if (!fuzzy.isEmpty()) {
                 candidates = fuzzy;
             }
@@ -692,7 +964,8 @@ public class LessonService {
                     nz(solutionHint.getSuccessCount()), nz(solutionHint.getFailCount())));
         }
         if (draftHint != null) {
-            lessonMapper.incrementHitCount(draftHint.getId(), now);
+            // P0-4：草稿补全引导不计 hit_count——hit 语义收窄为「有解法的经验被展示/复用」，
+            // 避免草稿提示灌水导致命中统计失真（原实现此处同样 incrementHitCount）
             hints.add(new LessonHint(draftHint.getId(), buildDraftHintText(draftHint),
                     HINT_TYPE_DRAFT, crossProjectSignature(draftHint),
                     nz(draftHint.getSuccessCount()), nz(draftHint.getFailCount())));
@@ -807,12 +1080,12 @@ public class LessonService {
     // ============================================================
 
     /**
-     * 分页查询（管理页面）：project_key 必填，status/tool_name/error_code/type 可选过滤
+     * 分页查询（管理页面）：project_key 必填，status/tool_name/error_code/type/zeroHit 可选过滤
      *
      * @return Map 含 items（当前页列表）与 total（总条数）
      */
     public Map<String, Object> pageQuery(String projectKey, Integer status, String toolName,
-                                         String errorCode, String type, int page, int size) {
+                                         String errorCode, String type, Boolean zeroHit, int page, int size) {
         // 管理页面：projectKey 留空 = 查询全部项目（管理通道不受项目隔离限制，
         // 避免 LLM 记录经验的项目（根目录名）与页面默认查询不一致导致查不到数据）
         if (projectKey != null && projectKey.isBlank()) projectKey = null;
@@ -823,11 +1096,11 @@ public class LessonService {
         List<Lesson> items = lessonMapper.selectPage(projectKey, status,
                 (toolName == null || toolName.isBlank()) ? null : toolName,
                 (errorCode == null || errorCode.isBlank()) ? null : errorCode,
-                type, offset, safeSize);
+                type, zeroHit, offset, safeSize);
         long total = lessonMapper.countByFilter(projectKey, status,
                 (toolName == null || toolName.isBlank()) ? null : toolName,
                 (errorCode == null || errorCode.isBlank()) ? null : errorCode,
-                type);
+                type, zeroHit);
 
         Map<String, Object> result = new HashMap<>();
         result.put("items", items);
@@ -900,6 +1173,79 @@ public class LessonService {
     public boolean deleteLesson(Long id) {
         if (id == null) return false;
         return lessonMapper.deleteById(id) > 0;
+    }
+
+    // ============================================================
+    // P2：聚类查询 + 归并执行（管理页人工治理入口）
+    // ============================================================
+
+    /**
+     * P2：聚类查询——返回重复组列表（条数 ≥2，排除 DETOUR），供管理页归并入口。
+     */
+    public List<Map<String, Object>> listClusters(String projectKey, int limit) {
+        if (projectKey != null && projectKey.isBlank()) projectKey = null;
+        int capped = Math.max(1, Math.min(limit <= 0 ? 50 : limit, 200));
+        return lessonMapper.selectClusterGroups(projectKey, capped);
+    }
+
+    /**
+     * P2：归并重复组——同 project+tool+category+code 的多条记录合并为一条：
+     * 选主（有解法 → 命中高 → id 小）→ 删除其余（计数汇聚）→ 主记录 canonical 码 + 新指纹重算。
+     * 管理操作（人工触发），与 P1 存量迁移同一套规则。
+     */
+    public String mergeGroup(String projectKey, String toolName, String errorCategory, String errorCode) {
+        if (projectKey == null || projectKey.isBlank()
+                || toolName == null || toolName.isBlank()
+                || errorCategory == null || errorCategory.isBlank()
+                || errorCode == null || errorCode.isBlank()) {
+            return "参数不足：需要 projectKey / toolName / errorCategory / errorCode";
+        }
+        List<Lesson> group = lessonMapper.selectByScope(projectKey, toolName, errorCategory, errorCode,
+                        null, 100).stream()
+                .filter(l -> projectKey.equals(l.getProjectKey()))
+                .collect(java.util.stream.Collectors.toList());
+        if (group.size() < 2) {
+            return "无需合并：组内仅 " + group.size() + " 条";
+        }
+        Lesson main = pickMergeTarget(group);
+        int sumHit = 0, sumSuccess = 0, sumFail = 0;
+        for (Lesson l : group) {
+            sumHit += nz(l.getHitCount());
+            sumSuccess += nz(l.getSuccessCount());
+            sumFail += nz(l.getFailCount());
+        }
+        // 先删非主（避免主记录更新签名时撞唯一索引）
+        int removed = 0;
+        for (Lesson l : group) {
+            if (!l.getId().equals(main.getId())) {
+                removed += lessonMapper.deleteById(l.getId());
+            }
+        }
+        // 主记录：canonical 码 + 新指纹（与代码现行规则一致）+ 计数汇聚
+        String canonCode = normalizer.canonicalizeCode(errorCode);
+        FailureNormalizer.NormalizedFailure nf = new FailureNormalizer.NormalizedFailure();
+        nf.toolName = toolName;
+        nf.errorCategory = errorCategory;
+        nf.errorCode = canonCode;
+        nf.paramsJson = main.getParamsJson();
+        String newSig = normalizer.fingerprint(projectKey, nf);
+        lessonMapper.updateMerged(main.getId(), sumHit, sumSuccess, sumFail, canonCode, newSig, LocalDateTime.now());
+        log.info("经验归并完成: project={}, tool={}, code={} → 保留 id={}, 合并 {} 条, hit {}→{}",
+                projectKey, toolName, canonCode, main.getId(), removed, nz(main.getHitCount()), sumHit);
+        return "已归并 " + group.size() + " 条 → 保留 ID:" + main.getId()
+                + "（删除 " + removed + " 条，命中汇聚为 " + sumHit + "）";
+    }
+
+    /**
+     * P2：归并选主——有可用解法优先 → 命中高 → id 小。
+     * 包级可见静态方法：mergeIntoExisting / mergeGroup 共用，且供验证类直测（⑫）。
+     */
+    static Lesson pickMergeTarget(List<Lesson> group) {
+        return group.stream()
+                .min(Comparator.comparingInt((Lesson l) -> (l.hasUsableSolution() ? -1_000_000 : 0))
+                        .thenComparingInt(l -> -(l.getHitCount() == null ? 0 : l.getHitCount()))
+                        .thenComparingLong(Lesson::getId))
+                .orElse(group.get(0));
     }
 
     /** 查询单条经验详情 */

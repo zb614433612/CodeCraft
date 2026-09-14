@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.1.7 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 187KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---

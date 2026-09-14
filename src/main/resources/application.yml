@@ -208,6 +208,7 @@ deepseek:
       - "schedule_task"
       - "mcp_server_manager"
       - "lesson"
+      - "agent_invoke"
 
 # ==================== 成长体系（Lesson）配置 ====================
 lesson:
@@ -272,6 +273,13 @@ lesson:
         pattern: "ClassNotFoundException"
         code: ClassNotFoundException
         category: DEPENDENCY
+    # P1：错误码别名映射——同义码归一化（写入/检索统一 canonical 形态，防同坑多码碎片）
+    canonical-aliases:
+      CMD_ENCODING_MISMATCH: CMD_ENCODING
+      CMD_WORKDIR_OUT_OF_SCOPE: CMD_CWD_OUT_OF_PROJECT
+      FILE_PATH_NOT_FOUND: FILE_NOT_FOUND
+      HTTP_404_NOT_FOUND: HTTP_404
+      BadSqlGrammarException: SQL_BAD_GRAMMAR
   # P0 归一化管线配置（LLM 语义归一化兜底）
   normalize:
     enabled: true              # 归一化管线总开关
@@ -348,3 +356,17 @@ codecraft:
       # 工具白名单：空=默认只读工具集；"*"=暴露全部工具（危险，谨慎使用）
       # 默认只读集：file_explorer / git_query / web_search / web_fetch / check_network / project_info
       exposed-tools: []
+
+# ==================== P4：LLM 限流与重试配置（多 Agent 并行任务的限流健壮性） ====================
+llm:
+  # 429/5xx 指数退避重试（流式安全：仅响应头阶段错误重试，不会重复流式数据）
+  retry:
+    max-attempts: 3            # 最多尝试次数（含首次请求，即最多重试 2 次）
+    base-delay-ms: 1000        # 重试基础延迟（毫秒，指数退避起点 1s → 2s → 4s...）
+    max-delay-ms: 10000        # 重试最大延迟（毫秒，退避封顶）
+  # 全局并发限流（DeepSeek 官方仅按并发限制，不按 QPS：v4-pro 500 / v4-flash 2500，账号粒度）
+  # 已移除 QPS 令牌桶与 per-provider 分桶隔离——所有 Provider 共享一个全局并发信号量兜底
+  rate-limit:
+    enabled: true              # 是否启用限流（false=全部放行，压测/排查用）
+    max-concurrency: 500       # 全局最大并发在飞请求数（官方 pro 档 500，flash 档 2500，可按需调大）
+    max-wait-ms: 5000          # 并发占满时的等待超时（毫秒），超时报「Provider 繁忙」且不再重试

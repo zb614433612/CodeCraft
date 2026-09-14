@@ -15,6 +15,7 @@ import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
 import com.example.agentdeepseek.model.entity.Skill;
 
+import com.example.agentdeepseek.service.agentinvoke.AgentInvokeService;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import com.example.agentdeepseek.service.SupplementStore;
@@ -39,6 +40,8 @@ import com.example.agentdeepseek.tool.permission.PathSecurityChecker;
 import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
 import com.example.agentdeepseek.util.OperationDetailGenerator;
 import com.example.agentdeepseek.util.PromptUtil;
+import com.example.agentdeepseek.util.TaskContext;
+import com.example.agentdeepseek.util.TaskContextRegistry;
 import com.example.agentdeepseek.util.ToolContext;
 import com.example.agentdeepseek.model.SubAgentResult;
 import com.fasterxml.jackson.core.JsonParser;
@@ -50,6 +53,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -118,6 +122,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final LLMClientManager llmClientManager;
     private final LessonService lessonService;
     private final FailureNormalizer failureNormalizer;
+    /** Phase 19 智能体互调（@Lazy 打破循环：AgentInvokeServiceImpl → DeepSeekService → 本类 → AgentInvokeService） */
+    private final AgentInvokeService agentInvokeService;
 
     /** 踩坑经验注入去重表：key=conversationId:lessonId:type, value=注入时间戳（毫秒） */
     private final java.util.concurrent.ConcurrentHashMap<String, Long> lessonHintInjected =
@@ -164,6 +170,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     @Autowired
     private AgentConfigMapper agentConfigMapper;
 
+    // 📝 Phase 18：任务上下文注册表（取消时精确置位 cancelFlag）
+    @Autowired
+    private TaskContextRegistry taskContextRegistry;
+
     // 📝 成长体系 C2：对话级复盘（工具循环结束后异步提炼踩坑经验，友好提示不抛异常也能捕获）
     @Autowired
     private LessonReviewService lessonReviewService;
@@ -182,6 +192,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private static final double DEFAULT_TEMPERATURE = 0.3;
     private static final int SESSION_NAME_TRUNCATE_LENGTH = 6;
     private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
+    /** P4：授权等待超时分钟数（超时后跳过该受限操作并向前端发送提示事件，任务继续执行） */
+    private static final int AUTH_WAIT_TIMEOUT_MINUTES = 5;
 
     /**
      * 事件重放缓冲上限：SSE 断线重连时最多能重放的历史事件数。
@@ -238,8 +250,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                    SupplementStore supplementStore,
                                    AttachmentStore attachmentStore,
                                    LLMClientManager llmClientManager,
-                                   LessonService lessonService,
-                                   FailureNormalizer failureNormalizer) {
+                                    LessonService lessonService,
+                                    FailureNormalizer failureNormalizer,
+                                    @Lazy AgentInvokeService agentInvokeService) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -265,6 +278,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.llmClientManager = llmClientManager;
         this.lessonService = lessonService;
         this.failureNormalizer = failureNormalizer;
+        this.agentInvokeService = agentInvokeService;
     }
 
     // ===== 拆分出的组件 =====
@@ -372,6 +386,87 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 log.debug("添加agent_task.pending_question_text列成功");
             } catch (Exception e) {
                 log.debug("添加agent_task.pending_question_text列失败，可能已经存在: {}", e.getMessage());
+            }
+            // ===== Phase 18：多 Agent 并行任务——agent_task 扩展列（任务实体化） =====
+            // conversation_id 改为可空：调度器派发的独立任务可以没有关联会话（执行时自动创建）
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task MODIFY conversation_id BIGINT NULL");
+                log.debug("修改agent_task.conversation_id为可空成功");
+            } catch (Exception e) {
+                log.debug("修改agent_task.conversation_id为可空失败，可能已可空: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS agent_config_id BIGINT");
+                log.debug("添加agent_task.agent_config_id列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.agent_config_id列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS task_no VARCHAR(32)");
+                log.debug("添加agent_task.task_no列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.task_no列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS input TEXT");
+                log.debug("添加agent_task.input列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.input列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS result TEXT");
+                log.debug("添加agent_task.result列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.result列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS progress INT DEFAULT 0");
+                log.debug("添加agent_task.progress列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.progress列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS work_dir VARCHAR(500)");
+                log.debug("添加agent_task.work_dir列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.work_dir列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS priority INT DEFAULT 5");
+                log.debug("添加agent_task.priority列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.priority列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0");
+                log.debug("添加agent_task.retry_count列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.retry_count列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS max_retry INT DEFAULT 2");
+                log.debug("添加agent_task.max_retry列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.max_retry列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS started_at DATETIME");
+                log.debug("添加agent_task.started_at列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.started_at列失败，可能已经存在: {}", e.getMessage());
+            }
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS finished_at DATETIME");
+                log.debug("添加agent_task.finished_at列成功");
+            } catch (Exception e) {
+                log.debug("添加agent_task.finished_at列失败，可能已经存在: {}", e.getMessage());
+            }
+            // 按智能体+状态查询索引（任务队列调度/列表查询）
+            try {
+                jdbcTemplate.execute("CREATE INDEX idx_agent_task_agent_status ON agent_task(agent_config_id, status)");
+                log.debug("创建agent_task.agent_config_id+status索引成功");
+            } catch (Exception e) {
+                log.debug("创建agent_task.agent_config_id+status索引失败，可能已经存在: {}", e.getMessage());
             }
 
             // ===== Agent系统：兼容旧数据库，添加新列 =====
@@ -1001,10 +1096,47 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @return 流式响应Flux
      */
     public Flux<String> streamChat(ChatRequest request) {
+        return doStreamChat(request, null, null, null);
+    }
+
+    /**
+     * 内部委托执行（Phase 19 智能体互调专用）：以指定 Agent 配置执行/续跑任务，
+     * 信任链校验已由 AgentInvokeService 完成；信任上下文仅存于本次 JVM 调用链，
+     * HTTP 入口不可达（Controller 只暴露 streamChat），外部无法伪造免授权调用。
+     *
+     * @param request            聊天请求（sessionId/agentConfigId 等与 streamChat 一致）
+     * @param callerAgentConfigId 调用方智能体（A）配置 ID，非 null 即视为内部委托
+     * @param callerConversationId 调用方（A）会话 ID（审计/溯源用，可空）
+     * @param trustChain         信任链（途经 agentConfigId），供审计与环检测
+     */
+    @Override
+    public Flux<String> streamChatInternal(ChatRequest request, Long callerAgentConfigId,
+                                           Long callerConversationId, List<Long> trustChain) {
+        return doStreamChat(request, callerAgentConfigId, callerConversationId, trustChain);
+    }
+
+    /**
+     * 流式聊天核心实现
+     */
+    private Flux<String> doStreamChat(ChatRequest request, Long callerAgentConfigId,
+                                      Long callerConversationId, List<Long> trustChain) {
         ConversationContext context = prepareConversationContext(request, true);
         Long conversationId = context.conversationId();
         Long storageConversationId = context.storageConversationId();
         Map<String, Object> apiRequest = context.apiRequest();
+
+        // Phase 19：内部委托信任上下文（仅本私有方法经 streamChatInternal 注入，streamChat 恒为 null）
+        if (callerAgentConfigId != null) {
+            apiRequest.put("_internalTrust", Boolean.TRUE);
+            apiRequest.put("_callerAgentConfigId", callerAgentConfigId);
+            if (callerConversationId != null) {
+                apiRequest.put("_callerConversationId", callerConversationId);
+            }
+            apiRequest.put("_trustChain", trustChain != null ? trustChain : List.of());
+            log.info("内部委托执行（智能体互调）: callerAgentConfigId={}, callerConversationId={}, "
+                            + "targetConversationId={}, trustChain={}",
+                    callerAgentConfigId, callerConversationId, conversationId, trustChain);
+        }
 
         // 检查是否有工具定义，使用提示词中指定的工具组
         JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(context.toolNames());
@@ -1021,7 +1153,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         if (hasTools) {
-            // 取消同一会话中正在运行的后台任务
+            // 取消同一会话中正在运行的后台任务（避免同一会话并发多个工具循环互相干扰）
             cancelRunningTask(conversationId);
             // 在后台启动工具循环（断开不销毁），返回事件流
             return Flux.concat(skillEventFlux, sessionEvent, startBackgroundTask(conversationId, storageConversationId, apiRequest));
@@ -1092,7 +1224,54 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     private void cancelRunningTask(Long conversationId) {
         supplementStore.clear(conversationId);
+        // Phase 18：置位 cancelFlag 并注销上下文（工具循环每轮迭代检查，实现真正中断；dispose 不触发 complete，需同步注销防泄漏）
+        taskContextRegistry.cancelAndUnregisterByConversationId(conversationId);
+        // Phase 18：级联取消该会话的所有子 Agent（防止幽灵运行挤占共享线程池）
+        if (agentForkManager != null) {
+            try {
+                int cancelled = agentForkManager.cancelByConversation(conversationId);
+                if (cancelled > 0) {
+                    log.info("级联取消子Agent: conversationId={}, count={}", conversationId, cancelled);
+                }
+            } catch (Exception e) {
+                log.warn("级联取消子Agent异常: conversationId={}, error={}", conversationId, e.getMessage());
+            }
+        }
         toolLoopManager.cancelRunningTask(conversationId, taskSubscriptions, judgeGrantedIterations);
+        // Phase 19 智能体互调：级联取消该会话委托给其他智能体的任务（B 会话级取消，防孤儿委托）
+        if (agentInvokeService != null) {
+            try {
+                int cancelled = agentInvokeService.cancelByCallerConversation(conversationId);
+                if (cancelled > 0) {
+                    log.info("级联取消智能体互调委托任务: callerConversationId={}, count={}", conversationId, cancelled);
+                }
+            } catch (Exception e) {
+                log.warn("级联取消智能体互调委托任务异常: conversationId={}, error={}", conversationId, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 注册任务上下文：供取消时精确置位 cancelFlag，任务结束注销
+     *
+     * @return 本次创建的 TaskContext（null=创建失败）；同时将「是否真正入注册表」写入
+     *         apiRequest._ctxRegistered（M1 修复：取消检查点必须区分「已注册但被注销（=已取消）」
+     *         与「从未注册成功（=继续执行）」，否则注册失败的任务会被检查点误判为已取消而终止）。
+     *         使用 registerIfAbsent（putIfAbsent 语义）：同一 taskId 并发注册时，后注册者不会覆盖先注册者的 ctx。
+     */
+    private TaskContext registerTaskContext(Long taskId, Map<String, Object> apiRequest, Long conversationId) {
+        try {
+            Long agentConfigId = (Long) apiRequest.get("_agentConfigId");
+            String workDir = (String) apiRequest.get("_projectRoot");
+            TaskContext taskContext = new TaskContext(taskId, agentConfigId, conversationId, workDir);
+            boolean registered = taskContextRegistry.registerIfAbsent(taskContext);
+            apiRequest.put("_ctxRegistered", registered);
+            return taskContext;
+        } catch (Exception e) {
+            log.warn("注册任务上下文失败: taskId={}, error={}", taskId, e.getMessage());
+            apiRequest.put("_ctxRegistered", false);
+            return null;
+        }
     }
 
     /**
@@ -1103,7 +1282,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 从 apiRequest 提取当前会话的 providerCode（供子Agent/评委/压缩等辅助调用跟随）
         LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
         final String providerCode = ctxClient != null ? ctxClient.getProviderCode() : null;
-        // 创建任务记录
+        // 创建任务记录（聊天链路新建 running 记录；任务中心调度器已移除，无预建 PENDING 记录复用路径）
         AgentTask task = new AgentTask(conversationId, MAX_TOOL_CALL_ITERATIONS);
         try {
             jdbcTemplate.update("INSERT INTO agent_task (conversation_id, status, iteration, max_iterations, event_count, created_at, updated_at) VALUES (?, 'running', 0, ?, 0, NOW(), NOW())",
@@ -1113,9 +1292,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         } catch (Exception e) {
             log.warn("创建任务记录失败: {}", e.getMessage());
         }
+        // 注册任务上下文（供取消时精确置位 cancelFlag，任务结束注销）
+        // M1 修复：记录是否注册成功（新建路径 INSERT 失败时 task.getId()==null 不会注册，
+        // 此时 _ctxRegistered=false → 取消检查点不误判「已取消」）
+        if (task.getId() != null) {
+            registerTaskContext(task.getId(), apiRequest, conversationId);
+        } else {
+            apiRequest.put("_ctxRegistered", false);
+        }
 
-        // 创建事件 Sink（replay 模式，新订阅者可获取历史事件，确保页面刷新重连后不丢事件）
-        Sinks.Many<String> sink = Sinks.unsafe().many().replay().limit(MAX_EVENT_REPLAY_BUFFER);
+        // 创建事件 Sink（replay 模式 + seq 信封；重连时按 cursor 跳过历史只推增量，历史内容由 DB 兜底）
+        Sinks.Many<TaskEventEnvelope> sink = Sinks.unsafe().many().replay().limit(MAX_EVENT_REPLAY_BUFFER);
         agentEventBus.register(conversationId, sink);
 
         // 在后台线程订阅工具循环 Flux
@@ -1123,7 +1310,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         Disposable sub = executeSemiStreamingToolCycle(conversationId, storageConversationId, apiRequest)
                 .subscribe(
                         event -> {
-                            Sinks.EmitResult result = sink.tryEmitNext(event);
+                            Sinks.EmitResult result = agentEventBus.emit(conversationId, event);
                             if (result != Sinks.EmitResult.OK) {
                                 log.trace("事件发送结果: {} (SSE 断开时正常)", result);
                             }
@@ -1140,12 +1327,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             sink.tryEmitError(error);
                             if (task.getId() != null) {
                                 try {
-                                    jdbcTemplate.update("UPDATE agent_task SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?",
+                                    // H4 补漏：error 回调同样仅 running 可转 failed——取消竞态下循环抛异常
+                                    // （如取消检查点主动中断）不得覆盖已置位的 cancelled 状态
+                                    jdbcTemplate.update("UPDATE agent_task SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ? AND status = 'running'",
                                             error.getMessage() != null ? error.getMessage().substring(0, Math.min(500, error.getMessage().length())) : "未知错误", task.getId());
                                 } catch (Exception ignored) {}
                             }
                             agentEventBus.unregister(conversationId);
                             taskSubscriptions.remove(conversationId);
+                            if (task.getId() != null) {
+                                taskContextRegistry.unregister(task.getId());
+                            }
                         },
                         () -> {
                             log.info("后台任务完成: conversationId={}", conversationId);
@@ -1155,23 +1347,23 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 if (agentForkManager != null && agentForkManager.getPendingAgentCount(conversationId) > 0) {
                                     int pendingCount = agentForkManager.getPendingAgentCount(conversationId);
                                     log.info("主Agent任务完成，自动收集 {} 个子Agent结果", pendingCount);
-                                    sink.tryEmitNext("\n═══════════════════════════════════════\n");
-                                    sink.tryEmitNext("📋 主Agent已完成，正在等待 " + pendingCount + " 个子Agent结果...\n");
+                                    agentEventBus.emit(conversationId, "\n═══════════════════════════════════════\n");
+                                    agentEventBus.emit(conversationId, "📋 主Agent已完成，正在等待 " + pendingCount + " 个子Agent结果...\n");
                                     List<SubAgentResult> subResults = agentForkManager.collectPendingAgents(conversationId, 300);
                                     int completedCount = 0;
                                     int timeoutCount = 0;
                                     for (SubAgentResult subResult : subResults) {
-                                        sink.tryEmitNext("\n─────────────────────────────────────\n");
-                                        sink.tryEmitNext(subResult.toResultString());
+                                        agentEventBus.emit(conversationId, "\n─────────────────────────────────────\n");
+                                        agentEventBus.emit(conversationId, subResult.toResultString());
                                         if ("TIMEOUT".equals(subResult.getStatus())) {
                                             timeoutCount++;
                                         } else {
                                             completedCount++;
                                         }
                                     }
-                                    sink.tryEmitNext("\n═══════════════════════════════════════\n");
+                                    agentEventBus.emit(conversationId, "\n═══════════════════════════════════════\n");
                                     if (timeoutCount > 0) {
-                                        sink.tryEmitNext("⚠️ 注意: " + timeoutCount + " 个子Agent超时未完成，" + completedCount + " 个正常完成\n");
+                                        agentEventBus.emit(conversationId, "⚠️ 注意: " + timeoutCount + " 个子Agent超时未完成，" + completedCount + " 个正常完成\n");
                                         log.warn("子Agent结果收集完成，共 {} 个（{} 个超时）", subResults.size(), timeoutCount);
                                     } else {
                                         log.info("子Agent结果收集完成，共 {} 个", subResults.size());
@@ -1179,28 +1371,34 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 }
                             } catch (Exception e) {
                                 log.warn("自动收集子Agent结果异常: {}", e.getMessage());
-                                sink.tryEmitNext("\n⚠️ 自动收集子Agent结果异常: " + e.getMessage() + "\n");
+                                agentEventBus.emit(conversationId, "\n⚠️ 自动收集子Agent结果异常: " + e.getMessage() + "\n");
                             }
 
                             // emit [DONE] so frontend gets complete event with sessionId
-                            sink.tryEmitNext("[DONE]");
+                            agentEventBus.emit(conversationId, "[DONE]");
                             sink.tryEmitComplete();
                             if (task.getId() != null) {
                                 try {
                                     int finalCount = eventCounter.get();
-                                    jdbcTemplate.update("UPDATE agent_task SET event_count = ?, status = 'completed', updated_at = NOW() WHERE id = ?", finalCount, task.getId());
+                                    // H4 修复：仅 running 可转 completed——取消竞态下（循环检测到取消标志后
+                                    // 按正常完成退出走此回调），不得覆盖已置位的 cancelled 状态
+                                    jdbcTemplate.update("UPDATE agent_task SET event_count = ?, status = 'completed', updated_at = NOW() WHERE id = ? AND status = 'running'", finalCount, task.getId());
                                 } catch (Exception ignored) {}
                             }
                             // 后台异步预压缩：提前压缩最早的历史，降低下次请求延迟
                             compactionService.asyncPrecompress(conversationId, providerCode);
                             agentEventBus.unregister(conversationId);
                             taskSubscriptions.remove(conversationId);
+                            if (task.getId() != null) {
+                                taskContextRegistry.unregister(task.getId());
+                            }
                         }
                 );
         taskSubscriptions.put(conversationId, sub);
 
-        // 返回 Sink 的 Flux（SSE 客户端订阅此 Flux）
+        // 返回 Sink 的 Flux（SSE 客户端订阅此 Flux；首次连接订阅全量，重连走 subscribeToTask 按 cursor 只推增量）
         return sink.asFlux()
+                .map(TaskEventEnvelope::getPayload)
                 .doOnCancel(() -> log.info("SSE 客户端断开，任务 {} 在后台继续执行", conversationId))
                 .doOnError(e -> log.error("SSE 错误: {}", e.getMessage()));
     }
@@ -1233,13 +1431,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
-     * 订阅活跃任务的事件流（用于重连）
+     * 订阅活跃任务的事件流（用于重连，游标续传：跳过 seq <= cursor 的历史事件，只推增量）
      */
-    public Flux<String> subscribeToTask(Long conversationId) {
-        Sinks.Many<String> sink = agentEventBus.getSink(conversationId);
+    public Flux<String> subscribeToTask(Long conversationId, long cursor) {
+        Sinks.Many<TaskEventEnvelope> sink = agentEventBus.getSink(conversationId);
         if (sink != null) {
+            // 游标续传：历史事件（seq <= cursor）一律跳过，只推增量事件；
+            // 历史内容由前端 fetchMessages(force=true) 从数据库兜底，根治重放导致的重复弹窗/重复追加
             return sink.asFlux()
-                    .doOnCancel(() -> log.info("重连客户端断开"));
+                    .skipWhile(env -> env.getSeq() <= cursor)
+                    .map(TaskEventEnvelope::getPayload)
+                    .doOnCancel(() -> log.info("重连客户端断开: conversationId={}, cursor={}", conversationId, cursor));
         }
         // 任务在运行但 Sink 已不存在（如服务重启），返回状态事件
         AgentTask task = getActiveTask(conversationId);
@@ -1247,6 +1449,23 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             return Flux.just("{\"event\":\"task_status\",\"status\":\"running\",\"taskId\":" + task.getId() + "}");
         }
         return Flux.empty();
+    }
+
+    /**
+     * 获取会话最新事件序号（重连游标：前端携带此值，后端跳过 seq &lt;= cursor 的历史事件）
+     */
+    public long getLatestEventSeq(Long conversationId) {
+        return agentEventBus.getLatestSeq(conversationId);
+    }
+
+    /**
+     * 清除会话的待审批问题记录（answer 接口授权成功后同步调用，
+     * 防止 agent_task 表残留过期 uuid 导致重连时 checkActiveTask 重复弹窗）
+     */
+    public void clearPendingQuestion(Long conversationId) {
+        if (conversationId != null) {
+            updatePendingQuestion(conversationId, null, null);
+        }
     }
 
     @Override
@@ -1440,6 +1659,23 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         //   - 同步检查会在这个窗口之前执行 → 队列为空 → 补充消息丢失
         //   - 延迟到订阅时检查 → 补充消息有最大时间窗口入队
         return Flux.defer(() -> {
+            // ===== 取消检查点（多 Agent 并行任务）=====
+            // 取消任务时置位 cancelFlag，这里每轮迭代检查，实现"主动停止"而非"等订阅结束"
+            // ★ 取消路径会立即注销上下文（cancelAndUnregisterByConversationId），因此：
+            //   会话上下文集合为空也视为已取消（普通聊天取消后上下文已注销）
+            // ★ M1 修复：仅当「注册成功过」（_ctxRegistered=true）才按上述逻辑判取消——
+            //   注册失败（INSERT/register 异常，仅 log 不阻断）的任务 registry 里查不到 ctx，
+            //   若直接判「已取消」会误杀整个工具执行（上轮 M5 回归）；从未注册 = 无法取消但应继续执行
+            boolean ctxRegistered = Boolean.TRUE.equals(initialApiRequest.get("_ctxRegistered"));
+            java.util.Set<TaskContext> sessionCtxs = ctxRegistered
+                    ? taskContextRegistry.getByConversationId(conversationId)
+                    : java.util.Set.of();
+            boolean cancelled = ctxRegistered && (sessionCtxs.isEmpty() || sessionCtxs.stream().anyMatch(TaskContext::isCancelled));
+            if (cancelled) {
+                log.info("任务已取消，终止工具循环: conversationId={}", conversationId);
+                return Flux.just(createReasoningSSEEvent("【任务已取消】"));
+            }
+
             // ===== 检查补充需求队列（用户中途补充的需求） =====
             List<String> supplements = new ArrayList<>();
             String supplement;
@@ -1902,8 +2138,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             if (userText == null) {
                 return;
             }
-            // 关键词截断（任务描述通常较长，取前 80 字足够命中目标维度）
-            String keyword = userText.length() > 80 ? userText.substring(0, 80) : userText;
+            // P0-3：不再用「前 80 字整段 LIKE」（自然语言长句与 goal 短句互为子串概率≈0 → 必然失配），
+            // 整段交给检索端拆词器（中文 2-gram + ASCII 分词，多词 OR 匹配 goal/keywords）
+            String keyword = userText.length() > 300 ? userText.substring(0, 300) : userText;
             String projectKey = failureNormalizer.extractProjectKey(projectRoot);
             String result = lessonService.searchLessons(projectKey, null, null, keyword, null, Lesson.TYPE_DETOUR);
             if (result == null || !result.startsWith("📚")) {
@@ -1970,6 +2207,42 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             } catch (Exception e) {
                 log.warn("F3 清算单条失败（不影响其余）: lessonId={}, err={}", entry.lessonId, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * P0-4：中断出口清理（只清理不判账）——会话异常/中断时移除该会话的注入追踪，
+     * 不自动判有效（避免「未完成即判有效」的假阳性），也不留残留到 TTL 兜底前
+     * 被后续失败误判为「再犯」（防误伤）。
+     */
+    private void clearLessonTracking(Long storageConversationId) {
+        if (storageConversationId != null) {
+            lessonTrackTable.remove(storageConversationId);
+        }
+    }
+
+    /**
+     * P1-D：把本会话「LLM 主动 search 命中」并入 F3 追踪表（工具线程经会话队列投递；
+     * 已追踪过的条目保留原有基线，不覆盖）。登记后由既有「再犯检查/结束清算」自动验证。
+     */
+    private void drainSearchHitsToTrack(Long conversationId, Long storageConversationId) {
+        if (conversationId == null || storageConversationId == null || lessonService == null) {
+            return;
+        }
+        List<LessonService.SearchHitTrack> hits = lessonService.drainSearchHits(conversationId);
+        if (hits.isEmpty()) {
+            return;
+        }
+        java.util.concurrent.ConcurrentHashMap<Long, LessonTrackEntry> sessionTracks =
+                lessonTrackTable.computeIfAbsent(storageConversationId,
+                        k -> new java.util.concurrent.ConcurrentHashMap<>());
+        for (LessonService.SearchHitTrack h : hits) {
+            if (h.lessonId == null || h.errorSignature == null || h.errorSignature.isBlank()) {
+                continue;
+            }
+            sessionTracks.putIfAbsent(h.lessonId,
+                    new LessonTrackEntry(h.lessonId, h.errorSignature, h.baselineSuccess, h.baselineFail));
+            log.info("search 命中并入 F3 追踪: conversationId={}, lessonId={}", storageConversationId, h.lessonId);
         }
     }
 
@@ -2477,6 +2750,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         log.debug("会话 {} 已获本轮对话全部同意，跳过权限审批", conversationId);
                                     }
 
+                                    // Phase 19 智能体互调：内部委托调用（_internalTrust，信任链已由
+                                    // AgentInvokeService 校验：环/深度/B enabled）→ 跳过审批弹窗，
+                                    // 按「委托即授权」语义放行 B 工具集内全部操作（下方异步执行路径会 setApproved）
+                                    if (Boolean.TRUE.equals(apiRequest.get("_internalTrust"))) {
+                                        needsApproval = false;
+                                        log.debug("内部委托调用（智能体互调）跳过权限审批: conversationId={}", conversationId);
+                                    }
+
                                     if (needsApproval) {
                                         // 构建授权审批事件流
                                         List<String> approvalEvents = new ArrayList<>();
@@ -2527,7 +2808,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         String question = prefix + summarySb.toString()
                                                 + "需要您的批准，回复「批准」继续或输入其他内容拒绝";
                                         com.example.agentdeepseek.model.dto.PendingQuestion pq =
-                                                new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
+                                                new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question, conversationId);
                                         pendingQuestionStore.put(uuid, pq);
                                         // 持久化待审批问题到任务记录（支持页面刷新后重连展示）
                                         updatePendingQuestion(conversationId, uuid, question);
@@ -2539,10 +2820,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                         // ★ timeout 只限制"等待用户授权"阶段：
                                                         // 放在 flatMapMany 之前，避免把同步工具执行（command 可能耗时 5-10 分钟）
                                                         // 和后续迭代时间也计入 5 分钟超时，导致用户已授权仍误报"等待用户授权超时"
-                                                        .timeout(java.time.Duration.ofMinutes(5))
+                                                        // ★ P4 修复：超时不再抛 TimeoutException 终止整个任务，
+                                                        // 而是切换到 __AUTH_TIMEOUT__ 标记，按"拒绝"语义跳过该操作继续工具循环（下方处理）
+                                                        .timeout(java.time.Duration.ofMinutes(AUTH_WAIT_TIMEOUT_MINUTES),
+                                                                Mono.just("__AUTH_TIMEOUT__"))
                                                         .flatMapMany(answer -> {
                                                             pendingQuestionStore.remove(uuid);
                                                             updatePendingQuestion(conversationId, null, null);
+
+                                                            // P4：授权等待超时（TTL 通知）——emit 提示事件 + 跳过该操作继续循环
+                                                            if ("__AUTH_TIMEOUT__".equals(answer)) {
+                                                                log.info("授权等待超时（{} 分钟未响应），跳过受限操作: conversationId={}",
+                                                                        AUTH_WAIT_TIMEOUT_MINUTES, conversationId);
+                                                                String timeoutEvent = createReasoningSSEEvent(
+                                                                        "⏰ 授权等待超时（" + AUTH_WAIT_TIMEOUT_MINUTES
+                                                                                + " 分钟未响应），该操作已跳过，任务继续执行。");
+                                                                return Flux.just(timeoutEvent)
+                                                                        .concatWith(continueAfterRejectedTools(
+                                                                                conversationId, storageConversationId, apiRequest,
+                                                                                messages, iteration, maxIterations,
+                                                                                collectedContentStr, reasoning, completeToolCalls,
+                                                                                "授权等待超时（" + AUTH_WAIT_TIMEOUT_MINUTES
+                                                                                        + " 分钟未响应），该操作已跳过"));
+                                                            }
 
                                                             // 解析 action 和用户实际回答
                                                             // answer 格式: "__ACTION__:actionType:userMessage"
@@ -2560,37 +2860,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             // 对于 reject 和 custom，不执行工具，直接继续工具循环
                                                             if ("reject".equals(action)) {
                                                                 log.info("用户拒绝了操作，继续工具循环");
-                                                                // 先构建 assistant(tool_calls) 消息，确保消息列表格式完整
-                                                                Map<String, Object> rejectTcMsg = new HashMap<>();
-                                                                rejectTcMsg.put("role", "assistant");
-                                                                if (!collectedContentStr.isEmpty()) {
-                                                                    rejectTcMsg.put("content", collectedContentStr);
-                                                                }
-                                                                rejectTcMsg.put("tool_calls", completeToolCalls);
-                                                                if (reasoning != null && !reasoning.isEmpty()) {
-                                                                    rejectTcMsg.put("reasoning_content", reasoning);
-                                                                }
-                                                                messages.add(rejectTcMsg);
-
-                                                                // 为每个工具调用添加 tool 结果消息（内容均为拒绝提示）
-                                                                String rejectMsg = "用户拒绝了该操作";
-                                                                if (completeToolCalls.isArray()) {
-                                                                    for (int i = 0; i < completeToolCalls.size(); i++) {
-                                                                        Map<String, Object> toolMsg = new HashMap<>();
-                                                                        toolMsg.put("role", "tool");
-                                                                        toolMsg.put("content", rejectMsg);
-                                                                        toolMsg.put("tool_call_id",
-                                                                                completeToolCalls.get(i).path("id").asText("call_rejected_" + i));
-                                                                        messages.add(toolMsg);
-                                                                    }
-                                                                }
-
-                                                                String rejectEvent = createReasoningSSEEvent(
-                                                                        "用户拒绝了该操作，请重新规划任务。");
-                                                                return Flux.just(rejectEvent)
-                                                                        .concatWith(handleToolCallIteration(
-                                                                                conversationId, storageConversationId, apiRequest,
-                                                                                messages, iteration + 1, maxIterations));
+                                                                return continueAfterRejectedTools(
+                                                                        conversationId, storageConversationId, apiRequest,
+                                                                        messages, iteration, maxIterations,
+                                                                        collectedContentStr, reasoning, completeToolCalls,
+                                                                        "用户拒绝了该操作");
                                                             }
 
                                                             if ("custom".equals(action)) {
@@ -2647,6 +2921,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                     ((LLMClient) apiRequest.get("_llmClient")) != null
                                                                             ? ((LLMClient) apiRequest.get("_llmClient")).getProviderCode()
                                                                             : null);
+                                                            // Phase 19：同步信任链（供 agent_invoke 多级委托传递）
+                                                            ToolContext.setTrustChain((List<Long>) apiRequest.get("_trustChain"));
                                                             PermissionContext.set(pendingQuestionStore, objectMapper);
                                                             PermissionContext.setApproved();
 
@@ -2688,6 +2964,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
                                                             //    避免「触发注入的失败」被误判为「注入后的再次失败」→ 注入即判无效）
                                                             checkLessonTracking(storageConversationId, innerResults, completeToolCalls);
+                                                            // P1-D：LLM 主动 search 命中并入 F3 追踪（先检查后登记，避免当轮误判）
+                                                            drainSearchHitsToTrack(conversationId, storageConversationId);
 
                                                             // 📝 成长体系：工具失败后被动注入相关经验提示（手动授权路径同样生效，会话级去重）
                                                             injectLessonHint(messages, innerResults, completeToolCalls, currentProjectRoot, storageConversationId);
@@ -2742,7 +3020,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         // ★ 让 fork/评委跟随主Agent的Provider选择
                                         LLMClient tempCli = (LLMClient) apiRequest.get("_llmClient");
                                         ToolContext.setProviderCode(tempCli != null ? tempCli.getProviderCode() : null);
+                                        // Phase 19：同步信任链（供 agent_invoke 多级委托传递）
+                                        ToolContext.setTrustChain((List<Long>) apiRequest.get("_trustChain"));
                                         PermissionContext.set(pendingQuestionStore, objectMapper);
+                                        // Phase 19 智能体互调：内部委托调用 → 批次级 approved（三层授权放行），
+                                        // 不持久 setSessionApproved，避免污染 B 会话后续手动操作的正常授权流程
+                                        if (Boolean.TRUE.equals(apiRequest.get("_internalTrust"))) {
+                                            PermissionContext.setApproved();
+                                        }
                                         try {
                                             return toolExecutor.executeToolCalls(completeToolCalls);
                                         } finally {
@@ -2804,6 +3089,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
                                         //    避免「触发注入的失败」被误判为「注入后的再次失败」→ 注入即判无效）
                                         checkLessonTracking(storageConversationId, toolResults, completeToolCalls);
+                                        // P1-D：LLM 主动 search 命中并入 F3 追踪（先检查后登记，避免当轮误判）
+                                        drainSearchHitsToTrack(conversationId, storageConversationId);
 
                                         // 📝 成长体系：工具失败后被动注入相关经验提示（仅失败轮、仅 Top-1、会话级去重、零常驻成本）
                                         injectLessonHint(messages, toolResults, completeToolCalls, currentProjectRoot, storageConversationId);
@@ -2859,6 +3146,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // 检查是否有未完成的工具调用累积
                     if (accumulatingToolCalls.get()) {
                         log.warn("流式调用在工具调用参数累积过程中结束，参数可能不完整。累积数据: {}", accumulatedToolCalls);
+                        // P0-4：中断出口只清理追踪（不判账）——同上（异常中断不承接自动验证）
+                        clearLessonTracking(storageConversationId);
                         // 尝试将已累积的部分数据作为最后一条消息保存，避免内容丢失
                         String partialContent = contentCollector.toString();
                         String messageContent;
@@ -2921,6 +3210,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     } else {
                         log.error("DeepSeek API 调用失败: {}", error.getMessage());
                     }
+                    // P0-4：异常出口只清理追踪（不判账）——中断的会话不承接自动验证
+                    clearLessonTracking(storageConversationId);
                 });
     }
 
@@ -3012,7 +3303,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // 保存待处理问题
         com.example.agentdeepseek.model.dto.PendingQuestion pq =
-                new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question);
+                new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question, conversationId);
         pendingQuestionStore.put(uuid, pq);
         // 持久化待审批问题到任务记录（支持页面刷新后重连展示）
         updatePendingQuestion(conversationId, uuid, question);
@@ -3092,6 +3383,52 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             return Flux.just(createReasoningSSEEvent(errorMsg));
                         })
                 );
+    }
+
+    /**
+     * P4：受限操作被拒绝（或授权等待超时）后，以拒绝语义继续工具循环。
+     * <p>
+     * 与 {@link #handleToolCallIteration} 共用：构建 assistant(tool_calls) 消息 +
+     * 每个 tool_call 的拒绝结果消息 + reasoning 事件，然后进入下一轮迭代。
+     * 用户拒绝与授权超时走同一条路径，保证消息列表格式一致。
+     * </p>
+     *
+     * @param rejectMsg 注入 tool 结果消息的拒绝原因文案（用户拒绝 / 授权等待超时）
+     */
+    private Flux<String> continueAfterRejectedTools(Long conversationId, Long storageConversationId,
+                                                    Map<String, Object> apiRequest,
+                                                    List<Map<String, Object>> messages, int iteration, int maxIterations,
+                                                    String collectedContentStr, String reasoning,
+                                                    JsonNode completeToolCalls, String rejectMsg) {
+        // 先构建 assistant(tool_calls) 消息，确保消息列表格式完整
+        Map<String, Object> rejectTcMsg = new HashMap<>();
+        rejectTcMsg.put("role", "assistant");
+        if (collectedContentStr != null && !collectedContentStr.isEmpty()) {
+            rejectTcMsg.put("content", collectedContentStr);
+        }
+        rejectTcMsg.put("tool_calls", completeToolCalls);
+        if (reasoning != null && !reasoning.isEmpty()) {
+            rejectTcMsg.put("reasoning_content", reasoning);
+        }
+        messages.add(rejectTcMsg);
+
+        // 为每个工具调用添加 tool 结果消息（内容均为拒绝提示）
+        if (completeToolCalls != null && completeToolCalls.isArray()) {
+            for (int i = 0; i < completeToolCalls.size(); i++) {
+                Map<String, Object> toolMsg = new HashMap<>();
+                toolMsg.put("role", "tool");
+                toolMsg.put("content", rejectMsg);
+                toolMsg.put("tool_call_id",
+                        completeToolCalls.get(i).path("id").asText("call_rejected_" + i));
+                messages.add(toolMsg);
+            }
+        }
+
+        String rejectEvent = createReasoningSSEEvent(rejectMsg + "，请重新规划任务。");
+        return Flux.just(rejectEvent)
+                .concatWith(handleToolCallIteration(
+                        conversationId, storageConversationId, apiRequest,
+                        messages, iteration + 1, maxIterations));
     }
 
     /**

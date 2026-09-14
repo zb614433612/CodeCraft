@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v1.1.7 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -18,7 +18,7 @@
                      └────────────┬─────────────┘
                                   │ implements
                      ┌────────────┴─────────────┐
-                      │  21 个工具实现类           │
+                      │  22 个工具实现类           │
                      │  (@ToolPermission 注解)   │
                      └────────────┬─────────────┘
                                   │ 自动注入 List<Tool>
@@ -282,14 +282,17 @@ public class MyNewTool implements Tool {
 
 | 分类 | 含义 | 示例工具 |
 |------|------|---------|
-| `READ` | 只读操作 | read_file, glob_files, grep_search |
-| `WRITE` | 写入/创建 | write_file, edit_file |
-| `DELETE` | 删除操作 | delete_file |
-| `EXECUTE` | 命令执行 | run_command, run_server |
-| `GIT` | Git 操作 | git_add, git_commit, git_push |
-| `NETWORK` | 网络请求 | web_search, web_fetch, http_request |
+| `READ` | 文件读取与搜索 | file_explorer |
+| `WRITE` | 文件写入与修改 | file_writer (write/edit) |
+| `DELETE` | 文件删除 | file_writer (delete) |
+| `EXECUTE` | 命令执行 | command (exec/start) |
+| `NETWORK` | 网络请求 | web_search、web_fetch、http_request、check_network |
 | `DATABASE` | 数据库操作 | execute_sql |
-| `SYSTEM` | 系统级操作 | fork_agent, task_manager |
+| `GIT` | Git 操作 | git_query、git_submit、git_branch |
+| `SERVICE` | 服务管理 | command (list/logs/stop) |
+| `SKILL` | 技能管理 | skill、lesson |
+| `COMMUNICATION` | 用户交互 | ask_clarification |
+| `ADMIN` | 管理操作 | agent、agent_invoke、task_manager、mcp_server_manager、schedule_task |
 
 ### Step 3：配置三层权限
 
@@ -334,18 +337,19 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 | `git_query` | GIT | ✗ | ✗ | ✗ |
 | `git_submit` | GIT | ✓ | ✗ | ✓ |
 | `git_branch` | GIT | ✓ | ✗ | ✗ |
-| `agent` | SYSTEM | ✗ | ✗ | ✗ |
-| `skill` | SYSTEM | ✓ | ✗ | ✗ |
-| `lesson` | SYSTEM | ✓ | ✗ | ✗ |
+| `agent` | ADMIN | ✗ | ✗ | ✗ |
+| `agent_invoke` | ADMIN | ✓ | ✗ | ✗ |
+| `skill` | SKILL | ✓ | ✗ | ✗ |
+| `lesson` | SKILL | ✓ | ✗ | ✗ |
 | `project_info` | READ | ✗ | ✗ | ✗ |
-| `task_manager` | SYSTEM | ✓ | ✗ | ✗ |
-| `ask_clarification` | SYSTEM | ✗ | ✗ | ✗ |
-| `chat_attachment` | READ | ✗ | ✗ | ✗ |
-| `mcp_server_manager` | SYSTEM | ✓ | ✗ | ✗ |
-| `schedule_task` | SYSTEM | ✓ | ✗ | ✗ |
+| `task_manager` | ADMIN | ✓ | ✗ | ✗ |
+| `ask_clarification` | COMMUNICATION | ✗ | ✗ | ✗ |
+| `chat_attachment` | READ | ✗ | ✓ | ✗ |
+| `mcp_server_manager` | ADMIN | ✓ | ✗ | ✗ |
+| `schedule_task` | ADMIN | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
 
-> 📌 速查表按当前 21 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
+> 📌 速查表按当前 22 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
 
 ---
 

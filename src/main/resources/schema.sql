@@ -522,3 +522,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_lesson_signature ON lesson(error_signature)
 CREATE INDEX IF NOT EXISTS idx_lesson_scope ON lesson(project_key, tool_name, error_category, error_code);
 CREATE INDEX IF NOT EXISTS idx_lesson_status ON lesson(status);
 CREATE INDEX IF NOT EXISTS idx_lesson_hit ON lesson(hit_count);
+
+-- ============================================================
+-- Phase 20：外部数据库连接配置表
+-- ============================================================
+-- ★ execute_sql 工具通过 connection 参数指定外部连接执行 SQL（用户提供 IP/账号密码的业务库），
+--   不传 connection 时仍连 CodeCraft 自身系统库（向后兼容）。
+CREATE TABLE IF NOT EXISTS db_connection (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL COMMENT '连接名称（execute_sql connection 参数用），如 订单库',
+  db_type VARCHAR(20) NOT NULL DEFAULT 'mysql' COMMENT '数据库类型：mysql / postgresql / h2',
+  host VARCHAR(200) COMMENT '主机地址（h2 file 模式可空，路径放 database_name）',
+  port INT COMMENT '端口（mysql 默认 3306 / postgresql 默认 5432）',
+  database_name VARCHAR(200) COMMENT '数据库名（h2 file 模式为 .mv.db 文件路径）',
+  username VARCHAR(100) COMMENT '用户名',
+  password_encrypted TEXT COMMENT '密码（AES-GCM 加密存储，API 不回显明文）',
+  extra_params VARCHAR(500) COMMENT 'JDBC URL 附加参数，如 useSSL=false&serverTimezone=Asia/Shanghai',
+  enabled TINYINT DEFAULT 1 COMMENT '是否启用：1=启用 0=停用',
+  user_id BIGINT COMMENT '归属用户（null=系统级共享，所有用户可见）',
+  created_at DATETIME NOT NULL COMMENT '创建时间',
+  updated_at DATETIME NOT NULL COMMENT '更新时间',
+  INDEX idx_db_connection_user (user_id)
+) DEFAULT CHARSET=utf8mb4 COMMENT='外部数据库连接配置表（Phase 20）';
+
+-- 新增 SETTING 菜单：数据库连接（外部业务库连接管理）
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(17, '数据库连接', '/db-connections', 'DatabaseOutlined', NULL, 11, 'SETTING');
+
+-- 管理员分配数据库连接菜单
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 17;

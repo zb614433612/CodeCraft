@@ -1,5 +1,8 @@
 package com.example.agentdeepseek.tool.impl;
 
+import com.example.agentdeepseek.model.entity.DbConnection;
+import com.example.agentdeepseek.service.dbconnection.DbConnectionManager;
+import com.example.agentdeepseek.service.dbconnection.DbConnectionService;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
@@ -9,17 +12,21 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * SQL 查询工具
- * 执行 SELECT 查询（自动 LIMIT 保护），增删改操作需获得执行权限
+ * SQL 查询工具（Phase 20 支持外部连接）
+ * 执行 SELECT 查询（自动 LIMIT 保护），增删改操作需获得执行权限。
+ * connection 参数可选：不传连 CodeCraft 系统库（默认）；传连接名称/id 连用户在
+ * 「数据库连接」管理页配置的外部业务库（MySQL/PostgreSQL/H2）。
  */
 @Slf4j
 @Component
@@ -45,10 +52,16 @@ public class ExecuteSqlTool implements Tool {
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final DbConnectionManager dbConnectionManager;
+    private final DbConnectionService dbConnectionService;
 
-    public ExecuteSqlTool(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
+    public ExecuteSqlTool(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper,
+                          DbConnectionManager dbConnectionManager,
+                          DbConnectionService dbConnectionService) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.dbConnectionManager = dbConnectionManager;
+        this.dbConnectionService = dbConnectionService;
     }
 
     @Override
@@ -60,6 +73,8 @@ public class ExecuteSqlTool implements Tool {
     public String getDescription() {
         return "执行 SQL 查询和数据库修改操作。\n"
                 + "【适用场景】查询数据库表结构、验证数据是否写入成功、排查数据异常、执行必要的增删改操作\n"
+                + "【指定连接（可选）】connection 参数=「数据库连接」管理页配置的外部业务库名称或 id（如 订单库），"
+                + "不传则连 CodeCraft 自身系统库。连接外部库前先确认用户已配置该连接，查表结构可先 SHOW TABLES / SELECT * FROM information_schema.tables\n"
                 + "【使用方式】SELECT 查询：直接传入 SQL（自动追加 LIMIT " + MAX_SELECT_ROWS + " 防止全表返回）。手动模式下所有 SQL 操作均需用户授权；自动模式下高危操作（DDL/DROP 等）仍需授权\n"
                 + "【注意】不支持多语句（以分号分隔的多条 SQL），每次只执行一条；SQL 最大 " + MAX_SQL_LENGTH + " 字符；SELECT 建议加 WHERE 条件避免全表扫描";
     }
@@ -74,6 +89,11 @@ public class ExecuteSqlTool implements Tool {
         sql.put("type", "string");
         sql.put("description", "【必填】单条 SQL 语句。SELECT 示例：\"SELECT id, name FROM users WHERE status = 'active'\"。写操作示例：\"UPDATE users SET status = 'inactive' WHERE id = 1\"。SELECT 查询务必加 WHERE 条件，避免全表扫描");
         properties.set("sql", sql);
+
+        ObjectNode connection = objectMapper.createObjectNode();
+        connection.put("type", "string");
+        connection.put("description", "【可选】外部数据库连接名称或 id（在「数据库连接」管理页配置），如 订单库 或 3。不传默认连 CodeCraft 自身系统库");
+        properties.set("connection", connection);
 
         parameters.set("properties", properties);
         parameters.putArray("required").add("sql");
@@ -101,17 +121,43 @@ public class ExecuteSqlTool implements Tool {
         String cleanSql = stripComments(sql);
         String sqlType = detectSqlType(cleanSql);
 
+        // ===== Phase 20：解析目标连接（connection 可选；不传=CodeCraft 系统库）=====
+        JdbcTemplate target = this.jdbcTemplate;
+        String dbLabel = "CodeCraft 系统库";
+        String connectionRef = arguments.path("connection").asText("").trim();
+        if (!connectionRef.isEmpty()) {
+            try {
+                DbConnection connCfg = dbConnectionService.resolveForTool(connectionRef);
+                if (connCfg == null) {
+                    return "【连接不存在】未找到启用中的数据库连接 \"" + connectionRef + "\"。\n"
+                            + "【建议】在「数据库连接」管理页确认连接名称/id 及启用状态；或去掉 connection 参数查询 CodeCraft 自身系统库";
+                }
+                Connection physical = dbConnectionManager.open(connCfg);
+                target = new JdbcTemplate(new SingleConnectionDataSource(physical, true));
+                String hostLabel = "h2".equals(connCfg.getDbType())
+                        ? connCfg.getDatabaseName()
+                        : connCfg.getHost() + ":" + (connCfg.getPort() != null ? connCfg.getPort() : "默认端口")
+                        + "/" + connCfg.getDatabaseName();
+                dbLabel = "外部库[" + connCfg.getName() + "] " + connCfg.getDbType() + "@" + hostLabel;
+                log.info("execute_sql 使用外部连接: ref={}, name={}, type={}", connectionRef, connCfg.getName(), connCfg.getDbType());
+            } catch (Exception e) {
+                log.error("外部连接打开失败: ref={}, err={}", connectionRef, e.getMessage(), e);
+                return "【连接失败】无法连接外部数据库 \"" + connectionRef + "\"：" + e.getMessage() + "\n"
+                        + "【建议】在「数据库连接」管理页用「测试连接」检查配置";
+            }
+        }
+
         try {
             if ("SELECT".equals(sqlType)) {
-                return executeSelect(sql);
+                return executeSelect(target, sql, dbLabel);
             } else if ("WRITE".equals(sqlType)) {
-                return executeUpdate(sql);
+                return executeUpdate(target, sql, dbLabel);
             } else {
                 return "【错误类型】【SQL 类型未知】无法识别的 SQL 语句类型。仅支持：SELECT 查询 和 写操作（INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE）。请检查 SQL 开头关键字是否正确，去掉前导注释后重试";
             }
         } catch (Exception e) {
-            log.error("SQL 执行失败: {}", sql, e);
-            return "【错误类型】【SQL 执行异常】" + e.getClass().getSimpleName() + ": " + e.getMessage() + "。建议检查：① 表名/字段名是否存在 ② 字段类型是否匹配 ③ 约束条件是否冲突（如唯一索引重复）④ 外键依赖是否满足";
+            log.error("SQL 执行失败: target={}, sql={}", dbLabel, sql, e);
+            return "【错误类型】【SQL 执行异常】" + e.getClass().getSimpleName() + ": " + e.getMessage() + "。建议检查：① 表名/字段名是否存在 ② 字段类型是否匹配 ③ 约束条件是否冲突（如唯一索引重复）④ 外键依赖是否满足 ⑤ 目标库为 " + dbLabel;
         }
     }
 
@@ -160,16 +206,18 @@ public class ExecuteSqlTool implements Tool {
 
     /**
      * 执行 SELECT 查询
+     * @param tpl     目标连接模板（系统库或外部连接）
+     * @param dbLabel 目标库描述（结果标注，防 AI 混淆）
      */
-    private String executeSelect(String sql) {
+    private String executeSelect(JdbcTemplate tpl, String sql, String dbLabel) {
         // 先去除字符串字面量再检测 LIMIT，避免字面量内的 LIMIT 被误匹配
         String sqlNoLiterals = STRING_LITERAL_PATTERN.matcher(sql).replaceAll("");
         if (!LIMIT_PATTERN.matcher(sqlNoLiterals).find()) {
             sql = sql + " LIMIT " + MAX_SELECT_ROWS;
         }
 
-        log.debug("执行 SELECT: {}", sql);
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+        log.debug("执行 SELECT ({}): {}", dbLabel, sql);
+        List<Map<String, Object>> rows = tpl.queryForList(sql);
 
         ArrayNode resultArray = objectMapper.createArrayNode();
         for (Map<String, Object> row : rows) {
@@ -202,7 +250,7 @@ public class ExecuteSqlTool implements Tool {
         }
 
         int rowCount = rows.size();
-        StringBuilder summary = new StringBuilder("查询完成，返回 ").append(rowCount).append(" 行");
+        StringBuilder summary = new StringBuilder("目标库：").append(dbLabel).append("\n查询完成，返回 ").append(rowCount).append(" 行");
         // LIMIT 追加标记（用于后续判断是否为我们追加的）
         if (rowCount >= MAX_SELECT_ROWS && LIMIT_PATTERN.matcher(sqlNoLiterals).find()) {
             summary.append("（受 ").append(MAX_SELECT_ROWS).append(" 行限制，结果可能不完整）");
@@ -213,10 +261,12 @@ public class ExecuteSqlTool implements Tool {
 
     /**
      * 执行写操作
+     * @param tpl     目标连接模板（系统库或外部连接）
+     * @param dbLabel 目标库描述
      */
-    private String executeUpdate(String sql) {
-        log.debug("执行更新: {}", sql);
-        int affected = jdbcTemplate.update(sql);
-        return "执行成功，影响 " + affected + " 行";
+    private String executeUpdate(JdbcTemplate tpl, String sql, String dbLabel) {
+        log.debug("执行更新 ({}): {}", dbLabel, sql);
+        int affected = tpl.update(sql);
+        return "目标库：" + dbLabel + "\n执行成功，影响 " + affected + " 行";
     }
 }

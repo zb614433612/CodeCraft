@@ -49,3 +49,22 @@ export async function getLogDates(): Promise<string[]> {
   }
   return []
 }
+
+/** 导出结果 */
+export interface LogExportResult {
+  date: string
+  fileNames: string[]
+  content: string
+  lineCount: number
+  charCount: number
+}
+
+/** 导出指定日期的完整日志（date 为空时导出最新日期） */
+export async function exportLogFile(date?: string): Promise<LogExportResult> {
+  const url = date ? `/logs/download?date=${encodeURIComponent(date)}` : '/logs/download'
+  const res = await request<any>(url, { method: 'GET' })
+  if (res.code === 200) {
+    return res.data as LogExportResult
+  }
+  throw new Error(res.message || '导出日志失败')
+}

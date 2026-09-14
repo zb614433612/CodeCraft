@@ -61,19 +61,31 @@ public class ToolLoopManager {
      * @param conversationId 会话ID
      * @param taskSubscriptions 任务订阅映射（由调用方持有）
      * @param judgeGrantedIterations 评委授予映射（由调用方持有）
+     * <p>
+     * 注意：<b>不再 dispose 工具循环订阅</b>（Phase 18 修复）——取消改为「置位取消标志 +
+     * 注销 TaskContext」，由工具循环每轮迭代的取消检查点自然终止。这样 complete 回调会正常执行
+     * （任务状态保持 cancelled 不被覆盖、上下文注销、锁释放时机与循环真正结束对齐）。
+     * dispose 会取消订阅导致 complete 回调不执行，破坏上述清理链。
+     * </p>
      */
     public void cancelRunningTask(Long conversationId,
                                    Map<Long, Disposable> taskSubscriptions,
                                    Map<Long, Integer> judgeGrantedIterations) {
-        Disposable sub = taskSubscriptions.remove(conversationId);
-        if (sub != null && !sub.isDisposed()) {
-            sub.dispose();
-            log.info("取消会话 {} 的正在运行的后台任务", conversationId);
-        }
+        // 不再 dispose：让取消检查点自然终止循环（见类注释）
+        // taskSubscriptions.remove 仅清理引用（complete 回调里也会 remove，幂等）
+        taskSubscriptions.remove(conversationId);
         agentEventBus.unregister(conversationId);
         judgeGrantedIterations.remove(conversationId);
         try {
-            jdbcTemplate.update("UPDATE agent_task SET status = 'cancelled', updated_at = NOW() WHERE conversation_id = ? AND status = 'running'", conversationId);
+            // M1 修复：H2 数据库不支持 UPDATE...ORDER BY...LIMIT 语法（MySQL 专有），
+            // 改为「先 SELECT 最新 running 记录 id，再按 id 精确 UPDATE」——只取消最新记录，
+            // 避免把同会话历史残留的 running 记录全部误标取消
+            List<Long> ids = jdbcTemplate.queryForList(
+                    "SELECT id FROM agent_task WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+                    Long.class, conversationId);
+            if (!ids.isEmpty()) {
+                jdbcTemplate.update("UPDATE agent_task SET status = 'cancelled', updated_at = NOW() WHERE id = ?", ids.get(0));
+            }
         } catch (Exception e) {
             log.debug("取消任务记录失败: {}", e.getMessage());
         }
@@ -84,12 +96,18 @@ public class ToolLoopManager {
      */
     public void updatePendingQuestion(Long conversationId, String uuid, String text) {
         try {
+            // M1 修复：同 cancelRunningTask——H2 不支持 UPDATE...ORDER BY...LIMIT，先 SELECT 最新 running id 再 UPDATE
+            List<Long> ids = jdbcTemplate.queryForList(
+                    "SELECT id FROM agent_task WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+                    Long.class, conversationId);
+            if (ids.isEmpty()) return;
+            Long taskId = ids.get(0);
             if (uuid != null) {
-                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = ?, pending_question_text = ?, updated_at = NOW() WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
-                        uuid, text, conversationId);
+                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = ?, pending_question_text = ?, updated_at = NOW() WHERE id = ?",
+                        uuid, text, taskId);
             } else {
-                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = NULL, pending_question_text = NULL, updated_at = NOW() WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
-                        conversationId);
+                jdbcTemplate.update("UPDATE agent_task SET pending_question_uuid = NULL, pending_question_text = NULL, updated_at = NOW() WHERE id = ?",
+                        taskId);
             }
         } catch (Exception e) {
             log.debug("更新待审批问题失败: {}", e.getMessage());

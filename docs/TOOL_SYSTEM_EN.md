@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v1.1.7 | Updated: 2026-08-13 | Audience: Developers / AI Collaborators
+> Version: v1.1.8 | Updated: 2026-09-14 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -249,14 +249,17 @@ public class MyNewTool implements Tool {
 
 | Category | Meaning | Example Tools |
 |----------|---------|--------------|
-| `READ` | Read-only | file_explorer (read/glob/grep) |
-| `WRITE` | Write/Create | file_writer (write/edit) |
-| `DELETE` | Delete | file_writer (delete) |
+| `READ` | File reading & search | file_explorer |
+| `WRITE` | File write & modify | file_writer (write/edit) |
+| `DELETE` | File deletion | file_writer (delete) |
 | `EXECUTE` | Command execution | command (exec/start) |
-| `GIT` | Git operations | git_query, git_submit, git_branch |
-| `NETWORK` | Network requests | web_search, web_fetch, http_request |
+| `NETWORK` | Network requests | web_search, web_fetch, http_request, check_network |
 | `DATABASE` | Database operations | execute_sql |
-| `SYSTEM` | System-level | agent, task_manager |
+| `GIT` | Git operations | git_query, git_submit, git_branch |
+| `SERVICE` | Service management | command (list/logs/stop) |
+| `SKILL` | Skill management | skill, lesson |
+| `COMMUNICATION` | User interaction | ask_clarification |
+| `ADMIN` | Admin operations | agent, agent_invoke, task_manager, mcp_server_manager, schedule_task |
 
 ### Step 3: Configure Three-Layer Permissions
 
@@ -295,18 +298,19 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `git_query` | GIT | ✗ | ✗ | ✗ |
 | `git_submit` | GIT | ✓ | ✗ | ✓ |
 | `git_branch` | GIT | ✓ | ✗ | ✗ |
-| `agent` | SYSTEM | ✗ | ✗ | ✗ |
-| `skill` | SYSTEM | ✓ | ✗ | ✗ |
-| `lesson` | SYSTEM | ✓ | ✗ | ✗ |
+| `agent` | ADMIN | ✗ | ✗ | ✗ |
+| `agent_invoke` | ADMIN | ✓ | ✗ | ✗ |
+| `skill` | SKILL | ✓ | ✗ | ✗ |
+| `lesson` | SKILL | ✓ | ✗ | ✗ |
 | `project_info` | READ | ✗ | ✗ | ✗ |
-| `task_manager` | SYSTEM | ✓ | ✗ | ✗ |
-| `ask_clarification` | SYSTEM | ✗ | ✗ | ✗ |
-| `chat_attachment` | READ | ✗ | ✗ | ✗ |
-| `mcp_server_manager` | SYSTEM | ✓ | ✗ | ✗ |
-| `schedule_task` | SYSTEM | ✓ | ✗ | ✗ |
+| `task_manager` | ADMIN | ✓ | ✗ | ✗ |
+| `ask_clarification` | COMMUNICATION | ✗ | ✗ | ✗ |
+| `chat_attachment` | READ | ✗ | ✓ | ✗ |
+| `mcp_server_manager` | ADMIN | ✓ | ✗ | ✗ |
+| `schedule_task` | ADMIN | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
 
-> 📌 This table tracks the current 21 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
+> 📌 This table tracks the current 22 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
 
 ---
 

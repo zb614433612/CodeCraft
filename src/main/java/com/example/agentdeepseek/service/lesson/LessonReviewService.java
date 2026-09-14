@@ -408,8 +408,8 @@ public class LessonReviewService {
             String effCode = nullableText(review.get("errorCode"));
 
             // P0：逐个失败归一化 + 入库（不再只取第一个失败工具）
-            // 同坑由 error_signature 指纹去重（同工具+同类别+同错误码+同参数 → 第二次仅 hit+1），
-            // 不同坑分别沉淀；LLM 提炼的根因/解法为整轮级别，各条共享（合理：同一轮的经验）
+            // P1-C：入库前浅查重降压——经验库已有同类坑 → 补空合并复用（不新建），防复盘通道碎片累积；
+            // 无既有条目时走 recordLessonWithResult 正常新建/签名去重
             for (FailedToolCall fc : failures) {
                 FailureNormalizer.NormalizedFailure nf = normalizer.normalize(
                         fc.toolName, fc.argumentsJson, fc.content);
@@ -417,14 +417,24 @@ public class LessonReviewService {
                 String category = effCategory != null ? effCategory : nf.errorCategory;
                 String code = (effCode != null && !effCode.isBlank()) ? effCode : nf.errorCode;
                 String symptom = "工具[" + nf.toolName + "] 执行失败: " + nf.symptom;
-                Lesson lesson = lessonService.recordLessonWithResult(
+                Lesson merged = lessonService.mergeIntoExisting(
                         projectKey, nf.toolName, category, code,
-                        symptom, rootCause, solution, nf.paramsJson, applicableCond, keywords,
-                        Lesson.SOURCE_REVIEW, null, null).lesson;
+                        rootCause, solution, nf.paramsJson, applicableCond, keywords);
+                Lesson lesson;
+                if (merged != null) {
+                    lesson = merged;
+                    log.info("对话复盘命中既有经验（浅查重复用，不新建）: id={}, conversationId={}, tool={}, code={}",
+                            lesson.getId(), conversationId, nf.toolName, code);
+                } else {
+                    lesson = lessonService.recordLessonWithResult(
+                            projectKey, nf.toolName, category, code,
+                            symptom, rootCause, solution, nf.paramsJson, applicableCond, keywords,
+                            Lesson.SOURCE_REVIEW, null, null).lesson;
+                    log.info("对话复盘沉淀经验: id={}, conversationId={}, tool={}, code={}, source={}",
+                            lesson.getId(), conversationId, nf.toolName, lesson.getErrorCode(), lesson.getSource());
+                }
                 // P0 链路 B：复盘结果反哺归一化缓存（同一错误后续零 LLM 成本）
                 normalizerService.cacheNormalization(nf.toolName, fc.content, category, code, rootCause);
-                log.info("对话复盘沉淀经验: id={}, conversationId={}, tool={}, code={}, source={}",
-                        lesson.getId(), conversationId, nf.toolName, lesson.getErrorCode(), lesson.getSource());
             }
         } catch (Exception e) {
             log.warn("对话复盘执行失败（不影响主流程）: conversationId={}, err={}", conversationId, e.getMessage());

@@ -151,8 +151,10 @@
           <template #icon><ReloadOutlined /></template>
           重置
         </a-button>
+        <a-checkbox v-model:checked="query.zeroHit" @change="handleSearch">只看零命中</a-checkbox>
       </div>
       <div class="toolbar-right">
+        <a-button @click="openClusters">🔀 归并重复</a-button>
         <a-button @click="handleRefresh" :loading="loading">
           <template #icon><SyncOutlined /></template>
           刷新
@@ -300,6 +302,32 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- ===== P2：重复组归并弹窗 ===== -->
+    <a-modal
+      v-model:open="clusterVisible"
+      title="重复经验归并"
+      :footer="null"
+      :width="720"
+    >
+      <p class="cluster-tip">同 项目+工具+类别+错误码 的重复组（归并后保留最优记录，命中与验证计数汇聚）</p>
+      <a-table
+        :columns="clusterColumns"
+        :data-source="clusters"
+        :loading="clusterLoading"
+        row-key="sample_id"
+        size="small"
+        :pagination="false"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'clusterAction'">
+            <a-popconfirm title="确认归并该组？将合并为一条并汇聚计数" @confirm="handleMerge(record)" ok-text="归并" cancel-text="取消">
+              <a-button type="link" size="small" danger>归并</a-button>
+            </a-popconfirm>
+          </template>
+        </template>
+      </a-table>
+    </a-modal>
   </div>
 </template>
 
@@ -314,8 +342,11 @@ import {
   updateLesson,
   feedbackLesson,
   deleteLesson,
+  listLessonClusters,
+  mergeLessonGroup,
   type LessonData,
-  type LessonStats
+  type LessonStats,
+  type LessonCluster
 } from '@/api/lesson'
 
 // ===== 状态 =====
@@ -330,7 +361,8 @@ const query = reactive({
   status: undefined as number | undefined,
   toolName: '',
   errorCode: '',
-  type: undefined as string | undefined // P1：FAILURE / DETOUR
+  type: undefined as string | undefined, // P1：FAILURE / DETOUR
+  zeroHit: false // P2：只看零命中
 })
 
 const pagination = computed(() => ({
@@ -393,6 +425,7 @@ async function fetchList() {
       toolName: query.toolName || undefined,
       errorCode: query.errorCode || undefined,
       type: query.type,
+      zeroHit: query.zeroHit || undefined,
       page: page.value,
       size: size.value
     })
@@ -425,6 +458,7 @@ function handleReset() {
   query.toolName = ''
   query.errorCode = ''
   query.type = undefined
+  query.zeroHit = false
   page.value = 1
   loadAll()
 }
@@ -501,6 +535,55 @@ async function handleDelete(id: number) {
     loadStats()
   } catch (e) {
     message.error('删除失败')
+    console.error(e)
+  }
+}
+
+// ===== P2：聚类归并 =====
+const clusterVisible = ref(false)
+const clusterLoading = ref(false)
+const clusters = ref<LessonCluster[]>([])
+
+const clusterColumns = [
+  { title: '项目', dataIndex: 'project_key', key: 'project_key', width: 130 },
+  { title: '工具', dataIndex: 'tool_name', key: 'tool_name', width: 110 },
+  { title: '类别', dataIndex: 'error_category', key: 'error_category', width: 100 },
+  { title: '错误码', dataIndex: 'error_code', key: 'error_code', ellipsis: true },
+  { title: '条数', dataIndex: 'cnt', key: 'cnt', width: 70 },
+  { title: '操作', key: 'clusterAction', width: 90 }
+]
+
+async function openClusters() {
+  clusterVisible.value = true
+  await loadClusters()
+}
+
+async function loadClusters() {
+  clusterLoading.value = true
+  try {
+    const data = await listLessonClusters(query.projectKey || undefined)
+    clusters.value = data.data ?? []
+  } catch (e) {
+    message.error('加载重复组失败')
+    console.error(e)
+  } finally {
+    clusterLoading.value = false
+  }
+}
+
+async function handleMerge(cluster: LessonCluster) {
+  try {
+    const res = await mergeLessonGroup({
+      projectKey: cluster.project_key || '',
+      toolName: cluster.tool_name || '',
+      errorCategory: cluster.error_category || '',
+      errorCode: cluster.error_code || ''
+    })
+    message.success(res.data || '归并完成')
+    await loadClusters()
+    loadAll()
+  } catch (e) {
+    message.error('归并失败')
     console.error(e)
   }
 }

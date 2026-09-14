@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.1.7 | 更新：2026-08-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -244,6 +244,8 @@ src/main/java/com/example/agentdeepseek/
 │ │   │   ├── DetourSignalDetector # 弯路信号扫描（用户否定/换方案/工具序列）
 │ │   │   ├── DetourBlockParser  # 【方案取舍】块解析
 │ │   │   └── ErrorCodeDictionary # 错误码字典（yml 配置加载）
+│   ├── agentinvoke/            # ★智能体互调：委托执行/信任链/环检测（Phase 19）
+│   ├── dbconnection/           # ★外部数据库连接：配置/加密/连接管理（Phase 20）
 │   └── SkillService / UserService / ConfigService / ...
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
@@ -252,7 +254,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolInitializer        # 启动时自动初始化所有工具
 │   ├── ExecutionTokenManager  # 工具执行 Token 管理
 │   ├── PermissionContext      # 会话级权限上下文
-│   ├── impl/                  # 21 个工具实现（新命名，一工具多 action）
+│   ├── impl/                  # 22 个工具实现（新命名，一工具多 action）
 │   │   ├── 文件操作: FileExplorerTool (read/glob/grep/tree),
 │   │   │            FileWriterTool (write/edit/delete)
 │   │   ├── 命令执行: CommandTool (exec/start/list/logs/stop)
@@ -403,6 +405,17 @@ src/main/java/com/example/agentdeepseek/
 └──────────────────┘      │ enabled/auto_register │
                           └──────────────────────┘
 
+┌──────────────────────────┐
+│ db_connection (Phase 20) │
+│ ──────────────────────── │
+│ id (PK)                  │
+│ name / db_type           │
+│ host / port / db_name    │
+│ username / password_enc  │
+│ extra_params / enabled   │
+│ user_id                  │
+└──────────────────────────┘
+
 ┌────────────────────────┐   ┌──────────────────────────┐
 │ lesson_norm_cache      │   │ lesson_rule              │
 │ ────────────────────── │   │ ───────────────────────  │
@@ -428,12 +441,12 @@ src/main/java/com/example/agentdeepseek/
 | **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~900 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~800 |
 | **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~5000 (整个p2p包) |
-| **工具系统** | 21 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
+| **工具系统** | 22 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
 | **成长体系** | 经验检索/自动捕获/复盘/归一化/弯路提炼 | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |
 | **技能系统** | BM25 匹配、贝叶斯置信度 | SkillMatcher + SkillIndexer | ~250 |
-| **多LLM Provider** | Provider CRUD、客户端路由、热刷新 | LLMClientManager + LLMClient + 5个实现 | ~1600 |
+| **多LLM Provider** | Provider CRUD、客户端路由、热刷新 | LLMClientManager + LLMClient + 6个实现 | ~1600 |
 
 ---
 

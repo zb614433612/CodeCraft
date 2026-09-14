@@ -3,15 +3,21 @@ package com.example.agentdeepseek.service.llm;
 import com.example.agentdeepseek.model.entity.ProviderConfig;
 import io.netty.channel.ChannelOption;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
+import reactor.core.publisher.Mono;
 import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import reactor.util.retry.Retry;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,6 +49,25 @@ public class LLMWebClientManager {
 
     /** 动态 API Key 解析器（由 LLMClientManager 注入） */
     private volatile Function<String, String> apiKeyResolver = code -> null;
+
+    /** P4：LLM 并发限流器（全局并发信号量，DeepSeek 官方仅按并发限制） */
+    private final ProviderRateLimiter providerRateLimiter;
+
+    /** P4：429/5xx 重试次数（含首次请求，默认 3 次 = 1 次原始 + 2 次退避重试） */
+    @Value("${llm.retry.max-attempts:3}")
+    private int retryMaxAttempts;
+
+    /** P4：重试基础延迟（毫秒，指数退避起点） */
+    @Value("${llm.retry.base-delay-ms:1000}")
+    private long retryBaseDelayMs;
+
+    /** P4：重试最大延迟（毫秒，退避封顶） */
+    @Value("${llm.retry.max-delay-ms:10000}")
+    private long retryMaxDelayMs;
+
+    public LLMWebClientManager(ProviderRateLimiter providerRateLimiter) {
+        this.providerRateLimiter = providerRateLimiter;
+    }
 
     /**
      * 获取或创建指定 Provider 的 WebClient
@@ -154,7 +179,57 @@ public class LLMWebClientManager {
             return next.exchange(request);
         });
 
+        // ===== P4：LLM 并发限流过滤器（全局并发信号量，等待策略自动排队） =====
+        // 所有经本 WebClient 的请求（含工具循环直连路径、AbstractLLMClient、无工具路径）统一限流。
+        // 响应头到达后即释放并发许可（流式 body 下载阶段不算在飞请求）。
+        builder.filter((request, next) ->
+                providerRateLimiter.acquireAsync(config.getCode())
+                        .flatMap(lease -> next.exchange(request)
+                                .doFinally(signalType -> lease.close())));
+
+        // ===== P4：429/5xx 指数退避重试过滤器（流式安全） =====
+        // 仅在「响应头阶段」判定错误（4xx/5xx 状态码）时重试——此时响应体尚未开始流转，
+        // 重试不会导致流式数据重复；一旦 200 响应头到达、body 开始输出，后续断流不会触发重试。
+        builder.filter((request, next) ->
+                Mono.defer(() -> next.exchange(request))
+                        .flatMap(response -> {
+                            HttpStatusCode status = response.statusCode();
+                            if (status.isError()) {
+                                // 将错误状态转为异常以触发 retryWhen；读取并释放错误响应体（防连接泄漏）
+                                return response.bodyToMono(String.class)
+                                        .defaultIfEmpty("")
+                                        .flatMap(body -> Mono.error(new WebClientResponseException(
+                                                status.value(), status.toString(),
+                                                response.headers().asHttpHeaders(),
+                                                body.getBytes(StandardCharsets.UTF_8), null)));
+                            }
+                            return Mono.just(response);
+                        })
+                        .retryWhen(Retry.backoff(Math.max(0, retryMaxAttempts - 1),
+                                        Duration.ofMillis(retryBaseDelayMs))
+                                .maxBackoff(Duration.ofMillis(retryMaxDelayMs))
+                                .filter(this::isRetryableStatus)
+                                .onRetryExhaustedThrow((spec, signal) -> signal.failure())));
+
         return builder.build();
+    }
+
+    /**
+     * P4：判定错误是否可重试——429（限流）与 5xx（服务端临时错误）可重试；
+     * 4xx 业务错误（400/401/403/404）不可重试
+     */
+    private boolean isRetryableStatus(Throwable ex) {
+        if (ex instanceof WebClientResponseException wce) {
+            int code = wce.getStatusCode().value();
+            boolean retryable = code == 429 || code >= 500;
+            if (retryable) {
+                log.warn("LLM 调用返回 {}，将指数退避重试: {}", code,
+                        wce.getMessage() != null && wce.getMessage().length() > 200
+                                ? wce.getMessage().substring(0, 200) : wce.getMessage());
+            }
+            return retryable;
+        }
+        return false;
     }
 
     /**

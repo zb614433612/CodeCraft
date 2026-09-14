@@ -205,8 +205,14 @@ public class AgentForkManager {
             String originalThreadName = Thread.currentThread().getName();
             Thread.currentThread().setName("sub-agent-" + agentId);
             try {
-                // 记录执行线程，供 collectAgent 超时时中断
+                // ★ 先注册执行线程，再检查取消：cancelByConversation 的 interrupt 依赖 agentThreads 注册，
+                //   若先检查后注册，注册前的取消会错过 interrupt（TOCTOU 窗口）。
+                //   两个机制互补闭合窗口：put 前被取消 → isCancelled 检查兜底；put 后被取消 → interrupt 生效。
                 agentThreads.put(agentId, Thread.currentThread());
+                if (future.isCancelled()) {
+                    log.info("子Agent已被取消，跳过执行: agentId={}", agentId);
+                    return;
+                }
                 // 设置线程级上下文（子Agent需要这些信息来通过权限检查和发送事件）
                 ToolContext.set(mode != null ? mode : "auto", parentConversationId,
                         ToolContext.getAgentType(), userId);
@@ -233,6 +239,10 @@ public class AgentForkManager {
                 ProjectRootContext.clear();
                 agentThreads.remove(agentId);
                 Thread.currentThread().setName(originalThreadName);
+                // M2 修复：清除中断标志——被 cancelByConversation/collectAgent 超时 interrupt 过的线程
+                // 回池复用（30s 内）时，残留的中断标志会让新子Agent的 isInterrupted 检查误命中，
+                // 导致新任务无理由以「中断」结束
+                Thread.interrupted();
             }
         });
 
@@ -389,6 +399,40 @@ public class AgentForkManager {
     public int getPendingAgentCount(Long conversationId) {
         Set<String> pending = pendingAgentsByConversation.get(conversationId);
         return pending != null ? pending.size() : 0;
+    }
+
+    /**
+     * 级联取消指定会话的所有子Agent（Phase 18：多 Agent 并行任务）
+     * <p>
+     * 主任务取消时调用：中断执行线程 + 清理注册表，防止幽灵运行挤占共享线程池（20 并发）。
+     * 复用 collectAgent 超时清理逻辑（future.cancel + worker.interrupt），
+     * 配合子Agent工具循环的中断检查实现真正停止。
+     * </p>
+     *
+     * @param conversationId 父会话ID
+     * @return 被取消的子Agent数量
+     */
+    public int cancelByConversation(Long conversationId) {
+        Set<String> pending = pendingAgentsByConversation.get(conversationId);
+        if (pending == null || pending.isEmpty()) return 0;
+        int count = 0;
+        for (String agentId : new ArrayList<>(pending)) {
+            CompletableFuture<SubAgentResult> future = agentFutures.get(agentId);
+            if (future != null && !future.isDone()) {
+                future.cancel(true);
+                Thread worker = agentThreads.get(agentId);
+                if (worker != null) {
+                    worker.interrupt();
+                    log.warn("子Agent已级联取消（中断信号）: agentId={}, conversationId={}", agentId, conversationId);
+                }
+                count++;
+            }
+            removePending(agentId);
+            agentFutures.remove(agentId);
+            runningAgents.remove(agentId);
+        }
+        pendingAgentsByConversation.remove(conversationId);
+        return count;
     }
 
     /**
@@ -685,7 +729,7 @@ public class AgentForkManager {
                     String uuid = java.util.UUID.randomUUID().toString();
                     String question = restrictedSummary.toString()
                             + "子Agent「" + context.getName() + "」需要您的批准，回复「批准」继续或输入其他内容拒绝";
-                    PendingQuestion pq = new PendingQuestion(uuid, question);
+                    PendingQuestion pq = new PendingQuestion(uuid, question, convId);
                     pendingQuestionStore.put(uuid, pq);
                     boolean sent = agentEventBus.emitAskUser(convId, uuid, question, "permission");
                     if (!sent) {

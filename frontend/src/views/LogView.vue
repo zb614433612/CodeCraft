@@ -23,6 +23,22 @@
         </div>
       </div>
       <div class="toolbar-right">
+        <a-dropdown placement="bottomRight">
+          <a-button size="small" class="toolbar-btn" :disabled="displayLines.length === 0 && availableDates.length === 0">
+            <template #icon><DownloadOutlined /></template>
+            导出
+          </a-button>
+          <template #overlay>
+            <a-menu @click="onExportMenuClick">
+              <a-menu-item key="view" :disabled="displayLines.length === 0">
+                导出当前视图（{{ displayLines.length }} 行）
+              </a-menu-item>
+              <a-menu-item key="file" :disabled="availableDates.length === 0">
+                下载完整日志（{{ exportFileDateLabel }}）
+              </a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
         <a-button type="primary" size="small" :loading="loading" @click="refresh" class="toolbar-btn">
           <template #icon><ReloadOutlined /></template>
           刷新
@@ -101,8 +117,8 @@
             <div
               class="log-row"
               :class="rowClass(item.text)"
-              @click="copyText(item.text)"
-              :title="'点击复制此行'"
+              @click="onRowClick(item.text)"
+              :title="'点击复制此行（拖选可复制多行）'"
             >
               <span class="log-row-num">{{ index !== undefined ? index + 1 : '' }}</span>
               <span class="log-row-badge" :class="'badge-' + rowLevel(item.text)">{{ rowLevel(item.text) }}</span>
@@ -128,7 +144,7 @@
         <CheckCircleOutlined class="statusbar-icon statusbar-ok" /> 已加载全部日志
       </span>
       <span class="statusbar-item statusbar-copy-hint">
-        点击任意行可复制内容
+        单击行复制单条 · 拖选多行后 Ctrl+C 复制所选 · 支持导出
       </span>
     </div>
   </div>
@@ -142,12 +158,13 @@ import {
   DownOutlined,
   LoadingOutlined,
   CheckCircleOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import { getAuthHeaders } from '@/utils/http-client'
-import { searchLogs, getLogDates } from '@/api/logs'
+import { searchLogs, getLogDates, exportLogFile } from '@/api/logs'
 
 const PAGE_SIZE = 500
 
@@ -162,7 +179,7 @@ const logLevels = [
 // ===== 模式 =====
 const mode = ref<'tail' | 'search'>('tail')
 const tailLines = ref<string[]>([])
-const searchLines = ref<{ lines: { content: string }[]; total: number }>({ lines: [], total: 0 })
+const searchLines = ref<{ lines: { content: string }[]; total: number; date: string }>({ lines: [], total: 0, date: '' })
 // 包装为对象数组，确保 DynamicScroller 的 key-field 稳定追踪每个 item
 const displayLines = computed(() => {
   const raw = mode.value === 'tail' ? tailLines.value : searchLines.value.lines.map(l => l.content)
@@ -266,7 +283,7 @@ async function doSearch() {
       page: 1,
       size: 5000,
     })
-    searchLines.value = { lines: result.lines || [], total: result.total }
+    searchLines.value = { lines: result.lines || [], total: result.total, date: result.date || '' }
   } catch (e: any) {
     message.error(e.message || '搜索失败')
   } finally {
@@ -335,6 +352,84 @@ function copyText(text: string) {
       message.success('已复制')
     }
   )
+}
+
+/**
+ * 行点击：无文本选中时复制单条；有选中（拖选/双击选词）时跳过，避免与"选择复制"冲突
+ */
+function onRowClick(text: string) {
+  const sel = window.getSelection()
+  if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) return
+  copyText(text)
+}
+
+// ===== 导出 =====
+const exportingFile = ref(false)
+
+/** 当前导出对应的日期：搜索模式取结果日期，实时模式取最新日期 */
+const currentExportDate = computed(() => {
+  if (mode.value === 'search') {
+    return searchLines.value.date || searchDate.value || undefined
+  }
+  return availableDates.value[0] || undefined
+})
+const exportFileDateLabel = computed(() => currentExportDate.value || '最新')
+
+function exportTimestamp(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+/** 通过 Blob 触发浏览器下载（带 BOM，避免 Windows 记事本中文乱码） */
+function downloadText(content: string, fileName: string) {
+  const blob = new Blob(['\uFEFF' + content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/** 导出当前视图（已加载 / 已搜索到的所有行） */
+function exportCurrentView() {
+  if (displayLines.value.length === 0) {
+    message.warning('当前没有可导出的日志')
+    return
+  }
+  const prefix = mode.value === 'tail' ? 'runtime' : 'search'
+  const lines = displayLines.value.map(l => l.text)
+  downloadText(lines.join('\n'), `codecraft-${prefix}-logs-${exportTimestamp()}.log`)
+  message.success(`已导出 ${lines.length} 行日志`)
+}
+
+/** 下载完整日志文件（后端按日期拼接原始文件内容） */
+async function exportFullFile() {
+  if (exportingFile.value) return
+  exportingFile.value = true
+  try {
+    const result = await exportLogFile(currentExportDate.value)
+    if (!result || !result.content) {
+      message.warning('该日期没有可导出的日志文件')
+      return
+    }
+    downloadText(result.content, `codecraft-${result.date || 'log'}.log`)
+    const mergeHint = result.fileNames.length > 1 ? `（合并 ${result.fileNames.length} 个文件）` : ''
+    message.success(`已下载 ${result.date} 完整日志：${result.lineCount} 行${mergeHint}`)
+  } catch (e: any) {
+    message.error(e.message || '导出日志失败')
+  } finally {
+    exportingFile.value = false
+  }
+}
+
+/** 导出菜单点击分发 */
+function onExportMenuClick(info: { key: string | number }) {
+  if (info.key === 'view') exportCurrentView()
+  else if (info.key === 'file') exportFullFile()
 }
 
 onMounted(() => {
@@ -671,7 +766,7 @@ onMounted(() => {
   height: auto;
   cursor: pointer;
   transition: background 0.1s;
-  user-select: none;
+  user-select: text;
 }
 .log-row:hover {
   background: rgba(255, 255, 255, 0.04);

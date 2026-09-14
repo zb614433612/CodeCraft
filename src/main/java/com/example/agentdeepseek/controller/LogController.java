@@ -43,7 +43,7 @@ public class LogController {
             @RequestParam(defaultValue = "20") int size) {
         if (page < 1) page = 1;
         if (size < 1) size = 20;
-        if (size > 100) size = 100;
+        if (size > 5000) size = 5000;
         LogService.SearchResult result = logService.search(keyword, level, date, page, size);
         Map<String, Object> response = new HashMap<>();
         response.put("code", 200);
@@ -63,6 +63,17 @@ public class LogController {
         Map<String, Object> result = new HashMap<>();
         result.put("code", 200);
         result.put("data", lines);
+        return result;
+    }
+
+    @Operation(summary = "导出完整日志", description = "按日期导出完整日志内容（拼接该日期所有归档文件与当前活跃文件），date 为空时导出最新日期")
+    @GetMapping("/download")
+    public Map<String, Object> download(
+            @Parameter(description = "日期 yyyy-MM-dd，为空时导出最新日期") @RequestParam(required = false) String date) {
+        LogService.ExportResult exportResult = logService.exportByDate(date);
+        Map<String, Object> result = new HashMap<>();
+        result.put("code", 200);
+        result.put("data", exportResult);
         return result;
     }
 }

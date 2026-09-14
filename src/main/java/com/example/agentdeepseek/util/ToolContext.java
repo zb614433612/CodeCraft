@@ -1,5 +1,7 @@
 package com.example.agentdeepseek.util;
 
+import java.util.List;
+
 /**
  * 工具执行上下文（ThreadLocal）
  * 用于在工具执行期间传递当前会话的执行模式、会话ID、用户ID和助手类型，
@@ -17,6 +19,8 @@ public class ToolContext {
     private static final ThreadLocal<String> currentTurnId = new ThreadLocal<>();
     private static final ThreadLocal<Double> currentTemperature = new ThreadLocal<>();
     private static final ThreadLocal<String> currentProviderCode = new ThreadLocal<>();
+    /** Phase 19：智能体互调信任链（途经 agentConfigId，源自 apiRequest._trustChain，供 agent_invoke 多级委托传递） */
+    private static final ThreadLocal<List<Long>> currentTrustChain = new ThreadLocal<>();
 
     public static void set(String mode, Long conversationId) {
         currentExecutionMode.set(mode);
@@ -82,6 +86,20 @@ public class ToolContext {
         currentProviderCode.set(providerCode);
     }
 
+    /** 获取当前信任链（智能体互调；无委托上下文时返回空列表） */
+    public static List<Long> getTrustChain() {
+        return currentTrustChain.get();
+    }
+
+    /** 设置当前信任链（DeepSeekServiceImpl 工具执行前从 apiRequest._trustChain 同步） */
+    public static void setTrustChain(List<Long> trustChain) {
+        if (trustChain == null || trustChain.isEmpty()) {
+            currentTrustChain.remove();
+        } else {
+            currentTrustChain.set(trustChain);
+        }
+    }
+
     public static void clear() {
         currentExecutionMode.remove();
         currentConversationId.remove();
@@ -91,5 +109,6 @@ public class ToolContext {
         currentTurnId.remove();
         currentTemperature.remove();
         currentProviderCode.remove();
+        currentTrustChain.remove();
     }
 }

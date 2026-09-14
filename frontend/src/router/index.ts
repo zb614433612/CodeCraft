@@ -89,6 +89,12 @@ const router = createRouter({
           meta: { requiresAdmin: true }
         },
         {
+          path: 'db-connections',
+          name: 'db-connections',
+          component: () => import('@/views/DbConnectionView.vue'),
+          meta: { requiresAdmin: true }
+        },
+        {
           path: 'lesson-manage',
           name: 'lesson-manage',
           component: () => import('@/views/LessonManageView.vue')

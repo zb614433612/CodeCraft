@@ -35,6 +35,18 @@ public class FailureNormalizer {
     /** P0：规则自学习表（LLM 沉淀的报错文本特征，优先级最高；转正规则优先） */
     private final LessonRuleMapper ruleMapper;
 
+    /**
+     * P1：参与指纹的参数名白名单（逗号分隔配置；默认空 = 所有参数均不参与指纹）。
+     * 历史教训：params 全值参与指纹导致同坑因上下文参数（command 文本/路径）分裂成多条——
+     * 参数保留用于检索过滤（filterByParams），但不再决定「是否同一个坑」。
+     * 确有区分价值的参数名（如「缺失依赖」）可通过配置恢复其参与。
+     */
+    @org.springframework.beans.factory.annotation.Value("${lesson.fingerprint.param-whitelist:}")
+    private String fingerprintParamWhitelistCsv;
+
+    /** 白名单解析缓存（lazy；volatile 保证可见性） */
+    private volatile java.util.List<String> fingerprintParamWhitelistCache;
+
     /** 指标：规则表命中次数（T6 看板：归一化落空率 / 自学习效果） */
     private final java.util.concurrent.atomic.AtomicLong ruleMatchCount = new java.util.concurrent.atomic.AtomicLong();
 
@@ -186,6 +198,9 @@ public class FailureNormalizer {
         // 4. 结构化参数（提取关键标量字段，供二级参数过滤 + 指纹）
         failure.paramsJson = extractParams(argumentsJson);
 
+        // P1-B：错误码 canonical 化（同义码归一，防同坑多码碎片；UNKNOWN 等无映射时原样返回）
+        failure.errorCode = dictionary.canonicalize(failure.errorCode);
+
         return failure;
     }
 
@@ -300,28 +315,94 @@ public class FailureNormalizer {
     // ============================================================
 
     /**
-     * 生成同坑去重指纹：md5(projectKey|toolName|category|errorCode|paramsHash)
-     * 相同指纹 = 同一个坑（允许参数值差异时由 params 参与区分）
+     * 生成同坑去重指纹：md5(projectKey|toolName|category|errorCode|effectiveParamsHash)
+     * <p>
+     * P1 指纹分级：effectiveParamsHash 仅由「白名单参数名」的条目计算（默认白名单为空 →
+     * 恒为 md5("[]") 前 8 位，即参数不参与指纹）。历史教训：params 全值参与导致同坑因
+     * 上下文参数（command 文本/路径）分裂成多条（CMD_NOT_FOUND 曾裂成 27 条）。
+     * 参数仍用于检索过滤（filterByParams），但不再决定「是否同一个坑」。
      */
     public String fingerprint(String projectKey, NormalizedFailure failure) {
-        String paramsHash = md5(failure.paramsJson == null ? "[]" : failure.paramsJson).substring(0, 8);
+        String paramsHash = effectiveParamsHash(failure);
         String raw = projectKey + "|" + failure.toolName + "|" + failure.errorCategory
                 + "|" + failure.errorCode + "|" + paramsHash;
         return md5(raw);
     }
 
     /**
-     * 生成跨项目同坑指纹：md5(toolName|category|errorCode|paramsHash)
+     * 生成跨项目同坑指纹：md5(toolName|category|errorCode|effectiveParamsHash)
      * 不含 projectKey —— 专供 F3 被动反馈的追踪比对使用：
      * 全局经验（project_key='__global__'）入库签名含 '__global__' 前缀，与当前项目失败
      * 重新计算的含项目签名必然不等 → 「再次失败判无效」对全局经验永不触发。
      * 无项目签名在项目内/全局两个维度一致，追踪比对统一用它即可两端命中。
      */
     public String fingerprintNoProject(NormalizedFailure failure) {
-        String paramsHash = md5(failure.paramsJson == null ? "[]" : failure.paramsJson).substring(0, 8);
+        String paramsHash = effectiveParamsHash(failure);
         String raw = failure.toolName + "|" + failure.errorCategory
                 + "|" + failure.errorCode + "|" + paramsHash;
         return md5(raw);
+    }
+
+    /**
+     * P1：计算指纹用参数哈希——仅白名单参数名参与（默认空 = 完全不参与，恒 md5("[]")）。
+     * 白名单对 paramsJson 中 [{name,value}] 的 name 精确匹配；命中项按原顺序重新序列化。
+     */
+    private String effectiveParamsHash(NormalizedFailure failure) {
+        String effective = filterParamsForFingerprint(failure.paramsJson);
+        return md5(effective).substring(0, 8);
+    }
+
+    /** 白名单过滤：无白名单/无参数 → "[]"；否则只保留 name 命中白名单的条目 */
+    private String filterParamsForFingerprint(String paramsJson) {
+        List<String> whitelist = fingerprintParamWhitelist();
+        if (whitelist.isEmpty() || paramsJson == null || paramsJson.isBlank() || "[]".equals(paramsJson)) {
+            return "[]";
+        }
+        try {
+            JsonNode array = objectMapper.readTree(paramsJson);
+            if (array == null || !array.isArray()) {
+                return "[]";
+            }
+            List<JsonNode> kept = new ArrayList<>();
+            for (JsonNode node : array) {
+                String name = node.path("name").asText("");
+                if (whitelist.contains(name)) {
+                    kept.add(node);
+                }
+            }
+            if (kept.isEmpty()) {
+                return "[]";
+            }
+            ArrayNode out = objectMapper.createArrayNode();
+            kept.forEach(out::add);
+            return objectMapper.writeValueAsString(out);
+        } catch (Exception e) {
+            log.debug("指纹参数过滤失败，按无参数处理: {}", e.getMessage());
+            return "[]";
+        }
+    }
+
+    /** P1：解析白名单配置（逗号分隔；空 = 所有参数不参与指纹） */
+    private List<String> fingerprintParamWhitelist() {
+        List<String> cache = fingerprintParamWhitelistCache;
+        if (cache == null) {
+            String csv = fingerprintParamWhitelistCsv;
+            if (csv == null || csv.isBlank()) {
+                cache = List.of();
+            } else {
+                cache = java.util.Arrays.stream(csv.split(","))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .collect(java.util.stream.Collectors.toList());
+            }
+            fingerprintParamWhitelistCache = cache;
+        }
+        return cache;
+    }
+
+    /** P1：错误码 canonical 化桥接（供 LessonService 等复用字典别名映射） */
+    public String canonicalizeCode(String code) {
+        return dictionary.canonicalize(code);
     }
 
     /**

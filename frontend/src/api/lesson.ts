@@ -63,6 +63,7 @@ export async function pageLessons(params: {
   toolName?: string
   errorCode?: string
   type?: string // P1：FAILURE / DETOUR
+  zeroHit?: boolean // P2：只看零命中（巡检清理候选）
   page?: number
   size?: number
 }) {
@@ -72,6 +73,7 @@ export async function pageLessons(params: {
   if (params.toolName) query.set('toolName', params.toolName)
   if (params.errorCode) query.set('errorCode', params.errorCode)
   if (params.type) query.set('type', params.type)
+  if (params.zeroHit) query.set('zeroHit', 'true')
   query.set('page', String(params.page ?? 1))
   query.set('size', String(params.size ?? 10))
   return request<LessonPageResult>(`/lessons?${query}`)
@@ -104,4 +106,35 @@ export async function feedbackLesson(id: number, effective: boolean) {
 /** 删除经验 */
 export async function deleteLesson(id: number) {
   return request<void>(`/lessons/${id}`, { method: 'DELETE' })
+}
+
+/** P2：重复经验组（聚类归并）——后端 Map 返回，键为下划线风格 */
+export interface LessonCluster {
+  project_key?: string
+  tool_name?: string
+  error_category?: string
+  error_code?: string
+  cnt?: number
+  sample_id?: number
+}
+
+/** P2：查询重复经验组（聚类归并入口） */
+export async function listLessonClusters(projectKey?: string, limit = 50) {
+  const query = new URLSearchParams()
+  if (projectKey) query.set('projectKey', projectKey)
+  query.set('limit', String(limit))
+  return request<LessonCluster[]>(`/lessons/clusters?${query}`)
+}
+
+/** P2：归并重复经验组 */
+export async function mergeLessonGroup(group: {
+  projectKey: string
+  toolName: string
+  errorCategory: string
+  errorCode: string
+}) {
+  return request<string>(`/lessons/merge`, {
+    method: 'POST',
+    body: JSON.stringify(group)
+  })
 }

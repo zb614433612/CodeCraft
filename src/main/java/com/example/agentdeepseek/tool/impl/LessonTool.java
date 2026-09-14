@@ -6,6 +6,7 @@ import com.example.agentdeepseek.service.lesson.LessonService;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
+import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -50,7 +51,7 @@ public class LessonTool implements Tool {
                 + "  feedback — 反馈经验应用结果（有效/无效），系统据此转正或隐藏经验\n"
                 + "  list     — 列出当前项目的经验库（巡检用，按有效/命中排序）\n"
                 + "【推荐工作流】\n"
-                + "  1) 工具执行失败 → lesson action=search 查经验（按项目+工具+错误码精准过滤）\n"
+                + "  1) 工具执行失败 → lesson action=search 查经验（优先传 tool_name + keyword；error_code 可传原始报错文本/异常类名，系统自动归一化对齐；keyword 支持空格分隔多个词）\n"
                 + "  2) 命中 → 按「解法+适用条件+关键参数」判断是否适用，应用后 feedback 反馈\n"
                 + "  3) 未命中 → 自行解决后，用 action=record 记录；若之前自动捕获过草稿（search 可见），用 action=complete 补全\n"
                 + "  4) 新项目/新任务开始 → action=list 巡检经验库，规避已知坑";
@@ -86,12 +87,12 @@ public class LessonTool implements Tool {
         // === search 专用 ===
         ObjectNode errorCode = objectMapper.createObjectNode();
         errorCode.put("type", "string");
-        errorCode.put("description", "【search 可选】错误码/异常类名，如 NoClassDefFoundError / ECONNREFUSED / 401 / BUILD FAILURE。");
+        errorCode.put("description", "【search 可选】错误码/异常类名/原始报错文本（系统自动归一化对齐库内短码），如 NoClassDefFoundError / command not found / 401 / BUILD FAILURE。");
         properties.set("error_code", errorCode);
 
         ObjectNode keyword = objectMapper.createObjectNode();
         keyword.put("type", "string");
-        keyword.put("description", "【search 可选】关键词（现象/解法/标签模糊匹配），如 编译 依赖 端口。search 至少提供 keyword 或 error_code 之一。");
+        keyword.put("description", "【search 可选】关键词（空格分隔多个词，按词模糊匹配、任一命中即召回），如 编译 依赖 端口。search 至少提供 keyword 或 error_code 之一。");
         properties.set("keyword", keyword);
 
         // === search 专用（P1）===
@@ -199,15 +200,24 @@ public class LessonTool implements Tool {
         if (keyword.isBlank() && errorCode.isBlank() && toolName.isBlank()) {
             return "【参数不足】search 至少需要提供 keyword（关键词）或 error_code（错误码）之一，"
                     + "建议同时传 tool_name（工具名）提高精度。示例：\n"
-                    + "  lesson action=search tool_name=command error_code=NoClassDefFoundError\n"
-                    + "  lesson action=search keyword=\"编译 依赖\"\n"
+                    + "  lesson action=search tool_name=command error_code=\"command not found\"（原始报错文本/异常类名均可，系统自动归一化对齐）\n"
+                    + "  lesson action=search keyword=\"编译 依赖\"（空格分隔多个词，按词模糊匹配）\n"
                     + "  lesson action=search type=detour keyword=\"登录 改造\"（P1：新任务规划方案前查弯路经验）";
         }
 
         String projectKey = resolveProjectKey(args);
         String paramsJson = args.has("params") ? args.path("params").toString() : null;
         String type = args.path("type").asText("");
-        return lessonService.searchLessons(projectKey, toolName, errorCode, keyword, paramsJson, type);
+        LessonService.SearchOutcome outcome = lessonService.searchLessonsForTool(
+                projectKey, toolName, errorCode, keyword, paramsJson, type);
+        // P1-D：命中投递——供主循环并入 F3 追踪（无会话上下文/无命中时静默跳过）
+        if (outcome.hits != null && !outcome.hits.isEmpty()) {
+            Long conversationId = ToolContext.getConversationId();
+            if (conversationId != null) {
+                lessonService.registerSearchHits(conversationId, outcome.hits);
+            }
+        }
+        return outcome.text;
     }
 
     // ============================================================
