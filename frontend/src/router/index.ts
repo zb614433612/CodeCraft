@@ -99,6 +99,11 @@ const router = createRouter({
           name: 'lesson-manage',
           component: () => import('@/views/LessonManageView.vue')
         },
+        {
+          path: 'file-manage',
+          name: 'file-manage',
+          component: () => import('@/views/FileManageView.vue')
+        },
 
       ]
     }

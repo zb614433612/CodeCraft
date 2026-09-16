@@ -71,8 +71,14 @@ AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按�
 ### 👥 用户管理与权限（Multi-User / RBAC）
 完整的账户体系：注册登录、Token 鉴权（JWT）、角色权限控制（RBAC）、菜单可见性管理、初始管理员自动创建。
 
-### 🧰 22 个工具生态（Tool Use / Function Calling）
-文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理等 8 大类 22 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
+### 🧰 24 个工具生态（Tool Use / Function Calling）
+文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理、桌面自动化（Computer Use）等 9 大类 24 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
+
+### 🖼️ 图像理解与文件管理（Vision / Files API）
+支持在聊天中粘贴（Ctrl+V）或上传图片（≤64MB），经云端 **Files API**（file_id 引用）供 LLM 图像理解，适配器架构兼容 DeepSeek / Anthropic 双风格；内置独立**文件管理页**（上传/列表/重命名/删除/引用到会话，文件永久保存）；文档附件（PDF/Word/Excel/文本）本地统一纳管（storage_type 区分 cloud/local）。
+
+### 🪟 桌面自动化（Computer Use）
+AI 可"看到"并"操控"电脑：`screen_capture` 一键截屏（分辨率标准化 + 自动上传 + 注入上下文，叠加网格与刻度辅助坐标读数）→ `desktop_control` 键鼠模拟（点击/拖拽/滚轮/按键/输入，单次支持 1~20 个批量动作）——"截图 → 定坐标 → 操作 → 再截图验证"闭环。DESKTOP 高危权限管控 + 坐标准星预检（先验证后执行），支持 Windows / macOS / Linux。
 
 ### 🗄️ 数据管理（外部数据库连接）
 在「数据库连接」管理页配置 MySQL / PostgreSQL / H2 外部业务库（密码 AES-256-GCM 加密存储、支持测试连接），AI 即可通过 `execute_sql` 的 `connection` 参数直接查询外部业务库——不传 `connection` 时仍连 CodeCraft 系统库，向后兼容。
@@ -180,8 +186,9 @@ codecraft/
 │   │       │   ├── llm/          # LLM 客户端层（LLMClient 接口 + 6 个 Provider 实现）
 │   │       │   ├── lesson/       # 成长体系（经验库：检索/记录/复盘/失败归一化）
 │   │       │   ├── agentinvoke/  # 智能体互调（委托执行/信任链）
-│   │       │   └── dbconnection/ # 外部数据库连接（配置/加密/连接管理）
-│   │       ├── tool/             # AI Agent 工具（22 个工具）
+│   │       │   ├── dbconnection/ # 外部数据库连接（配置/加密/连接管理）
+│   │       │   └── files/        # 文件资产（Files API 适配/上传/图像理解）
+│   │       ├── tool/             # AI Agent 工具（24 个工具）
 │   │       │   ├── impl/         # 工具实现
 │   │       │   ├── permission/   # 工具权限控制
 │   │       │   └── postedit/     # 工具后处理（格式化、检查）

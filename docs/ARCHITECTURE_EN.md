@@ -1,14 +1,14 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v1.1.8 | Updated: 2026-09-14 | Audience: Developers / AI Collaborators
+> Version: v2.0.0 | Updated: 2026-09-16 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
 
 ## 1. One-Sentence Definition
 
-**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **22 tools** (file read/write, command execution, Git operations, web search, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
+**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **24 tools** (file read/write, command execution, Git operations, web search, desktop automation, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
 
 ---
 
@@ -32,7 +32,7 @@
 │ │          Spring Boot 3.4 Backend (src/main/java/)                   │ │
 │ │                       │                                             │ │
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
-│ │ │        Controller Layer (21 Controllers)    │                      │ │
+│ │ │        Controller Layer (23 Controllers)    │                      │ │
 │ │ │ DeepSeekController / GitController /       │                      │ │
 │ │ │ P2pController / SnapshotController / ...   │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
@@ -159,7 +159,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── NetworkToolConfig      # Proxy/Network config
 │   ├── OpenApiConfig          # Swagger/OpenAPI docs
 │   └── SpaConfig              # SPA routing fallback
-├── controller/                # REST API Controllers (21)
+├── controller/                # REST API Controllers (23) + GlobalExceptionHandler
 │   ├── DeepSeekController     # ★Core: Chat, Agent task status
 │   ├── ConversationController # Conversation CRUD
 │   ├── GitController          # Git operations
@@ -179,24 +179,30 @@ src/main/java/com/example/agentdeepseek/
 │   ├── RoleController         # Role management
 │   ├── ConfigController       # System config (API Key, etc.)
 │   ├── LogController          # Log query
+│   ├── SystemController       # System info (status/version, etc.)
+│   ├── DbConnectionController # External DB connections (Phase 20)
+│   ├── FileAssetController    # File assets (upload/list/reference, vision-files-api)
+│   ├── ProviderBalanceController # Provider balance query
 │   └── ScheduleTaskController # Scheduled tasks
 ├── filter/                    # TokenAuthenticationFilter
 ├── initializer/               # UserInitializer (first-launch admin setup)
-├── mapper/                    # MyBatis Mapper Interfaces (21)
+├── mapper/                    # MyBatis Mapper Interfaces (24)
 │   ├── ConversationMapper / ConversationMessageMapper / CompactionMapper
 │   ├── AgentConfigMapper / SkillMapper / SubAgentLogMapper
 │   ├── UserMapper / MenuMapper / RoleMapper / RoleMenuMapper
 │   ├── ScheduleTaskMapper / SysConfigMapper
 │   └── ProviderConfigMapper (LLM Provider) / McpServerMapper (MCP)
 │ │   ├── LessonMapper / LessonNormCacheMapper / LessonRuleMapper (Growth)
+│ │   ├── DbConnectionMapper / FileAssetMapper / FileReferenceMapper
 │ │   └── P2p* (4: Auth/Session/Message/KnownPeer)
 ├── model/
-│   ├── entity/                # Database Entities (23)
+│   ├── entity/                # Database Entities (26)
 │   │   ├── Conversation / ConversationMessage / CompactionRecord
 │   │   ├── User / Menu / Role / RoleMenu / SysConfig
 │   │   ├── AgentConfig / AgentTask / Skill / SubAgentLog
 │   │   ├── ScheduleTask / MessageRole / ProviderConfig / McpServerConfig
 │ │   │   ├── Lesson / LessonNormCache / LessonRule（Growth System）
+│ │   │   ├── DbConnection / FileAsset / FileReference
 │ │   │   └── P2pAgentAuthorization / P2pAgentConversation /
 │ │   │       P2pChatMessage / P2pKnownPeer
 │   ├── dto/                   # Request/Response DTOs
@@ -216,6 +222,8 @@ src/main/java/com/example/agentdeepseek/
 ├── service/                   # Business Interfaces + Implementations
 │   ├── DeepSeekService        # Core chat service interface
 │   ├── ShellDiscoveryService  # Smart Shell discovery (Win/Mac/Linux multi-shell)
+│   ├── files/                 # ★File assets & Files API adapter (upload/vision/reference)
+│   ├── llm/                   # LLM client layer (LLMClient + 6 providers + ProviderBalanceService)
 │   └── impl/
 │       ├── DeepSeekServiceImpl    # ★★★Core Engine (187KB)
 │       ├── ToolLoopManager        # Tool loop (dead loop / judge / cancel)
@@ -244,7 +252,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolRegistry           # Tool registry (singleton)
 │   ├── ToolExecutor           # Tool execution engine
 │   ├── ToolInitializer        # Auto-init all tools on startup
-│   ├── impl/                  # 22 tool implementations (new naming, one tool many actions)
+│   ├── impl/                  # 24 tool implementations (new naming, one tool many actions)
 │   │   ├── File: file_explorer, file_writer
 │   │   ├── Command: command
 │   │   ├── Network: web_search, web_fetch, http_request, check_network
@@ -258,7 +266,9 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── Interaction: ask_clarification, chat_attachment, query_tool_history
 │   │   ├── Schedule: schedule_task
 │   │   ├── MCP Manager: mcp_server_manager
+│   │   ├── Desktop: screen_capture, desktop_control (Computer Use)
 │   │   └── History: query_tool_history
+│   ├── desktop/               # Desktop automation (platform adapter/CaptureContext/verify)
 │   ├── permission/            # Permission control
 │   └── postedit/              # Post-processing pipeline
 ├── log/LogService             # Application-level logging (11KB)
@@ -394,6 +404,19 @@ src/main/java/com/example/agentdeepseek/
 │ user_id                  │
 └──────────────────────────┘
 
+┌──────────────────────────┐   ┌──────────────────────────┐
+│ file_asset (vision)      │   │ file_reference           │
+│ ──────────────────────── │   │ ───────────────────────  │
+│ id (PK)                  │   │ id (PK)                  │
+│ file_id (remote ID)      │   │ file_asset_id (FK)       │
+│ provider_code / user_id  │   │ conversation_id          │
+│ filename / display_name  │   │ message_id (backfilled)  │
+│ mime_type / size         │   │ created_at               │
+│ local_path / storage_type│   └──────────────────────────┘
+│ source / status / orphan │
+│ expires_at / created_at  │
+└──────────────────────────┘
+
 ┌────────────────────────┐   ┌──────────────────────────┐
 │ lesson_norm_cache      │   │ lesson_rule              │
 │ ────────────────────── │   │ ───────────────────────  │
@@ -420,7 +443,9 @@ src/main/java/com/example/agentdeepseek/
 | **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~900 |
 | **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~800 |
 | **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~5000 |
-| **Tool System** | 22 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
+| **Tool System** | 24 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
+| **File Assets** | Upload/local storage/Files API adapter/vision understanding | FileAssetService + FilesApiClientManager | ~900 |
+| **Desktop Automation** | Screenshot (grid/scale ticks)/mouse & keyboard/coordinate preflight | ScreenCaptureTool + DesktopControlTool | ~1500 |
 | **Growth System** | Retrieval/capture/review/normalization/detour | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **User Permissions** | RBAC, Token auth, menu control | UserServiceImpl + Filter | ~500 |
 | **Scheduled Tasks** | Cron/one-time scheduling, execution tracking | ScheduleTaskScheduler | ~350 |

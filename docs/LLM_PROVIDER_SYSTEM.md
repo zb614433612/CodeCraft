@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.0 | 更新：2026-09-16 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -418,7 +418,35 @@ const refreshModelList = () => {
 | PUT | `/api/llm-providers/{id}` | 更新 Provider | admin |
 | DELETE | `/api/llm-providers/{id}` | 删除 Provider | admin |
 
-### 7.2 请求/响应示例
+### 7.2 ProviderBalanceController
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| GET | `/api/llm-providers/{code}/balance` | 查询 Provider 账户余额（仅 DeepSeek 支持；聊天页面在进入页面 / 每次对话结束后调用，用于展示余额） | 登录用户 |
+
+**响应示例（DeepSeek）**
+
+```json
+{
+  "code": 200,
+  "message": "操作成功",
+  "data": {
+    "providerCode": "deepseek",
+    "isAvailable": true,
+    "balanceInfos": [
+      {
+        "currency": "CNY",
+        "totalBalance": "110.00",
+        "grantedBalance": "10.00",
+        "toppedUpBalance": "100.00"
+      }
+    ],
+    "updatedAt": 1678886400000
+  }
+}
+```
+
+### 7.3 请求/响应示例
 
 **创建 Provider**
 

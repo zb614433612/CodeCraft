@@ -48,9 +48,8 @@ public class TokenEstimator {
             // 每条消息约 3~5 token 的基础开销（role 字段等）
             total += 4;
 
-            // content 字段
-            String content = (String) msg.getOrDefault("content", "");
-            total += estimate(content);
+            // content 字段（M3：支持多模态数组——text 块按文本估算，file/image 块按 ~1024 token/块）
+            total += estimateContent(msg.get("content"));
 
             // reasoning_content 字段（DeepSeek 思考链）
             String reasoning = (String) msg.getOrDefault("reasoning_content", "");
@@ -69,5 +68,40 @@ public class TokenEstimator {
             }
         }
         return Math.max(total, 1);
+    }
+
+    /**
+     * 估算 content 字段的 token 数（兼容 String 与多模态内容块数组）
+     * <p>
+     * 数组形态（M3 图像注入后）：text 块按文本精确估算；file / image_url 等图片块按
+     * ~1024 token/块 估算（DeepSeek 文档口径；仅预算守卫用途，非计费口径）。
+     * </p>
+     *
+     * @param content 消息 content（String / List&lt;Map&gt; / null）
+     * @return token 估算值
+     */
+    private static int estimateContent(Object content) {
+        if (content == null) {
+            return 0;
+        }
+        if (content instanceof String text) {
+            return estimate(text);
+        }
+        if (content instanceof List<?> parts) {
+            int sum = 0;
+            for (Object item : parts) {
+                if (item instanceof Map<?, ?> block) {
+                    Object type = block.get("type");
+                    if ("text".equals(type)) {
+                        Object text = block.get("text");
+                        sum += estimate(text == null ? "" : String.valueOf(text));
+                    } else {
+                        sum += 1024; // 图片类块（file / image_url / image）
+                    }
+                }
+            }
+            return sum;
+        }
+        return estimate(String.valueOf(content));
     }
 }

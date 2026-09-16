@@ -24,7 +24,7 @@ public interface ConversationMessageMapper {
      * @param message 消息实体
      * @return 受影响的行数
      */
-    @Insert("INSERT INTO conversation_message (conversation_id, role, content, reasoning, tool_calls, turn_id, created_at) VALUES (#{conversationId}, #{role, typeHandler=org.apache.ibatis.type.EnumTypeHandler}, #{content}, #{reasoning}, #{toolCalls}, #{turnId}, #{createdAt})")
+    @Insert("INSERT INTO conversation_message (conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at) VALUES (#{conversationId}, #{role, typeHandler=org.apache.ibatis.type.EnumTypeHandler}, #{content}, #{reasoning}, #{toolCalls}, #{turnId}, #{messageType}, #{createdAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(ConversationMessage message);
 
@@ -33,7 +33,7 @@ public interface ConversationMessageMapper {
      * @param conversationId 会话ID
      * @return 消息列表
      */
-    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, created_at FROM conversation_message WHERE conversation_id = #{conversationId} ORDER BY created_at ASC")
+    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at FROM conversation_message WHERE conversation_id = #{conversationId} ORDER BY created_at ASC")
     @Results(id = "ConversationMessageResultMap", value = {
         @Result(property = "id", column = "id"),
         @Result(property = "conversationId", column = "conversation_id"),
@@ -42,6 +42,7 @@ public interface ConversationMessageMapper {
         @Result(property = "reasoning", column = "reasoning"),
         @Result(property = "toolCalls", column = "tool_calls"),
         @Result(property = "turnId", column = "turn_id"),
+        @Result(property = "messageType", column = "message_type"),
         @Result(property = "createdAt", column = "created_at")
     })
     List<ConversationMessage> selectByConversationId(Long conversationId);
@@ -51,7 +52,7 @@ public interface ConversationMessageMapper {
      * @param id 消息ID
      * @return 消息实体
      */
-    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, created_at FROM conversation_message WHERE id = #{id}")
+    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at FROM conversation_message WHERE id = #{id}")
     @ResultMap("ConversationMessageResultMap")
     ConversationMessage selectById(Long id);
 

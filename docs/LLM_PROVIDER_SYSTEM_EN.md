@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v1.1.8 | Updated: 2026-09-14 | Audience: Developers / AI Collaborators
+> Version: v2.0.0 | Updated: 2026-09-16 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---
@@ -418,7 +418,35 @@ When no Provider is configured, a guide interface is displayed:
 | PUT | `/api/llm-providers/{id}` | Update Provider | admin |
 | DELETE | `/api/llm-providers/{id}` | Delete Provider | admin |
 
-### 7.2 Request/Response Example
+### 7.2 ProviderBalanceController
+
+| Method | Path | Description | Permission |
+|--------|------|-------------|------------|
+| GET | `/api/llm-providers/{code}/balance` | Query Provider account balance (DeepSeek only; called by the chat page on page entry / after each conversation to display the balance) | Logged-in user |
+
+**Response Example (DeepSeek)**
+
+```json
+{
+  "code": 200,
+  "message": "操作成功",
+  "data": {
+    "providerCode": "deepseek",
+    "isAvailable": true,
+    "balanceInfos": [
+      {
+        "currency": "CNY",
+        "totalBalance": "110.00",
+        "grantedBalance": "10.00",
+        "toppedUpBalance": "100.00"
+      }
+    ],
+    "updatedAt": 1678886400000
+  }
+}
+```
+
+### 7.3 Request/Response Example
 
 **Create Provider**
 

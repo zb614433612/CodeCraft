@@ -10,17 +10,21 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.http.client.PrematureCloseException;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.util.retry.Retry;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 /**
@@ -37,6 +41,8 @@ import java.util.function.Function;
  *   <li>支持动态 API Key 解析（通过 apiKeyResolver）</li>
  *   <li>256KB 内存缓冲区，容纳 tool_calls 大 JSON 块</li>
  *   <li>HTTP/2 优先 + HTTP/1.1 兜底</li>
+ *   <li>P4 健壮性过滤器链（所有调用路径共用）：并发限流 → 429/5xx 指数退避重试
+ *       → 网络类错误固定间隔重试（默认 5 秒 × 3 次，DNS/连接失败等网络波动兜底不中断任务）</li>
  * </ul>
  * </p>
  */
@@ -64,6 +70,14 @@ public class LLMWebClientManager {
     /** P4：重试最大延迟（毫秒，退避封顶） */
     @Value("${llm.retry.max-delay-ms:10000}")
     private long retryMaxDelayMs;
+
+    /** P4：网络类错误重试次数（DNS 解析失败/连接拒绝/连接超时/读响应头超时等；不含首次请求，默认 3 次） */
+    @Value("${llm.retry.network-max-retries:3}")
+    private int networkMaxRetries = 3;
+
+    /** P4：网络类错误重试固定间隔（毫秒，默认 5000 = 5 秒） */
+    @Value("${llm.retry.network-interval-ms:5000}")
+    private long networkIntervalMs = 5000;
 
     public LLMWebClientManager(ProviderRateLimiter providerRateLimiter) {
         this.providerRateLimiter = providerRateLimiter;
@@ -190,6 +204,13 @@ public class LLMWebClientManager {
         // ===== P4：429/5xx 指数退避重试过滤器（流式安全） =====
         // 仅在「响应头阶段」判定错误（4xx/5xx 状态码）时重试——此时响应体尚未开始流转，
         // 重试不会导致流式数据重复；一旦 200 响应头到达、body 开始输出，后续断流不会触发重试。
+        //
+        // 网络类错误兜底（2026-09-16）：DNS 解析失败 / 连接拒绝 / 连接超时 / 读响应头超时等
+        // 「响应头到达前」的网络波动同样在此阶段重试（固定间隔 network-interval-ms × network-max-retries），
+        // 重试耗尽后包装为明确的中文「网络错误」文案向上传播（不再裸抛英文网络异常）。
+        // 两层 retryWhen 串行且 filter 互斥（网络类 vs 状态码类），互不干扰：
+        //   - 网络错误 → 内层固定间隔重试，耗尽后包装传播（外层 filter 不匹配）；
+        //   - 429/5xx → 内层不匹配直接透传，由外层指数退避重试（现有行为不变）。
         builder.filter((request, next) ->
                 Mono.defer(() -> next.exchange(request))
                         .flatMap(response -> {
@@ -205,6 +226,30 @@ public class LLMWebClientManager {
                             }
                             return Mono.just(response);
                         })
+                        // 内层：网络类错误固定间隔重试（网络波动兜底，防任务中断）
+                        .retryWhen(Retry.fixedDelay(Math.max(0, networkMaxRetries),
+                                        Duration.ofMillis(Math.max(0, networkIntervalMs)))
+                                .filter(this::isRetryableNetworkError)
+                                .doBeforeRetry(signal -> log.warn(
+                                        "LLM 网络波动 [{}]：将在 {}ms 后进行第 {}/{} 次重试｜原因: {}",
+                                        config.getCode(), networkIntervalMs,
+                                        signal.totalRetries() + 1, networkMaxRetries,
+                                        signal.failure().getMessage()))
+                                .onRetryExhaustedThrow((spec, signal) -> {
+                                    Throwable failure = signal.failure();
+                                    if (networkMaxRetries <= 0) {
+                                        // 显式禁用（0）：不重试也不包装，原样抛错
+                                        return failure;
+                                    }
+                                    log.error("LLM 网络连接失败 [{}]：已自动重试 {} 次（间隔 {}ms）仍无法连接｜原因: {}",
+                                            config.getCode(), networkMaxRetries, networkIntervalMs,
+                                            failure.getMessage());
+                                    return new RuntimeException("网络连接失败：LLM API（" + config.getCode()
+                                            + "）无法连接，已自动重试 " + networkMaxRetries
+                                            + " 次仍失败，请检查本机网络或代理后重试。原因: " + failure.getMessage(),
+                                            failure);
+                                }))
+                        // 外层：429/5xx 指数退避重试（现有）
                         .retryWhen(Retry.backoff(Math.max(0, retryMaxAttempts - 1),
                                         Duration.ofMillis(retryBaseDelayMs))
                                 .maxBackoff(Duration.ofMillis(retryMaxDelayMs))
@@ -228,6 +273,47 @@ public class LLMWebClientManager {
                                 ? wce.getMessage().substring(0, 200) : wce.getMessage());
             }
             return retryable;
+        }
+        return false;
+    }
+
+    /**
+     * P4：判定是否为「网络类」可重试错误（2026-09-16 网络波动兜底）。
+     * <p>
+     * 仅覆盖「响应头到达前」的请求阶段错误：DNS 解析失败、连接拒绝/超时、请求写失败、读响应头超时等。
+     * 命中类型（沿 cause 链最深 10 层判断）：
+     * <ul>
+     *   <li>{@link WebClientRequestException} —— Spring WebClient 对请求阶段网络异常的统一定向包装</li>
+     *   <li>{@link IOException} —— 含 UnknownHost / ConnectException / SocketException（connection reset 等）</li>
+     *   <li>{@link TimeoutException}（java.util.concurrent）与 netty {@code io.netty.handler.timeout.TimeoutException}（Read/Write 超时）</li>
+     *   <li>{@link PrematureCloseException} —— reactor-netty 连接被对端提前关闭</li>
+     * </ul>
+     * 不命中：4xx/5xx 状态码错误（走 {@link #isRetryableStatus} 的 429/5xx 通道）、业务异常。
+     * 注意：响应头 200 到达后的流式中途断流不在重试范围——重试会导致流式数据重复，现状保持。
+     */
+    private boolean isRetryableNetworkError(Throwable ex) {
+        Throwable t = ex;
+        for (int depth = 0; t != null && depth < 10; depth++) {
+            if (t instanceof WebClientRequestException) {
+                return true;
+            }
+            if (t instanceof IOException) {
+                return true;
+            }
+            if (t instanceof TimeoutException) {
+                return true;
+            }
+            if (t instanceof io.netty.handler.timeout.TimeoutException) {
+                return true;
+            }
+            if (t instanceof PrematureCloseException) {
+                return true;
+            }
+            Throwable next = t.getCause();
+            if (next == t || next == null) {
+                break;
+            }
+            t = next;
         }
         return false;
     }

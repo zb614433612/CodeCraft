@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.0 | 更新：2026-09-16 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 187KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -33,7 +33,7 @@ DeepSeekServiceImpl 承担的职责（理想情况下应拆分为 4~5 个类）�
 ## 二、依赖注入全景图
 
 ```
-DeepSeekServiceImpl (22 个依赖)
+DeepSeekServiceImpl (28 个依赖)
 ├─ 外部通信
 │   └─ WebClient deepSeekWebClient     → DeepSeek API HTTP 调用（兜底，正常走 LLMClient）
 ├─ 配置
@@ -64,7 +64,15 @@ DeepSeekServiceImpl (22 个依赖)
 ├─ 成长体系（★v1.1.5 新增，v1.1.6 进化：P0 归一化 / P1 弯路通道 / P2 环境感知）
 │   ├─ LessonService                   → 经验 CRUD + 按需检索 + 状态机
 │   ├─ LessonRecorder                  → 失败自动捕获草稿（source=auto）
-│   └─ LessonReviewService             → 对话级异步复盘（C2）
+│   ├─ LessonReviewService
+│   └─ FailureNormalizer               → 错误码归一化 + 指纹去重             → 对话级异步复盘（C2）
+├─ Agent 互调 / 文件资产（★v1.1.8 / v2.0.0）
+│   ├─ AgentInvokeService              → 智能体委托执行（信任链）
+│   ├─ FileAssetService                → 文件资产管理（上传/引用/级联）
+│   ├─ FileVisionService               → 图像理解服务（视觉注入）
+│   ├─ CaptureContextRegistry          → 截图坐标上下文（桌面自动化）
+│   ├─ SupplementStore                 → 补充需求消息存储
+│   └─ AttachmentStore                 → 上传附件暂存区
 ├─ 权限/待处理
 │   ├─ PendingQuestionStore            → 待审批问题存储
 │   ├─ ExecutionTokenManager           → Token 管理

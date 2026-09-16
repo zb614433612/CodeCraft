@@ -12,6 +12,7 @@ import com.example.agentdeepseek.model.entity.AgentTask;
 import com.example.agentdeepseek.model.entity.AgentConfig;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
+import com.example.agentdeepseek.model.entity.FileAsset;
 import com.example.agentdeepseek.model.entity.MessageRole;
 import com.example.agentdeepseek.model.entity.Skill;
 
@@ -24,6 +25,8 @@ import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
 import com.example.agentdeepseek.service.ConfigService;
 import com.example.agentdeepseek.service.AttachmentStore;
+import com.example.agentdeepseek.service.files.FileAssetService;
+import com.example.agentdeepseek.service.files.FileVisionService;
 import com.example.agentdeepseek.model.entity.Lesson;
 import com.example.agentdeepseek.service.lesson.FailureNormalizer;
 import com.example.agentdeepseek.service.lesson.LessonService;
@@ -35,6 +38,8 @@ import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.PermissionContext;
 import com.example.agentdeepseek.tool.ToolExecutor;
 import com.example.agentdeepseek.tool.impl.DeepSeekAnalyzer;
+import com.example.agentdeepseek.tool.desktop.CaptureContext;
+import com.example.agentdeepseek.tool.desktop.CaptureContextRegistry;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.example.agentdeepseek.tool.permission.PathSecurityChecker;
 import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
@@ -252,7 +257,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                    LLMClientManager llmClientManager,
                                     LessonService lessonService,
                                     FailureNormalizer failureNormalizer,
-                                    @Lazy AgentInvokeService agentInvokeService) {
+                                     FileAssetService fileAssetService,
+                                     FileVisionService fileVisionService,
+                                     CaptureContextRegistry captureContextRegistry,
+                                     @Lazy AgentInvokeService agentInvokeService) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -278,6 +286,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.llmClientManager = llmClientManager;
         this.lessonService = lessonService;
         this.failureNormalizer = failureNormalizer;
+        this.fileAssetService = fileAssetService;
+        this.fileVisionService = fileVisionService;
+        this.captureContextRegistry = captureContextRegistry;
         this.agentInvokeService = agentInvokeService;
     }
 
@@ -285,6 +296,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final MessagePersister messagePersister;
     private final ContextBuilder contextBuilder;
     private final ToolLoopManager toolLoopManager;
+
+    /** M2：文件资产服务（发送消息时建立 file_reference 引用） */
+    private final FileAssetService fileAssetService;
+
+    /** M3：图像理解服务（file 内容块构建与注入） */
+    private final FileVisionService fileVisionService;
+
+    /** M5：桌面截图坐标上下文注册表（注入文案补充归一化坐标协议与图片尺寸说明） */
+    private final CaptureContextRegistry captureContextRegistry;
 
     @Override
     public void afterPropertiesSet() {
@@ -321,6 +341,28 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 log.debug("添加conversation_message.turn_id列成功");
             } catch (Exception e) {
                 log.debug("添加conversation_message.turn_id列失败，可能已经存在: {}", e.getMessage());
+            }
+
+            // 添加message_type列到conversation_message表（桌面截图注入消息标记；前端历史渲染跳过该气泡，不打断 AI 消息聚合）
+            try {
+                jdbcTemplate.execute("ALTER TABLE conversation_message ADD COLUMN message_type VARCHAR(32) DEFAULT NULL COMMENT '消息类型：NULL=普通消息，desktop_inject=桌面截图自动注入' AFTER turn_id");
+                log.debug("添加conversation_message.message_type列成功");
+            } catch (Exception e) {
+                log.debug("添加conversation_message.message_type列失败，可能已经存在: {}", e.getMessage());
+            }
+
+            // 回填存量注入消息：历史版本未打标记的桌面截图注入消息补 desktop_inject（幂等，只回填 message_type 为空的行）
+            // 判据：role=user（LOWER 兼容——库中枚举经 EnumTypeHandler 存 name() 大写 'USER'）+ turn_id 为空（普通用户消息均有 turnId）+ 固定通知文案前缀
+            try {
+                int backfilled = jdbcTemplate.update(
+                        "UPDATE conversation_message SET message_type = 'desktop_inject' " +
+                        "WHERE message_type IS NULL AND LOWER(role) = 'user' AND turn_id IS NULL " +
+                        "AND content LIKE '[系统] 桌面截图已由工具自动注入（screen_capture）%'");
+                if (backfilled > 0) {
+                    log.info("已回填 {} 条桌面截图注入消息标记（desktop_inject）", backfilled);
+                }
+            } catch (Exception e) {
+                log.debug("回填桌面截图注入消息标记失败: {}", e.getMessage());
             }
 
             // 添加user_id列到conversation表（如果不存在）
@@ -732,8 +774,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         conversationId = conversation.getId();
         storageConversationId = conversationId;
 
-        // 保存用户消息
-        messagePersister.saveUserMessage(storageConversationId, userMessage, request.getTurnId());
+        // 保存用户消息（M2：捕获 messageId，用于建立文件引用）
+        Long userMessageId = messagePersister.saveUserMessage(storageConversationId, userMessage, request.getTurnId());
+
+        // M2：建立文件引用（当轮新上传 + 历史引用两类；校验 active 与归属，失败不影响发送主链路）
+        if (userMessageId != null && request.getFileAssetIds() != null && !request.getFileAssetIds().isEmpty()) {
+            try {
+                fileAssetService.linkToMessage(request.getFileAssetIds(), userId, storageConversationId, userMessageId);
+            } catch (Exception e) {
+                log.warn("建立文件引用失败（不影响发送）: {}", e.getMessage());
+            }
+        }
 
         // 确定上下文模式：请求优先 > 系统配置 > 默认 full
         String contextMode = request.getContextMode();
@@ -925,30 +976,61 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         // 注入附件提示：告知 LLM 用户上传了哪些附件，可按需调用 chat_attachment 工具读取
+        // M7：统一构建"附件提示段"（旧 attachmentIds 段 + 文档资产段），供主流程注入与 toolLoop 复用
         List<String> attachmentIds = request.getAttachmentIds();
         log.info("【附件诊断】request.attachmentIds = {}", attachmentIds);
+        StringBuilder attachSection = new StringBuilder();
         if (attachmentIds != null && !attachmentIds.isEmpty()) {
-            StringBuilder attSection = new StringBuilder();
-            attSection.append("\n\n---\n");
-            attSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
+            attachSection.append("\n\n---\n");
+            attachSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
             for (String attId : attachmentIds) {
                 AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attId);
                 if (meta != null) {
-                    attSection.append("- attachment_id: ").append(attId)
+                    attachSection.append("- attachment_id: ").append(attId)
                             .append(", 文件名: ").append(meta.getFileName())
                             .append(", 类型: ").append(meta.getType())
                             .append(", 大小: ").append(formatFileSize(meta.getSize())).append("\n");
                 }
             }
-            attSection.append("---\n");
+            attachSection.append("---\n");
+        }
 
-            // 注入到最后一条用户消息的内容开头
+        // M7：文件资产（fileAssetIds）分流——图片 → vision 内容块（下方 M3 块）；文档 → 文档附件提示段
+        // （提示 LLM 用 chat_attachment 工具 read_by_file_asset 读取 file_asset 本地副本）
+        List<Long> imageAssetIds = new ArrayList<>();
+        List<Long> allFileAssetIds = request.getFileAssetIds();
+        if (allFileAssetIds != null && !allFileAssetIds.isEmpty()) {
+            List<FileAsset> fileAssets = fileAssetService.getOwnedAssets(allFileAssetIds, userId);
+            StringBuilder docLines = new StringBuilder();
+            for (FileAsset fa : fileAssets) {
+                if (fa.getMimeType() != null && fa.getMimeType().startsWith("image/")) {
+                    imageAssetIds.add(fa.getId());
+                } else {
+                    docLines.append("- file_asset_id: ").append(fa.getId())
+                            .append(", 文件名: ").append(fa.getFilename())
+                            .append(", 类型: ").append(fa.getMimeType())
+                            .append(", 大小: ").append(formatFileSize(fa.getSize())).append("\n");
+                }
+            }
+            if (docLines.length() > 0) {
+                attachSection.append("\n\n---\n");
+                attachSection.append("[系统提示] 用户上传了以下文档附件（本地存储），如需读取内容请调用 chat_attachment 工具（action=read_by_file_asset）：\n");
+                attachSection.append(docLines);
+                attachSection.append("---\n");
+            }
+            log.info("【文件资产诊断】fileAssetIds={}, 图片数={}, 文档提示={}",
+                    allFileAssetIds.size(), imageAssetIds.size(), docLines.length() > 0 ? "有" : "无");
+        }
+
+        // 注入附件提示（旧附件段 + M7 文档段）到最后一条用户消息内容开头
+        if (attachSection.length() > 0) {
+            String attachText = attachSection.toString();
             for (int i = historyMessages.size() - 1; i >= 0; i--) {
                 Map<String, Object> msg = historyMessages.get(i);
                 if ("user".equals(msg.get("role"))) {
                     String existing = (String) msg.get("content");
-                    msg.put("content", attSection.toString() + existing);
-                    log.info("附件提示注入: 共 {} 个附件", attachmentIds.size());
+                    msg.put("content", attachText + existing);
+                    log.info("附件提示注入: 段长度={}", attachText.length());
                     break;
                 }
             }
@@ -1001,6 +1083,33 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             effectiveThinkingMode = thinkingMode;  // 由上方 Agent 配置或默认值决定
         }
 
+        // ===== M3：图像理解注入（file 内容块）=====
+        // 顺序铁律：必须在所有字符串注入（技能/附件提示/语言指令）之后、buildRequestBody 之前执行——
+        // 上述注入均以 (String) msg.get("content") 强转拼接，数组化后再调用会 ClassCastException。
+        // 模型防线：带图但模型不支持 vision → 明确报错（指引切换模型；M4 前端拦截的兜底）。
+        // M7：仅对"图片类"资产构建（imageAssetIds 已在上方按 mime 分流；纯文档不触发 vision 检查）
+        List<Map<String, Object>> visionBlocks = List.of();
+        if (!imageAssetIds.isEmpty()) {
+            String visionProviderCode = llmClient.getProviderCode();
+            if (!FileVisionService.supportsVisionModel(visionProviderCode, effectiveModel)) {
+                throw new IllegalStateException("当前模型（" + effectiveModel
+                        + "）不支持图像理解，请切换至支持视觉的模型（如 deepseek-flash）后再发送图片");
+            }
+            try {
+                FileVisionService.FileBlocksResult visionResult =
+                        fileVisionService.buildFileBlocks(imageAssetIds, userId, visionProviderCode);
+                if (!visionResult.warnings().isEmpty()) {
+                    FileVisionService.appendVisionWarnings(historyMessages, visionResult.warnings());
+                }
+                if (!visionResult.blocks().isEmpty()) {
+                    FileVisionService.injectBlocksIntoLastUserMessage(historyMessages, visionResult.blocks());
+                    visionBlocks = visionResult.blocks();
+                }
+            } catch (Exception e) {
+                log.warn("图像块构建失败（不影响发送）: {}", e.getMessage());
+            }
+        }
+
         // ===== 构建工具列表（提前构建，供 buildRequestBody 使用）=====
         JsonNode toolDefinitions = toolExecutor.buildToolDefinitions(filteredToolNames);
         List<Map<String, Object>> toolsList = null;
@@ -1049,22 +1158,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (turnId != null && !turnId.isEmpty()) {
             apiRequest.put("_turnId", turnId);
         }
-        // 保存附件提示到 API 请求中（内部使用，供后续 toolLoop 重建消息时复用）
-        if (attachmentIds != null && !attachmentIds.isEmpty()) {
-            StringBuilder attSection = new StringBuilder();
-            attSection.append("\n\n---\n");
-            attSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
-            for (String attId : attachmentIds) {
-                AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attId);
-                if (meta != null) {
-                    attSection.append("- attachment_id: ").append(attId)
-                            .append(", 文件名: ").append(meta.getFileName())
-                            .append(", 类型: ").append(meta.getType())
-                            .append(", 大小: ").append(formatFileSize(meta.getSize())).append("\n");
-                }
-            }
-            attSection.append("---\n");
-            apiRequest.put("_attachmentSection", attSection.toString());
+        // 保存附件提示到 API 请求中（内部使用，供后续 toolLoop 重建消息时复用；含旧附件段 + M7 文档资产段）
+        if (attachSection.length() > 0) {
+            apiRequest.put("_attachmentSection", attachSection.toString());
+        }
+        // M3：保存图像块到 API 请求中（内部使用，供工具循环重建消息时复用；防重复 IO/编码）
+        if (!visionBlocks.isEmpty()) {
+            apiRequest.put("_imageBlocks", visionBlocks);
         }
         // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
         apiRequest.put("_contextMode", contextMode);
@@ -1517,11 +1617,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // ===== 清理旧的补充消息队列（新任务开始时清空） =====
         supplementStore.clear(conversationId);
 
-        // ===== 重置本轮对话的自动批准状态 =====
-        // 用户每次发送新消息开始工具循环时，清除上一轮的"本轮对话全部同意"状态
-        // "本轮对话"定义为：用户发送一次消息 → LLM完成任务（含多轮工具调用）→ 结束
-        PermissionContext.removeSessionApproved(conversationId);
-        log.debug("已重置会话 {} 的「本轮对话全部同意」状态（新消息开始）", conversationId);
+        // 注：「全部同意」授权为会话级持续授权——用户点过一次后，在该会话内持续有效
+        // （直到会话被删除或应用重启），不再随"新消息任务开始"重置。
+        // 2026-09-16 修复：此前每条新消息都会清掉授权，导致用户被反复要求授权
+        // （实测 5 小时被问 35 次）；用户误以为已授权而不响应时又会触发
+        // "授权等待超时、跳过受限操作"，主观感受为"编译测试/会话无故中断"。
 
         // 构建初始消息列表
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -1539,7 +1639,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 Map<String, Object> msg = messages.get(i);
                 if ("user".equals(msg.get("role"))) {
                     String existing = (String) msg.get("content");
-                    if (!existing.contains("[系统提示] 用户上传了以下附件")) {
+                    if (!existing.contains("[系统提示] 用户上传了以下")) {
                         msg.put("content", attachmentSection + existing);
                         log.info("附件提示注入(toolLoop): 已注入附件提示到用户消息");
                     }
@@ -1576,6 +1676,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 📝 成长体系 P2：任务启动 DETOUR 弯路预警（新用户消息进入工具循环前，按任务关键词检索弯路经验并注入 system 提示）
         String toolProjectRoot = (String) initialApiRequest.get("_projectRoot");
         injectDetourHintAtTaskStart(messages, toolProjectRoot, storageConversationId);
+
+        // M3：图像块注入（工具循环从 DB 重建消息后需重新注入；幂等：content 已含图片块则跳过）
+        List<Map<String, Object>> imageBlocks = extractImageBlocks(initialApiRequest);
+        if (!imageBlocks.isEmpty()) {
+            FileVisionService.injectBlocksIntoLastUserMessage(messages, imageBlocks);
+        }
 
         // 初始化评委扩展计数器
         judgeGrantedIterations.put(conversationId, 0);
@@ -2108,6 +2214,18 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
         return null;
+    }
+
+    /**
+     * M3：从 API 请求中提取图像块（供工具循环重建消息时复用；不存在/为空返回空列表）
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> extractImageBlocks(Map<String, Object> apiRequest) {
+        Object obj = apiRequest.get("_imageBlocks");
+        if (obj instanceof List<?> list && !list.isEmpty()) {
+            return (List<Map<String, Object>>) list;
+        }
+        return List.of();
     }
 
     /**
@@ -2742,12 +2860,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     boolean needsApproval = ("manual".equals(currentExecutionMode) && hasRestrictedTools)
                                             || ("auto".equals(currentExecutionMode) && hasHighRiskTools);
 
-                                    // 检查会话级别自动批准（用户选择了「本轮对话全部同意」）
+                                    // 检查会话级别自动批准（用户选择了「全部同意」，会话级持续生效）
                                     boolean isSessionApproved = PermissionContext.isSessionApproved(conversationId);
                                     if (isSessionApproved) {
                                         // 已获本轮对话全部批准，跳过所有权限弹窗
                                         needsApproval = false;
-                                        log.debug("会话 {} 已获本轮对话全部同意，跳过权限审批", conversationId);
+                                        log.debug("会话 {} 已获「全部同意」授权，跳过权限审批", conversationId);
                                     }
 
                                     // Phase 19 智能体互调：内部委托调用（_internalTrust，信任链已由
@@ -2824,7 +2942,28 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                         // 而是切换到 __AUTH_TIMEOUT__ 标记，按"拒绝"语义跳过该操作继续工具循环（下方处理）
                                                         .timeout(java.time.Duration.ofMinutes(AUTH_WAIT_TIMEOUT_MINUTES),
                                                                 Mono.just("__AUTH_TIMEOUT__"))
+                                                        // ★ 2026-09-16 修复（错误归因）：错误处理仅覆盖"等待用户授权"阶段。
+                                                        // 批准之后（工具执行、后续迭代、下一轮 LLM 调用等）的异常向上传播，
+                                                        // 由任务级错误处理上报真实原因（"后台任务失败: xxx"），
+                                                        // 不再被误报为"等待用户授权超时 / 处理用户授权时出错"（实测 DNS 失败被误报为授权错误）。
+                                                        .onErrorResume(e -> {
+                                                            pendingQuestionStore.remove(uuid);
+                                                            updatePendingQuestion(conversationId, null, null);
+                                                            if (e instanceof java.util.concurrent.TimeoutException) {
+                                                                log.warn("等待用户授权超时: uuid={}", uuid, e);
+                                                                return Mono.just("__AUTH_WAIT_TIMEOUT__");
+                                                            }
+                                                            log.error("等待用户授权阶段出错: uuid={}", uuid, e);
+                                                            return Mono.just("__AUTH_WAIT_ERROR__");
+                                                        })
                                                         .flatMapMany(answer -> {
+                                                            // 等待阶段异常标记：发出提示事件并结束本轮（保持原有用户可见语义）
+                                                            if ("__AUTH_WAIT_TIMEOUT__".equals(answer)) {
+                                                                return Flux.just(createReasoningSSEEvent("等待用户授权超时，请重新发送消息。"));
+                                                            }
+                                                            if ("__AUTH_WAIT_ERROR__".equals(answer)) {
+                                                                return Flux.just(createReasoningSSEEvent("处理用户授权时出错，请重新发送消息。"));
+                                                            }
                                                             pendingQuestionStore.remove(uuid);
                                                             updatePendingQuestion(conversationId, null, null);
 
@@ -2926,7 +3065,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             PermissionContext.set(pendingQuestionStore, objectMapper);
                                                             PermissionContext.setApproved();
 
-                                                            // 如果是「本轮对话全部同意」，设置会话级别自动批准
+                                                            // 如果是「全部同意」，设置会话级别授权（会话级持续生效）
                                                             if (approveAll) {
                                                                 PermissionContext.setSessionApproved(conversationId);
                                                             }
@@ -2952,14 +3091,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             }
                                                             messages.add(tcMsg);
 
-                                                            // 构建工具结果消息并保存到数据库
-                                                            List<ObjectNode> tcMessages = toolExecutor.buildToolMessages(innerResults);
-                                                            for (ObjectNode tcMessage : tcMessages) {
-                                                                messages.add(objectMapper.convertValue(tcMessage, Map.class));
-                                                                saveToolMessage(storageConversationId,
-                                                                        formatToolResult(tcMessage.path("content").asText(""),
-                                                                                tcMessage.path("tool_name").asText("")));
-                                                            }
+                                                            // 构建工具结果消息并保存（M5：统一封装，含截图等工具的 user 消息注入）
+                                                            appendToolResultMessages(messages, innerResults,
+                                                                    storageConversationId, apiRequest);
 
                                                             // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
                                                             //    避免「触发注入的失败」被误判为「注入后的再次失败」→ 注入即判无效）
@@ -2981,16 +3115,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                     .concatWith(handleToolCallIteration(
                                                                             conversationId, storageConversationId, apiRequest,
                                                                             messages, iteration + 1, maxIterations));
-                                                        })
-                                                        .onErrorResume(e -> {
-                                                            pendingQuestionStore.remove(uuid);
-                                                            updatePendingQuestion(conversationId, null, null);
-                                                            if (e instanceof java.util.concurrent.TimeoutException) {
-                                                                log.warn("等待用户授权超时: uuid={}", uuid);
-                                                                return Flux.just(createReasoningSSEEvent("等待用户授权超时，请重新发送消息。"));
-                                                            }
-                                                            log.error("用户授权处理失败: uuid={}", uuid, e);
-                                                            return Flux.just(createReasoningSSEEvent("处理用户授权时出错，请重新发送消息。"));
                                                         })
                                                 );
                                     }
@@ -3076,15 +3200,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             log.debug("创建工具结果事件，内容长度: {}", toolResult.getContent() != null ? toolResult.getContent().length() : 0);
                                         }
 
-                                        // 将工具结果消息添加到消息列表并保存
-                                        List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(toolResults);
-                                        for (ObjectNode toolMessage : toolMessages) {
-                                            messages.add(objectMapper.convertValue(toolMessage, Map.class));
-                                            String toolContent = toolMessage.path("content").asText("");
-                                            String toolName = toolMessage.path("tool_name").asText("");
-                                            String formattedToolContent = formatToolResult(toolContent, toolName);
-                                            saveToolMessage(storageConversationId, formattedToolContent);
-                                        }
+                                        // 将工具结果消息添加到消息列表并保存（M5：统一封装，含截图等工具的 user 消息注入）
+                                        appendToolResultMessages(messages, toolResults,
+                                                storageConversationId, apiRequest);
 
                                         // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
                                         //    避免「触发注入的失败」被误判为「注入后的再次失败」→ 注入即判无效）
@@ -3319,7 +3437,27 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         // ★ timeout 只限制"等待用户回答"阶段：放在 flatMapMany 之前，
                         // 避免把回答后继续工具循环（LLM 调用 + 工具执行）的时间计入 5 分钟超时
                         .timeout(java.time.Duration.ofMinutes(5))
+                        // ★ 2026-09-16 修复（错误归因）：错误处理仅覆盖"等待用户回答"阶段。
+                        // 回答之后（继续工具循环、LLM 调用、工具执行等）的异常向上传播，
+                        // 由任务级错误处理上报真实原因，不再被误报为"等待用户回答超时 / 处理用户回答时出错"。
+                        .onErrorResume(e -> {
+                            pendingQuestionStore.remove(uuid);
+                            updatePendingQuestion(conversationId, null, null);
+                            if (e instanceof java.util.concurrent.TimeoutException) {
+                                log.warn("等待用户回答超时: uuid={}", uuid, e);
+                                return Mono.just("__ASK_WAIT_TIMEOUT__");
+                            }
+                            log.error("等待用户回答阶段出错: uuid={}", uuid, e);
+                            return Mono.just("__ASK_WAIT_ERROR__");
+                        })
                         .flatMapMany(answer -> {
+                            // 等待阶段异常标记：发出提示事件并结束本轮（保持原有用户可见语义）
+                            if ("__ASK_WAIT_TIMEOUT__".equals(answer)) {
+                                return Flux.just(createReasoningSSEEvent("等待用户回答超时，请重新发送消息。"));
+                            }
+                            if ("__ASK_WAIT_ERROR__".equals(answer)) {
+                                return Flux.just(createReasoningSSEEvent("处理用户回答时出错，请重新发送消息。"));
+                            }
                             log.info("收到用户回答: uuid={}, answer={}", uuid, answer);
 
                             // 创建替换后的工具结果
@@ -3354,15 +3492,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             }
                             messages.add(toolCallMessage);
 
-                            // 将包含回答的工具结果添加到消息列表并保存到数据库
-                            List<ObjectNode> toolMsgNodes = toolExecutor.buildToolMessages(modifiedResults);
-                            for (ObjectNode toolMsgNode : toolMsgNodes) {
-                                messages.add(objectMapper.convertValue(toolMsgNode, Map.class));
-                                String toolContent = toolMsgNode.path("content").asText("");
-                                String toolName = toolMsgNode.path("tool_name").asText("");
-                                String formattedToolContent = formatToolResult(toolContent, toolName);
-                                saveToolMessage(storageConversationId, formattedToolContent);
-                            }
+                            // 将包含回答的工具结果添加到消息列表并保存（M5：统一封装，含截图等工具的 user 消息注入）
+                            appendToolResultMessages(messages, modifiedResults,
+                                    storageConversationId, apiRequest);
 
                             // 发送恢复事件，然后继续工具循环
                             return Flux.just(createResumeEvent())
@@ -3370,19 +3502,127 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             conversationId, storageConversationId, apiRequest,
                                             messages, iteration + 1, maxIterations));
                         })
-                        .onErrorResume(e -> {
-                            pendingQuestionStore.remove(uuid);
-                            updatePendingQuestion(conversationId, null, null);
-                            if (e instanceof java.util.concurrent.TimeoutException) {
-                                log.warn("等待用户回答超时: uuid={}", uuid);
-                                String errorMsg = "等待用户回答超时，请重新发送消息。";
-                                return Flux.just(createReasoningSSEEvent(errorMsg));
-                            }
-                            log.error("用户回答后处理失败: uuid={}", uuid, e);
-                            String errorMsg = "处理用户回答时出错，请重新发送消息。";
-                            return Flux.just(createReasoningSSEEvent(errorMsg));
-                        })
                 );
+    }
+
+    /**
+     * M5：统一封装"工具结果消息追加"（三处工具执行路径共用：手动授权 / 自动模式 / ask_user 回答后）
+     * <ol>
+     *   <li>先按现状追加全部 tool 消息（role=tool）+ saveToolMessage（保持原有行为不变）；</li>
+     *   <li>再对带 {@code injectUserFileAssetIds} 的工具结果追加上 user 消息（桌面截图等）——
+     *       注入消息必须位于<b>全部 tool 消息之后</b>，否则破坏 tool_call/tool 配对关系导致 API 400；</li>
+     *   <li>注入的 user 消息同步存库（纯文本）+ 建立 file_reference 关联（供历史回显）。</li>
+     * </ol>
+     */
+    private void appendToolResultMessages(List<Map<String, Object>> messages,
+                                          List<ToolExecutor.ToolCallResult> results,
+                                          Long storageConversationId,
+                                          Map<String, Object> apiRequest) {
+        // 1. 工具结果消息（role=tool）+ 存库（保持原有行为）
+        List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(results);
+        for (ObjectNode toolMessage : toolMessages) {
+            messages.add(objectMapper.convertValue(toolMessage, Map.class));
+            String toolContent = toolMessage.path("content").asText("");
+            String toolName = toolMessage.path("tool_name").asText("");
+            saveToolMessage(storageConversationId, formatToolResult(toolContent, toolName));
+        }
+
+        // 2. M5：桌面截图等工具的 user 消息注入（图片只能进 user 消息）
+        appendInjectedUserMessages(messages, results, storageConversationId, apiRequest);
+    }
+
+    /**
+     * M5：为带注入信息的工具结果追加 user 消息（text 块 + 图像块），并建立 file_reference 关联。
+     * <p>图像块复用 vision 链路（{@link FileVisionService#buildFileBlocks}）：Provider 支持 Files API → file 块；
+     * 否则自动降级 base64。任一环节失败仅记日志，不影响主链路。</p>
+     */
+    private void appendInjectedUserMessages(List<Map<String, Object>> messages,
+                                            List<ToolExecutor.ToolCallResult> results,
+                                            Long storageConversationId,
+                                            Map<String, Object> apiRequest) {
+        // 收集全部待注入资产ID
+        List<Long> assetIds = new ArrayList<>();
+        for (ToolExecutor.ToolCallResult result : results) {
+            if (result.hasInjections()) {
+                assetIds.addAll(result.getInjectUserFileAssetIds());
+            }
+        }
+        if (assetIds.isEmpty()) {
+            return;
+        }
+        try {
+            Long injectUserId = (Long) apiRequest.get("_userId");
+            if (injectUserId == null) {
+                log.warn("注入 user 图像消息失败：会话用户缺失（assetIds={}）", assetIds);
+                return;
+            }
+            String injectProviderCode = null;
+            Object injectClient = apiRequest.get("_llmClient");
+            if (injectClient instanceof LLMClient c) {
+                injectProviderCode = c.getProviderCode();
+            }
+            // 图像块构建（Provider 不支持 Files API 时自动降级 base64；失效项记入 warnings）
+            FileVisionService.FileBlocksResult blocksResult =
+                    fileVisionService.buildFileBlocks(assetIds, injectUserId, injectProviderCode);
+            if (!blocksResult.warnings().isEmpty()) {
+                log.warn("注入 user 图像消息警告: {}", blocksResult.warnings());
+            }
+            if (blocksResult.blocks().isEmpty()) {
+                log.warn("注入 user 图像消息失败：图像块为空（assetIds={}）", assetIds);
+                return;
+            }
+
+            // 构建 user 消息（text + 图像块）——追加在全部 tool 消息之后
+            // C 方案：文案含归一化坐标协议说明（固定前缀保留，兼容存量回填判据；v2 起不暴露尺寸元信息）
+            String noticeText = buildDesktopInjectNotice(storageConversationId);
+            List<Object> parts = new ArrayList<>();
+            Map<String, Object> textBlock = new HashMap<>();
+            textBlock.put("type", "text");
+            textBlock.put("text", noticeText);
+            parts.add(textBlock);
+            parts.addAll(blocksResult.blocks());
+            Map<String, Object> injectMsg = new HashMap<>();
+            injectMsg.put("role", "user");
+            injectMsg.put("content", parts);
+            messages.add(injectMsg);
+
+            // 存库（纯文本；打 desktop_inject 标记——前端历史渲染跳过该气泡，不打断 AI 消息聚合）
+            // + 建立 file_reference（供历史回显：截图资产由前端归并到宿主 AI 消息显示）
+            Long injectMessageId = messagePersister.saveInjectedUserMessage(storageConversationId, noticeText);
+            if (injectMessageId != null) {
+                fileAssetService.linkToMessage(assetIds, injectUserId, storageConversationId, injectMessageId);
+            }
+            log.info("已注入桌面截图 user 消息: assetIds={}, messageId={}", assetIds, injectMessageId);
+        } catch (Exception e) {
+            log.warn("注入 user 图像消息失败（不影响主链路）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 构建桌面截图注入通知文案（C 方案：固定前缀 + 归一化坐标协议说明；不含图片像素尺寸元信息）。
+     *
+     * <p>固定前缀 {@code [系统] 桌面截图已由工具自动注入（screen_capture）} 不可变更——存量注入消息
+     * 回填判据依赖该前缀（见 {@link #afterPropertiesSet()}）。协议说明用于引导模型：视觉服务端
+     * 可能对图片二次压缩、绝对像素不可靠，请按截图上 10×10 网格与四边三级刻度"读数"，以 0~1000
+     * 归一化坐标调用 desktop_control / screen_capture(region)，系统自动换算，无需模型自行折算；
+     * 并引导用 mark 准星做点击前校验（M6.2 预检闸门：未校验坐标会被拦截，先验证后执行）。</p>
+     *
+     * <p>v2 协议下不向模型暴露"标准化尺寸/缩放比"等元信息（与坐标换算完全解耦，避免诱导"像素思维"）。</p>
+     */
+    private String buildDesktopInjectNotice(Long conversationId) {
+        String prefix = "[系统] 桌面截图已由工具自动注入（screen_capture），请基于此图分析并继续操作。";
+        CaptureContext ctx = captureContextRegistry == null ? null : captureContextRegistry.get(conversationId);
+        if (ctx == null) {
+            return prefix;
+        }
+        return prefix
+                + "\n【坐标协议】本图叠加了 10×10 网格与四边三级刻度（每 25/50/100，0~1000 刻度）：调用 desktop_control 或 screen_capture(region) 时，"
+                + "请使用 0~1000 归一化坐标——x 读顶部刻度（0=最左、1000=最右），y 读左侧刻度（0=最上、1000=最下），"
+                + "取目标位置对应的刻度值即可；只传 0~1000 的数值、不要传像素值——系统会自动换算为屏幕物理坐标，"
+                + "无需自行折算，图片被进一步缩放/压缩也不影响。"
+                + "\n【操作前校验（默认流程）】执行点击/拖拽前先 screen_capture(mark={x,y}) 校验目标坐标：准星正中即执行、"
+                + "有偏差按刻度修正后再校验；未校验的坐标执行时会被系统预检拦截（自动返回校验图、不执行动作），"
+                + "已校验坐标（3 分钟内）直接放行。小目标/密集列表可先用 region 放大再读数。";
     }
 
     /**

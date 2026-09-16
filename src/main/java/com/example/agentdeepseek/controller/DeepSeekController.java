@@ -8,6 +8,7 @@ import com.example.agentdeepseek.service.AttachmentStore;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import com.example.agentdeepseek.service.SupplementStore;
+import com.example.agentdeepseek.util.SseBatchUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -73,8 +74,8 @@ public class DeepSeekController {
         request.setUserId(userId);
         log.debug("设置用户ID: {}", userId);
 
-        // 调用服务层获取流式响应
-        return deepSeekService.streamChat(request)
+        // 调用服务层获取流式响应（M5：SSE 传输层聚合——窗口内多事件合并为一帧推送）
+        return SseBatchUtil.batch(deepSeekService.streamChat(request))
                 .map(chunk -> ServerSentEvent.builder(chunk).build())
                 .doOnError(error -> log.error("DeepSeek API调用失败", error))
                 .doOnComplete(() -> log.info("流式响应完成"));
@@ -82,7 +83,7 @@ public class DeepSeekController {
 
     /**
      * 回答 ask_user 问题
-     * action 取值：approve（同意）/ approve_all（本轮对话全部同意）/ reject（拒绝）/ custom（其他，需输入消息）
+     * action 取值：approve（同意）/ approve_all（全部同意，本会话持续有效）/ reject（拒绝）/ custom（其他，需输入消息）
      */
     @Operation(summary = "回答ask_user问题", description = "用户回答LLM提出的问题，回答会传递给正在等待的流")
     @PostMapping("/answer")
@@ -202,7 +203,8 @@ public class DeepSeekController {
     public Flux<ServerSentEvent<String>> subscribeTask(
             @PathVariable Long conversationId,
             @RequestParam(value = "cursor", required = false, defaultValue = "0") long cursor) {
-        return deepSeekService.subscribeToTask(conversationId, cursor)
+        // M5：同样经 SSE 传输层聚合（重连增量流与首连格式一致）
+        return SseBatchUtil.batch(deepSeekService.subscribeToTask(conversationId, cursor))
                 .map(chunk -> ServerSentEvent.builder(chunk).build())
                 .doOnCancel(() -> log.info("任务事件流客户端断开: conversationId={}, cursor={}", conversationId, cursor));
     }

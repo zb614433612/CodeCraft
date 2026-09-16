@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v1.1.8 | Updated: 2026-09-14 | Audience: Developers / AI Collaborators
+> Version: v2.0.0 | Updated: 2026-09-16 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -260,6 +260,7 @@ public class MyNewTool implements Tool {
 | `SKILL` | Skill management | skill, lesson |
 | `COMMUNICATION` | User interaction | ask_clarification |
 | `ADMIN` | Admin operations | agent, agent_invoke, task_manager, mcp_server_manager, schedule_task |
+| `DESKTOP` | Desktop automation (screen capture / mouse & keyboard, high-risk) | screen_capture, desktop_control |
 
 ### Step 3: Configure Three-Layer Permissions
 
@@ -309,8 +310,10 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `mcp_server_manager` | ADMIN | ✓ | ✗ | ✗ |
 | `schedule_task` | ADMIN | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
+| `screen_capture` | DESKTOP | ✗ | ✗ | ✓ |
+| `desktop_control` | DESKTOP | ✓ | ✗ | ✓ |
 
-> 📌 This table tracks the current 22 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
+> 📌 This table tracks the current 24 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
 
 ---
 

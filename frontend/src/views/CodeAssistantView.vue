@@ -231,7 +231,9 @@
                 <span class="thinking-hint">点击{{ getThinkingVisible(msg.id) ? '收起' : '展开' }}</span>
               </div>
               <div v-if="getThinkingVisible(msg.id)" class="thinking-content" :data-think-scroll="msg.id" @scroll.passive="handleThinkScroll">
-                <div class="thinking-text" v-html="formatThinking(msg.thinking, msg.toolResults)" @click="handleToolCardClick"></div>
+                <div class="thinking-text" :class="{ 'thinking-timeline': !!(msg.toolResults && msg.toolResults.length) }" @click="handleToolCardClick($event, msg)">
+                  <div v-for="seg in buildThinkingSegmentsFor(msg)" :key="seg.key" class="think-seg" :data-card-at="seg.cardAt" v-html="seg.html"></div>
+                </div>
                 <div v-if="msg.isStreaming && thinkShowScrollBtn" class="think-scroll-btn-wrap">
                   <div class="think-scroll-btn" @click.stop="thinkScrollToBottom" title="回到底部">
                     <DownOutlined />
@@ -239,7 +241,38 @@
                 </div>
               </div>
             </div>
-            <div class="message-text code-message" v-html="formatMessage(msg.content)" v-if="msg.content"></div>
+            <!-- M4/M7：消息附件（图片→缩略图点击放大；文档→文件图标卡片点击下载）
+                 修复：AI 消息同样支持（桌面截图注入资产归并到宿主 AI 消息回显） -->
+            <div
+              v-if="(msg.role === 'user' || msg.role === 'assistant') && msg.fileAssets && msg.fileAssets.length > 0"
+              class="message-images"
+            >
+              <template v-for="asset in msg.fileAssets" :key="asset.id">
+                <!-- 文档（M7：文件格式图标 + 文件名） -->
+                <div
+                  v-if="asset.kind === 'doc'"
+                  class="message-doc-chip"
+                  :title="fileAssetDisplayName(asset) + '（点击下载）'"
+                  @click="downloadMessageFile(asset)"
+                >
+                  <span class="doc-chip-icon">{{ docTypeIcon(docTypeOf(asset.filename, asset.mimeType)) }}</span>
+                  <span class="doc-chip-name">{{ fileAssetDisplayName(asset) }}</span>
+                </div>
+                <!-- 图片（缩略图） -->
+                <div
+                  v-else
+                  class="message-image-thumb"
+                  :title="fileAssetDisplayName(asset)"
+                  @click="openBigPreview(asset.previewUrl)"
+                >
+                  <img v-if="asset.previewUrl" :src="asset.previewUrl" :alt="asset.filename" />
+                  <span v-else class="thumb-loading">🖼️</span>
+                </div>
+              </template>
+            </div>
+            <div class="message-text code-message" v-if="msg.content">
+              <div v-for="seg in buildMessageSegments(msg)" :key="seg.key" class="msg-seg" v-html="seg.html"></div>
+            </div>
           </div>
         </div>
         </DynamicScrollerItem>
@@ -256,6 +289,65 @@
           <DownOutlined />
         </div>
       </transition>
+
+      <!-- M4：大图预览遮罩（点击消息/附件缩略图打开） -->
+      <div v-if="bigPreviewUrl" class="big-preview-mask" @click="bigPreviewUrl = ''">
+        <img :src="bigPreviewUrl" alt="big-preview" />
+      </div>
+
+      <!-- 附件入口 → 选择历史文件（图片+文档多选加入附件区，随消息以 fileAssetIds 发送） -->
+      <a-modal
+        v-model:open="historyPickerVisible"
+        title="选择历史文件"
+        :width="600"
+        ok-text="添加到附件"
+        :ok-button-props="{ disabled: historySelectedIds.size === 0 }"
+        @ok="confirmHistoryPick"
+      >
+        <div class="history-picker-toolbar">
+          <a-input
+            v-model:value="historyKeyword"
+            placeholder="搜索文件名"
+            allow-clear
+            class="history-picker-search"
+          >
+            <template #prefix><SearchOutlined /></template>
+          </a-input>
+          <span class="history-picker-count">已选 {{ historySelectedIds.size }} 个</span>
+        </div>
+
+        <a-spin :spinning="historyPickerLoading">
+          <div v-if="filteredHistoryImages.length > 0" class="history-picker-grid">
+            <div
+              v-for="f in filteredHistoryImages"
+              :key="f.id"
+              :class="['history-picker-item', {
+                'history-picker-item--selected': historySelectedIds.has(f.id),
+                'history-picker-item--attached': isAssetAttached(f.id)
+              }]"
+              @click="toggleHistorySelect(f)"
+            >
+              <div class="history-picker-thumb">
+                <!-- 图片：缩略图；文档：文件格式图标（M7） -->
+                <template v-if="isImageMime(f.mimeType)">
+                  <img v-if="historyPreviewMap[f.id]" :src="historyPreviewMap[f.id]" :alt="fileAssetDisplayName(f)" />
+                  <span v-else class="history-picker-thumb-placeholder">🖼️</span>
+                </template>
+                <span v-else class="history-picker-thumb-placeholder history-picker-doc-icon">
+                  {{ docTypeIcon(docTypeOf(f.filename, f.mimeType)) }}
+                </span>
+                <span v-if="historySelectedIds.has(f.id)" class="history-picker-check">✓</span>
+                <span v-if="isAssetAttached(f.id)" class="history-picker-attached-badge">已在附件</span>
+              </div>
+              <div class="history-picker-name" :title="fileAssetDisplayName(f)">{{ fileAssetDisplayName(f) }}</div>
+              <div class="history-picker-size">{{ formatFileSize(f.size) }}</div>
+            </div>
+          </div>
+          <div v-else-if="!historyPickerLoading" class="history-picker-empty">
+            {{ historyKeyword ? '没有匹配的文件' : '暂无历史文件，可先上传文件' }}
+          </div>
+        </a-spin>
+      </a-modal>
 
       <!-- 流式加载指示器（hasRunningTask：前台流式/后台任务/重连恢复都显示，让「后台输出中...」在切回时可见） -->
       <div v-if="hasRunningTask &amp;&amp; streamStatus" class="stream-indicator">
@@ -304,7 +396,7 @@
           <div class="ask-user-question" v-html="formatQuestion(pendingQuestion.question)"></div>
           <div class="permission-btn-grid">
             <a-button type="primary" class="permission-btn permission-btn-approve" @click="handlePermissionAction('approve')">同意</a-button>
-            <a-button type="primary" ghost class="permission-btn permission-btn-approve-all" @click="handlePermissionAction('approve_all')">本轮对话全部同意</a-button>
+            <a-button type="primary" ghost class="permission-btn permission-btn-approve-all" @click="handlePermissionAction('approve_all')">本会话全部同意</a-button>
             <a-button danger class="permission-btn permission-btn-reject" @click="handlePermissionAction('reject')">拒绝</a-button>
             <a-button class="permission-btn permission-btn-custom" :class="{ active: pendingShowCustomInput }" @click="pendingShowCustomInput = !pendingShowCustomInput">
               {{ pendingShowCustomInput ? '收起' : '其他（输入消息）' }}
@@ -413,10 +505,12 @@
 
       <!-- ===== 输入区域（仅聊天标签 + 有Provider时显示） ===== -->
       <footer v-if="activeTab?.type === 'chat' && providerOptions.length > 0" class="chat-input-area">
-        <!-- 隐藏的文件选择器 -->
+        <!-- 隐藏的文件选择器（M4：支持多选；accept 收窄图片 + 文档类型） -->
         <input
           ref="fileInputRef"
           type="file"
+          accept="image/jpeg,image/png,image/gif,image/webp,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.md,.log,.json,.yml,.yaml,.xml,.properties,.ini,.toml,.ts,.tsx,.vue,.js,.jsx,.css,.scss,.less,.html,.java,.py,.go,.rs,.c,.cpp,.h,.sh,.bat,.ps1,.sql"
+          multiple
           style="display: none"
           @change="handleFileSelected"
         />
@@ -425,34 +519,60 @@
           <div
             v-for="att in attachedFiles"
             :key="att.id"
-            :class="['attachment-tag', { 'attachment-error': att.error }]"
+            :class="['attachment-tag', { 'attachment-error': att.error, 'attachment-image': att.kind === 'image' }]"
           >
-            <span class="attachment-icon">{{ getAttachmentIcon(att.type) }}</span>
+            <!-- M4：图片附件显示缩略图（点击放大） -->
+            <div
+              v-if="att.kind === 'image'"
+              class="attachment-thumb"
+              :title="att.fileName"
+              @click="openBigPreview(att.previewUrl)"
+            >
+              <img v-if="att.previewUrl" :src="att.previewUrl" :alt="att.fileName" />
+              <span v-else class="thumb-loading">🖼️</span>
+            </div>
+            <span v-else class="attachment-icon">{{ getAttachmentIcon(att.type) }}</span>
             <span class="attachment-name" :title="att.fileName">{{ att.fileName }}</span>
             <span class="attachment-size">{{ formatFileSize(att.size) }}</span>
             <span v-if="att.uploading" class="attachment-uploading">
               <LoadingOutlined spin />
             </span>
-            <span v-else-if="att.error" class="attachment-error-msg" :title="att.error">上传失败</span>
-            <span v-else class="attachment-remove" @click="removeAttachment(att.id)">×</span>
+            <template v-else>
+              <span v-if="att.error" class="attachment-error-msg" :title="att.error">{{ att.error }}</span>
+              <span class="attachment-remove" @click="removeAttachment(att.id)">×</span>
+            </template>
           </div>
         </div>
         <div class="input-wrapper">
-          <a-button
-            class="attach-btn"
-            @click="triggerFileUpload"
-            :disabled="hasRunningTask"
-            title="上传附件"
-          >
-            <PaperClipOutlined />
-          </a-button>
+          <a-dropdown :trigger="['click']" placement="topLeft" :disabled="hasRunningTask">
+            <a-button
+              class="attach-btn"
+              :disabled="hasRunningTask"
+              title="添加附件"
+            >
+              <PaperClipOutlined />
+            </a-button>
+            <template #overlay>
+              <a-menu @click="onAttachMenuClick">
+                <a-menu-item key="upload">
+                  <span class="attach-menu-icon"><UploadOutlined /></span>
+                  上传新文件
+                </a-menu-item>
+                <a-menu-item key="history">
+                  <span class="attach-menu-icon"><HistoryOutlined /></span>
+                  用历史文件
+                </a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
           <a-textarea
             v-model:value="inputMessage"
-            placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送）"
+            placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送，Ctrl+V粘贴截图）"
             :auto-size="{ minRows: 1, maxRows: 8 }"
             :disabled="hasRunningTask || isOptimizing"
             @keydown.enter.exact.prevent="sendMessage"
             @keydown.shift.enter="handleShiftEnter"
+            @paste="handlePasteImage"
           />
           <a-button
             class="optimize-btn"
@@ -597,8 +717,9 @@
               </div>
             </div>
           </div>
-          <div class="footer-right" v-if="currentMessages.length > 0">
-            <span class="context-tokens">
+          <div class="footer-right" v-if="balanceText || currentMessages.length > 0">
+            <span v-if="balanceText" class="balance-chip" :title="balanceTitle">💰 余额 {{ balanceText }}</span>
+            <span v-if="currentMessages.length > 0" class="context-tokens">
               上下文 Token: {{ formatTokenCount(totalContextTokens) }}
               <span v-if="settingsStore.contextMode === 'compact'" class="context-mode-badge" title="精简模式：非本轮工具调用和思考过程已精简">⚡ 精简</span>
             </span>
@@ -786,7 +907,7 @@ import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
-import { streamChat, checkActiveTask, taskStream, cancelTask, uploadAttachment, supplementRequest, optimizePrompt } from '@/api/chat'
+import { streamChat, checkActiveTask, taskStream, cancelTask, supplementRequest, optimizePrompt } from '@/api/chat'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 import { setConfig } from '@/api/config'
 import type { SkillMatchInfo } from '@/utils/sse-client'
@@ -794,7 +915,7 @@ import type { AgentStreamEvent } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
 import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, getSnapshotFileContent, type SessionChanges } from '@/api/snapshot'
 import { useSettingsStore } from '@/store/settings'
-import { renderMarkdown } from '@/utils/markdown'
+import { renderMarkdown, renderMarkdownLight } from '@/utils/markdown'
 import { estimateTokenCount, formatTokenCount } from '@/utils/tokenCalculator'
 import {
   CodeOutlined,
@@ -809,13 +930,15 @@ import {
   SettingOutlined,
   CloseOutlined,
   CheckOutlined,
-  FolderOpenOutlined,
   UndoOutlined,
   PaperClipOutlined,
   PlaySquareOutlined,
   CaretRightOutlined,
   PoweroffOutlined,
-  ClearOutlined
+  ClearOutlined,
+  UploadOutlined,
+  HistoryOutlined,
+  SearchOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import FileEditor from '@/components/FileEditor.vue'
@@ -835,7 +958,12 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { getGitDiff, gitRestore, gitShowFile } from '@/api/git'
 import AgentSelector from '@/components/AgentSelector.vue'
-import { listProviders, parseModelList, type ProviderConfig } from '@/api/llm-provider'
+import { listProviders, parseModelList, getProviderBalance, type ProviderConfig, type ProviderBalance, type ProviderBalanceInfo } from '@/api/llm-provider'
+// M4：图像理解（文件资产上传/历史回显/跨页引用）
+import { uploadFileAsset, getFilePreviewBlobUrl, downloadFileAsset, listFileAssets, fileAssetDisplayName, docTypeOf, docTypeIcon, isImageMime, type FileAssetData } from '@/api/file-asset'
+import { useFileRefStore } from '@/store/file-ref'
+import { compressImageIfNeeded } from '@/utils/image-compress'
+import { useRoute } from 'vue-router'
 
 const PROMPT_FILE = 'code_agent_prompt.txt'
 
@@ -869,11 +997,34 @@ interface ChatMessage {
   tokenCount?: number
   turnId?: string
   snapshotId?: string
+  expandedCards?: Set<number>  // M1b-2：工具卡片展开状态（数据驱动折叠；默认折叠=不在集合中）
+  fullCards?: Set<number>      // M3：超长卡片「显示全部」状态（解除截断；默认不在集合中）
+  /** M4：消息附带的图片文件（本轮发送 或 历史回显——按 messageId 映射 file_reference） */
+  fileAssets?: MessageFileAsset[]
+  /** 修复：桌面截图注入消息id列表（role=user 的 desktop_inject 消息不渲染气泡，
+   *  其截图资产由 loadMessageFileRefs 归并到本 AI 消息的 fileAssets 回显） */
+  injectSourceIds?: string[]
+}
+
+/** M4/M7：消息气泡中展示的文件（图片→缩略图；文档→文件图标卡片） */
+interface MessageFileAsset {
+  id: number
+  /** 远端 Files API 文件ID（本地存储文档为 null） */
+  fileId?: string | null
+  filename: string
+  displayName?: string
+  mimeType?: string
+  size?: number
+  /** M7：图片/文档（气泡渲染分流：缩略图 vs 文件图标卡片） */
+  kind?: 'image' | 'doc'
+  /** blob 预览 URL（异步填充；无则显示占位；仅图片） */
+  previewUrl?: string
 }
 
 // ===== 附件系统 =====
 interface AttachedFile {
   id: string
+  /** Legacy：旧临时通道附件ID（M7 起弃用，恒为空；文档也走 fileAssetId） */
   attachmentId: string
   fileName: string
   size: number
@@ -881,10 +1032,172 @@ interface AttachedFile {
   extension: string
   uploading: boolean
   error?: string
+  /** 附件种类——image（云端 Files API，注入 vision 内容块）/ doc（本地存储，LLM 工具读取） */
+  kind?: 'image' | 'doc'
+  /** 附件的本地资产ID（发送时组装 fileAssetIds，图片+文档统一通道） */
+  fileAssetId?: number
+  /** 图片附件缩略图（本地上传为 objectURL；引用/历史为 blob URL；仅图片） */
+  previewUrl?: string
+  /** previewUrl 是否由本组件创建（true 时移除需 revoke；缓存 URL 不释放） */
+  previewOwned?: boolean
 }
+
+// 单文件上传上限：64MB（与 application.yml 的 spring.servlet.multipart.max-file-size 及 DeepSeek Files API 上限对齐）
+const MAX_UPLOAD_SIZE = 64 * 1024 * 1024
 
 const attachedFiles = ref<AttachedFile[]>([])
 const fileInputRef = ref<HTMLInputElement | null>(null)
+
+// ===== M4：图像理解（Files API 图片附件） =====
+const fileRefStore = useFileRefStore()
+const route = useRoute()
+/** 大图预览遮罩 URL（点击消息/附件缩略图打开；点击遮罩关闭） */
+const bigPreviewUrl = ref('')
+
+/** 打开大图预览遮罩（无 URL 时提示加载中） */
+const openBigPreview = (url?: string) => {
+  if (url) {
+    bigPreviewUrl.value = url
+  } else {
+    message.warning('图片加载中，请稍候')
+  }
+}
+
+/** M7：消息气泡中文档附件点击下载 */
+const downloadMessageFile = async (asset: MessageFileAsset) => {
+  try {
+    await downloadFileAsset(asset.id, fileAssetDisplayName(asset))
+  } catch (e: any) {
+    message.error(e.message || '下载失败')
+  }
+}
+
+// ===== 附件入口两步交互：上传新文件 / 用历史文件 =====
+/** 📎 下拉菜单点击分发 */
+const onAttachMenuClick = ({ key }: { key: string | number }) => {
+  if (key === 'upload') {
+    triggerFileUpload()
+  } else if (key === 'history') {
+    openHistoryPicker()
+  }
+}
+
+// 历史图片选择弹窗
+const historyPickerVisible = ref(false)
+const historyPickerLoading = ref(false)
+const historyImages = ref<FileAssetData[]>([])
+const historyKeyword = ref('')
+const historySelectedIds = ref<Set<number>>(new Set())
+/** 弹窗缩略图（id → blob URL；来自 file-asset 全局缓存，无需 revoke） */
+const historyPreviewMap = ref<Record<number, string>>({})
+
+/** 按关键字过滤（前端过滤，避免频繁请求） */
+const filteredHistoryImages = computed(() => {
+  const kw = historyKeyword.value.trim().toLowerCase()
+  if (!kw) return historyImages.value
+  return historyImages.value.filter(f => fileAssetDisplayName(f).toLowerCase().includes(kw))
+})
+
+/** 该文件是否已在附件区（避免重复添加） */
+const isAssetAttached = (assetId: number) => attachedFiles.value.some(a => a.fileAssetId === assetId)
+
+/** 打开历史图片选择弹窗（每次打开重新拉取最新列表） */
+const openHistoryPicker = async () => {
+  historyPickerVisible.value = true
+  historyKeyword.value = ''
+  historySelectedIds.value = new Set()
+  historyPickerLoading.value = true
+  try {
+    const res = await listFileAssets({ limit: 200, order: 'desc' })
+    if (res.code === 200 && res.data) {
+      historyImages.value = res.data
+      // 异步加载缩略图（仅图片；失败保留占位图）
+      for (const f of res.data) {
+        if (!isImageMime(f.mimeType)) continue
+        if (historyPreviewMap.value[f.id]) continue
+        getFilePreviewBlobUrl(f.id).then(url => {
+          historyPreviewMap.value = { ...historyPreviewMap.value, [f.id]: url }
+        }).catch(() => {})
+      }
+    } else {
+      message.error(res.message || '加载历史文件失败')
+    }
+  } catch (e: any) {
+    message.error(e.message || '加载历史文件失败')
+  } finally {
+    historyPickerLoading.value = false
+  }
+}
+
+/** 切换选中（已在附件中的不可再选） */
+const toggleHistorySelect = (f: FileAssetData) => {
+  if (isAssetAttached(f.id)) {
+    message.info('该文件已在附件中')
+    return
+  }
+  const next = new Set(historySelectedIds.value)
+  if (next.has(f.id)) next.delete(f.id)
+  else next.add(f.id)
+  historySelectedIds.value = next
+}
+
+/** 确认添加：写入附件区（与「引用到聊天」同一附件结构，随消息以 fileAssetIds 发送） */
+const confirmHistoryPick = () => {
+  const selected = historyImages.value.filter(f => historySelectedIds.value.has(f.id) && !isAssetAttached(f.id))
+  // M7：仅当选中有图片时才做模型 vision 能力检查（纯文档不需要视觉模型）
+  if (selected.some(f => isImageMime(f.mimeType)) && !ensureVisionModel()) return
+  let added = 0
+  for (const f of selected) {
+    const isImg = isImageMime(f.mimeType)
+    const attFile: AttachedFile = {
+      id: `hist-${f.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      attachmentId: '',
+      fileName: fileAssetDisplayName(f),
+      size: f.size || 0,
+      type: isImg ? 'image' : docTypeOf(f.filename, f.mimeType),
+      extension: (f.filename.split('.').pop() || '').toLowerCase(),
+      uploading: false,
+      kind: isImg ? 'image' : 'doc',
+      fileAssetId: f.id
+    }
+    attachedFiles.value.push(attFile)
+    added++
+    if (isImg) {
+      getFilePreviewBlobUrl(f.id).then(url => {
+        const found = attachedFiles.value.find(a => a.id === attFile.id)
+        if (found) found.previewUrl = url
+      }).catch(() => {})
+    }
+  }
+  historyPickerVisible.value = false
+  if (added > 0) message.success(`已添加 ${added} 个历史文件`)
+}
+
+/** 模型 vision 能力判定（与后端 FileVisionService.supportsVisionModel 规则一致；非 deepseek 宽松放行） */
+const isVisionModel = (model?: string): boolean => {
+  if (!model) return true
+  const m = model.toLowerCase()
+  if (m.startsWith('deepseek')) {
+    return m.includes('flash') || m.includes('vision') || m.includes('-vl')
+  }
+  return true
+}
+
+/** 当前模型不支持图片时：尝试自动切换 flash 系模型；无可用则返回 false（调用方阻止上传） */
+const ensureVisionModel = (): boolean => {
+  const runtime = agentSelectorRef.value?.runtime
+  const model = runtime?.model || agentRuntime.value.model
+  if (isVisionModel(model)) return true
+  const flash = availableModels.value.find(m => isVisionModel(m))
+  if (flash && runtime) {
+    runtime.model = flash
+    agentSelectorRef.value?.saveRuntime()
+    message.warning(`当前模型不支持图片，已自动切换为 ${flash}`)
+    return true
+  }
+  message.error('当前模型不支持图片理解，且未找到可用的视觉模型（如 deepseek-flash），请先切换模型')
+  return false
+}
 
 // Agent 选择器相关
 const agentSelectorRef = ref<InstanceType<typeof AgentSelector> | null>(null)
@@ -982,17 +1295,88 @@ const refreshModelList = () => {
   }
 }
 
-// ★ 监听 Provider 手动切换 → 重新加载模型列表
+// ===== DeepSeek 余额展示（仅当前 Provider 为 DeepSeek 时展示） =====
+const providerBalance = ref<ProviderBalance | null>(null)
+
+/** 解析当前生效的 Provider（runtime.providerCode > 第一个 Provider，与 refreshModelList 逻辑一致） */
+const resolveActiveProvider = (): ProviderConfig | null => {
+  const providers = providerOptions.value
+  if (providers.length === 0) return null
+  const runtime = agentSelectorRef.value?.runtime
+  return (runtime?.providerCode
+    ? providers.find((p: ProviderConfig) => p.code === runtime.providerCode)
+    : null) || providers[0]
+}
+
+/** 当前生效的 Provider 是否为 DeepSeek（余额能力仅 DeepSeek 提供） */
+const isDeepSeekProvider = computed(() => {
+  const prov = resolveActiveProvider()
+  if (!prov) return false
+  return (prov.requestTemplate || prov.code || '').toLowerCase() === 'deepseek'
+})
+
+/** 待展示的余额明细：优先人民币，否则取第一条 */
+const activeBalance = computed(() => {
+  const infos = providerBalance.value?.balanceInfos || []
+  if (infos.length === 0) return null
+  return infos.find((i: ProviderBalanceInfo) => i.currency === 'CNY') || infos[0]
+})
+
+/** 货币符号 */
+const currencySymbol = (currency: string) => currency === 'CNY' ? '¥' : currency === 'USD' ? '$' : `${currency} `
+
+/** 余额文本（如 "¥110.00"）；非 DeepSeek 或无数据时为空串（对应 UI 不展示） */
+const balanceText = computed(() => {
+  if (!isDeepSeekProvider.value) return ''
+  const info = activeBalance.value
+  if (!info) return ''
+  return `${currencySymbol(info.currency || '')}${info.totalBalance}`
+})
+
+/** 余额悬浮提示：总余额 / 赠金 / 充值 */
+const balanceTitle = computed(() => {
+  const info = activeBalance.value
+  if (!info) return ''
+  const sym = currencySymbol(info.currency || '')
+  return `总余额 ${sym}${info.totalBalance} · 赠金 ${sym}${info.grantedBalance} · 充值 ${sym}${info.toppedUpBalance}`
+})
+
+/**
+ * 刷新 DeepSeek 余额
+ * 触发时机：进入聊天页面（Provider 列表加载完成）、切换 Provider / Agent、每次对话结束后
+ * 非 DeepSeek Provider 时清空展示；查询失败时静默保留上一次成功数据，不影响聊天主流程
+ */
+const refreshBalance = async () => {
+  const prov = resolveActiveProvider()
+  const template = prov ? (prov.requestTemplate || prov.code || '').toLowerCase() : ''
+  if (!prov || template !== 'deepseek') {
+    providerBalance.value = null
+    return
+  }
+  try {
+    const res = await getProviderBalance(prov.code)
+    if (res.code === 200 && res.data) {
+      providerBalance.value = res.data
+    }
+  } catch (e) {
+    // 静默失败：保留上一次成功数据（如 API Key 未配置、网络异常等）
+    console.warn('获取 DeepSeek 余额失败:', e)
+  }
+}
+
+// ★ 监听 Provider 手动切换 → 重新加载模型列表 + 刷新 DeepSeek 余额
 watch(() => agentSelectorRef.value?.runtime?.providerCode, () => {
   if (providerOptions.value.length > 0) {
     refreshModelList()
+    refreshBalance()
   }
 })
 
-// ★ 监听 providerOptions 首次加载完成 → 刷新一次（解决初始化时序问题）
+// ★ 监听 providerOptions 首次加载完成 → 刷新一次（解决初始化时序问题；进入页面时由此触发余额查询）
 watch(providerOptions, (opts) => {
   if (opts.length > 0) {
     refreshModelList()
+    refreshBalance()
   }
 })
 
@@ -1095,7 +1479,11 @@ const onAgentChange = (agentId: number | null | undefined, agent: any) => {
     conversations.value = []
     fetchConversations()
   }
-  clearSavedConversationId()
+  // M4 优化：仅真实切换 Agent 时清「上次查看会话」记忆——首次加载保留，供 fetchConversations 恢复；
+  // 原实现在 fetchConversations 异步完成（await）前就无条件清除，导致「恢复上次会话」分支永远落到第一个会话。
+  if (oldAgentId) {
+    clearSavedConversationId()
+  }
   skillsRefreshKey.value++
 
   // 第六步：文件树
@@ -1126,35 +1514,103 @@ const triggerFileUpload = () => {
 
 const handleFileSelected = async (event: Event) => {
   const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file) return
+  const files = target.files
+  if (!files || files.length === 0) return
 
-  const attId = `att-${Date.now()}`
+  // M4：支持多选（循环上传）；图片/文档自动分流
+  for (const file of Array.from(files)) {
+    await attachLocalFile(file)
+  }
+
+  // 清空 input 以便重复选择同一个文件
+  target.value = ''
+}
+
+/**
+ * M4/M7 统一附件入口：
+ * - 图片（image/*）→ 文件资产·云端 Files API（/api/files 上传 + fileAssetId 随发送，注入 vision 内容块）；含模型能力检查
+ * - 文档（pdf/word/excel/text）→ 文件资产·本地存储（fileAssetId 随发送，LLM 通过 chat_attachment 工具读取）
+ */
+const attachLocalFile = async (file: File, source: 'upload' | 'paste' = 'upload') => {
+  const attId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  const isImage = file.type.startsWith('image/')
   const attFile: AttachedFile = {
     id: attId,
     attachmentId: '',
     fileName: file.name,
     size: file.size,
-    type: '',
+    type: isImage ? 'image' : '',
     extension: '',
-    uploading: true
+    uploading: true,
+    kind: isImage ? 'image' : 'doc'
   }
-  attachedFiles.value.push(attFile)
 
-  try {
-    const result = await uploadAttachment(file)
-    if (result.success) {
+  // 超限预检：超过上限的文件不发请求，直接提示（与后端校验/提示保持一致）
+  if (file.size > MAX_UPLOAD_SIZE) {
+    attFile.uploading = false
+    attFile.error = `文件大小超过上限（最大 ${MAX_UPLOAD_SIZE / 1024 / 1024}MB）`
+    attachedFiles.value.push(attFile)
+    return
+  }
+
+  if (isImage) {
+    // 模型能力检查：不支持则尝试自动切换；无法切换时阻止上传（后端亦有防线）
+    if (!ensureVisionModel()) {
+      attFile.uploading = false
+      attFile.error = '当前模型不支持图片'
+      attachedFiles.value.push(attFile)
+      return
+    }
+    // 本地缩略图（上传过程中即时可见；previewOwned 标记供移除时 revoke）
+    attFile.previewUrl = URL.createObjectURL(file)
+    attFile.previewOwned = true
+    attachedFiles.value.push(attFile)
+    try {
+      // P3：上传前可选预压缩（超阈值转 JPEG；失败自动回退原图，不阻断上传）
+      const uploadTarget = await compressImageIfNeeded(file)
+      if (uploadTarget !== file) {
+        attFile.fileName = uploadTarget.name
+        attFile.size = uploadTarget.size
+      }
+      const res = await uploadFileAsset(uploadTarget, {
+        source,
+        providerCode: agentRuntime.value.providerCode || undefined
+      })
       const found = attachedFiles.value.find(a => a.id === attId)
       if (found) {
-        found.attachmentId = result.attachmentId
-        found.type = result.type
-        found.extension = result.extension
+        if (res.code === 200 && res.data) {
+          found.fileAssetId = res.data.id
+          found.extension = (res.data.mimeType || '').split('/')[1] || ''
+          found.uploading = false
+        } else {
+          found.error = res.message || '上传失败'
+          found.uploading = false
+        }
+      }
+    } catch (e: any) {
+      const found = attachedFiles.value.find(a => a.id === attId)
+      if (found) {
+        found.error = e.message || '上传失败'
         found.uploading = false
       }
-    } else {
-      const found = attachedFiles.value.find(a => a.id === attId)
-      if (found) {
-        found.error = result.error || '上传失败'
+    }
+    return
+  }
+
+  // 文档（M7）：统一走文件资产（本地存储）；发送后 LLM 通过 chat_attachment(read_by_file_asset) 读取
+  attFile.type = docTypeOf(file.name)
+  attachedFiles.value.push(attFile)
+  try {
+    const res = await uploadFileAsset(file, { source })
+    const found = attachedFiles.value.find(a => a.id === attId)
+    if (found) {
+      if (res.code === 200 && res.data) {
+        found.fileAssetId = res.data.id
+        found.type = docTypeOf(res.data.filename, res.data.mimeType)
+        found.extension = (res.data.filename.split('.').pop() || '').toLowerCase()
+        found.uploading = false
+      } else {
+        found.error = res.message || '上传失败'
         found.uploading = false
       }
     }
@@ -1165,12 +1621,146 @@ const handleFileSelected = async (event: Event) => {
       found.uploading = false
     }
   }
-
-  // 清空 input 以便重复选择同一个文件
-  target.value = ''
 }
 
+// ===== M4：粘贴图片（Ctrl+V） =====
+/** 粘贴图片的 MIME → 扩展名映射（Files API 支持范围） */
+const PASTE_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp'
+}
+
+const handlePasteImage = (e: ClipboardEvent) => {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of Array.from(items)) {
+    if (!item.type.startsWith('image/')) continue
+    const blob = item.getAsFile()
+    if (!blob) continue
+    // 命中图片：拦截默认粘贴（避免把二进制塞进文本框），走统一上传
+    e.preventDefault()
+    const ext = PASTE_IMAGE_EXT[item.type] || 'png'
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const name = `pasted-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.${ext}`
+    const file = new File([blob], name, { type: item.type })
+    attachLocalFile(file, 'paste')
+    return // 只取第一张图片
+  }
+  // 非图片粘贴不拦截（正常文本粘贴）
+}
+
+// ===== M4：跨页引用消费（文件管理页「引用到聊天」→ 附件区） =====
+let consumingRefs = false
+const tryConsumePendingRefs = async () => {
+  if (consumingRefs) return
+  const refs = fileRefStore.consumeRefs()
+  if (refs.length === 0) return
+  consumingRefs = true
+  try {
+    let added = 0
+    for (const r of refs) {
+      // 去重：附件区已有同一 fileAssetId 则跳过
+      if (attachedFiles.value.some(a => a.fileAssetId === r.id)) continue
+      // M7：按 MIME 区分图片/文档（文档显示文件图标，发送后 LLM 用 chat_attachment 读取）
+      const isImg = isImageMime(r.mimeType)
+      const attFile: AttachedFile = {
+        id: `ref-${r.id}-${Date.now()}`,
+        attachmentId: '',
+        fileName: r.filename,
+        size: r.size || 0,
+        type: isImg ? 'image' : docTypeOf(r.filename, r.mimeType),
+        extension: (r.filename.split('.').pop() || '').toLowerCase(),
+        uploading: false,
+        kind: isImg ? 'image' : 'doc',
+        fileAssetId: r.id
+      }
+      attachedFiles.value.push(attFile)
+      added++
+      if (isImg) {
+        // 异步加载缩略图（blob 缓存 URL，previewOwned=false 不 revoke；文档不需要）
+        getFilePreviewBlobUrl(r.id).then(url => {
+          const found = attachedFiles.value.find(a => a.id === attFile.id)
+          if (found) found.previewUrl = url
+        }).catch(e => console.warn('引用缩略图加载失败:', r.id, e))
+      }
+    }
+    if (added > 0) {
+      message.success(`已引用 ${added} 个文件`)
+    }
+  } finally {
+    consumingRefs = false
+  }
+}
+
+// ===== M4 优化：跨页引用目标（文件管理页「引用到聊天」可指定目标会话/新聊天） =====
+// 路由协议：/code-assistant?refConv=<会话ID>&refAgent=<Agent配置ID>（引用到已有会话）；
+//          /code-assistant?refNew=1（引用到新聊天）。
+// 消费时机：fetchConversations 完成后优先应用（见 fetchConversations）；应用后清 URL query，避免刷新重复触发。
+type RefNavTarget = { type: 'conv'; id: string; agentId?: number } | { type: 'new' }
+const pendingRefTarget = ref<RefNavTarget | null>(null)
+
+/** 从路由 query 解析引用目标（组件挂载时执行一次） */
+const readRefTargetFromQuery = () => {
+  const q = route.query
+  const refConv = typeof q.refConv === 'string' ? q.refConv : ''
+  const refNew = typeof q.refNew === 'string' ? q.refNew : ''
+  const refAgent = typeof q.refAgent === 'string' ? parseInt(q.refAgent) : NaN
+  if (refConv) {
+    pendingRefTarget.value = { type: 'conv', id: refConv, agentId: isNaN(refAgent) ? undefined : refAgent }
+  } else if (refNew === '1') {
+    pendingRefTarget.value = { type: 'new' }
+  }
+}
+readRefTargetFromQuery()
+
+/** 应用完成后清理目标 + 清除 URL query（避免刷新重复触发） */
+const clearPendingRefTarget = () => {
+  pendingRefTarget.value = null
+  if (route.query.refConv || route.query.refNew || route.query.refAgent) {
+    router.replace({ path: '/code-assistant' })
+  }
+}
+
+/** 应用引用目标：新聊天直接新建；指定会话优先在当前列表定位；跨 Agent 时先切换 Agent（切换后 fetchConversations 会再次应用） */
+const applyPendingRefTarget = () => {
+  const t = pendingRefTarget.value
+  if (!t) return
+  if (t.type === 'new') {
+    startNewChat()
+    clearPendingRefTarget()
+    return
+  }
+  const found = conversations.value.find(c => c.id === t.id)
+  if (found) {
+    selectConversation(t.id)
+    clearPendingRefTarget()
+    return
+  }
+  if (t.agentId && t.agentId !== currentAgentConfigId.value) {
+    const ok = agentSelectorRef.value?.switchToAgentById?.(t.agentId)
+    if (ok) return
+  }
+  message.warning('未找到目标会话，可能已被删除或不属于当前智能体')
+  clearPendingRefTarget()
+}
+
+// M4：引用消费时机——① 组件挂载（跨页跳转重新进入）；② 路由切回本页（keep-alive 场景兜底）
+onMounted(() => {
+  tryConsumePendingRefs()
+})
+watch(() => route.path, (p) => {
+  if (p === '/code-assistant') tryConsumePendingRefs()
+})
+
 const removeAttachment = (id: string) => {
+  const target = attachedFiles.value.find(a => a.id === id)
+  // 仅释放本组件创建的 objectURL（引用/历史回显的缓存 URL 由 file-asset 模块统一管理）
+  if (target?.previewOwned && target.previewUrl) {
+    URL.revokeObjectURL(target.previewUrl)
+  }
   attachedFiles.value = attachedFiles.value.filter(a => a.id !== id)
 }
 
@@ -2255,7 +2845,84 @@ const clearConvState = (convId: string | null | undefined) => {
 // Markdown 渲染缓存（避免历史消息重复解析 markdown，性能优化）
 // key=content原文, value=渲染后的HTML，最大缓存200条
 const markdownCache = new Map<string, string>()
-const thinkingCache = new Map<string, string>()
+// thinking 段列表缓存（key 含折叠状态签名）。缓存「带 cardAt 的段列表」而非合并单段 HTML——
+// 修复：合并单段会丢失 cardAt，导致静态消息（历史/已结束）的工具卡片点击无法定位
+const thinkingCache = new Map<string, ThinkSegment[]>()
+
+// ===== M1a 分段渲染（2026-09-15 性能改造）=====
+// 段级缓存：稳定段（块级片段）文本 → 渲染 HTML；段文本不变则永久命中。
+// —— 流式期间消息内容持续增长，稳定段缓存命中后仅尾段增量解析，单次成本 O(尾段)。
+const segmentCache = new Map<string, string>()
+const SEGMENT_CACHE_LIMIT = 800
+
+/**
+ * 查找最后一个"块级安全切点"（切点之前为稳定前缀，之后为尾段）。
+ * 规则：以 \n\n 为候选边界；以下情况不切（保守优先，防格式错乱）：
+ *  1) 候选边界处于未闭合的围栏代码块（```）内部；
+ *  2) 边界下一行以空格/Tab 开头（疑似缩进续行，避免改变块语义）。
+ * 实现为纯字符扫描（无 markdown 解析），成本远低于全量渲染。
+ * @returns 切点索引；无安全切点返回 -1
+ */
+const findStablePrefixEnd = (text: string): number => {
+  // 快速路径：全文无三反引号时，直接取最后一个合格的 \n\n
+  if (text.indexOf('```') === -1) {
+    let g = text.lastIndexOf('\n\n')
+    while (g !== -1) {
+      const c = text.charCodeAt(g + 2)
+      if (c !== 32 && c !== 9) return g + 2
+      g = text.lastIndexOf('\n\n', g - 1)
+    }
+    return -1
+  }
+  // 一般路径：线性配对扫描（围栏感知）
+  let lastSafe = -1
+  let pos = 0
+  let inFence = false
+  const len = text.length
+  while (pos < len) {
+    if (inFence) {
+      // 查找行首 ```（闭合）；跳过行中出现的三反引号
+      let close = text.indexOf('```', pos)
+      while (close !== -1 && close > 0 && text[close - 1] !== '\n') {
+        close = text.indexOf('```', close + 3)
+      }
+      if (close === -1) break // 围栏未闭合：其后内容全部视为尾段
+      inFence = false
+      pos = close + 3
+    } else {
+      // 查找下一个行首 ```（开围栏）与下一个 \n\n（候选切点），取更近者
+      let fence = text.indexOf('```', pos)
+      while (fence !== -1 && fence > 0 && text[fence - 1] !== '\n') {
+        fence = text.indexOf('```', fence + 3)
+      }
+      const gap = text.indexOf('\n\n', pos)
+      if (gap === -1 && fence === -1) break
+      if (gap !== -1 && (fence === -1 || gap < fence)) {
+        const c = text.charCodeAt(gap + 2)
+        if (c !== 32 && c !== 9) lastSafe = gap + 2
+        pos = gap + 2
+      } else {
+        inFence = true
+        pos = fence + 3
+      }
+    }
+  }
+  return lastSafe
+}
+
+/** 渲染单个稳定段（带段级缓存；段文本不变则永久命中） */
+const renderSegmentCached = (segment: string): string => {
+  if (!segment) return ''
+  const hit = segmentCache.get(segment)
+  if (hit !== undefined) return hit
+  const html = renderMarkdown(segment)
+  if (segmentCache.size >= SEGMENT_CACHE_LIMIT) {
+    const firstKey = segmentCache.keys().next().value
+    if (firstKey !== undefined) segmentCache.delete(firstKey)
+  }
+  segmentCache.set(segment, html)
+  return html
+}
 
 const toggleCollapsed = () => { collapsed.value = !collapsed.value }
 
@@ -2327,6 +2994,11 @@ const fetchConversations = async () => {
     const response = await getConversationList(undefined, currentAgentConfigId.value || undefined)
     if (response.code === 200 && response.data) {
       conversations.value = response.data.map(mapConversationResponseToConversation)
+      // M4 优化：优先应用跨页引用目标（文件管理页「引用到聊天」指定会话/新聊天）
+      if (pendingRefTarget.value) {
+        applyPendingRefTarget()
+        return
+      }
       // 优先恢复上次查看的会话
       if (!currentConversationId.value && conversations.value.length > 0) {
         const savedId = loadConversationId()
@@ -2359,6 +3031,8 @@ const fetchMessages = async (conversationId: string, force = false) => {
       messages.value[conversationId] = groups as ChatMessage[]
       // 历史消息加载后，匹配回滚快照
       matchSnapshotsForMessages(conversationId)
+      // M4：历史图片回显（按 messageId 映射 file_reference）
+      loadMessageFileRefs(conversationId)
       // 加载会话改动统计
       loadSessionChanges(conversationId)
     }
@@ -2395,6 +3069,107 @@ const matchSnapshotsForMessages = async (convId: string) => {
     }
   } catch (e) {
     console.warn('匹配快照失败:', e)
+  }
+}
+
+/**
+ * M4/M7：历史文件回显
+ * 拉取会话被引用的文件（GET /api/files?conversationId=X&withRefs=true）→
+ * 按 file_reference.messageId 分组映射到对应 user 消息 → 气泡渲染（图片缩略图 / 文档图标卡片）。
+ * 兼容：无引用数据的旧消息保持纯文本（不修改）。
+ */
+const loadMessageFileRefs = async (convId: string) => {
+  if (convId.startsWith('local-')) return
+  const sid = parseInt(convId)
+  if (isNaN(sid)) return
+  try {
+    const res = await listFileAssets({ conversationId: sid, withRefs: true, limit: 200 })
+    if (res.code !== 200 || !res.data || res.data.length === 0) return
+    const msgs = messages.value[convId]
+    if (!msgs) return
+
+    // 按 messageId 分组（同一消息去重；M7：按 mime 标注图片/文档，供气泡分流渲染）
+    const byMessage = new Map<number, MessageFileAsset[]>()
+    for (const f of res.data) {
+      for (const ref of f.references || []) {
+        if (ref.messageId == null) continue
+        const list = byMessage.get(ref.messageId) || []
+        if (!list.some(x => x.id === f.id)) {
+          list.push({
+            id: f.id,
+            fileId: f.fileId,
+            filename: f.filename,
+            displayName: f.displayName,
+            mimeType: f.mimeType,
+            size: f.size,
+            kind: isImageMime(f.mimeType) ? 'image' : 'doc'
+          })
+        }
+        byMessage.set(ref.messageId, list)
+      }
+    }
+    if (byMessage.size === 0) return
+
+    let changed = false
+    for (let i = 0; i < msgs.length; i++) {
+      const msg = msgs[i]
+
+      // 常规：user 消息直接挂载（真实用户发送/引用的文件）
+      if (msg.role === 'user') {
+        if (msg.fileAssets) continue
+        const mid = parseInt(msg.id)
+        if (isNaN(mid)) continue
+        const assets = byMessage.get(mid)
+        if (assets && assets.length > 0) {
+          msgs[i].fileAssets = assets
+          changed = true
+        }
+        continue
+      }
+
+      // 修复：桌面截图注入消息（不渲染为用户气泡）的资产归并到宿主 AI 消息回显
+      if (msg.role === 'assistant' && msg.injectSourceIds && msg.injectSourceIds.length > 0) {
+        const merged = msg.fileAssets ? [...msg.fileAssets] : []
+        let added = false
+        for (const sid of msg.injectSourceIds) {
+          const sidNum = parseInt(sid)
+          if (isNaN(sidNum)) continue
+          const assets = byMessage.get(sidNum)
+          if (assets) {
+            for (const a of assets) {
+              if (!merged.some(x => x.id === a.id)) {
+                merged.push(a)
+                added = true
+              }
+            }
+          }
+        }
+        if (added) {
+          msgs[i].fileAssets = merged
+          changed = true
+        }
+      }
+    }
+    if (!changed) return
+
+    // 强制刷新 DynamicScroller（与快照匹配同模式）
+    messages.value[convId] = [...msgs]
+
+    // 异步加载缩略图（blob URL 缓存；仅图片；逐张填充后触发刷新）
+    for (const msg of messages.value[convId]) {
+      if (!msg.fileAssets) continue
+      for (const asset of msg.fileAssets) {
+        if (asset.kind === 'doc' || asset.previewUrl) continue
+        getFilePreviewBlobUrl(asset.id).then(url => {
+          asset.previewUrl = url
+          // 嵌套对象变更不在 DynamicScroller 的 size-dependencies 内，主动刷新一次
+          const cur = messages.value[convId]
+          if (cur) messages.value[convId] = [...cur]
+        }).catch(e => console.warn('历史图片缩略图加载失败:', asset.id, e))
+      }
+    }
+  } catch (e) {
+    console.warn('加载历史图片引用失败:', e)
   }
 }
 
@@ -2689,6 +3464,7 @@ const handleAgentEvent = (event: AgentStreamEvent) => {
   if (eventType === 'agent_tool_call') {
     const toolResult = result || ''
     const toolNameVal = tool_name || ''
+    maybeShowDesktopPrivacyNotice([toolNameVal])
     const actionStr = toolNameVal ? extractActionFromToolContent(toolResult, toolNameVal) : ''
     agent.events.push({ type: 'tool_call' as const, toolName: toolNameVal, action: actionStr, filePath: file_path || '', result: toolResult })
     return
@@ -2954,6 +3730,31 @@ const submitPendingAnswer = async () => {
 // 处理权限授权按钮（4种 action）
 const permissionLock = ref(false)
 
+// ===== P3：桌面自动化隐私提示（M5 遗留） =====
+// 首次检测到桌面工具（screen_capture / desktop_control）调用时弹窗告知；仅弹一次（localStorage 持久化标记）
+const DESKTOP_PRIVACY_NOTICE_KEY = 'desktop.privacy-notice-shown'
+let desktopPrivacyNoticeShownInSession = false
+
+const maybeShowDesktopPrivacyNotice = (tools: string[]) => {
+  if (desktopPrivacyNoticeShownInSession) return
+  if (!tools.some(t => t === 'screen_capture' || t === 'desktop_control')) return
+  desktopPrivacyNoticeShownInSession = true
+  try {
+    if (localStorage.getItem(DESKTOP_PRIVACY_NOTICE_KEY)) return
+  } catch (_) { /* 读取失败按未展示处理 */ }
+  try { localStorage.setItem(DESKTOP_PRIVACY_NOTICE_KEY, '1') } catch (_) {}
+  Modal.info({
+    title: '桌面自动化隐私提示',
+    content: h('div', { style: 'line-height:1.8' }, [
+      h('p', null, '即将使用桌面自动化功能（桌面截图 / 键鼠控制），请知悉：'),
+      h('p', null, '1. 截图会通过文件服务上传至云端 LLM 用于视觉分析，并保存在「文件管理」中（来源标记 tool_capture）；'),
+      h('p', null, '2. 键鼠操作会真实控制您的电脑（移动/点击/输入等），操作期间请勿同时使用鼠标键盘；'),
+      h('p', null, '3. 请勿在桌面自动化场景中处理密码、支付、验证码等敏感信息。')
+    ]),
+    okText: '我知道了'
+  })
+}
+
 // ★ 判断当前授权是否是 file_writer
 const isPermissionFileTool = computed(() => {
   const q = pendingQuestion.value
@@ -2983,7 +3784,7 @@ const handlePermissionAction = async (action: string) => {
     pendingQuestionAnswer.value = ''
     pendingShowCustomInput.value = false
     if (action === 'approve_all') {
-      message.success('已同意本轮所有操作')
+      message.success('已同意本会话后续所有操作')
     } else if (action === 'approve') {
       message.success('已同意')
     } else if (action === 'reject') {
@@ -3187,11 +3988,8 @@ const scheduleMessageUpdate = (convId: string, thinkingMsgId?: string | number) 
   updateTimer = window.setTimeout(() => {
     updateTimer = null
     if (autoScrollToBottom.value) {
-      // 自动滚动模式：递增节拍器 + 触发 DynamicScroller 更新 + 滚动到底部
-      streamingUpdateTick.value++
-      if (messages.value[convId]) {
-        messages.value[convId] = [...messages.value[convId]]
-      }
+      // 自动滚动模式：统一刷新入口（节拍器 + 数组替换，50ms 去重）+ 滚动到底部
+      refreshScrollerData(convId)
       scrollToBottom()
     }
     // autoScrollToBottom = false 时：完全冻结，不递增 tick、不替换数组、不滚动
@@ -3211,10 +4009,7 @@ const flushMessageUpdate = (convId: string, thinkingMsgId?: string | number) => 
     updateTimer = null
   }
   if (autoScrollToBottom.value) {
-    streamingUpdateTick.value++
-    if (messages.value[convId]) {
-      messages.value[convId] = [...messages.value[convId]]
-    }
+    refreshScrollerData(convId)
     scrollToBottom()
   }
   if (thinkingMsgId !== undefined && thinkAutoScroll.value) {
@@ -3251,7 +4046,14 @@ const sendMessage = async () => {
   const text = inputMessage.value.trim()
   // ★ 2026-08-14：守卫改用 hasRunningTask——输入框 disabled 后 Enter 等路径虽不会触发，
   //   双保险防止「切回智能体后任务仍在后台执行」时误发新消息造成同会话双流冲突
-  if (!text || hasRunningTask.value) return
+  if (hasRunningTask.value) return
+  // M4：支持"仅图片无文字"发送（粘贴截图后直接发）；两者皆无则忽略
+  if (!text && attachedFiles.value.length === 0) return
+  // M4：图片上传未完成时阻止发送（避免静默丢图）
+  if (attachedFiles.value.some(a => a.kind === 'image' && a.uploading)) {
+    message.warning('图片正在上传中，请稍候再发送')
+    return
+  }
 
   // 检查工作目录是否已设置（Agent 配置或全局设置均可）
   if (!agentRuntime.value.workDir && !settingsStore.projectRoot) {
@@ -3277,15 +4079,26 @@ const sendMessage = async () => {
   showSupplementInput.value = false
   supplementMessage.value = ''
 
-  // 构建最终消息：附件不再拼接到消息中，由 LLM 通过 chat_attachment 工具读取
-  let finalMessage = text
+  // 构建最终消息：附件不再拼接到消息中（图片走 vision 内容块；文档由 LLM 通过 chat_attachment 工具读取）
+  // M4：纯图片无文字场景用占位文本（保证消息非空）
+  let finalMessage = text || (attachedFiles.value.some(a => a.kind === 'image') ? '[图片]' : text)
 
-  // 收集附件ID列表，传给后端
-  const attachmentIds: string[] = []
+  // M7：统一收集文件资产ID（图片 + 文档；发送时建立引用：图片注入 vision 块，文档注入读取提示）
+  const fileAssetIds: number[] = []
+  // M4：本轮消息气泡展示用（附件区发送后清空，缩略图/文件图标需保留在消息上）
+  const messageFileAssets: MessageFileAsset[] = []
   if (attachedFiles.value.length > 0) {
     for (const att of attachedFiles.value) {
-      if (att.attachmentId && !att.error) {
-        attachmentIds.push(att.attachmentId)
+      if (att.error || att.uploading) continue
+      if (att.fileAssetId) {
+        fileAssetIds.push(att.fileAssetId)
+        messageFileAssets.push({
+          id: att.fileAssetId,
+          filename: att.fileName,
+          size: att.size,
+          kind: att.kind,
+          previewUrl: att.previewUrl
+        })
       }
     }
   }
@@ -3308,7 +4121,9 @@ const sendMessage = async () => {
     content: finalMessage,
     timestamp: Date.now(),
     tokenCount: estimateTokenCount(finalMessage),
-    turnId
+    turnId,
+    // M4：本轮图片缩略图滞留显示（previewUrl 所有权转移给消息，不再 revoke）
+    fileAssets: messageFileAssets.length > 0 ? messageFileAssets : undefined
   }
 
   // 清空附件列表
@@ -3375,7 +4190,8 @@ const sendMessage = async () => {
       agentConfigId: currentAgentConfigId.value,
       providerCode: agentRuntime.value.providerCode || undefined,
       contextMode: settingsStore.contextMode,
-      attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined
+      // M7：文件资产ID（图片 + 文档统一通道；后端建立引用并分流注入）
+      fileAssetIds: fileAssetIds.length > 0 ? fileAssetIds : undefined
     }, abortCtrl)) {
       // 每个事件都检查 sessionId —— 后端在第一个 SSE 事件中就返回了真实会话 ID，
       // 但不在流式过程中迁移 convId（避免数组引用变动导致内容重复），
@@ -3435,6 +4251,7 @@ const sendMessage = async () => {
         const tcData = event.data as { tools: string[]; summaries: string[] }
         const tools = tcData.tools || []
         const summaries = tcData.summaries || []
+        maybeShowDesktopPrivacyNotice(tools)
         for (let i = 0; i < tools.length; i++) {
           assistantMsg.toolResults!.push({
             at: thinkingContent.length,
@@ -3607,6 +4424,8 @@ const sendMessage = async () => {
     if (!convId.startsWith('local-')) {
       fetchConversations()
     }
+    // ★ 每次对话结束后刷新一次 DeepSeek 余额（当前 Provider 为 DeepSeek 时自动展示）
+    refreshBalance()
   }
 }
 
@@ -3754,6 +4573,8 @@ const reconnectToTaskStream = async (convId: number, cursor = 0) => {
     stopAbortController.value = null
     // 任务可能已完成或有新消息，从 DB 强制刷新最新消息列表（绕过缓存）
     await fetchMessages(stringConvId, true)
+    // ★ 后台任务（对话）结束后刷新一次 DeepSeek 余额
+    refreshBalance()
   }
 }
 
@@ -4218,13 +5039,35 @@ function extractActionFromToolContent(content: string, toolName: string): string
   }
 }
 
+// ===== M3：巨型消息瘦身（2026-09-15 性能改造）=====
+// 1) 工具卡片「延迟渲染」：折叠态不生成正文 DOM（展开时才构建），随 expandedCards 数据驱动；
+// 2) 超长截断：展开态正文超 100KB 时截断渲染，附「显示全部」入口（fullCards 状态）；
+// 3) 卡片渲染缓存：卡片 HTML 按内容 + 状态分槽缓存，流式期间免重复构建（对齐 M1a 段缓存思路）。
+const TOOL_BODY_RENDER_LIMIT = 100 * 1024
+const TOOL_CARD_CACHE_LIMIT = 500
+type ToolCardCacheEntry = Partial<Record<'collapsed' | 'expanded' | 'full', string>>
+const toolCardCache = new Map<string, ToolCardCacheEntry>()
+
+/** 构建卡片正文 HTML（仅展开态调用；超长截断，full=显示全部） */
+const buildToolBodyHtml = (content: string, full: boolean): string => {
+  if (!full && content.length > TOOL_BODY_RENDER_LIMIT) {
+    let cut = TOOL_BODY_RENDER_LIMIT
+    const lastCode = content.charCodeAt(cut - 1)
+    if (lastCode >= 0xd800 && lastCode <= 0xdbff) cut -= 1  // 避免切开代理对（emoji 等）
+    const omitted = content.length - cut
+    return `<div class="tool-result-body"><pre>${escapeHtml(content.slice(0, cut))}</pre></div>`
+      + `<div class="tool-result-truncated">内容过长，已省略 ${omitted.toLocaleString()} 字符 <span class="tr-expand-all">显示全部</span></div>`
+  }
+  return `<div class="tool-result-body"><pre>${escapeHtml(content)}</pre></div>`
+}
+
 /**
  * 渲染技能使用卡片（skill action=report 工具结果专用）
  * 解析格式：
  *   技能「名称」(ID:N) 执行结果：成功/失败
  *   当前置信度：XX%（共使用 N 次，成功 N / 失败 N）
  */
-function renderSkillUsageCard(content: string): string | null {
+function renderSkillUsageCard(content: string, expanded = false, full = false): string | null {
   // ⚠️ 只检查第一行！避免后续文本中的「技能」「执行结果」等关键词误匹配
   // 参考下方 tool-result-card 的 isError 判断也做了同样的限制（line 4009-4011）
   const firstLine = content.split('\n')[0]
@@ -4241,9 +5084,10 @@ function renderSkillUsageCard(content: string): string | null {
   const statusIcon = success ? '&#10003;' : '&#10007;'
   const cardClass = success ? 'skill-usage-success' : 'skill-usage-fail'
   const firstLineSummary = firstLine.substring(0, 80)
-  const escaped = escapeHtml(content)
 
-  return `<div class="skill-usage-card tool-result-collapsed ${cardClass}">
+  // M1b-2：折叠状态数据驱动（expanded=true 时不带 collapsed 类）
+  // M3：折叠态不生成正文 DOM；展开态走超长截断逻辑
+  return `<div class="skill-usage-card ${expanded ? '' : 'tool-result-collapsed'} ${cardClass}">
     <div class="tool-result-header">
       <span class="tr-toggle">▶</span>
       <span class="skill-usage-badge ${success ? 'skill-usage-badge-ok' : 'skill-usage-badge-fail'}">${statusIcon}</span>
@@ -4251,113 +5095,200 @@ function renderSkillUsageCard(content: string): string | null {
       ${confidence ? `<span class="skill-usage-conf">${escapeHtml(confidence)}</span>` : ''}
       <span class="tr-summary">${escapeHtml(firstLineSummary)}</span>
     </div>
-    <div class="tool-result-body"><pre>${escaped}</pre></div>
+    ${expanded ? buildToolBodyHtml(content, full) : ''}
   </div>`
 }
 
-const formatThinking = (thinking: string | undefined, toolResults?: { at: number; content: string; toolName?: string; pending?: boolean; operationSummary?: string }[]) => {
-  if (!thinking && (!toolResults || toolResults.length === 0)) return ''
-  thinking = thinking || ''
-  const cacheKey = thinking + '|' + JSON.stringify(toolResults?.map(t => ({ at: t.at, len: t.content.length, pending: t.pending, tn: t.toolName })))
-  const cached = thinkingCache.get(cacheKey)
-  if (cached !== undefined) return cached
+// ===== M1b-2：thinking 段级渲染 + 折叠状态数据化（2026-09-15 性能改造）=====
+// 与 content 段化（M1b-1）同机制：纯函数式段化 + 稳定 key 的 v-for DOM 复用。
+// 折叠状态数据化：工具卡片展开态存于 msg.expandedCards（reactive），渲染时读取决定卡片 class。
 
-  const renderResult = (() => {
-    if (toolResults && toolResults.length > 0) {
-      const sorted = [...toolResults].sort((a, b) => a.at - b.at)
-      const parts: string[] = ['<div class="thinking-timeline">']
-      let lastPos = 0
-      for (const tr of sorted) {
-        // 思考过程片段（到工具调用之间的推理）
-        if (tr.at > lastPos) {
-          const textSegment = thinking.slice(lastPos, tr.at)
-          if (textSegment.trim()) {
-            parts.push(`<div class="thinking-text-block">${renderMarkdown(textSegment)}</div>`)
-          }
-        }
-        // ★ pending 条目：工具正在执行中，显示加载动画
-        if (tr.pending) {
-          const toolLabel = tr.toolName || '工具'
-          const summaryText = tr.operationSummary || `正在调用 ${toolLabel}...`
-          // 提取操作摘要的第一行（去掉 markdown 标记后截取前80字符）
-          const cleanSummary = summaryText.replace(/^>\s*/, '').replace(/[*`]/g, '').substring(0, 80)
-          parts.push(`<div class="tool-result-card tool-result-pending">
-            <div class="tool-result-header">
-              <span class="tr-toggle tr-toggle-spin">⏳</span>
-              <span class="tr-icon tr-icon-pending">
-                <span class="tr-pending-dot"></span>
-              </span>
-              <span class="tr-label">${escapeHtml(toolLabel)} · 执行中...</span>
-              <span class="tr-summary">${escapeHtml(cleanSummary)}</span>
-            </div>
-            <div class="tool-result-body tool-result-loading">
-              <div class="tool-loading-bar">
-                <div class="tool-loading-bar-inner"></div>
-              </div>
-              <div class="tool-loading-hint">工具执行中，请稍候...</div>
-            </div>
-          </div>`)
-          lastPos = tr.at
-          continue
-        }
-        // 工具调用结果卡片（含工具名称解析）
-        const { toolName, cleanContent } = parseToolNameLine(tr.content)
-        const displayContent = cleanContent || tr.content
+/** thinking 渲染段：key 稳定（供 v-for DOM 复用）；cardAt 供点击定位卡片（pending 卡片无此标记，不响应折叠） */
+type ThinkSegment = { key: string; html: string; cardAt?: number }
 
-        // 技能使用卡片：skill action=report 特殊渲染
-        if (toolName === 'skill') {
-          const skillUsageHtml = renderSkillUsageCard(displayContent)
-          if (skillUsageHtml) {
-            parts.push(skillUsageHtml)
-            lastPos = tr.at
-            continue
-          }
-        }
+/** 构建 pending 卡片 HTML（工具执行中；不响应折叠） */
+const buildPendingCardHtml = (tr: { toolName?: string; operationSummary?: string }) => {
+  const toolLabel = tr.toolName || '工具'
+  const summaryText = tr.operationSummary || `正在调用 ${toolLabel}...`
+  // 提取操作摘要的第一行（去掉 markdown 标记后截取前80字符）
+  const cleanSummary = summaryText.replace(/^>\s*/, '').replace(/[*`]/g, '').substring(0, 80)
+  return `<div class="tool-result-card tool-result-pending">
+    <div class="tool-result-header">
+      <span class="tr-toggle tr-toggle-spin">⏳</span>
+      <span class="tr-icon tr-icon-pending">
+        <span class="tr-pending-dot"></span>
+      </span>
+      <span class="tr-label">${escapeHtml(toolLabel)} · 执行中...</span>
+      <span class="tr-summary">${escapeHtml(cleanSummary)}</span>
+    </div>
+    <div class="tool-result-body tool-result-loading">
+      <div class="tool-loading-bar">
+        <div class="tool-loading-bar-inner"></div>
+      </div>
+      <div class="tool-loading-hint">工具执行中，请稍候...</div>
+    </div>
+  </div>`
+}
 
-        const escaped = escapeHtml(displayContent)
-        // ⚠️ 只检查第一行！工具报错永远在第一行，避免读取文件内容中的「错误关键词」导致误判
-        // 注意：【[^】]+】不能用作通用匹配——project_info 等工具的成功结果也以【结构】【依赖】开头
-        const firstLineOfResult = displayContent.split('\n')[0]
-        const isError = /^(错误[：:]|❌\s*错误)/.test(firstLineOfResult)
-                     || /【失败|【异常|【错误|【超时|【无数据|【未找到|【权限不足|【缺少参数|【不支持|【操作失败|【查询失败|【更新失败|【删除失败|【创建失败|【启动失败|【命令未找到|【执行异常|【执行中断|【参数缺失|【参数错误|【并发限制|【任务不存在|【无法识别|【格式错误|【缺少参数/.test(firstLineOfResult)
-                     || /\bCannot\b/.test(firstLineOfResult)
-        const firstLine = displayContent.split('\n')[0].substring(0, 80)
-        // 提取操作类型并构建更有信息的标签
-        const actionLabel = toolName ? extractActionFromToolContent(displayContent, toolName) : ''
-        const labelText = isError
-          ? ('执行出错' + (toolName ? ' ' + toolName : ''))
-          : (toolName ? (toolName + ' · ' + actionLabel) : '工具执行')
-        parts.push(`<div class="tool-result-card tool-result-collapsed ${isError ? 'tool-result-error' : ''}">
-          <div class="tool-result-header">
-            <span class="tr-toggle">▶</span>
-            <span class="tr-icon ${isError ? 'tr-icon-error' : 'tr-icon-success'}">${isError ? '&#10007;' : '&#10003;'}</span>
-            <span class="tr-label">${labelText}</span>
-            <span class="tr-summary">${escapeHtml(firstLine)}</span>
-          </div>
-          <div class="tool-result-body"><pre>${escaped}</pre></div>
-        </div>`)
-        lastPos = tr.at
-      }
-      // 剩余思考过程
-      if (thinking && lastPos < thinking.length) {
-        const remaining = thinking.slice(lastPos)
-        if (remaining.trim()) {
-          parts.push(`<div class="thinking-text-block">${renderMarkdown(remaining)}</div>`)
-        }
-      }
-      parts.push('</div>')
-      return parts.join('\n')
-    }
-    // 无工具调用，纯渲染思考文本
-    return thinking.trim() ? renderMarkdown(thinking) : ''
-  })()
+/** 构建工具结果卡片 HTML（已完成；expanded 控制折叠态，full 控制截断解除，数据驱动） */
+const buildToolCardHtml = (displayContent: string, toolName: string | undefined, expanded: boolean, full: boolean) => {
+  // ⚠️ 只检查第一行！工具报错永远在第一行，避免读取文件内容中的「错误关键词」导致误判
+  // 注意：【[^】]+】不能用作通用匹配——project_info 等工具的成功结果也以【结构】【依赖】开头
+  const firstLineOfResult = displayContent.split('\n')[0]
+  const isError = /^(错误[：:]|❌\s*错误)/.test(firstLineOfResult)
+               || /【失败|【异常|【错误|【超时|【无数据|【未找到|【权限不足|【缺少参数|【不支持|【操作失败|【查询失败|【更新失败|【删除失败|【创建失败|【启动失败|【命令未找到|【执行异常|【执行中断|【参数缺失|【参数错误|【并发限制|【任务不存在|【无法识别|【格式错误|【缺少参数/.test(firstLineOfResult)
+               || /\bCannot\b/.test(firstLineOfResult)
+  const firstLine = displayContent.split('\n')[0].substring(0, 80)
+  // 提取操作类型并构建更有信息的标签
+  const actionLabel = toolName ? extractActionFromToolContent(displayContent, toolName) : ''
+  const labelText = isError
+    ? ('执行出错' + (toolName ? ' ' + toolName : ''))
+    : (toolName ? (toolName + ' · ' + actionLabel) : '工具执行')
+  // M3：折叠态不生成正文 DOM（全文转义/渲染成本仅在展开时支付）；展开态走超长截断逻辑
+  return `<div class="tool-result-card ${expanded ? '' : 'tool-result-collapsed'} ${isError ? 'tool-result-error' : ''}">
+    <div class="tool-result-header">
+      <span class="tr-toggle">▶</span>
+      <span class="tr-icon ${isError ? 'tr-icon-error' : 'tr-icon-success'}">${isError ? '&#10007;' : '&#10003;'}</span>
+      <span class="tr-label">${labelText}</span>
+      <span class="tr-summary">${escapeHtml(firstLine)}</span>
+    </div>
+    ${expanded ? buildToolBodyHtml(displayContent, full) : ''}
+  </div>`
+}
 
-  if (thinkingCache.size >= 200) {
-    const firstKey = thinkingCache.keys().next().value
-    if (firstKey) thinkingCache.delete(firstKey)
+/** 构建单个已完成工具卡片的 HTML（带渲染缓存）：
+ *  - key=内容（值寻址），折叠/展开/完整三态分槽存储；
+ *  - 流式期间每 tick 对历史卡片重复构建的成本 → 降为 Map 命中（O(1)）；
+ *  - 缓存按内容值寻址，内容变化（重连重建）时自动失效并重建。 */
+const buildToolCardCached = (
+  tr: { at: number; content: string; toolName?: string },
+  expanded: boolean,
+  full: boolean,
+): string => {
+  const slot: 'collapsed' | 'expanded' | 'full' = !expanded ? 'collapsed' : (full ? 'full' : 'expanded')
+  let entry = toolCardCache.get(tr.content)
+  if (entry) {
+    const hit = entry[slot]
+    if (hit !== undefined) return hit
   }
-  thinkingCache.set(cacheKey, renderResult)
-  return renderResult
+  const { toolName, cleanContent } = parseToolNameLine(tr.content)
+  const displayContent = cleanContent || tr.content
+  let html = ''
+  if (toolName === 'skill') {
+    html = renderSkillUsageCard(displayContent, expanded, full) || ''
+  }
+  if (!html) html = buildToolCardHtml(displayContent, toolName, expanded, full)
+  if (!entry) {
+    if (toolCardCache.size >= TOOL_CARD_CACHE_LIMIT) {
+      const firstKey = toolCardCache.keys().next().value
+      if (firstKey !== undefined) toolCardCache.delete(firstKey)
+    }
+    entry = {}
+    toolCardCache.set(tr.content, entry)
+  }
+  entry[slot] = html
+  return html
+}
+
+/** 构建 thinking 的渲染段列表（纯派生；读取 msg.expandedCards / msg.fullCards 决定卡片折叠/截断态）
+ *  M4：streaming=true 时尾段走降级渲染（跳过 hljs/katex），封段/消息结束后由完整渲染补齐 */
+const buildThinkingSegments = (thinking: string | undefined, toolResults: ChatMessage['toolResults'], msg?: ChatMessage, streaming = false): ThinkSegment[] => {
+  const t = thinking || ''
+  const segs: ThinkSegment[] = []
+  let idx = 0 // 段序号（稳定：已定稿前缀不变 → 序号不变 → DOM 复用）
+  if (toolResults && toolResults.length > 0) {
+    const sorted = [...toolResults].sort((a, b) => a.at - b.at)
+    let lastPos = 0
+    for (const tr of sorted) {
+      // 思考过程片段（到工具调用之间的推理）：稳定段走段级缓存
+      if (tr.at > lastPos) {
+        const textSegment = t.slice(lastPos, tr.at)
+        if (textSegment.trim()) {
+          segs.push({ key: 's-' + idx++, html: `<div class="thinking-text-block">${renderSegmentCached(textSegment)}</div>` })
+        }
+      }
+      // ★ pending 条目：工具正在执行中，显示加载动画（不响应折叠）
+      if (tr.pending) {
+        segs.push({ key: 's-' + idx++, html: buildPendingCardHtml(tr) })
+        lastPos = tr.at
+        continue
+      }
+      // 工具调用结果卡片（含工具名称解析）；折叠/截断态数据驱动 + M3 卡片渲染缓存
+      const expanded = !!(msg && msg.expandedCards && msg.expandedCards.has(tr.at))
+      const full = !!(msg && msg.fullCards && msg.fullCards.has(tr.at))
+      segs.push({ key: 's-' + idx++, html: buildToolCardCached(tr, expanded, full), cardAt: tr.at })
+      lastPos = tr.at
+    }
+    // 剩余思考过程（尾段：每 tick 增量渲染）
+    if (t && lastPos < t.length) {
+      const remaining = t.slice(lastPos)
+      if (remaining.trim()) {
+        segs.push({ key: 'tail', html: `<div class="thinking-text-block">${streaming ? renderMarkdownLight(remaining) : renderMarkdown(remaining)}</div>` })
+      }
+    }
+    return segs
+  }
+  // 无工具调用，纯渲染思考文本（单尾段）
+  if (t.trim()) {
+    segs.push({ key: 'tail', html: streaming ? renderMarkdownLight(t) : renderMarkdown(t) })
+  }
+  return segs
+}
+
+/** thinking 渲染段列表（模板调用）：
+ *  - 静态消息（非流式）→ 段列表缓存（缓存 key 含折叠状态签名，状态变化自动重建）
+ *  - 流式消息 → 多段输出：稳定段 DOM 复用，仅尾段节点每 tick 更新
+ *  修复（卡片点击失效）：静态消息同样输出「带 cardAt 的段列表」——此前合并为单段 HTML
+ *  丢失 cardAt，导致历史/已结束消息的工具卡片点击在 handleToolCardClick 定位环节被静默忽略 */
+const buildThinkingSegmentsFor = (msg: ChatMessage): ThinkSegment[] => {
+  const t = msg.thinking
+  const trs = msg.toolResults
+  if (!t && (!trs || trs.length === 0)) return []
+  if (!msg.isStreaming) {
+    const stateSig = (msg.expandedCards && msg.expandedCards.size > 0
+        ? '|x' + Array.from(msg.expandedCards).sort((a, b) => a - b).join(',')
+        : '')
+      + (msg.fullCards && msg.fullCards.size > 0
+        ? '|f' + Array.from(msg.fullCards).sort((a, b) => a - b).join(',')
+        : '')
+    const cacheKey = 'st:' + (t || '').length + ':' + (t || '').slice(0, 32) + ':' + (t || '').slice(-32) + ':' + JSON.stringify(trs?.map(x => ({ at: x.at, len: x.content.length, pending: x.pending, tn: x.toolName }))) + stateSig
+    const cached = thinkingCache.get(cacheKey)
+    if (cached !== undefined) return cached
+    const segs = buildThinkingSegments(t, trs, msg)
+    if (thinkingCache.size >= 200) {
+      const firstKey = thinkingCache.keys().next().value
+      if (firstKey) thinkingCache.delete(firstKey)
+    }
+    thinkingCache.set(cacheKey, segs)
+    return segs
+  }
+  return buildThinkingSegments(t, trs, msg, true)
+}
+
+// ===== M1b-1：content 段级渲染（2026-09-15 性能改造）=====
+// DOM 段级增量：把 content 拆为「稳定段 + 尾段」，各段独立 v-html 渲染；
+// Vue diff 时稳定段（key 与 html 均不变）DOM 完全复用，仅尾段节点每 tick 更新。
+// 与 M1a 段缓存联动：稳定段 HTML 直接命中 segmentCache，只有尾段增量解析。
+// 设计原则（详见 findings/F4）：content 为唯一事实源，段列表为纯派生、无跨调用状态。
+
+/** 构建 content 的渲染段列表（纯派生：无安全切点则单尾段）
+ *  M4：streaming=true 时尾段走降级渲染（跳过 hljs/katex），封段/消息结束后由完整渲染补齐 */
+const buildContentSegments = (content: string, streaming = false): { key: string; html: string }[] => {
+  if (!content) return []
+  const stableEnd = findStablePrefixEnd(content)
+  const segs: { key: string; html: string }[] = []
+  if (stableEnd <= 0) {
+    segs.push({ key: 'tail', html: streaming ? renderMarkdownLight(content) : renderMarkdown(content) })
+    return segs
+  }
+  const parts = content.slice(0, stableEnd).split('\n\n')
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]
+    if (p) segs.push({ key: 'c-' + i, html: renderSegmentCached(p) })
+  }
+  const tail = content.slice(stableEnd)
+  if (tail) segs.push({ key: 'tail', html: streaming ? renderMarkdownLight(tail) : renderMarkdown(tail) })
+  return segs
 }
 
 const formatMessage = (content: string) => {
@@ -4365,7 +5296,8 @@ const formatMessage = (content: string) => {
   // 缓存命中直接返回，避免重复解析 markdown（核心性能优化）
   const cached = markdownCache.get(content)
   if (cached !== undefined) return cached
-  const html = renderMarkdown(content)
+  // ★ M1a 分段渲染：稳定段走段级缓存（渲染一次永久命中）+ 尾段增量渲染，拼接为完整 HTML
+  const html = buildContentSegments(content).map(s => s.html).join('')
   // LRU 淘汰：缓存超过上限时删除最早条目
   if (markdownCache.size >= 200) {
     const firstKey = markdownCache.keys().next().value
@@ -4373,6 +5305,19 @@ const formatMessage = (content: string) => {
   }
   markdownCache.set(content, html)
   return html
+}
+
+/** 消息正文渲染段列表（模板调用）：
+ *  - 静态消息（非流式）→ markdownCache 整体缓存，输出单段（不随渲染重复计算）
+ *  - 流式消息 → 多段输出：稳定段 DOM 复用，仅尾段节点每 tick 更新（M1b 核心收益）；
+ *    M4：尾段降级渲染（跳过 hljs/katex），段封段/消息结束后由完整渲染补齐 */
+const buildMessageSegments = (msg: { content?: string; isStreaming?: boolean }): { key: string; html: string }[] => {
+  const content = msg.content
+  if (!content) return []
+  if (!msg.isStreaming) {
+    return [{ key: 'main', html: formatMessage(content) }]
+  }
+  return buildContentSegments(content, true)
 }
 
 // 渲染 ask_user 问题的 markdown（预处理字面量 \n → 真正换行）
@@ -4388,12 +5333,38 @@ const escapeHtml = (text: string) => {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-// 工具结果卡片点击折叠/展开
-const handleToolCardClick = (e: MouseEvent) => {
-  const header = (e.target as HTMLElement).closest('.tool-result-header')
-  if (header) {
-    header.parentElement?.classList.toggle('tool-result-collapsed')
+/** M3：点击「显示全部」→ 记录完整展开状态（解除截断） */
+const handleToolCardExpandAll = (e: MouseEvent, msg: ChatMessage) => {
+  const segEl = (e.target as HTMLElement).closest('.think-seg') as HTMLElement | null
+  const atStr = segEl?.dataset.cardAt
+  if (atStr === undefined || atStr === '') return
+  const at = Number(atStr)
+  if (!Number.isFinite(at)) return
+  const f = msg.fullCards ? new Set(msg.fullCards) : new Set<number>()
+  f.add(at)
+  msg.fullCards = f  // 响应式更新 → 触发重渲染 → 卡片切换为完整内容
+}
+
+// 工具结果卡片点击折叠/展开（M1b-2：数据驱动，状态存于 msg.expandedCards）
+const handleToolCardClick = (e: MouseEvent, msg: ChatMessage) => {
+  const target = e.target as HTMLElement
+  // M3：「显示全部」入口在卡片正文内，先行拦截
+  if (target.closest('.tr-expand-all')) {
+    handleToolCardExpandAll(e, msg)
+    return
   }
+  const header = target.closest('.tool-result-header')
+  if (!header) return
+  // 通过段 wrapper 的 data-card-at 定位卡片（pending 卡片无标记 → 不响应折叠）
+  const segEl = header.closest('.think-seg') as HTMLElement | null
+  const atStr = segEl?.dataset.cardAt
+  if (atStr === undefined || atStr === '') return
+  const at = Number(atStr)
+  if (!Number.isFinite(at)) return
+  const s = msg.expandedCards ? new Set(msg.expandedCards) : new Set<number>()
+  if (s.has(at)) s.delete(at)
+  else s.add(at)
+  msg.expandedCards = s  // 响应式更新 → 触发重渲染 → 卡片折叠态刷新
 }
 
 // ===== 自动滚动到底部控制 =====
@@ -4454,13 +5425,24 @@ const scrollToBottom = () => {
   })
 }
 
-// 强制刷新 DynamicScroller：递增 tick + 替换数组引用，使最新内容可见并重新计算布局
-const forceRefreshScroller = () => {
+// ★ M2 统一刷新入口（2026-09-15 性能改造）：递增节拍器 + 替换数组引用，触发 DynamicScroller 重测。
+//   50ms 去重窗：同一瞬间的多路调用（tick 刷新与滚动兜底刷新）只执行一次，消除重复的强制布局。
+let lastScrollerRefreshAt = 0
+const refreshScrollerData = (convId: string) => {
+  const now = Date.now()
+  if (now - lastScrollerRefreshAt < 50) return
+  lastScrollerRefreshAt = now
   streamingUpdateTick.value++
-  const convId = currentConversationId.value
-  if (convId && messages.value[convId]) {
+  if (messages.value[convId]) {
     messages.value[convId] = [...messages.value[convId]]
   }
+}
+
+// 强制刷新 DynamicScroller：使最新内容可见并重新计算布局（经统一入口，50ms 去重）
+const forceRefreshScroller = () => {
+  const convId = currentConversationId.value
+  if (!convId) return
+  refreshScrollerData(convId)
 }
 
 // 监听 DynamicScroller 的 scroll 事件，检测用户是否手动滚动离开底部
@@ -5833,6 +6815,10 @@ watch(currentConversationId, (newId) => {
   flex-direction: column;
   gap: 10px;
 }
+/* M1b-2：段 wrapper 不参与布局（穿透），使各段内的块成为 flex/gap 的直接子项，视觉与原结构等效 */
+.think-seg {
+  display: contents;
+}
 .thinking-text-block {
   padding: 4px 0;
   white-space: pre-wrap;
@@ -5894,7 +6880,15 @@ watch(currentConversationId, (newId) => {
 }
 .attachment-size { color: var(--text-3); font-size: 11px; flex-shrink: 0; }
 .attachment-uploading { color: var(--accent); font-size: 12px; }
-.attachment-error-msg { color: var(--red); font-size: 11px; cursor: help; }
+.attachment-error-msg {
+  color: var(--red);
+  font-size: 11px;
+  cursor: help;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .attachment-remove {
   cursor: pointer;
   color: var(--text-4);
@@ -5905,6 +6899,175 @@ watch(currentConversationId, (newId) => {
   flex-shrink: 0;
 }
 .attachment-remove:hover { color: var(--red); }
+
+/* M4：图片附件缩略图（附件区） */
+.attachment-tag.attachment-image { padding: 3px 10px 3px 4px; }
+.attachment-thumb {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  cursor: zoom-in;
+  background: rgba(0, 0, 0, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent-md);
+}
+.attachment-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.thumb-loading { font-size: 14px; opacity: 0.6; }
+
+/* M4：消息气泡图片（本轮发送 / 历史回显） */
+.message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.message-image-thumb {
+  width: 96px;
+  height: 96px;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: zoom-in;
+  background: rgba(0, 0, 0, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.message-image-thumb:hover {
+  transform: scale(1.03);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+.message-image-thumb img { width: 100%; height: 100%; object-fit: cover; }
+/* M7：消息气泡文档卡片（文件格式图标 + 文件名，点击下载） */
+.message-doc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.message-doc-chip:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+.doc-chip-icon { font-size: 16px; flex-shrink: 0; }
+.doc-chip-name {
+  font-size: 12px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* M4：大图预览遮罩 */
+.big-preview-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.big-preview-mask img {
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* ===== 附件入口下拉菜单 + 历史图片选择弹窗 ===== */
+.attach-menu-icon { margin-right: 6px; font-size: 13px; }
+.history-picker-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.history-picker-search { flex: 1; }
+.history-picker-count { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.history-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 10px;
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.history-picker-item {
+  border: 2px solid transparent;
+  border-radius: var(--radius-xs);
+  padding: 4px;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.03);
+  transition: border-color 0.15s, background 0.15s;
+}
+.history-picker-item:hover { border-color: var(--accent-md); }
+.history-picker-item--selected { border-color: var(--accent); background: var(--accent-lt); }
+.history-picker-item--attached { opacity: 0.55; cursor: not-allowed; }
+.history-picker-thumb {
+  position: relative;
+  width: 100%;
+  height: 96px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.history-picker-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.history-picker-thumb-placeholder { font-size: 20px; opacity: 0.6; }
+.history-picker-doc-icon { font-size: 34px; opacity: 0.9; }
+.history-picker-check {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.history-picker-attached-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+}
+.history-picker-name {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-picker-size { font-size: 11px; color: var(--text-4); }
+.history-picker-empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--text-4);
+  font-size: 13px;
+}
 
 /* 附件上传按钮 */
 .attach-btn {
@@ -6054,6 +7217,18 @@ watch(currentConversationId, (newId) => {
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
+}
+.balance-chip {
+  margin-right: 10px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #d48806;
+  background: rgba(250, 173, 20, 0.12);
+  border: 1px solid rgba(250, 173, 20, 0.32);
+  white-space: nowrap;
+  cursor: default;
 }
 .context-mode-badge {
   margin-left: 6px;
@@ -6899,6 +8074,11 @@ watch(currentConversationId, (newId) => {
   background: #1a1925;
   border-color: #2a2838;
 }
+[data-theme="dark"] .balance-chip {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.3);
+}
 [data-theme="dark"] .mode-selector:hover {
   border-color: rgba(139, 92, 246, 0.35);
   background: rgba(139, 92, 246, 0.06);
@@ -7076,6 +8256,18 @@ watch(currentConversationId, (newId) => {
   text-align: left;
 }
 .tool-result-error .tool-result-body pre { color: #991b1b; }
+
+/* ===== M3：超长内容截断提示行 ===== */
+.tool-result-truncated {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #9696aa;
+  background: #faf9fd;
+  border-top: 1px dashed var(--border, #e8e5f0);
+  text-align: center;
+}
+.tr-expand-all { color: #7c3aed; cursor: pointer; font-weight: 600; }
+.tr-expand-all:hover { text-decoration: underline; }
 
 /* ===== 工具调用加载中（pending）卡片 ===== */
 .tool-result-pending {
@@ -7429,6 +8621,8 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .tool-result-error .tool-result-header:hover { background: #4a2020; }
 [data-theme="dark"] .tool-result-body pre { color: #a09eb8; }
 [data-theme="dark"] .tool-result-error .tool-result-body pre { color: #fca5a5; }
+[data-theme="dark"] .tool-result-truncated { background: #201f30; color: #7e7c96; border-top-color: #2e2d42; }
+[data-theme="dark"] .tr-expand-all { color: #b39ddb; }
 [data-theme="dark"] .code-block-cmd,
 [data-theme="dark"] .code-block-filelist {
   background: #1a1925;

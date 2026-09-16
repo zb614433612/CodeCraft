@@ -64,6 +64,29 @@ export async function deleteProvider(id: number) {
   return request<void>(`/llm-providers/${id}`, { method: 'DELETE' })
 }
 
+/** Provider 单币种余额明细 */
+export interface ProviderBalanceInfo {
+  currency: string
+  totalBalance: string
+  grantedBalance: string
+  toppedUpBalance: string
+}
+
+/** Provider 账户余额（目前仅 DeepSeek 支持查询） */
+export interface ProviderBalance {
+  providerCode: string
+  isAvailable: boolean
+  balanceInfos: ProviderBalanceInfo[]
+  updatedAt?: number
+}
+
+/**
+ * 查询 Provider 账户余额（目前仅 DeepSeek 支持）
+ */
+export async function getProviderBalance(code: string) {
+  return request<ProviderBalance>(`/llm-providers/${code}/balance`, { method: 'GET' })
+}
+
 /** 解析 JSON 模型列表为 string[] */
 export function parseModelList(modelList?: string): string[] {
   if (!modelList) return []

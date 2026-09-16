@@ -18,8 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 层面二：manual 模式下路径越界 → requestCrossPathPermission()
  * 层面三：auto 模式下 highRisk=true 的工具 → requestHighRiskPermission()
  *
- * 会话级别自动批准：用户选择「本轮对话全部同意」后，当前会话后续所有工具调用
- * 自动跳过三层权限检查（包括高危操作），直到会话结束。
+ * 会话级别自动批准：用户选择「全部同意」后，当前会话后续所有工具调用
+ * 自动跳过三层权限检查（包括高危操作），直到会话删除或应用重启。
  * </pre>
  *
  * DeepSeekServiceImpl 在工具批次执行前调用 set()/setApproved() 建立上下文，
@@ -31,7 +31,7 @@ public class PermissionContext {
 
     private static final ThreadLocal<PermissionRequestor> holder = new ThreadLocal<>();
 
-    /** 已获得「本轮对话全部同意」的会话ID集合 */
+    /** 已获得「全部同意」授权的会话ID集合 */
     private static final Set<Long> sessionApprovedConversations = ConcurrentHashMap.newKeySet();
 
     private PermissionContext() {}
@@ -135,10 +135,10 @@ public class PermissionContext {
     // ======================== 会话级别自动批准 ========================
 
     /**
-     * 检查当前会话是否已获得「本轮对话全部同意」
+     * 检查当前会话是否已获得「全部同意」授权
      *
      * @param conversationId 会话ID
-     * @return true 表示已获得本轮批准，所有权限检查可跳过
+     * @return true 表示已获得授权，所有权限检查可跳过
      */
     public static boolean isSessionApproved(Long conversationId) {
         if (conversationId == null) return false;
@@ -146,20 +146,21 @@ public class PermissionContext {
     }
 
     /**
-     * 设置当前会话为「本轮对话全部同意」
-     * 调用后该会话后续所有工具调用自动跳过权限检查（包括高危操作）
+     * 设置当前会话为「全部同意」（会话级持续授权）
+     * 调用后该会话后续所有工具调用自动跳过权限检查（包括高危操作），
+     * 直到会话删除或应用重启。
      *
      * @param conversationId 会话ID
      */
     public static void setSessionApproved(Long conversationId) {
         if (conversationId != null) {
             sessionApprovedConversations.add(conversationId);
-            log.info("会话 {} 已获得「本轮对话全部同意」，后续工具调用自动放行", conversationId);
+            log.info("会话 {} 已获得「全部同意」授权（本会话持续生效），后续工具调用自动放行", conversationId);
         }
     }
 
     /**
-     * 移除会话的自动批准状态（新消息开始时调用）
+     * 移除会话的自动批准状态（会话删除/主动撤销等场景调用）
      *
      * @param conversationId 会话ID
      */

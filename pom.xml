@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.example</groupId>
     <artifactId>code-craft</artifactId>
-    <version>1.1.8</version>
+    <version>2.0.0</version>
     <name>CodeCraft</name>
     <description>CodeCraft - AI Coding Assistant</description>
     <url/>

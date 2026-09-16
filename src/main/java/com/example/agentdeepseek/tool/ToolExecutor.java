@@ -84,18 +84,27 @@ public class ToolExecutor {
         private final String content;
         private final boolean restricted;
         private final String operationSummary;
+        /** M5：工具要求注入 user 消息的文件资产ID列表（桌面截图等写入；null/空表示无注入） */
+        private final List<Long> injectUserFileAssetIds;
 
         public ToolCallResult(String toolCallId, String toolName, String content) {
-            this(toolCallId, toolName, content, false, null);
+            this(toolCallId, toolName, content, false, null, null);
         }
 
         public ToolCallResult(String toolCallId, String toolName, String content,
                               boolean restricted, String operationSummary) {
+            this(toolCallId, toolName, content, restricted, operationSummary, null);
+        }
+
+        public ToolCallResult(String toolCallId, String toolName, String content,
+                              boolean restricted, String operationSummary,
+                              List<Long> injectUserFileAssetIds) {
             this.toolCallId = toolCallId;
             this.toolName = toolName;
             this.content = content;
             this.restricted = restricted;
             this.operationSummary = operationSummary;
+            this.injectUserFileAssetIds = injectUserFileAssetIds;
         }
 
         public String getToolCallId() { return toolCallId; }
@@ -103,6 +112,14 @@ public class ToolExecutor {
         public String getContent() { return content; }
         public boolean isRestricted() { return restricted; }
         public String getOperationSummary() { return operationSummary; }
+
+        /** M5：待注入 user 消息的文件资产ID列表（可能为 null / 空） */
+        public List<Long> getInjectUserFileAssetIds() { return injectUserFileAssetIds; }
+
+        /** M5：是否存在待注入的资产ID */
+        public boolean hasInjections() {
+            return injectUserFileAssetIds != null && !injectUserFileAssetIds.isEmpty();
+        }
 
         /**
          * 判断工具调用是否失败（供成长体系被动注入、重试逻辑等使用）。
@@ -171,6 +188,8 @@ public class ToolExecutor {
      * 执行单个工具调用
      */
     private ToolCallResult executeSingleToolCall(JsonNode toolCallNode) {
+        // M5：防御性清空"注入 user 消息"通道（若上一工具因异常残留，避免误归属到本次结果）
+        ToolContext.clearInjectUserFileAssetIds();
         // 使用 .asText() 时，Jackson NullNode 返回字符串 "null"（而非空字符串），
         // 因此必须同时检查 isEmpty() 和 "null" 字面量，防止 JSON null 值穿透检查
         String toolCallId = toolCallNode.path("id").asText();
@@ -260,6 +279,9 @@ public class ToolExecutor {
             String result = executionPipeline.execute(tool, toolName, arguments,
                     executionMode, conversationId, userId);
 
+            // M5：读取工具登记的"注入 user 消息"文件资产ID（桌面截图等；读取即清空）
+            List<Long> injectUserFileAssetIds = ToolContext.consumeInjectUserFileAssetIds();
+
             // 📝 成长体系：工具不抛异常、直接返回业务错误（如【参数缺失】校验）也捕获失败经验
             if (isBusinessError(result)) {
                 lessonRecorder.recordAsync(toolName, arguments.toString(), result);
@@ -272,8 +294,10 @@ public class ToolExecutor {
             }
 
             return new ToolCallResult(toolCallId, toolName, result,
-                    isRestricted, displayArgs);
+                    isRestricted, displayArgs, injectUserFileAssetIds);
         } catch (Exception e) {
+            // M5：工具异常时丢弃注入登记，避免污染后续工具结果
+            ToolContext.clearInjectUserFileAssetIds();
             log.error("工具执行异常: tool={}, arguments={}", toolName, arguments, e);
             // 📝 成长体系：异步捕获失败经验（执行期异常，最有价值的踩坑来源）
             lessonRecorder.recordAsync(toolName, arguments.toString(),
@@ -421,7 +445,8 @@ public class ToolExecutor {
             "file_explorer", "file_writer", "command",
             "git_query", "git_submit", "git_branch",
             "agent", "skill", "task_manager",
-            "chat_attachment", "schedule_task"
+            "chat_attachment", "schedule_task",
+            "desktop_control"
     );
 
     /**
@@ -467,6 +492,12 @@ public class ToolExecutor {
             return null;
         }
 
+        // desktop_control 批量形态特判：顶层 actions 数组存在即视为已提供动作（无需顶层 action）
+        if ("desktop_control".equals(toolName)
+                && arguments.path("actions").isArray() && !arguments.path("actions").isEmpty()) {
+            return null;
+        }
+
         // 尝试推断 action
         String inferred = inferAction(toolName, arguments);
 
@@ -499,6 +530,7 @@ public class ToolExecutor {
             case "task_manager" -> inferTaskManagerAction(args);
             case "chat_attachment" -> inferChatAttachmentAction(args);
             case "schedule_task" -> inferScheduleTaskAction(args);
+            case "desktop_control" -> inferDesktopControlAction(args);
             default -> null;
         };
     }
@@ -627,7 +659,9 @@ public class ToolExecutor {
     private String inferChatAttachmentAction(JsonNode args) {
         boolean hasAttachmentId = isNonEmpty(args, "attachment_id");
         boolean hasFilePath = isNonEmpty(args, "file_path");
+        boolean hasFileAssetId = isNonEmpty(args, "file_asset_id");
 
+        if (hasFileAssetId) return "read_by_file_asset";
         if (hasAttachmentId) return "read_by_attachment";
         if (hasFilePath) return "read_by_path";
         return null;
@@ -647,6 +681,28 @@ public class ToolExecutor {
         if (hasId) return "update";
         // 无参数默认 list
         return "list";
+    }
+
+    /**
+     * 推断 desktop_control 的单动作类型（仅单动作兼容形态；批量形态由 actions 数组携带 action，不走此处）。
+     * 按参数特征安全推断：文本→type、按键→key、滚轮→mouse_scroll、拖拽→mouse_drag、
+     * 按键次数→mouse_click；仅有坐标时最保守推断为 mouse_move（移动无副作用）。
+     */
+    private String inferDesktopControlAction(JsonNode args) {
+        boolean hasText = isNonEmpty(args, "text");
+        boolean hasKey = isNonEmpty(args, "key");
+        boolean hasAmount = args.has("amount");
+        boolean hasFrom = args.has("fromX") || args.has("fromY");
+        boolean hasButton = isNonEmpty(args, "button") || args.has("clicks");
+        boolean hasXY = args.has("x") && args.has("y");
+
+        if (hasText) return "type";
+        if (hasKey) return "key";
+        if (hasAmount) return "mouse_scroll";
+        if (hasFrom) return "mouse_drag";
+        if (hasButton) return "mouse_click";
+        if (hasXY) return "mouse_move";
+        return null;
     }
 
     private boolean isNonEmpty(JsonNode node, String key) {
@@ -694,8 +750,10 @@ public class ToolExecutor {
             case "agent" -> "fork / collect / inspect";
             case "skill" -> "create / update / delete / list / report";
             case "task_manager" -> "create / complete / batch_complete / batch_reopen / list";
-            case "chat_attachment" -> "read_by_path / read_by_attachment";
+            case "chat_attachment" -> "read_by_path / read_by_attachment / read_by_file_asset";
             case "schedule_task" -> "create / list / update / delete / toggle";
+            case "desktop_control" -> "mouse_move / mouse_click / mouse_drag / mouse_scroll / key / type / screen_size"
+                    + "（多动作用 actions 数组）";
             default -> "（未知）";
         };
     }
@@ -713,6 +771,7 @@ public class ToolExecutor {
             case "task_manager" -> "list";
             case "chat_attachment" -> "read_by_path";
             case "schedule_task" -> "list";
+            case "desktop_control" -> "screen_size";
             default -> "";
         };
     }
@@ -730,6 +789,8 @@ public class ToolExecutor {
             case "task_manager" -> "{ \"action\": \"list\" }";
             case "chat_attachment" -> "{ \"action\": \"read_by_path\", \"file_path\": \"E:\\\\docs\\\\report.pdf\" }";
             case "schedule_task" -> "{ \"action\": \"list\" }";
+            case "desktop_control" -> "{ \"actions\": [{\"action\": \"mouse_click\", \"x\": 640, \"y\": 360}] }"
+                    + " 或单动作 { \"action\": \"mouse_click\", \"x\": 640, \"y\": 360 }";
             default -> "{ \"action\": \"...\" }";
         };
     }

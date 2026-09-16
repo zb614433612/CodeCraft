@@ -10,6 +10,8 @@ import org.springframework.stereotype.Component;
  * 三层防护执行管道 — 取代工具类内部的零散权限检查。
  *
  * <pre>
+ * 阶段 0: 会话级「全部同意」→ 跳过全部检查
+ * 阶段 0.5: 无副作用预检（SideEffectFreePreflight）→ 免授权直接执行（本次调用不会产生副作用）
  * 阶段 1: 三层权限检查
  *   1.1 层面一: manual + affectsData → 弹窗授权
  *   1.2 层面二: manual + isPathSensitive + 路径越界 → 弹窗授权（auto 模式放行）
@@ -45,10 +47,19 @@ public class ToolExecutionPipeline {
         ToolPermissionMetadata meta = permissionRegistry.getMetadata(toolName);
 
         // ===== 阶段 0：会话级别自动批准 =====
-        // 如果用户选择了「本轮对话全部同意」，跳过所有权限检查（包括高危操作）
+        // 如果用户选择了「全部同意」（会话级持续授权），跳过所有权限检查（包括高危操作）
         if (PermissionContext.isSessionApproved(conversationId)) {
-            log.debug("会话 {} 已获「本轮对话全部同意」，跳过工具 {} 的权限检查", conversationId, toolName);
+            log.debug("会话 {} 已获「全部同意」授权，跳过工具 {} 的权限检查", conversationId, toolName);
             // 直接跳到阶段 2：审计日志
+            auditLogger.log(toolName, arguments, userId, executionMode);
+            return tool.execute(arguments);
+        }
+
+        // ===== 阶段 0.5：无副作用预检免授权 =====
+        // 工具声明"本次调用为无副作用预检"（如 desktop_control 坐标预检：仅生成校验图、不执行动作）时，
+        // 免授权直接执行——避免"预检轮 + 执行轮"两次弹窗；契约见 SideEffectFreePreflight（判定与执行逻辑须同源）
+        if (tool instanceof SideEffectFreePreflight preflight && preflight.isSideEffectFreePreflight(arguments)) {
+            log.debug("工具 {} 本次调用判定为无副作用预检，免授权直接执行", toolName);
             auditLogger.log(toolName, arguments, userId, executionMode);
             return tool.execute(arguments);
         }

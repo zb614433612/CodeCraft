@@ -1,14 +1,14 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.0 | 更新：2026-09-16 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
 
 ## 一、一句话定义
 
-**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 21 种内置工具（读写文件、执行命令、操作 Git、搜索网络等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）动态切换，并可通过 MCP 双向接入外部工具生态。
+**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 24 种内置工具（读写文件、执行命令、操作 Git、搜索网络、桌面自动化等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）动态切换，并可通过 MCP 双向接入外部工具生态。
 
 ---
 
@@ -31,7 +31,7 @@
 │ │          Spring Boot 3.4 后端 (src/main/java/)                      │ │
 │ │                       │                                             │ │
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
-│ │ │        Controller 层（21 个）               │                      │ │
+│ │ │        Controller 层（23 个）               │                      │ │
 │ │ │ DeepSeekController / GitController /       │                      │ │
 │ │ │ P2pController / SnapshotController / ...   │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
@@ -155,7 +155,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── NetworkToolConfig      # 代理/网络配置
 │   ├── OpenApiConfig          # Swagger/OpenAPI 文档
 │   └── SpaConfig              # 单页应用路由回退
-├── controller/                # REST API 控制器（21 个）
+├── controller/                # REST API 控制器（23 个）+ GlobalExceptionHandler（全局异常处理）
 │   ├── DeepSeekController     # ★核心：聊天、Agent 任务状态
 │   ├── ConversationController # 会话 CRUD
 │   ├── GitController          # Git 操作（status/diff/commit...）
@@ -175,24 +175,30 @@ src/main/java/com/example/agentdeepseek/
 │   ├── RoleController         # 角色管理
 │   ├── ConfigController       # 系统配置（API Key等）
 │   ├── LogController          # 日志查询
+│   ├── SystemController       # 系统信息（运行状态/版本等）
+│   ├── DbConnectionController # 外部数据库连接（Phase 20）
+│   ├── FileAssetController    # 文件资产（上传/列表/引用，vision-files-api）
+│   ├── ProviderBalanceController # Provider 余额查询
 │   └── ScheduleTaskController # 定时任务
 ├── filter/                    # TokenAuthenticationFilter（Token 鉴权拦截器）
 ├── initializer/               # UserInitializer（首次启动初始化管理员）
-├── mapper/                    # MyBatis Mapper 接口（21 个）
+├── mapper/                    # MyBatis Mapper 接口（24 个）
 │   ├── ConversationMapper / ConversationMessageMapper / CompactionMapper
 │   ├── AgentConfigMapper / SkillMapper / SubAgentLogMapper
 │   ├── UserMapper / MenuMapper / RoleMapper / RoleMenuMapper
 │   ├── ScheduleTaskMapper / SysConfigMapper
 │   └── ProviderConfigMapper（LLM Provider）/ McpServerMapper（MCP）
 │ │   ├── LessonMapper / LessonNormCacheMapper / LessonRuleMapper（成长体系）
-│ │   └── P2p* (4个：授权/会话/消息/已知节点)
+│ │   ├── DbConnectionMapper / FileAssetMapper / FileReferenceMapper
+│ │   │   └── P2p* (4个：授权/会话/消息/已知节点)
 ├── model/
-│   ├── entity/                # 数据库实体（23 个）
+│   ├── entity/                # 数据库实体（26 个）
 │   │   ├── Conversation / ConversationMessage / CompactionRecord
 │   │   ├── User / Menu / Role / RoleMenu / SysConfig
 │   │   ├── AgentConfig / AgentTask / Skill / SubAgentLog
 │   │   ├── ScheduleTask / MessageRole / ProviderConfig / McpServerConfig
 │ │   │   ├── Lesson / LessonNormCache / LessonRule（成长体系）
+│ │   │   ├── DbConnection / FileAsset / FileReference
 │ │   │   └── P2pAgentAuthorization / P2pAgentConversation / P2pChatMessage / P2pKnownPeer
 
 │   ├── dto/                   # 请求/响应 DTO
@@ -246,6 +252,8 @@ src/main/java/com/example/agentdeepseek/
 │ │   │   └── ErrorCodeDictionary # 错误码字典（yml 配置加载）
 │   ├── agentinvoke/            # ★智能体互调：委托执行/信任链/环检测（Phase 19）
 │   ├── dbconnection/           # ★外部数据库连接：配置/加密/连接管理（Phase 20）
+│   ├── files/                  # ★文件资产与 Files API 适配（上传/图像理解/引用管理，vision-files-api）
+│   ├── llm/                    # LLM 客户端层：LLMClient 抽象 + 6 个 Provider 实现 + ProviderBalanceService
 │   └── SkillService / UserService / ConfigService / ...
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
@@ -254,7 +262,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolInitializer        # 启动时自动初始化所有工具
 │   ├── ExecutionTokenManager  # 工具执行 Token 管理
 │   ├── PermissionContext      # 会话级权限上下文
-│   ├── impl/                  # 22 个工具实现（新命名，一工具多 action）
+│   ├── impl/                  # 24 个工具实现（新命名，一工具多 action）
 │   │   ├── 文件操作: FileExplorerTool (read/glob/grep/tree),
 │   │   │            FileWriterTool (write/edit/delete)
 │   │   ├── 命令执行: CommandTool (exec/start/list/logs/stop)
@@ -269,12 +277,16 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── 交互工具: AskClarificationTool, ChatAttachmentTool, QueryToolHistoryTool
 │   │   ├── 定时任务: ScheduleTaskTool
 │   │   ├── MCP 管理: McpServerManagerTool
+│   │   │   │   ├── 桌面自动化: ScreenCaptureTool (截图/网格刻度/准星标记/放大镜),
+│   │   │            DesktopControlTool (键鼠模拟/批量动作/坐标预检)
 │   │   └── 辅助组件: DeepSeekAnalyzer（非流式 LLM 分析器，评委/子Agent 调用）
+│   ├── desktop/                 # 桌面自动化支持（平台适配/CaptureContext/坐标校验/预检）
 │   ├── permission/            # 权限控制
 │   │   ├── ToolPermission / ToolPermissionMetadata / ToolPermissionRegistry
-│   │   ├── ToolExecutionPipeline (三层防护)
+│   │   ├── ToolPermissionLevel (权限档位：SAFE/DATA/HIGH_RISK)
+│   │   ├── ToolExecutionPipeline (三层防护) / SideEffectFreePreflight (预检豁免)
 │   │   ├── PathSecurityChecker (路径越界检查)
-│   │   ├── OperationCategory (操作分类)
+│   │   ├── OperationCategory (操作分类，含 DESKTOP)
 │   │   └── ToolAuditLogger (审计日志)
 │   └── postedit/              # 后处理管线
 │       ├── PostEditPipeline   # 编排 Formatter + Diagnostic
@@ -416,6 +428,19 @@ src/main/java/com/example/agentdeepseek/
 │ user_id                  │
 └──────────────────────────┘
 
+┌──────────────────────────┐   ┌──────────────────────────┐
+│ file_asset (vision)      │   │ file_reference           │
+│ ──────────────────────── │   │ ───────────────────────  │
+│ id (PK)                  │   │ id (PK)                  │
+│ file_id (远端ID)         │   │ file_asset_id (FK)       │
+│ provider_code / user_id  │   │ conversation_id          │
+│ filename / display_name  │   │ message_id (回填)        │
+│ mime_type / size         │   │ created_at               │
+│ local_path / storage_type│   └──────────────────────────┘
+│ source / status / orphan │
+│ expires_at / created_at  │
+└──────────────────────────┘
+
 ┌────────────────────────┐   ┌──────────────────────────┐
 │ lesson_norm_cache      │   │ lesson_rule              │
 │ ────────────────────── │   │ ───────────────────────  │
@@ -441,7 +466,9 @@ src/main/java/com/example/agentdeepseek/
 | **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~900 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~800 |
 | **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~5000 (整个p2p包) |
-| **工具系统** | 22 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
+| **工具系统** | 24 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
+| **文件资产** | 文件上传/本地存储/Files API 适配/图像理解 | FileAssetService + FilesApiClientManager | ~900 |
+| **桌面自动化** | 截图（网格刻度）/键鼠模拟/坐标预检 | ScreenCaptureTool + DesktopControlTool | ~1500 |
 | **成长体系** | 经验检索/自动捕获/复盘/归一化/弯路提炼 | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |

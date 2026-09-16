@@ -2,11 +2,13 @@ package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.ChatAttachmentConfig;
 import com.example.agentdeepseek.service.AttachmentStore;
+import com.example.agentdeepseek.service.files.FileAssetService;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.impl.document.ParserFactory;
 import com.example.agentdeepseek.tool.impl.document.ParsedDocument;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
+import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -43,15 +45,18 @@ public class ChatAttachmentTool implements Tool {
     private final ParserFactory parserFactory;
     private final AttachmentStore attachmentStore;
     private final ChatAttachmentConfig config;
+    private final FileAssetService fileAssetService;
 
     public ChatAttachmentTool(ObjectMapper objectMapper,
                               ParserFactory parserFactory,
                               AttachmentStore attachmentStore,
-                              ChatAttachmentConfig config) {
+                              ChatAttachmentConfig config,
+                              FileAssetService fileAssetService) {
         this.objectMapper = objectMapper;
         this.parserFactory = parserFactory;
         this.attachmentStore = attachmentStore;
         this.config = config;
+        this.fileAssetService = fileAssetService;
     }
 
     @Override
@@ -62,10 +67,11 @@ public class ChatAttachmentTool implements Tool {
     @Override
     public String getDescription() {
         return "【适用场景】读取用户指定或上传的文件内容，支持文本/代码/PDF/Word/Excel。"
-                + "两种方式：read_by_path=读取磁盘路径文件（用户在聊天中粘贴路径）；"
-                + "read_by_attachment=读取用户通过上传按钮上传的附件。"
-                + "【参数说明】action 必填（read_by_path 或 read_by_attachment）；"
-                + "read_by_path 时需传 file_path；read_by_attachment 时需传 attachment_id。"
+                + "三种方式：read_by_path=读取磁盘路径文件（用户在聊天中粘贴路径）；"
+                + "read_by_attachment=读取用户通过上传按钮上传的临时附件；"
+                + "read_by_file_asset=读取文件管理中的文件资产（推荐；用系统提示中给出的 file_asset_id）。"
+                + "【参数说明】action 必填；read_by_path 需传 file_path；"
+                + "read_by_attachment 需传 attachment_id；read_by_file_asset 需传 file_asset_id。"
                 + "【限制】PDF 最多解析 " + config.getParse().getPdfMaxPages() + " 页，"
                 + "单文件最大输出 " + config.getParse().getContentMaxLength() + " 字符，"
                 + "超出部分截断。";
@@ -82,10 +88,11 @@ public class ChatAttachmentTool implements Tool {
         // action 参数
         ObjectNode actionProp = objectMapper.createObjectNode();
         actionProp.put("type", "string");
-        actionProp.put("description", "操作类型：read_by_path=按文件路径读取磁盘文件；read_by_attachment=按附件ID读取已上传文件");
+        actionProp.put("description", "操作类型：read_by_path=按文件路径读取磁盘文件；read_by_attachment=按附件ID读取已上传临时附件；read_by_file_asset=按文件资产ID读取（文件管理中的文件，推荐）");
         ArrayNode actionEnum = objectMapper.createArrayNode()
                 .add("read_by_path")
-                .add("read_by_attachment");
+                .add("read_by_attachment")
+                .add("read_by_file_asset");
         actionProp.set("enum", actionEnum);
         properties.set("action", actionProp);
 
@@ -98,8 +105,14 @@ public class ChatAttachmentTool implements Tool {
         // attachment_id 参数
         ObjectNode attachmentIdProp = objectMapper.createObjectNode();
         attachmentIdProp.put("type", "string");
-        attachmentIdProp.put("description", "【read_by_attachment时必填】前端上传后返回的附件ID");
+        attachmentIdProp.put("description", "【read_by_attachment时必填】前端上传后返回的附件ID（旧临时通道）");
         properties.set("attachment_id", attachmentIdProp);
+
+        // file_asset_id 参数（M7：文件资产统一通道）
+        ObjectNode fileAssetIdProp = objectMapper.createObjectNode();
+        fileAssetIdProp.put("type", "integer");
+        fileAssetIdProp.put("description", "【read_by_file_asset时必填】文件资产ID（系统提示中给出的 file_asset_id）");
+        properties.set("file_asset_id", fileAssetIdProp);
 
         // page 参数
         ObjectNode pageProp = objectMapper.createObjectNode();
@@ -125,7 +138,8 @@ public class ChatAttachmentTool implements Tool {
             return switch (action) {
                 case "read_by_path" -> readByPath(arguments);
                 case "read_by_attachment" -> readByAttachment(arguments);
-                default -> error("未知操作: " + action + "，可选值: read_by_path / read_by_attachment");
+                case "read_by_file_asset" -> readByFileAsset(arguments);
+                default -> error("未知操作: " + action + "，可选值: read_by_path / read_by_attachment / read_by_file_asset");
             };
         } catch (Exception e) {
             log.error("ChatAttachmentTool 执行失败: action={}", action, e);
@@ -173,6 +187,29 @@ public class ChatAttachmentTool implements Tool {
                         + config.getStore().getExpireMinutes() + " 分钟)");
             }
             return error("附件不存在或已过期: " + attachmentId);
+        }
+
+        return doParse(path, args);
+    }
+
+    // ========== 方式三：按文件资产ID读取（M7：文件管理统一体系） ==========
+
+    private String readByFileAsset(JsonNode args) {
+        if (!args.has("file_asset_id") || args.get("file_asset_id").asText().isBlank()) {
+            return error("缺少参数 file_asset_id，请提供文件资产ID");
+        }
+
+        String raw = args.get("file_asset_id").asText().trim();
+        long assetId;
+        try {
+            assetId = Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            return error("file_asset_id 必须为数字: " + raw);
+        }
+
+        Path path = fileAssetService.resolveLocalFileForTool(assetId, ToolContext.getUserId());
+        if (path == null) {
+            return error("文件资产不存在、已失效或无权访问: #" + assetId);
         }
 
         return doParse(path, args);

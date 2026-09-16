@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.util;
 
+import com.example.agentdeepseek.tool.desktop.DesktopActionSummary;
 import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
@@ -47,8 +48,21 @@ public class OperationDetailGenerator {
             case "file_writer" -> generateFileWriter(arguments);
             case "execute_sql" -> generateExecuteSql(arguments);
             case "git_submit" -> generateGitSubmit(arguments);
+            case "desktop_control" -> generateDesktopControl(arguments);
             default -> null;
         };
+    }
+
+    /**
+     * desktop_control 动作摘要（授权弹窗预览）：逐条列出将要执行的键鼠动作（最多 6 条）。
+     * 复用 DesktopActionSummary（与工具执行结果文案一致）。
+     */
+    private static String generateDesktopControl(JsonNode args) {
+        String batch = DesktopActionSummary.summarizeBatch(args, 6);
+        if (batch == null) return null;
+        int count = DesktopActionSummary.extractActions(args).size();
+        return "> **🖥️ 桌面操作**（" + count + " 个动作）\n\n" + batch + "\n"
+                + "> ⚠️ 涉及真实键鼠操作；禁止用于密码/支付等敏感场景\n\n";
     }
 
     /**

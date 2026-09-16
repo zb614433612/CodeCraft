@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v1.1.8 | Updated: 2026-09-14 | Audience: Developers / AI Collaborators
+> Version: v2.0.0 | Updated: 2026-09-16 | Audience: Developers / AI Collaborators
 > This document dissects the 187KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -33,7 +33,7 @@ DeepSeekServiceImpl responsibilities (ideally split into 4-5 classes):
 ## 2. Dependency Injection Panorama
 
 ```
-DeepSeekServiceImpl (21 dependencies)
+DeepSeekServiceImpl (28 dependencies)
 ├─ External Communication
 │   └─ WebClient deepSeekWebClient     → DeepSeek API HTTP calls
 ├─ Configuration
@@ -63,7 +63,15 @@ DeepSeekServiceImpl (21 dependencies)
 ├─ Growth System (★new in v1.1.5, evolved in v1.1.6: P0 normalization / P1 detour channel / P2 env awareness)
 │   ├─ LessonService                   → CRUD + on-demand retrieval + state machine
 │   ├─ LessonRecorder                  → Auto-capture drafts on failure (source=auto)
-│   └─ LessonReviewService             → Turn-level async review (C2)
+│   ├─ LessonReviewService
+│   └─ FailureNormalizer               → Error-code normalization + signature dedup             → Turn-level async review (C2)
+├─ Agent Invocation / File Assets (★v1.1.8 / v2.0.0)
+│   ├─ AgentInvokeService              → Agent delegation (trust chain)
+│   ├─ FileAssetService                → File asset management (upload/reference/cascade)
+│   ├─ FileVisionService               → Vision understanding (visual injection)
+│   ├─ CaptureContextRegistry          → Screenshot coordinate context (desktop automation)
+│   ├─ SupplementStore                 → Supplemental requirement message store
+│   └─ AttachmentStore                 → Uploaded attachment staging
 ├─ Permission/Pending
 │   ├─ PendingQuestionStore            → Pending approval storage
 │   ├─ ExecutionTokenManager           → Token management

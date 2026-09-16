@@ -59,6 +59,9 @@ public class ChatRequest {
     @Schema(description = "上下文模式（可选）：full（全量注入）/ compact（精简历史工具调用和思考过程），为空则使用服务端默认配置", example = "compact")
     private String contextMode;
 
-    @Schema(description = "附件ID列表（前端上传后返回的ID），LLM可通过 chat_attachment 工具读取", example = "[\"a1b2c3\", \"d4e5f6\"]")
+    @Schema(description = "附件ID列表（旧临时通道，Legacy：临时暂存30分钟过期），LLM可通过 chat_attachment 工具读取", example = "[\"a1b2c3\", \"d4e5f6\"]")
     private List<String> attachmentIds;
+
+    @Schema(description = "文件资产ID列表（图片→云端 Files API，注入 vision file 内容块；文档→本地存储，注入提示供 chat_attachment(read_by_file_asset) 读取）；发送时建立 file_reference 引用", example = "[1, 2]")
+    private List<Long> fileAssetIds;
 }

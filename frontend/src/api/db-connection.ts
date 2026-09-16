@@ -56,15 +56,15 @@ export function deleteDbConnection(id: number) {
   return request<void>(`/db-connections/${id}`, { method: 'DELETE' })
 }
 
-/** 测试未保存连接（新增弹窗内先测试再保存） */
+/** 测试未保存连接（新增弹窗内先测试再保存；成功信息在 message 字段） */
 export function testDbConnection(data: DbConnectionConfig) {
-  return request<{ message: string }>('/db-connections/test', {
+  return request<void>('/db-connections/test', {
     method: 'POST',
     body: JSON.stringify(data)
   })
 }
 
-/** 测试已保存连接（只传 id，密码由服务端解密） */
+/** 测试已保存连接（只传 id，密码由服务端解密；成功信息在 message 字段） */
 export function testSavedDbConnection(id: number) {
-  return request<{ message: string }>(`/db-connections/${id}/test`, { method: 'POST' })
+  return request<void>(`/db-connections/${id}/test`, { method: 'POST' })
 }

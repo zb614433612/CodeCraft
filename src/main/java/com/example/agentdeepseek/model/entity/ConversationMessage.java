@@ -49,6 +49,12 @@ public class ConversationMessage {
      */
     private String turnId;
 
+    /**
+     * 消息类型（NULL=普通消息；desktop_inject=桌面截图自动注入——role 仍为 USER 以兼容 API 消息还原，
+     * 但前端历史渲染时跳过该消息、不作为用户气泡显示）
+     */
+    private String messageType;
+
 
     /**
      * 创建时间

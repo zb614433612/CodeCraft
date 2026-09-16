@@ -136,9 +136,17 @@ const saveRuntime = async () => {
   }
 }
 
+/** 切换到指定 Agent（供跨页引用目标定位等场景调用）；返回是否找到并触发切换 */
+const switchToAgentById = (agentId: number): boolean => {
+  const target = agentList.value.find(a => a.id === agentId)
+  if (!target) return false
+  switchAgent(target)
+  return true
+}
+
 onMounted(() => { fetchAgents() })
 
-defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime })
+defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime, switchToAgentById })
 </script>
 
 <style scoped>

@@ -1196,7 +1196,9 @@ public class AgentForkManager {
         StringBuilder tail = new StringBuilder();
         for (int i = Math.max(0, messages.size() - 3); i < messages.size(); i++) {
             Map<String, Object> m = messages.get(i);
-            String c = (String) m.get("content");
+            // M3：兼容多模态数组（图片注入后 user content 为数组；此处仅日志摘要，非字符串时 String.valueOf 兜底）
+            Object rawContent = m.get("content");
+            String c = (rawContent instanceof String s) ? s : (rawContent == null ? null : String.valueOf(rawContent));
             tail.append(m.get("role")).append(": ")
                     .append(c != null && c.length() > 80 ? c.substring(0, 80) + "..." : c)
                     .append(" | ");

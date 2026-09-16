@@ -20,10 +20,10 @@ After startup visit: **http://localhost:8084**
 
 ```bash
 # Windows
-scripts\build.bat v1.1.8
+scripts\build.bat v2.0.0
 
 # Mac / Linux
-./scripts/build.sh v1.1.8
+./scripts/build.sh v2.0.0
 ```
 
 ---
@@ -112,15 +112,15 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 
 ```
 project root
-├── src/main/java/...        → Backend source (253 Java files)
-│   ├── tool/impl/           -> 21 AI tool implementations (incl. lesson growth system)
+├── src/main/java/...        → Backend source (304 Java files)
+│   ├── tool/impl/           -> 24 AI tool implementations (incl. lesson growth system)
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/lesson/      -> Growth system (lesson retrieval/record/review/normalizer)
 │   └── service/impl/        → Core business logic
 ├── frontend/src/            → Vue 3 frontend source
-│   ├── views/               → 14 page views
+│   ├── views/               → 16 page views
 │   ├── components/          → 16 common components
-│   └── api/                 → 21 API call modules
+│   └── api/                 → 23 API call modules
 ├── electron/                → Electron desktop shell
 ├── data/                    → H2 database files (runtime)
 ├── logs/                    → Log files (runtime)

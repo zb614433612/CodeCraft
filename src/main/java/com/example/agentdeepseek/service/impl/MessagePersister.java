@@ -17,6 +17,13 @@ import org.springframework.stereotype.Component;
 @Component
 public class MessagePersister {
 
+    /**
+     * 消息类型：桌面截图自动注入（screen_capture 的 user 消息）。
+     * <p>role 仍为 USER（DeepSeek API 要求图片只能进 user 消息），但前端历史渲染时
+     * 按此类型跳过用户气泡、不打断 AI 消息聚合，将其截图资产归并到宿主 AI 消息回显。</p>
+     */
+    public static final String TYPE_DESKTOP_INJECT = "desktop_inject";
+
     private final ConversationMessageMapper conversationMessageMapper;
 
     public MessagePersister(ConversationMessageMapper conversationMessageMapper) {
@@ -28,11 +35,29 @@ public class MessagePersister {
      * @param conversationId 会话ID
      * @param content 消息内容
      * @param turnId 前端生成的 turnId（用于匹配回滚快照）
+     * @return 消息ID（自增回填；M2 用于建立 file_reference 关联）
      */
-    public void saveUserMessage(Long conversationId, String content, String turnId) {
+    public Long saveUserMessage(Long conversationId, String content, String turnId) {
         ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
         msg.setTurnId(turnId);
         conversationMessageMapper.insert(msg);
+        return msg.getId();
+    }
+
+    /**
+     * 保存桌面截图自动注入的 user 消息（M5 历史显示修复）。
+     * <p>与 {@link #saveUserMessage} 同构，但打上 {@link #TYPE_DESKTOP_INJECT} 标记：
+     * 后台 API 消息还原保持不变（role=user），仅前端历史渲染跳过该气泡。</p>
+     *
+     * @param conversationId 会话ID
+     * @param content 注入通知文本（纯文本存库）
+     * @return 消息ID（用于建立 file_reference 关联，供历史回显）
+     */
+    public Long saveInjectedUserMessage(Long conversationId, String content) {
+        ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
+        msg.setMessageType(TYPE_DESKTOP_INJECT);
+        conversationMessageMapper.insert(msg);
+        return msg.getId();
     }
 
     /**

@@ -123,7 +123,7 @@ mvn clean package -DskipTests
 mvn clean package -DskipTests -DskipFrontend=true
 
 # 输出文件
-# target/code-craft-1.1.8.jar  （约 67MB）
+# target/code-craft-2.0.0.jar  （约 67MB）
 ```
 
 ---
@@ -189,13 +189,13 @@ npm run dist:win
 
 ```
 electron/release/
-├── CodeCraft-Setup-1.1.8.exe       # NSIS 安装程序（发行用）
-└── CodeCraft-1.1.8-win.zip         # 绿色版压缩包（可选）
+├── CodeCraft-Setup-2.0.0.exe       # NSIS 安装程序（发行用）
+└── CodeCraft-2.0.0-win.zip         # 绿色版压缩包（可选）
 ```
 
 ### 安装运行
 
-双击 `CodeCraft-Setup-1.1.8.exe` 安装，安装后桌面会生成快捷方式。
+双击 `CodeCraft-Setup-2.0.0.exe` 安装，安装后桌面会生成快捷方式。
 
 > **运行注意事项：**
 > - ? **无需安装 Java** — JRE 已内置在 EXE 中
@@ -300,15 +300,15 @@ npm run dist:mac
 
 ```
 electron/release/
-├── CodeCraft-1.1.8.dmg              # DMG 磁盘映像（发行用）
-├── CodeCraft-1.1.8-mac.zip          # 绿色版压缩包（可选）
+├── CodeCraft-2.0.0.dmg              # DMG 磁盘映像（发行用）
+├── CodeCraft-2.0.0-mac.zip          # 绿色版压缩包（可选）
 └── mac/                             # 未打包的 .app 目录
     └── CodeCraft.app
 ```
 
 ### 安装运行
 
-1. 双击 `CodeCraft-1.1.8.dmg` 挂载磁盘映像
+1. 双击 `CodeCraft-2.0.0.dmg` 挂载磁盘映像
 2. 将 `CodeCraft.app` 拖到 `Applications` 文件夹
 3. 首次打开时，由于未签名，需要**右键 → 打开**（或到「系统偏好设置 → 安全性与隐私」中允许）
 
@@ -372,8 +372,8 @@ npm run dist:linux
 输出：
 ```
 electron/release/
-├── CodeCraft-1.1.8.AppImage    # AppImage（免安装，双击运行）
-└── CodeCraft-1.1.8.deb         # deb 包（Debian/Ubuntu）
+├── CodeCraft-2.0.0.AppImage    # AppImage（免安装，双击运行）
+└── CodeCraft-2.0.0.deb         # deb 包（Debian/Ubuntu）
 ```
 
 ---
@@ -399,7 +399,7 @@ npm install
 npm run dist:win
 
 # 4. 安装
-# 双击 electron/release/CodeCraft-Setup-1.1.8.exe
+# 双击 electron/release/CodeCraft-Setup-2.0.0.exe
 ```
 
 ### macOS 全流程
@@ -439,7 +439,7 @@ npm install
 npm run dist:mac
 
 # 5. 安装
-# 双击 electron/release/CodeCraft-1.1.8.dmg 挂载后拖入 Applications
+# 双击 electron/release/CodeCraft-2.0.0.dmg 挂载后拖入 Applications
 ```
 
 ---
@@ -461,7 +461,7 @@ codecraft/
 │   │       ├── service/        # 业务逻辑层
 │   │       │   ├── llm/        # LLM 客户端层（LLMClient + 6 个 Provider 实现）
 │ │   │       │   └── lesson/     # 成长体系（经验库：检索/记录/复盘/归一化）
-│   │       ├── tool/           # AI Agent 工具（22 个工具）
+│   │       ├── tool/           # AI Agent 工具（24 个工具）
 │   │       └── util/           # 工具类
 │   └── main/resources/         # 配置文件和静态资源
 ├── frontend/                   # Vue3 前端源码

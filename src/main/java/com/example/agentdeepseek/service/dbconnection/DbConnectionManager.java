@@ -137,8 +137,12 @@ public class DbConnectionManager {
 
     /** 测试连接：成功返回 null；失败返回错误信息（已脱敏去掉堆栈） */
     public String testConnection(DbConnection c) {
-        String plain = credentialCipher.decrypt(c.getPasswordEncrypted());
-        c.setPasswordPlain(plain);
+        // 仅当调用方未直接提供明文密码时才从密文解密补全：
+        // 未保存配置的测试场景前端传的是 passwordPlain（passwordEncrypted 为空），
+        // 若无条件用解密结果覆盖，会把明文密码置 null，导致连接"无密码"裸连被拒。
+        if (c.getPasswordPlain() == null || c.getPasswordPlain().isEmpty()) {
+            c.setPasswordPlain(credentialCipher.decrypt(c.getPasswordEncrypted()));
+        }
         try (Connection ignored = open(c)) {
             return null;
         } catch (Exception e) {

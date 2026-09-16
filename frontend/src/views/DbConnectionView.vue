@@ -165,11 +165,9 @@ const loadList = async () => {
   loading.value = true
   try {
     const res = await listDbConnections()
-    if (res.code === 200) {
-      connections.value = res.data || []
-    } else {
-      message.error(res.message || '加载失败')
-    }
+    connections.value = res.data || []
+  } catch (e: any) {
+    message.error(e?.message || '加载失败')
   } finally {
     loading.value = false
   }
@@ -208,11 +206,11 @@ const closeModal = () => {
 }
 
 const handleTest = async (record: DbConnectionVO) => {
-  const res = await testSavedDbConnection(record.id)
-  if (res.code === 200 && res.data) {
+  try {
+    await testSavedDbConnection(record.id)
     message.success('连接成功')
-  } else {
-    message.error(res.error || res.message || '连接失败')
+  } catch (e: any) {
+    message.error(e?.message || '连接失败')
   }
 }
 
@@ -230,11 +228,12 @@ const doTest = async () => {
   const payload = { ...form, enabled: formEnabled.value ? 1 : 0 }
   try {
     const res = await testDbConnection(payload)
-    testOk.value = res.code === 200
-    testResult.value = res.code === 200 ? '连接成功' : (res.error || res.message || '连接失败')
+    testOk.value = true
+    testResult.value = res.message || '连接成功'
   } catch (e: any) {
     testOk.value = false
-    testResult.value = '连接失败: ' + (e?.message || e)
+    // 失败信息来自后端（request 封装在 code!==200 时抛出后端 message，已含"连接失败:"上下文）
+    testResult.value = e?.message || '连接失败'
   } finally {
     testing.value = false
   }
@@ -264,28 +263,28 @@ const handleSubmit = async () => {
   submitting.value = true
   try {
     const payload = { ...form, enabled: formEnabled.value ? 1 : 0 }
-    const res = editing.value
-      ? await updateDbConnection(form.id!, payload)
-      : await createDbConnection(payload)
-    if (res.code === 200) {
-      message.success(editing.value ? '连接已更新' : '连接已创建')
-      modalOpen.value = false
-      loadList()
+    if (editing.value) {
+      await updateDbConnection(form.id!, payload)
     } else {
-      message.error(res.error || res.message || '保存失败')
+      await createDbConnection(payload)
     }
+    message.success(editing.value ? '连接已更新' : '连接已创建')
+    modalOpen.value = false
+    loadList()
+  } catch (e: any) {
+    message.error(e?.message || '保存失败')
   } finally {
     submitting.value = false
   }
 }
 
 const handleDelete = async (id: number) => {
-  const res = await deleteDbConnection(id)
-  if (res.code === 200) {
+  try {
+    await deleteDbConnection(id)
     message.success('已删除')
     loadList()
-  } else {
-    message.error(res.message || '删除失败')
+  } catch (e: any) {
+    message.error(e?.message || '删除失败')
   }
 }
 

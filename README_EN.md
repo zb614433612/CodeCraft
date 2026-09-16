@@ -11,18 +11,20 @@
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **22 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **24 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
 - 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
-- 🧰 **22-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons — covering the full development workflow
+- 🧰 **24-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons, desktop automation — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
 - 🤝 **Agent-to-Agent Invocation**: Agents can delegate tasks to other agent instances in independent sessions (create/continue); delegation = authorization, max depth 3
 - 🔄 **Auto Error Correction**: Auto-retries on failure, automatically switches alternatives
 - 🎯 **Skill System**: Create reusable skills, learned patterns accumulate confidence
 - 📚 **Growth System (Lesson Knowledge Base)**: Failed tool calls are auto-captured as lessons (per-project, on-demand retrieval); solution hints are injected on recurring errors; a feedback loop promotes/hides experiences automatically
 - 🗄️ **Data Management**: Connect external MySQL / PostgreSQL / H2 databases on the "DB Connections" page; AI queries them via the `execute_sql` connection parameter
+- 🖼️ **Vision & File Management**: Paste (Ctrl+V) or upload images (≤64MB) in chat for LLM understanding via the cloud Files API (file_id references; DeepSeek / Anthropic adapter); standalone File Manager page with full CRUD, session reference and permanent retention; documents (PDF/Word/Excel) stored locally in the same asset system
+- 🪟 **Desktop Automation (Computer Use)**: `screen_capture` (grid-overlay screenshots, auto-upload + context injection) and `desktop_control` (mouse/keyboard simulation, 1-20 batch actions) — the "capture → locate → act → verify" loop, guarded by the DESKTOP high-risk permission and crosshair preflight
 - 🖥️ **Desktop App**: Electron + built-in JRE, zero-installation ready to use
 - 🌐 **P2P Remote Collaboration**: Peer-to-peer encrypted channels for remote agent invocation between devices
 - 💾 **Snapshot System**: Auto-backup before code changes, support multi-granularity rollback
@@ -67,7 +69,7 @@ Default admin account: `admin` / `123456`
 ```
 CodeCraft
 ├── src/main/java/.../              # Java Backend (Spring Boot 3.4)
-│   ├── controller/                 # REST API Controllers (21)
+│   ├── controller/                 # REST API Controllers (23)
 │   ├── service/impl/               # Core Business Logic
 │   │   ├── DeepSeekServiceImpl     # ★ AI Engine Core (187KB)
 │   │   ├── ToolLoopManager         # Tool Call Loop Engine
@@ -77,19 +79,20 @@ CodeCraft
 │   ├── service/lesson/             # Growth System (retrieval/record/review/normalizer)
 │   ├── service/agentinvoke/        # Agent-to-Agent Invocation (delegation/trust chain)
 │   ├── service/dbconnection/       # External DB connections (config/AES-GCM/manager)
-│   ├── tool/                       # AI Agent Tools (22 tools)
+│   └── service/files/          # File Assets & Files API adapter (vision pipeline)
+│   ├── tool/                       # AI Agent Tools (24 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
 │   │   ├── agent/                  # P2pAgentService, Handlers
 │   │   ├── connection/             # Netty Server/Client, ConnectionPool
 │   │   ├── protocol/               # MessageFrame, MessageType
 │   │   ├── security/               # TlsHelper, CryptoHelper
 │   │   └── signaling/              # QR Code Signaling, Connection String
-│   ├── model/entity/               # Database Entities (24, incl. ProviderConfig/McpServerConfig/Lesson)
-│   ├── mapper/                     # MyBatis Mappers (22)
+│   ├── model/entity/               # Database Entities (26, incl. ProviderConfig/McpServerConfig/Lesson/FileAsset)
+│   ├── mapper/                     # MyBatis Mappers (24)
 │   └── config/                     # Spring Configuration
 ├── frontend/                       # Vue 3 Frontend (TypeScript)
 │   ├── src/
-│   │   ├── views/                  # Page Views (15)
+│   │   ├── views/                  # Page Views (16)
 │   │   │   ├── CodeAssistantView   # ★ Main Chat + Coding Interface
 │   │   │   ├── AgentConfigView     # Agent Configuration Management
 │   │   │   └── ...
@@ -99,7 +102,7 @@ CodeCraft
 │   │   │   ├── FileTree            # File Browser
 │   │   │   ├── GitSidebar          # Git Diff/Commit Sidebar
 │   │   │   └── ...
-│   │   └── api/                    # API Call Modules (22, incl. llm-provider API)
+│   │   └── api/                    # API Call Modules (23, incl. llm-provider / file-asset API)
 │   └── ...
 ├── electron/                       # Electron Desktop Shell
 ├── docs/                           # Project Documentation
@@ -117,7 +120,7 @@ CodeCraft
     └── build.sh                    # macOS/Linux One-Click Build
 ```
 
-## 🧰 Tool Ecosystem (21 Tools)
+## 🧰 Tool Ecosystem (24 Tools)
 
 | Category | Tool | Typical Usage |
 |----------|------|--------------|
@@ -138,10 +141,19 @@ CodeCraft
 | **History** | `query_tool_history` | Query tool call history in current session |
 | **Lesson** | `lesson` | Pitfall experience knowledge base (search/record/complete/feedback/list) |
 | **MCP** | `mcp_server_manager` | Manage MCP servers (create/delete/connect/disconnect/refresh) |
+| **Desktop** | `screen_capture` / `desktop_control` | Screen capture (grid overlay) and mouse/keyboard automation (Computer Use, batch actions) |
 
 ## 🗄️ Data Management (External DB Connections)
 
 Configure external MySQL / PostgreSQL / H2 business databases on the "DB Connections" page (passwords AES-256-GCM encrypted; test-connection supported). AI then targets them via the `execute_sql` `connection` parameter — omit it to use the built-in CodeCraft system DB (backward compatible).
+
+## 🖼️ Vision & File Management
+
+Paste (Ctrl+V) or upload images directly in chat — images go to the cloud Files API (file_id references) for LLM vision understanding, with DeepSeek / Anthropic adapter support. A standalone **File Manager** page provides full CRUD, "reference to session", and permanent retention. Documents (PDF / Word / Excel / text) are stored locally and unified under the same asset system (`storage_type=cloud|local`).
+
+## 🪟 Desktop Automation (Computer Use)
+
+`screen_capture` captures the screen (resolution-normalized, auto-uploaded, injected into context as a user message) with a 10×10 grid + 0–1000 normalized coordinate scale; `desktop_control` then simulates mouse/keyboard actions (move/click/drag/scroll/key/type, 1-20 batch actions per call). Click/drag coordinates pass a crosshair preflight check ("verify before execute"). Guarded by the DESKTOP high-risk permission category.
 
 ## 🎯 Skill System
 

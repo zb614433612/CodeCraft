@@ -5,6 +5,51 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [2.0.0] - 2026-09-16
+
+### 🖼️ New: Vision & File Management (Files API)
+
+- **Paste/upload images straight to LLMs**: Ctrl+V paste or upload images in chat (≤64MB), referenced into user messages via the cloud Files API (file_id) with automatic base64 fallback for Providers without Files support; multi-image and historical message image playback supported
+- **Files API adapter layer**: new FilesApiClient abstraction (interface + AbstractFilesApiClient + DeepSeek/Anthropic implementations + FilesApiClientManager), routing per Provider following the LLMClient adapter pattern
+- **File asset module**: new file_asset / file_reference tables with FileAssetController / FileAssetMapper / FileReferenceMapper / service/files (FileAssetService / FileAssetStore / FileVisionService); files retained permanently (no more expires_after); cascade deletion when references drop to zero (with orphan compensation retry)
+- **Standalone File Manager page** (SETTING menu): upload / list / rename / delete / preview, "reference to session" dual entry; automatic compression for large pasted images
+- **Unified document attachments (M7)**: storage_type distinguishes cloud (images via cloud Files API) / local (PDF/Word/Excel/text stored locally); document reads go through the chat_attachment read_by_file_asset channel
+- **Frontend**: chat image message component with privacy notice, FileManageView page, file-asset API module
+
+### 🪟 New: Desktop Automation (Computer Use)
+
+- **New `screen_capture` tool (the 23rd)**: screenshot → resolution normalization → auto-upload to Files API → injected into context as a user message; overlay with 10×10 grid + three-level edge rulers (25/50/100) for coordinate reading; region zoom (magnifier) and mark crosshair support (estimate → marked screenshot → visual correction → act)
+- **New `desktop_control` tool (the 24th)**: desktop mouse/keyboard simulation (mouse_move / mouse_click / mouse_drag / mouse_scroll / key / type / screen_size), 1–20 batch actions per call (single-action mode also supported); 0–1000 normalized coordinate protocol (based on the latest screenshot)
+- **Safety mechanisms**: DESKTOP high-risk permission category (approval dialog shows action summary) + crosshair preflight gate (unverified click/drag coordinates return a crosshair check image first; preflight rounds exempt via SideEffectFreePreflight) + red lines (no password/payment input)
+- **Cross-platform**: DesktopPlatformAdapter (Windows / macOS / Linux); new `desktop` config block in application.yml (capture / control)
+
+### ⚡ Optimization: Streaming Render Performance (stream-render-perf M1–M5)
+
+- **Frontend rendering**: segmented stable rendering, update pipeline de-duplication, giant-message slimming, streaming degradation (very large messages fall back to plain text while streaming, Markdown restored after)
+- **Backend SSE batch push (M5)**: SseBatchUtil merges pushes by output boundaries (50ms / 32 items), zero frontend changes
+
+### 💰 New: Provider Balance Query
+
+- New ProviderBalanceController / ProviderBalanceService (DeepSeek `/user/balance`); chat page refreshes the balance on entry and after each turn
+
+### 🛠️ Fixes & Enhancements
+
+- **LLM network retry enhancement**: LLMWebClientManager auto-retry on network errors + auth attribution fix
+- **Global exception handling**: new GlobalExceptionHandler as unified fallback
+- **Permission pipeline**: OperationCategory gains DESKTOP; new SideEffectFreePreflight (no-side-effect preflight exemption) and ToolPermissionLevel
+- **DB connections**: connection test fix
+
+### 🏷️ Version Numbers
+
+- Backend: `1.1.8` → `2.0.0` (pom.xml)
+- Frontend: `1.1.8` → `2.0.0`
+- Electron: `1.1.8` → `2.0.0` (packaged jar path synced to `code-craft-2.0.0.jar`)
+- MCP Server handshake version: `1.1.8` → `2.0.0`
+- Build artifacts: `code-craft-1.1.8.jar` → `code-craft-2.0.0.jar`
+- Docs: README(_EN) / BUILD_AND_RUN(_EN) / docs (ARCHITECTURE, TOOL_SYSTEM, MCP_SYSTEM, etc.) synced to v2.0.0 (built-in tools 22 → 24)
+
+---
+
 ## [1.1.8] - 2026-09-14
 
 ### 🤝 New: Agent-to-Agent Invocation

@@ -5,6 +5,51 @@
 
 ---
 
+## [2.0.0] - 2026-09-16
+
+### 🖼️ 新增：图像理解与文件管理（Vision / Files API）
+
+- **粘贴/上传图片直通 LLM**：聊天中 Ctrl+V 粘贴或上传图片（≤64MB），经云端 Files API 以 file_id 引用注入 user 消息（不支持 Files 的 Provider 自动 base64 降级）；支持多图与历史消息图片回显
+- **Files API 适配体系**：新增 FilesApiClient 抽象层（FilesApiClient 接口 + AbstractFilesApiClient + DeepSeek/Anthropic 双实现 + FilesApiClientManager），仿 LLMClient 适配器模式按 Provider 路由
+- **文件资产模块**：新增 file_asset / file_reference 两表与 FileAssetController / FileAssetMapper / FileReferenceMapper / service/files（FileAssetService / FileAssetStore / FileVisionService）；文件永久保存（不再传 expires_after），引用归零时级联删除（含 orphan 补偿重试）
+- **独立文件管理页**（SETTING 菜单）：上传 / 列表 / 重命名 / 删除 / 预览、「引用到会话」双入口；粘贴大图自动压缩
+- **文档附件统一（M7）**：storage_type 区分 cloud（图片走云端 Files API）/ local（PDF/Word/Excel/文本存本地）；LLM 读取文档统一走 chat_attachment 的 read_by_file_asset 通道
+- **前端**：聊天页图片消息组件与隐私提示、FileManageView 页面、file-asset API 模块
+
+### 🪟 新增：桌面自动化（Computer Use）
+
+- **新增 `screen_capture` 工具（第 23 个）**：截屏 → 分辨率标准化 → 自动上传 Files API → 以 user 消息注入上下文；截图叠加 10×10 网格 + 四边三级刻度（25/50/100）辅助坐标读数；支持 region 局部放大（放大镜）与 mark 准星标记（估坐标 → 带标记截图 → 目测校正 → 操作）
+- **新增 `desktop_control` 工具（第 24 个）**：桌面键鼠模拟（mouse_move / mouse_click / mouse_drag / mouse_scroll / key / type / screen_size），单次支持 1~20 个批量动作（也兼容单动作）；坐标采用 0~1000 归一化协议（基于最近一次截图基准）
+- **安全机制**：DESKTOP 高危权限分类（授权弹窗展示动作摘要）+ 坐标准星预检闸门（点击/拖拽前未校验坐标时先返回带准星的校验图，预检轮经 SideEffectFreePreflight 免弹窗）+ 红线约束（禁止密码/支付类输入）
+- **跨平台**：DesktopPlatformAdapter 平台适配层（Windows / macOS / Linux）；application.yml 新增 desktop 配置块（capture / control）
+
+### ⚡ 优化：流式渲染性能（stream-render-perf M1~M5）
+
+- **前端渲染**：分段稳定渲染、更新管线去冗余、巨型消息瘦身、流式降级渲染（超大消息流式期间降级为纯文本，结束后恢复 Markdown）
+- **后端 SSE 聚合推送（M5）**：SseBatchUtil 按输出边界（50ms / 32 条）批量合并推送，前端零改动
+
+### 💰 新增：Provider 余额查询
+
+- 新增 ProviderBalanceController / ProviderBalanceService（对接 DeepSeek `/user/balance`）；聊天页进入与每轮对话结束后自动刷新余额展示
+
+### 🛠️ 修复与增强
+
+- **LLM 网络重试增强**：LLMWebClientManager 网络异常自动重试与认证归属修复
+- **全局异常处理**：新增 GlobalExceptionHandler 统一兜底
+- **权限管道增强**：OperationCategory 新增 DESKTOP 分类；新增 SideEffectFreePreflight（无副作用预检豁免）与 ToolPermissionLevel
+- **数据库连接**：连接测试修复
+
+### 🏷️ 版本号
+
+- 后端：`1.1.8` → `2.0.0`（pom.xml）
+- 前端：`1.1.8` → `2.0.0`
+- Electron：`1.1.8` → `2.0.0`（打包 jar 路径同步 `code-craft-2.0.0.jar`）
+- MCP Server 握手版本：`1.1.8` → `2.0.0`
+- 打包产物：`code-craft-1.1.8.jar` → `code-craft-2.0.0.jar`
+- 说明文档：README(_EN) / BUILD_AND_RUN(_EN) / docs（ARCHITECTURE、TOOL_SYSTEM、MCP_SYSTEM 等）同步至 v2.0.0（内置工具数 22 → 24）
+
+---
+
 ## [1.1.8] - 2026-09-14
 
 ### 🤝 新增：智能体互相调用（Agent-to-Agent Invocation）

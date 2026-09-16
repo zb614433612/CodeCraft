@@ -14,5 +14,6 @@ public enum OperationCategory {
     SERVICE,        // 服务管理（command action=list/logs/stop）
     SKILL,          // 技能管理（skill: create/update/delete/list/report）
     COMMUNICATION,  // 用户交互（ask_clarification）
-    ADMIN           // 管理操作（agent / task_manager）
+    ADMIN,          // 管理操作（agent / task_manager）
+    DESKTOP         // 桌面自动化（screen_capture 截图 / desktop_control 键鼠模拟）
 }

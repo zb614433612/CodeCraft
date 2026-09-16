@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS conversation_message (
   content LONGTEXT COMMENT '消息内容',
   reasoning LONGTEXT COMMENT '思考过程（仅assistant角色）',
   tool_calls LONGTEXT COMMENT '工具调用数据块（JSON格式）',
+  turn_id VARCHAR(50) COMMENT '前端生成的turnId，用于匹配回滚快照',
+  message_type VARCHAR(32) DEFAULT NULL COMMENT '消息类型：NULL=普通消息，desktop_inject=桌面截图自动注入（前端不渲染为用户气泡）',
   created_at DATETIME NOT NULL COMMENT '创建时间',
   INDEX idx_conversation_id (conversation_id),
   INDEX idx_created_at (created_at),
@@ -552,3 +554,86 @@ INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_t
 -- 管理员分配数据库连接菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 17;
+
+-- 新增 SETTING 菜单：文件管理（图片文件资产——普通用户可用，仅本人数据）
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(18, '文件管理', '/file-manage', 'FolderOpenOutlined', NULL, 12, 'SETTING');
+
+-- 分配文件管理菜单：管理员 + 普通用户（页面本身按"仅本人"隔离数据）
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code IN ('admin', 'user') AND m.id = 18;
+
+-- ============================================================
+-- 文件资产模块（vision-files-api M2）：file_asset + file_reference 两表
+-- 文件本体与"被会话/消息引用"分离：删除会话时按"引用归零"判定是否删除文件本体
+-- （不建 DB 外键：远端删除需应用层参与，级联由 FileAssetService 显式处理）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS file_asset (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  file_id VARCHAR(100) COMMENT '远端 Files API 文件ID（file-api-...；local 存储为 NULL）',
+  provider_code VARCHAR(30) COMMENT '所属 LLM Provider code（local 存储为 NULL）',
+  user_id BIGINT NOT NULL COMMENT '上传用户ID',
+  filename VARCHAR(512) NOT NULL COMMENT '文件名（≤512）',
+  display_name VARCHAR(512) COMMENT '本地显示名（重命名用，可空；空时显示 filename）',
+  mime_type VARCHAR(100) COMMENT 'MIME（由内容魔数判定，如 image/png）',
+  size BIGINT NOT NULL COMMENT '字节数',
+  local_path VARCHAR(500) NOT NULL COMMENT '本地副本文件名（位于 file-asset.store.dir 目录内）',
+  storage_type VARCHAR(16) DEFAULT 'cloud' COMMENT '存储类型：cloud=云端 Files API（图片）/ local=本地存储（文档）',
+  source VARCHAR(20) DEFAULT 'upload' COMMENT '来源：upload/paste',
+  status VARCHAR(20) DEFAULT 'active' COMMENT 'active/deleted/orphan',
+  orphan_retry_count INT DEFAULT 0 COMMENT 'orphan 补偿重试次数（远端删除失败累计；超阈值保留告警）',
+  expires_at DATETIME COMMENT '远端过期时间（永久策略下恒为 NULL，字段保留兼容）',
+  created_at DATETIME NOT NULL COMMENT '上传时间'
+) DEFAULT CHARSET=utf8mb4 COMMENT='文件资产表（对齐远端 Files API，永久保存）';
+
+CREATE TABLE IF NOT EXISTS file_reference (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  file_asset_id BIGINT NOT NULL COMMENT '关联 file_asset.id',
+  conversation_id BIGINT NOT NULL COMMENT '引用所在会话',
+  message_id BIGINT COMMENT '引用所在用户消息ID（发送时回填；供历史消息回显）',
+  created_at DATETIME NOT NULL COMMENT '引用建立时间'
+) DEFAULT CHARSET=utf8mb4 COMMENT='文件引用关联表（支撑历史回显/级联清理/跨会话引用保护）';
+
+-- H2 兼容的索引创建（照 lesson/db_connection 表惯例：内联 INDEX 在 H2 MODE=MySQL 下部分不支持）
+CREATE INDEX IF NOT EXISTS idx_file_asset_user ON file_asset(user_id);
+CREATE INDEX IF NOT EXISTS idx_file_asset_fid ON file_asset(file_id);
+CREATE INDEX IF NOT EXISTS idx_file_asset_status ON file_asset(status);
+CREATE INDEX IF NOT EXISTS idx_file_ref_asset ON file_reference(file_asset_id);
+CREATE INDEX IF NOT EXISTS idx_file_ref_conv ON file_reference(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_file_ref_msg ON file_reference(message_id);
+
+-- ============================================================
+-- M7（文档附件统一）：storage_type 区分云端/本地
+-- 文档类附件（pdf/word/excel/文本/代码）改为本地存储（local），不上传 Files API；
+-- 图片仍为云端（cloud）。local 资产无远端信息，file_id/provider_code 放开 NOT NULL。
+-- 老库由下方 ALTER 迁移（新库 CREATE 定义已同步；重复执行由 continue-on-error 容忍）
+-- ============================================================
+ALTER TABLE file_asset ADD COLUMN IF NOT EXISTS storage_type VARCHAR(16) DEFAULT 'cloud' COMMENT '存储类型：cloud=云端 Files API（图片）/ local=本地存储（文档）';
+-- H2 标准语法：放开 NOT NULL（local 文档无远端 file_id/provider）
+ALTER TABLE file_asset ALTER COLUMN file_id DROP NOT NULL;
+ALTER TABLE file_asset ALTER COLUMN provider_code DROP NOT NULL;
+-- H2 兼容的独立索引（避免内联 INDEX 跨表重名坑）
+CREATE INDEX IF NOT EXISTS idx_file_asset_storage ON file_asset(storage_type);
+
+-- ============================================================
+-- P3 收尾：orphan 补偿重试计数（远端删除失败后的补偿任务用）
+-- 老库由下方 ALTER 迁移（新库 CREATE 定义已同步；重复执行由 continue-on-error 容忍）
+-- ============================================================
+ALTER TABLE file_asset ADD COLUMN IF NOT EXISTS orphan_retry_count INT DEFAULT 0 COMMENT 'orphan 补偿重试次数（远端删除失败累计；超阈值保留告警）';
+
+-- ============================================================
+-- 会话消息 turnId 列补录（历史缺失修复）
+-- 原因：turn_id 列此前仅由 DeepSeekServiceImpl.afterPropertiesSet 程序化 ALTER 添加，
+-- schema.sql 未收录；纯 schema.sql 建库场景（如冒烟测试 H2 内存库）缺列导致写入失败。
+-- 老库由下方 ALTER 迁移（新库 CREATE 定义已同步；重复执行由 continue-on-error 容忍）。
+-- ============================================================
+ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS turn_id VARCHAR(50) COMMENT '前端生成的turnId，用于匹配回滚快照';
+
+-- ============================================================
+-- 历史记录显示修复：桌面截图注入消息标记（conversation_message.message_type）
+-- 原因：自动注入的 user 消息（role=user，供 API 消息还原）不应在前端渲染为用户气泡；
+-- 前端按 message_type='desktop_inject' 跳过聚合打断，将其截图资产归并到宿主 AI 消息回显。
+-- 老库由下方 ALTER 迁移（新库 CREATE 定义已同步；重复执行由 continue-on-error 容忍）；
+-- 存量旧数据回填由 DeepSeekServiceImpl.afterPropertiesSet 幂等执行。
+-- ============================================================
+ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS message_type VARCHAR(32) DEFAULT NULL COMMENT '消息类型：NULL=普通消息，desktop_inject=桌面截图自动注入（前端不渲染为用户气泡）';

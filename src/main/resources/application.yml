@@ -2,11 +2,19 @@
 server:
   # 服务器端口
   port: 8084
+  tomcat:
+    # 请求体超限时允许吞掉的最大字节数：避免客户端收不到错误响应而连接重置（配合 multipart 上限）
+    max-swallow-size: 70MB
 # Spring配置
 spring:
   # 允许循环引用（AgentForkManager ↔ ToolExecutor 通过工具形成良性循环）
   main:
     allow-circular-references: true
+    # 关闭 headless：桌面自动化（screen_capture/desktop_control）依赖 AWT Robot。
+    # 注意：实际生效点在启动类 AgentDeepseekApplication.main()（SpringApplicationBuilder.headless(false)）——
+    # Spring Boot 的系统属性初始化早于本配置文件绑定，此处配置无法直接影响 java.awt.headless；
+    # 保留本项为意图声明与未来版本兼容，勿删启动类中的 headless(false)。
+    headless: false
   # 应用名称配置
   application:
     # 应用名称
@@ -59,6 +67,13 @@ spring:
     type: caffeine
     caffeine:
       spec: maximumSize=500,expireAfterWrite=1h
+  # 文件上传（multipart）配置——单文件上限 64MB（对齐 DeepSeek Files API 单文件上限 64 MiB）
+  servlet:
+    multipart:
+      # 单文件上限：64MB（超限请求将被拒绝）
+      max-file-size: 64MB
+      # 单请求上限：单文件 64MB + multipart 协议开销，留余量
+      max-request-size: 70MB
 
 # MyBatis配置
 mybatis:
@@ -156,6 +171,40 @@ web-fetch:
     host: 127.0.0.1 # 代理主机地址
     port: 7890 # 代理端口（Clash 默认 7890）
 
+# 桌面自动化配置（screen_capture 桌面截图 / desktop_control 键盘鼠标模拟）
+desktop:
+  # 总开关（关闭后桌面工具直接返回"功能未启用"提示）
+  enabled: true
+  capture:
+    # 截图标准化长边上限（像素）——截图统一缩放至模型友好尺寸，坐标空间=标准化图像素空间
+    max-long-edge: 1280
+    # region 局部截图自动放大上限（≤1 = 禁用；仅 region 请求生效，全屏截图只缩不放）
+    max-zoom: 3.0
+    # 截图频率限制：同一会话每分钟上限（0 = 不限制）
+    max-per-minute: 0
+    # 截图频率限制：同一会话最小间隔（毫秒；0 = 不限制）
+    min-interval-ms: 0
+  control:
+    # 单次批量动作上限（desktop_control 键鼠模拟；M6 实施）
+    max-actions-per-call: 20
+    # 动作间延迟（毫秒，模拟人类节奏，让 UI 有响应时间）
+    action-delay-ms: 150
+    # 预检闸门（先验证后执行；M6.2）：点击/拖拽坐标未经准星校验时先返回带准星的校验图（不执行动作），确认后再次调用即执行
+    verify-before-click: true
+
+# 文件资产配置（本地副本目录 file-asset.store.dir 用代码默认值 data/file-assets）
+file-asset:
+  # orphan 补偿清理（P3）：远端删除失败的文件定时重试删除
+  orphan-cleanup:
+    # 任务开关
+    enabled: true
+    # 调度间隔（毫秒，默认 30 分钟）
+    interval-ms: 1800000
+    # 首次执行延迟（毫秒，默认 2 分钟；等待应用完全就绪）
+    initial-delay-ms: 120000
+    # 连续失败告警阈值（达到后日志升级为 ERROR 并保留记录待人工处理）
+    max-retries: 5
+
 # DeepSeek API配置
 deepseek:
   # DeepSeek API基础URL
@@ -209,6 +258,8 @@ deepseek:
       - "mcp_server_manager"
       - "lesson"
       - "agent_invoke"
+      - "screen_capture"
+      - "desktop_control"
 
 # ==================== 成长体系（Lesson）配置 ====================
 lesson:
@@ -364,6 +415,9 @@ llm:
     max-attempts: 3            # 最多尝试次数（含首次请求，即最多重试 2 次）
     base-delay-ms: 1000        # 重试基础延迟（毫秒，指数退避起点 1s → 2s → 4s...）
     max-delay-ms: 10000        # 重试最大延迟（毫秒，退避封顶）
+    # 网络类错误兜底重试（2026-09-16）：DNS 解析失败/连接拒绝/连接超时/读响应头超时等网络波动，防任务中断
+    network-max-retries: 3     # 网络类错误最多重试次数（不含首次请求；0=禁用网络重试）
+    network-interval-ms: 5000  # 网络类错误重试固定间隔（毫秒，默认 5 秒）
   # 全局并发限流（DeepSeek 官方仅按并发限制，不按 QPS：v4-pro 500 / v4-flash 2500，账号粒度）
   # 已移除 QPS 令牌桶与 per-provider 分桶隔离——所有 Provider 共享一个全局并发信号量兜底
   rate-limit:

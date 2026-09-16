@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v1.1.8 | 更新：2026-09-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.0 | 更新：2026-09-16 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -18,7 +18,7 @@
                      └────────────┬─────────────┘
                                   │ implements
                      ┌────────────┴─────────────┐
-                      │  22 个工具实现类           │
+                      │  24 个工具实现类           │
                      │  (@ToolPermission 注解)   │
                      └────────────┬─────────────┘
                                   │ 自动注入 List<Tool>
@@ -293,6 +293,7 @@ public class MyNewTool implements Tool {
 | `SKILL` | 技能管理 | skill、lesson |
 | `COMMUNICATION` | 用户交互 | ask_clarification |
 | `ADMIN` | 管理操作 | agent、agent_invoke、task_manager、mcp_server_manager、schedule_task |
+| `DESKTOP` | 桌面自动化（截图 / 键鼠模拟，高危） | screen_capture、desktop_control |
 
 ### Step 3：配置三层权限
 
@@ -348,8 +349,10 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 | `mcp_server_manager` | ADMIN | ✓ | ✗ | ✗ |
 | `schedule_task` | ADMIN | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
+| `screen_capture` | DESKTOP | ✗ | ✗ | ✓ |
+| `desktop_control` | DESKTOP | ✓ | ✗ | ✓ |
 
-> 📌 速查表按当前 22 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
+> 📌 速查表按当前 24 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
 
 ---
 

@@ -9,6 +9,8 @@ export interface ConversationResponse {
   userId: number
   createdAt: string // ISO字符串
   updatedAt: string // ISO字符串
+  /** 会话所属 Agent 配置 ID（后端 Conversation 实体实际返回；用于跨页引用目标定位/跨 Agent 切换） */
+  agentConfigId?: number | null
 }
 
 // 后端返回的消息数据类型
@@ -19,6 +21,8 @@ export interface MessageResponse {
   content: string
   reasoning: string | null
   turnId: string | null
+  /** 消息类型：null=普通消息，desktop_inject=桌面截图自动注入（前端不渲染为用户气泡） */
+  messageType?: string | null
   createdAt: string // ISO字符串
 }
 
@@ -129,6 +133,15 @@ export function processMessageGroups(messages: MessageResponse[]): any[] {
     const timestamp = new Date(msg.createdAt).getTime()
 
     if (role === 'user') {
+      // 修复：桌面截图自动注入消息（role=user 仅为兼容 API 消息还原）不渲染为用户气泡、也不打断 AI 消息聚合；
+      // 仅把消息id记入宿主 AI 消息（injectSourceIds），由 loadMessageFileRefs 把截图资产归并到该 AI 消息回显
+      if (msg.messageType === 'desktop_inject') {
+        if (currentAssistantMsg) {
+          if (!currentAssistantMsg.injectSourceIds) currentAssistantMsg.injectSourceIds = []
+          currentAssistantMsg.injectSourceIds.push(msg.id.toString())
+        }
+        continue
+      }
       flushAssistantMsg()
       result.push({
         id: msg.id.toString(),

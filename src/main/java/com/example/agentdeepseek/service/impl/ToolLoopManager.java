@@ -500,6 +500,32 @@ public class ToolLoopManager {
     }
 
     /**
+     * M3：提取消息 content 的纯文本（兼容多模态内容块数组）
+     * <p>数组形态下拼接所有 text 块（图片等非文本块忽略）；其他类型 String.valueOf 兜底。</p>
+     */
+    private static String extractTextContent(Object content) {
+        if (content == null) {
+            return null;
+        }
+        if (content instanceof String text) {
+            return text;
+        }
+        if (content instanceof List<?> parts) {
+            StringBuilder sb = new StringBuilder();
+            for (Object item : parts) {
+                if (item instanceof Map<?, ?> block && "text".equals(block.get("type"))) {
+                    Object text = block.get("text");
+                    if (text != null) {
+                        sb.append(text);
+                    }
+                }
+            }
+            return sb.toString();
+        }
+        return String.valueOf(content);
+    }
+
+    /**
      * 构建评委评估上下文
      */
     public String buildJudgeContext(List<Map<String, Object>> messages) {
@@ -511,7 +537,7 @@ public class ToolLoopManager {
         for (Map<String, Object> msg : messages) {
             if ("user".equals(msg.get("role"))) {
                 round++;
-                String uc = (String) msg.get("content");
+                String uc = extractTextContent(msg.get("content"));
                 if (uc != null && !uc.isEmpty()) {
                     String truncated = uc.length() > 300 ? uc.substring(0, 300) + "..." : uc;
                     sb.append("[轮次 ").append(round).append("] ").append(truncated).append("\n");

@@ -13,7 +13,7 @@ MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的�
 | 方向 | 含义 | 价值 |
 |------|------|------|
 | **MCP Client** | CodeCraft 作为客户端，连接外部 MCP Server（GitHub、数据库、浏览器自动化等），将外部工具拉取进现有 ToolRegistry | 让 DeepSeek/OpenAI 等模型直接调用海量 MCP 生态工具，无需逐个手写 |
-| **MCP Server** | CodeCraft 作为服务端，把内置 22 个工具（文件/Git/命令/搜索等）暴露为 MCP 服务 | 让 Claude Desktop、Cursor 等 MCP 客户端连接 CodeCraft，复用其工具能力 |
+| **MCP Server** | CodeCraft 作为服务端，把内置 24 个工具（文件/Git/命令/搜索等）暴露为 MCP 服务 | 让 Claude Desktop、Cursor 等 MCP 客户端连接 CodeCraft，复用其工具能力 |
 
 ---
 
@@ -70,7 +70,7 @@ MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的�
 │  │ DeepSeek     │◄────►│  ToolRegistry ◄── ToolInitializer     │  │
 │  │ OpenAI       │      │  ToolExecutor（解析/执行/智能补齐）     │  │
 │  │ Anthropic    │      │  ToolExecutionPipeline（三层权限防护）  │  │
-│  │ Ollama/MiMo  │      │  22 个内置工具（@Component 自动注册）  │  │
+│  │ Ollama/MiMo  │      │  24 个内置工具（@Component 自动注册）  │  │
 │  └──────────────┘      └──────────────┬───────────────────────┘  │
 │                                       │                          │
 │          ┌────────────────────────────┼───────────────────┐      │
@@ -163,7 +163,7 @@ public class McpToolAdapter implements Tool {
 
 ```
 应用启动
-  → ToolInitializer 注册 22 个内置工具
+  → ToolInitializer 注册 24 个内置工具
   → McpClientManager（ApplicationRunner，order 靠后）
       → 读 mcp_server 表 enabled=1
       → for each server:
@@ -383,7 +383,7 @@ codecraft:
 |--------|----------|----------|
 | `mcp/client` 包 | ✅ McpConnection / McpToolAdapter / McpClientManager | 与设计一致 |
 | `mcp/server` 包 | ✅ McpServerProperties / McpToolHandler / CodeCraftMcpServer / McpAuthFilter | 与设计一致 |
-| `McpController` | ✅ McpServerController（`/api/mcp/servers` CRUD + connect/disconnect/refresh） | 合并了 exposure 管理；`mcp_exposure` 表未建，Server 白名单用 application.yml 配置（7 个只读工具） |
+| `McpController` | ✅ McpServerController（`/api/mcp/servers` CRUD + connect/disconnect/refresh） | 合并了 exposure 管理；`mcp_exposure` 表未建，Server 白名单用 application.yml 配置（6 个只读工具） |
 | `McpServerService` | ✅ 含状态合并 VO（status/errorMessage/toolCount/registeredToolCount） | 新增：前端免二次查询 |
 | 权限集成 | ✅ ToolPermissionLevel 枚举 + ToolPermissionRegistry 动态注册 API | 与设计一致（P7） |
 | 前端 | ✅ McpConfigView.vue + api/mcp.ts + 路由 /mcp-config + 菜单 id=15 | 与设计一致（P6） |
@@ -391,8 +391,8 @@ codecraft:
 
 ### 11.2 各 Phase 验证结果
 
-- **P3（Server）**：initialize 握手 ✅；tools/list 返回 7 个默认白名单工具 ✅；tools/call 执行 check_network 成功 ✅；白名单外工具拒绝 ✅
-- **P4（Client）**：自连自身，19 内置 + 7 selftest_ 外部 = 26 个工具注册 ✅（v1.1.4 当时；当前为 21 个内置工具）；/api/tools/registry 可见带【MCP-前缀】描述 ✅
+- **P3（Server）**：initialize 握手 ✅；tools/list 返回 6 个默认白名单工具 ✅；tools/call 执行 check_network 成功 ✅；白名单外工具拒绝 ✅
+- **P4（Client）**：自连自身，19 内置 + 7 selftest_ 外部 = 26 个工具注册 ✅（v1.1.4 当时；当前为 24 个内置工具）；/api/tools/registry 可见带【MCP-前缀】描述 ✅
 - **P5/P6（API+前端）**：列表 API 三态（FAILED/CONNECTED/DISABLED）✅；重复前缀冲突跳过（registeredToolCount=0）✅；disconnect 后工具清零 ✅；mvn compile 全通过（含前端 vite build）✅
 - **P7（权限）**：SAFE 档位 → category=READ/affectsData=false ✅；HIGH_RISK 档位 → category=EXECUTE/affectsData=true/highRisk=true ✅；disconnect 同步注销权限元数据 ✅
 - **P8（端到端）**：完整调用链路（Client → Server → 内置工具 → 返回）往返执行成功 ✅（临时 main 类验证，结果含「网络连通性检测结果」报告）

@@ -18,6 +18,8 @@ export interface ChatRequest {
   providerCode?: string
   contextMode?: string
   attachmentIds?: string[]
+  /** M4：文件资产ID列表（图片；发送时建立引用并注入 file 内容块） */
+  fileAssetIds?: number[]
 }
 
 // 流式聊天的额外选项
@@ -32,6 +34,8 @@ export interface StreamChatOptions {
   providerCode?: string
   contextMode?: string
   attachmentIds?: string[]
+  /** M4：文件资产ID列表（图片；发送时建立引用并注入 file 内容块） */
+  fileAssetIds?: number[]
 }
 
 // 聊天响应数据（非流式，用于创建会话等）
@@ -116,6 +120,9 @@ export async function* streamChat(
   }
   if (options?.attachmentIds) {
     requestBody.attachmentIds = options.attachmentIds
+  }
+  if (options?.fileAssetIds && options.fileAssetIds.length > 0) {
+    requestBody.fileAssetIds = options.fileAssetIds
   }
 
   try {

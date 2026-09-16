@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 BUILD_AND_RUN](./BUILD_AND_RUN.md)
 # Build & Run Guide (Lazy Channel)
 
-> Applicable version: v1.1.8+
+> Applicable version: v2.0.0+
 
 ## TL;DR
 
@@ -9,10 +9,10 @@
 
 ```bash
 # Windows
-scripts\build.bat v1.1.8
+scripts\build.bat v2.0.0
 
 # Mac / Linux
-./scripts/build.sh v1.1.8
+./scripts/build.sh v2.0.0
 ```
 
 ### One-click Run
@@ -145,7 +145,7 @@ npm run dist:linux
 ```
 project root
 ├── src/main/java/...        → Backend source (253 Java files)
-│   ├── tool/impl/           → 21 AI tool implementations
+│   ├── tool/impl/           → 24 AI tool implementations
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/impl/        → Core business logic
 │   └── service/llm/         → ★ LLM Client Layer (LLMClient + 5 Provider impls)
