@@ -1,7 +1,10 @@
 package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
+import com.example.agentdeepseek.model.vo.CloudFileDeleteResultVO;
+import com.example.agentdeepseek.model.vo.CloudFileListVO;
 import com.example.agentdeepseek.model.vo.FileAssetVO;
+import com.example.agentdeepseek.model.vo.FilePageVO;
 import com.example.agentdeepseek.service.files.FileAssetService;
 import com.example.agentdeepseek.service.files.FilesApiException;
 import io.swagger.v3.oas.annotations.Operation;
@@ -89,6 +92,38 @@ public class FileAssetController {
     }
 
     /**
+     * 分页列出当前用户的文件（2026-09-21 文件管理页分页改造）
+     * <p>
+     * 标准页码分页 + 总数/占用空间统计；与游标版 {@code GET /api/files} 并存
+     * （旧调用方——聊天页历史图片选择、引用回显——继续使用游标版，本端点新增不改旧契约）。
+     * </p>
+     */
+    @Operation(summary = "文件列表（分页）", description = "标准页码分页（page/pageSize）+ 总数与占用空间统计（与列表同筛选口径）")
+    @GetMapping("/page")
+    public ApiResponse<FilePageVO> page(
+            @Parameter(description = "页码（从 1 开始）")
+            @RequestParam(value = "page", required = false, defaultValue = "1") Integer page,
+            @Parameter(description = "每页条数（默认 20，上限 200）")
+            @RequestParam(value = "pageSize", required = false, defaultValue = "20") Integer pageSize,
+            @Parameter(description = "排序：asc/desc（缺省 desc=最新在前）")
+            @RequestParam(value = "order", required = false, defaultValue = "desc") String order,
+            @Parameter(description = "文件名/显示名模糊筛选（可空）")
+            @RequestParam(value = "keyword", required = false) String keyword,
+            @Parameter(description = "状态筛选：active/deleted/orphan（可空）")
+            @RequestParam(value = "status", required = false) String status,
+            @Parameter(description = "存储类型筛选：cloud=云端（图片）/ local=本地（文档）（可空）")
+            @RequestParam(value = "storageType", required = false) String storageType,
+            @Parameter(description = "按引用会话筛选（可空）")
+            @RequestParam(value = "conversationId", required = false) Long conversationId,
+            @Parameter(description = "是否附带引用信息（含 messageId，供历史回显）")
+            @RequestParam(value = "withRefs", required = false, defaultValue = "false") boolean withRefs,
+            @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
+            @RequestAttribute("userId") Long userId) {
+        return ApiResponse.success(fileAssetService.listPaged(userId, page, pageSize, order,
+                keyword, status, storageType, conversationId, withRefs));
+    }
+
+    /**
      * 查询单个文件（含引用信息）
      */
     @Operation(summary = "查询文件", description = "查询单个文件资产（含引用信息，供历史回显定位）")
@@ -139,6 +174,37 @@ public class FileAssetController {
             @Parameter(description = "Provider code（可选，缺省用首个 Provider）")
             @RequestParam(value = "providerCode", required = false) String providerCode) {
         return ApiResponse.success(fileAssetService.supported(providerCode));
+    }
+
+    /**
+     * 云端文件列表（Files API 账号级；2026-09-21 云端文件视图）
+     * <p>
+     * 拉取 Provider 账号下云端文件全量清单，与本地记录比对标注「已登记 / 仅云端」。
+     * 「仅云端」= 软件重装/清理数据后本地无记录的文件（云端孤儿主要形态），可在此删除清理。
+     * 路由说明：字面量路径优先于 {@code /{id}} 变量段，无冲突。
+     * </p>
+     */
+    @Operation(summary = "云端文件列表", description = "查询 Provider 账号下云端 Files API 文件清单，并与本地记录比对标注「已登记/仅云端」（仅云端=重装/清理后本地无记录，可清理）")
+    @GetMapping("/cloud")
+    public ApiResponse<CloudFileListVO> cloudFiles(
+            @Parameter(description = "Provider code（可选，缺省用首个 Provider）")
+            @RequestParam(value = "providerCode", required = false) String providerCode) {
+        return ApiResponse.success(fileAssetService.listCloudFiles(providerCode));
+    }
+
+    /**
+     * 删除云端文件（Files API 账号级；联动清理本地记录，保证云端不留孤儿）
+     */
+    @Operation(summary = "删除云端文件", description = "删除云端 Files API 文件（幂等：404 视为已删除）；本地存在同 provider+fileId 记录时联动清理（引用+记录+本地副本）")
+    @DeleteMapping("/cloud/{fileId}")
+    public ApiResponse<CloudFileDeleteResultVO> deleteCloudFile(
+            @Parameter(description = "远端 Files API 文件ID（file-api-...）", required = true)
+            @PathVariable String fileId,
+            @Parameter(description = "Provider code（可选，缺省用首个 Provider）")
+            @RequestParam(value = "providerCode", required = false) String providerCode,
+            @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
+            @RequestAttribute("userId") Long userId) {
+        return ApiResponse.success(fileAssetService.deleteCloudFile(fileId, providerCode, userId), "删除成功");
     }
 
     /**

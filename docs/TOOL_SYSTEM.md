@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v2.0.0 | 更新：2026-09-16 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.1 | 更新：2026-09-22 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -18,7 +18,7 @@
                      └────────────┬─────────────┘
                                   │ implements
                      ┌────────────┴─────────────┐
-                      │  24 个工具实现类           │
+                      │  27 个工具实现类           │
                      │  (@ToolPermission 注解)   │
                      └────────────┬─────────────┘
                                   │ 自动注入 List<Tool>
@@ -288,7 +288,7 @@ public class MyNewTool implements Tool {
 | `EXECUTE` | 命令执行 | command (exec/start) |
 | `NETWORK` | 网络请求 | web_search、web_fetch、http_request、check_network |
 | `DATABASE` | 数据库操作 | execute_sql |
-| `GIT` | Git 操作 | git_query、git_submit、git_branch |
+| `GIT` | Git 操作 | git_query、git_submit、git_branch、git_stash、git_tag、git_remote |
 | `SERVICE` | 服务管理 | command (list/logs/stop) |
 | `SKILL` | 技能管理 | skill、lesson |
 | `COMMUNICATION` | 用户交互 | ask_clarification |
@@ -336,8 +336,11 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 | `check_network` | NETWORK | ✗ | ✗ | ✗ |
 | `execute_sql` | DATABASE | ✓ | ✗ | ✓ |
 | `git_query` | GIT | ✗ | ✗ | ✗ |
-| `git_submit` | GIT | ✓ | ✗ | ✓ |
+| `git_submit` | GIT | ✓ | ✗ | ✗ |
 | `git_branch` | GIT | ✓ | ✗ | ✗ |
+| `git_stash` | GIT | ✓ | ✗ | ✗ |
+| `git_tag` | GIT | ✓ | ✗ | ✗ |
+| `git_remote` | GIT | ✓ | ✗ | ✗ |
 | `agent` | ADMIN | ✗ | ✗ | ✗ |
 | `agent_invoke` | ADMIN | ✓ | ✗ | ✗ |
 | `skill` | SKILL | ✓ | ✗ | ✗ |
@@ -352,7 +355,7 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 | `screen_capture` | DESKTOP | ✗ | ✗ | ✓ |
 | `desktop_control` | DESKTOP | ✓ | ✗ | ✓ |
 
-> 📌 速查表按当前 24 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
+> 📌 速查表按当前 27 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
 
 ---
 

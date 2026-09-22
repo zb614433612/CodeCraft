@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v2.0.0 | Updated: 2026-09-16 | Audience: Developers / AI Collaborators
+> Version: v2.0.1 | Updated: 2026-09-22 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -255,7 +255,7 @@ public class MyNewTool implements Tool {
 | `EXECUTE` | Command execution | command (exec/start) |
 | `NETWORK` | Network requests | web_search, web_fetch, http_request, check_network |
 | `DATABASE` | Database operations | execute_sql |
-| `GIT` | Git operations | git_query, git_submit, git_branch |
+| `GIT` | Git operations | git_query, git_submit, git_branch, git_stash, git_tag, git_remote |
 | `SERVICE` | Service management | command (list/logs/stop) |
 | `SKILL` | Skill management | skill, lesson |
 | `COMMUNICATION` | User interaction | ask_clarification |
@@ -297,8 +297,11 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `check_network` | NETWORK | ✗ | ✗ | ✗ |
 | `execute_sql` | DATABASE | ✓ | ✗ | ✓ |
 | `git_query` | GIT | ✗ | ✗ | ✗ |
-| `git_submit` | GIT | ✓ | ✗ | ✓ |
+| `git_submit` | GIT | ✓ | ✗ | ✗ |
 | `git_branch` | GIT | ✓ | ✗ | ✗ |
+| `git_stash` | GIT | ✓ | ✗ | ✗ |
+| `git_tag` | GIT | ✓ | ✗ | ✗ |
+| `git_remote` | GIT | ✓ | ✗ | ✗ |
 | `agent` | ADMIN | ✗ | ✗ | ✗ |
 | `agent_invoke` | ADMIN | ✓ | ✗ | ✗ |
 | `skill` | SKILL | ✓ | ✗ | ✗ |
@@ -313,7 +316,7 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `screen_capture` | DESKTOP | ✗ | ✗ | ✓ |
 | `desktop_control` | DESKTOP | ✓ | ✗ | ✓ |
 
-> 📌 This table tracks the current 24 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
+> 📌 This table tracks the current 27 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
 
 ---
 

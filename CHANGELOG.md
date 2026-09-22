@@ -5,6 +5,42 @@
 
 ---
 
+## [2.0.1] - 2026-09-22
+
+### 🔧 增强：Git 工具家族功能补齐（AI 工具 / REST / 前端 UI 三层同步）
+
+- **新增 3 个 Git 工具（内置工具数 24 → 27）**：`git_stash`（储藏管理 save/list/pop/drop）、`git_tag`（标签管理 list/create/delete/push）、`git_remote`（远程仓库管理 list/add/set_url/remove）
+- **`git_submit` 扩展 6 个 action**：pull（拉取并合并）、fetch（获取远程更新）、unstage（取消暂存）、restore（还原工作区改动）、reset（回退提交，--hard 必须 confirm=true）、revert（撤销指定提交）；修复推送被拒提示「请先 git pull」但系统无 pull 工具的死循环文案
+- **`git_query` 新增 show action**：查看某次提交详情或某文件在该提交中的改动（ref/file/stat 参数，超长输出自动截断）
+- **`git_branch` 新增 merge action**：将指定分支合并到当前分支（no_ff/message 参数）；create 支持 switch=true 创建并切换；修复切换失败提示「必要时 stash」但系统无 stash 工具的死循环文案
+- **权限注解统一**：`git_query` / `git_submit` 补充 `@ToolPermission`（写类工具 affectsData=true，manual 模式审批；此前 git_submit 无注解不受审批）
+- **REST 层**：GitController 新增 22 个端点（pull / push / fetch / stash×4 / merge / reset / revert / branches / branch×3 / tags / tag×3 / remotes / remote×2）；/restore 支持 all 参数
+- **前端**：GitSidebar 新增同步按钮（拉取/推送/获取）、储藏/分支/标签折叠区、文件还原按钮；修复「取消暂存」误调 /add 接口的 bug；`api/git.ts` 新增 18+ API 函数；CodeAssistantView 工具标签映射同步
+- **配置与文档**：application.yml tool-groups 与核心提示词工具名单更新为 6 个 Git 工具；README(_EN) / BUILD_AND_RUN(_EN) / docs（TOOL_SYSTEM(_EN)、ARCHITECTURE(_EN)、MCP_SYSTEM）同步（内置工具数 24 → 27）
+
+### 🐛 修复：子 Agent 重复调用检测「误杀」正常批处理（F3）
+
+- **根因**：fork 循环（AgentForkManager）的重复检测判据仅比对「第一个工具调用的工具名」，连续读取不同文件 / 搜索不同关键词等正常批处理被误判为死循环；且终止处置为零日志 break、状态保持初始值（completed）——表现为「子 Agent 静默提前停止且无任何痕迹可查」
+- **修复**：①判据对齐主循环 ToolLoopManager（「相同工具 + 相同关键参数」才计次，全量遍历所有工具调用），删除本地残缺实现；②重复检测终止补 log.warn + `completionSuspicious=true`（复用 ⚠️ 核验通道）；③评委终止 / 用户拒绝 / API 解析失败三处退出路径统一补「疑似未完成」标记（退出路径收口）；④`ToolLoopManager.extractToolKey` 的 file_explorer/file_writer 签名纳入 `pattern`（grep/glob 关键词）——连续搜索不同关键词不再误判
+- **验证**：新增回归测试 SubAgentRepeatDetectTest（8 用例，含「连续读不同文件不误杀 / 真死循环仍检测」双向断言），8/8 通过
+
+### 🐛 修复：file_explorer 的 grep 无法搜索 .log 等非白名单文本类型文件
+
+- **根因**：grep 按 `TEXT_EXTENSIONS` 白名单过滤文件，`.log`（及 .csv/.diff/.mjs 等常见文本类型）不在名单中被静默跳过；且显式传入 `include` 也无法绕过——日志文件内容永远搜不到（与文件大小无关，372KB 小日志同样受影响；read 无此限制，行为割裂易误判「文件里没有该内容」）
+- **修复**：①白名单扩容（.mjs/.cjs/.log/.csv/.tsv/.diff/.patch/.rst/.adoc/.jsonl/.ndjson/.lock）；②新增 include 逃生通道（显式指定类型时不再套用默认白名单；二进制拦截保留）；③0 命中提示新增「特殊后缀用 include 显式指定」建议
+- **验证**：新增回归测试 FileExplorerGrepLogTest（6 用例，红绿对照：修复前 2/6 → 修复后 6/6 通过）
+
+### 🏷️ 版本号
+
+- 后端：`2.0.0` → `2.0.1`（pom.xml）
+- 前端：`2.0.0` → `2.0.1`（package.json + package-lock.json）
+- Electron：`2.0.0` → `2.0.1`（打包 jar 路径同步 `code-craft-2.0.1.jar`）
+- MCP Server 握手版本：`2.0.0` → `2.0.1`
+- 打包产物：`code-craft-2.0.0.jar` → `code-craft-2.0.1.jar`
+- 说明文档：BUILD_AND_RUN(_EN) / docs（ARCHITECTURE、DEEPSEEK_SERVICE_IMPL、LLM_PROVIDER_SYSTEM、TOOL_SYSTEM、DEV_QUICKREF、RELEASE_CHECKLIST 等）同步至 v2.0.1
+
+---
+
 ## [2.0.0] - 2026-09-16
 
 ### 🖼️ 新增：图像理解与文件管理（Vision / Files API）
@@ -38,6 +74,7 @@
 - **全局异常处理**：新增 GlobalExceptionHandler 统一兜底
 - **权限管道增强**：OperationCategory 新增 DESKTOP 分类；新增 SideEffectFreePreflight（无副作用预检豁免）与 ToolPermissionLevel
 - **数据库连接**：连接测试修复
+- **智能体互调增强**：`agent_invoke` 工具描述动态注入「可用智能体清单」（委托方智能体可自主发现可用目标，推荐用 ID 调用）
 
 ### 🏷️ 版本号
 

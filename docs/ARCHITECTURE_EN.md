@@ -1,14 +1,14 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v2.0.0 | Updated: 2026-09-16 | Audience: Developers / AI Collaborators
+> Version: v2.0.1 | Updated: 2026-09-22 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
 
 ## 1. One-Sentence Definition
 
-**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **24 tools** (file read/write, command execution, Git operations, web search, desktop automation, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
+**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **27 tools** (file read/write, command execution, Git operations, web search, desktop automation, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
 
 ---
 
@@ -257,7 +257,7 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── Command: command
 │   │   ├── Network: web_search, web_fetch, http_request, check_network
 │   │   ├── Database: execute_sql
-│   │   ├── Git: git_query, git_submit, git_branch
+│   │   ├── Git: git_query, git_submit, git_branch, git_stash, git_tag, git_remote
 │   │   ├── Agent: agent, agent_invoke (Phase 19: invoke/poll/cancel)
 │   │   ├── Skill: skill
 │   │   ├── Lesson: lesson  ★Growth System (search/record/complete/feedback/list)
@@ -443,7 +443,7 @@ src/main/java/com/example/agentdeepseek/
 | **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~900 |
 | **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~800 |
 | **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~5000 |
-| **Tool System** | 24 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
+| **Tool System** | 27 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
 | **File Assets** | Upload/local storage/Files API adapter/vision understanding | FileAssetService + FilesApiClientManager | ~900 |
 | **Desktop Automation** | Screenshot (grid/scale ticks)/mouse & keyboard/coordinate preflight | ScreenCaptureTool + DesktopControlTool | ~1500 |
 | **Growth System** | Retrieval/capture/review/normalization/detour | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |

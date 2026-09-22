@@ -11,7 +11,7 @@
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **24 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **27 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
 - 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching
@@ -80,7 +80,7 @@ CodeCraft
 │   ├── service/agentinvoke/        # Agent-to-Agent Invocation (delegation/trust chain)
 │   ├── service/dbconnection/       # External DB connections (config/AES-GCM/manager)
 │   └── service/files/          # File Assets & Files API adapter (vision pipeline)
-│   ├── tool/                       # AI Agent Tools (24 tools)
+│   ├── tool/                       # AI Agent Tools (27 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
 │   │   ├── agent/                  # P2pAgentService, Handlers
 │   │   ├── connection/             # Netty Server/Client, ConnectionPool
@@ -129,7 +129,7 @@ CodeCraft
 | **Command** | `command` | Execute commands, start/stop/list/logs services |
 | **Network** | `web_search` / `web_fetch` / `http_request` / `check_network` | Web search, page fetch, API calls, connectivity check |
 | **Database** | `execute_sql` | Database query and modification (system DB or configured external connection) |
-| **Git** | `git_query` / `git_submit` / `git_branch` | Git status, diff, log, add, commit, push, branch management |
+| **Git** | `git_query` / `git_submit` / `git_branch` / `git_stash` / `git_tag` / `git_remote` | Git status, diff, log, show, add, commit, push/pull/fetch, branch/merge, stash, tag & remote management |
 | **Agent** | `agent` | Sub-agent fork, collect, inspect |
 | **Agent** | `agent_invoke` | Agent-to-agent delegation: invoke/poll/cancel, independent session |
 | **Skill** | `skill` | Skill CRUD and result reporting |

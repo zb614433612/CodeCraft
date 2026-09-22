@@ -59,6 +59,18 @@ public interface AgentConfigMapper {
     @ResultMap("agentConfigResultMap")
     List<AgentConfig> selectAllSystem();
 
+    /**
+     * 全部启用中的智能体（agent_invoke 工具描述动态注入「可用智能体清单」用）。
+     * 单机产品不做用户过滤——与调用链 resolveAgent（数字 ID 走 selectById）语义一致。
+     */
+    @Select("SELECT id, name, description, avatar, system_prompt, tool_names, model_name, " +
+            "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
+            "provider_id, provider_code, character_profile, user_id, created_at, updated_at FROM agent_config " +
+            "WHERE enabled = 1 " +
+            "ORDER BY is_builtin DESC, sort_order ASC, created_at DESC")
+    @ResultMap("agentConfigResultMap")
+    List<AgentConfig> selectAllEnabled();
+
     @Insert("INSERT INTO agent_config (name, description, avatar, system_prompt, tool_names, model_name, " +
             "thinking_mode, execution_mode, temperature, work_dir, sort_order, enabled, is_default, is_builtin, " +
             "provider_id, provider_code, character_profile, user_id, created_at, updated_at) " +

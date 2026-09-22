@@ -237,27 +237,34 @@ public class GitController {
         return Map.of("success", true);
     }
 
-    @Operation(summary = "还原/撤销文件改动", description = "还原指定文件的未暂存修改 (git checkout -- file)")
+    @Operation(summary = "还原/撤销文件改动", description = "还原未暂存的修改（git checkout -- <file>）；all=true 时还原全部 (git checkout -- .)")
     @PostMapping("/restore")
-    public Map<String, Object> restoreFile(@RequestBody Map<String, String> body) {
+    public Map<String, Object> restoreFile(@RequestBody Map<String, Object> body) {
         Map<String, Object> result = new LinkedHashMap<>();
-        String projectRoot = body.get("projectRoot");
-        String file = body.get("file");
+        String projectRoot = body.get("projectRoot") != null ? String.valueOf(body.get("projectRoot")) : null;
+        String file = body.get("file") != null ? String.valueOf(body.get("file")) : null;
+        boolean all = Boolean.TRUE.equals(body.get("all")) || "true".equalsIgnoreCase(String.valueOf(body.get("all")));
 
-        if (projectRoot == null || file == null || file.isEmpty()) {
+        if (projectRoot == null || projectRoot.isEmpty()) {
             result.put("success", false);
-            result.put("error", "缺少必要参数 projectRoot 或 file");
+            result.put("error", "缺少必要参数 projectRoot");
+            return result;
+        }
+        if (!all && (file == null || file.isEmpty())) {
+            result.put("success", false);
+            result.put("error", "缺少必要参数 file（或设置 all=true 还原全部）");
             return result;
         }
 
-        GitCommandExecutor.GitResult restoreResult = gitExecutor.execute(projectRoot,
-                "checkout", "--", file);
+        GitCommandExecutor.GitResult restoreResult = all
+                ? gitExecutor.execute(projectRoot, "checkout", "--", ".")
+                : gitExecutor.execute(projectRoot, "checkout", "--", file);
 
         result.put("success", restoreResult.success());
         if (!restoreResult.success()) {
             result.put("error", restoreResult.output());
         } else {
-            result.put("output", "已还原: " + file);
+            result.put("output", all ? "已还原全部未暂存改动" : "已还原: " + file);
         }
         return result;
     }
@@ -357,6 +364,478 @@ public class GitController {
         }
 
         result.put("success", true);
+        return result;
+    }
+
+    // ==================== 远程同步（pull / fetch / push） ====================
+
+    @Operation(summary = "拉取远程更新", description = "git pull [remote] [branch]，自动注入已保存 Token")
+    @PostMapping("/pull")
+    public Map<String, Object> pull(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String remote = getStr(body, "remote");
+        if (remote == null || remote.isBlank()) remote = "origin";
+        String branch = getStr(body, "branch");
+
+        List<String> args = new ArrayList<>();
+        args.add("pull");
+        args.add(remote);
+        if (branch != null && !branch.isBlank()) {
+            args.add(branch);
+        }
+        return execResult(gitExecutor.executeWithStoredAuth(projectRoot, args.toArray(new String[0])));
+    }
+
+    @Operation(summary = "获取远程更新", description = "git fetch [--prune] [remote]，不合并")
+    @PostMapping("/fetch")
+    public Map<String, Object> fetch(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String remote = getStr(body, "remote");
+        if (remote == null || remote.isBlank()) remote = "origin";
+        boolean prune = getBool(body, "prune");
+
+        List<String> args = new ArrayList<>();
+        args.add("fetch");
+        if (prune) {
+            args.add("--prune");
+        }
+        args.add(remote);
+        return execResult(gitExecutor.executeWithStoredAuth(projectRoot, args.toArray(new String[0])));
+    }
+
+    @Operation(summary = "推送到远程", description = "git push [-u] [--force] <remote> [branch]，自动注入已保存 Token")
+    @PostMapping("/push")
+    public Map<String, Object> push(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String remote = getStr(body, "remote");
+        if (remote == null || remote.isBlank()) remote = "origin";
+        String branch = getStr(body, "branch");
+        boolean setUpstream = getBool(body, "setUpstream");
+        boolean force = getBool(body, "force");
+
+        List<String> args = new ArrayList<>();
+        args.add("push");
+        if (setUpstream) {
+            args.add("-u");
+        }
+        if (force) {
+            args.add("--force");
+        }
+        args.add(remote);
+        if (branch != null && !branch.isBlank()) {
+            args.add(branch);
+        }
+
+        GitCommandExecutor.GitResult r = gitExecutor.executeWithStoredAuth(projectRoot, args.toArray(new String[0]));
+        Map<String, Object> result = execResult(r);
+        if (!r.success()) {
+            String output = r.output();
+            if (output.contains("rejected") || output.contains("non-fast-forward")) {
+                result.put("error", "推送被拒绝：远程仓库有更新的提交，请先拉取（pull）再推送。\n" + output);
+            }
+        }
+        return result;
+    }
+
+    // ==================== 本地撤销（unstage） ====================
+
+    @Operation(summary = "取消暂存", description = "git reset HEAD -- <files>；all=true 取消全部暂存（保留工作区改动）")
+    @PostMapping("/unstage")
+    public Map<String, Object> unstage(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+
+        @SuppressWarnings("unchecked")
+        List<String> files = (List<String>) body.get("files");
+        boolean all = getBool(body, "all");
+
+        GitCommandExecutor.GitResult r;
+        if (all) {
+            r = gitExecutor.execute(projectRoot, "reset", "HEAD", "--", ".");
+        } else if (files != null && !files.isEmpty()) {
+            List<String> args = new ArrayList<>();
+            args.add("reset");
+            args.add("HEAD");
+            args.add("--");
+            args.addAll(files);
+            r = gitExecutor.execute(projectRoot, args.toArray(new String[0]));
+        } else {
+            return errorResult("请指定 files 或设置 all=true");
+        }
+        return execResult(r);
+    }
+
+    // ==================== 储藏（stash） ====================
+
+    @Operation(summary = "储藏当前改动", description = "git stash push [-m message]")
+    @PostMapping("/stash")
+    public Map<String, Object> stashSave(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String message = getStr(body, "message");
+
+        List<String> args = new ArrayList<>();
+        args.add("stash");
+        args.add("push");
+        if (message != null && !message.isBlank()) {
+            args.add("-m");
+            args.add(message);
+        }
+        return execResult(gitExecutor.execute(projectRoot, args.toArray(new String[0])));
+    }
+
+    @Operation(summary = "列出储藏记录", description = "git stash list（返回原始列表文本）")
+    @GetMapping("/stash")
+    public Map<String, Object> stashList(@RequestParam String projectRoot) {
+        return execResult(gitExecutor.execute(projectRoot, "stash", "list"));
+    }
+
+    @Operation(summary = "弹出储藏", description = "git stash pop [stash@{n}]")
+    @PostMapping("/stash/pop")
+    public Map<String, Object> stashPop(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String stashRef = buildStashRef(body.get("index"));
+        GitCommandExecutor.GitResult r = stashRef == null
+                ? gitExecutor.execute(projectRoot, "stash", "pop")
+                : gitExecutor.execute(projectRoot, "stash", "pop", stashRef);
+        return execResult(r);
+    }
+
+    @Operation(summary = "删除储藏", description = "git stash drop [stash@{n}]")
+    @PostMapping("/stash/drop")
+    public Map<String, Object> stashDrop(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String stashRef = buildStashRef(body.get("index"));
+        GitCommandExecutor.GitResult r = stashRef == null
+                ? gitExecutor.execute(projectRoot, "stash", "drop")
+                : gitExecutor.execute(projectRoot, "stash", "drop", stashRef);
+        return execResult(r);
+    }
+
+    // ==================== 分支（branches / switch / create / delete / merge） ====================
+
+    @Operation(summary = "获取分支列表", description = "返回本地分支列表与当前分支名")
+    @GetMapping("/branches")
+    public Map<String, Object> getBranches(@RequestParam String projectRoot) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot, "branch");
+        if (!r.success()) {
+            result.put("success", false);
+            result.put("error", r.output());
+            return result;
+        }
+        List<String> branches = new ArrayList<>();
+        for (String line : r.output().split("\n")) {
+            String name = line.replace("*", "").trim();
+            if (!name.isEmpty()) {
+                branches.add(name);
+            }
+        }
+        GitCommandExecutor.GitResult cur = gitExecutor.execute(projectRoot, "rev-parse", "--abbrev-ref", "HEAD");
+        result.put("success", true);
+        result.put("current", cur.success() ? cur.output().trim() : "");
+        result.put("branches", branches);
+        return result;
+    }
+
+    @Operation(summary = "切换分支", description = "git switch <name>")
+    @PostMapping("/branch/switch")
+    public Map<String, Object> branchSwitch(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        String name = getStr(body, "name");
+        if (projectRoot == null || projectRoot.isEmpty() || name == null || name.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot 或 name");
+        }
+        return execResult(gitExecutor.execute(projectRoot, "switch", name));
+    }
+
+    @Operation(summary = "创建分支", description = "git switch -c <name>（switch=true）或 git branch <name>")
+    @PostMapping("/branch/create")
+    public Map<String, Object> branchCreate(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        String name = getStr(body, "name");
+        if (projectRoot == null || projectRoot.isEmpty() || name == null || name.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot 或 name");
+        }
+        boolean switchTo = getBool(body, "switch");
+        GitCommandExecutor.GitResult r = switchTo
+                ? gitExecutor.execute(projectRoot, "switch", "-c", name)
+                : gitExecutor.execute(projectRoot, "branch", name);
+        return execResult(r);
+    }
+
+    @Operation(summary = "删除分支", description = "git branch -d/-D <name>")
+    @PostMapping("/branch/delete")
+    public Map<String, Object> branchDelete(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        String name = getStr(body, "name");
+        if (projectRoot == null || projectRoot.isEmpty() || name == null || name.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot 或 name");
+        }
+        boolean force = getBool(body, "force");
+        GitCommandExecutor.GitResult r = force
+                ? gitExecutor.execute(projectRoot, "branch", "-D", name)
+                : gitExecutor.execute(projectRoot, "branch", "-d", name);
+        return execResult(r);
+    }
+
+    @Operation(summary = "合并分支", description = "git merge [--no-ff] [-m message] <branch>，合并到当前分支")
+    @PostMapping("/merge")
+    public Map<String, Object> merge(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        String branch = getStr(body, "branch");
+        if (projectRoot == null || projectRoot.isEmpty() || branch == null || branch.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot 或 branch");
+        }
+        boolean noFf = getBool(body, "noFf");
+        String message = getStr(body, "message");
+
+        List<String> args = new ArrayList<>();
+        args.add("merge");
+        if (noFf) {
+            args.add("--no-ff");
+        }
+        if (message != null && !message.isBlank()) {
+            args.add("-m");
+            args.add(message);
+        }
+        args.add(branch);
+
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot, args.toArray(new String[0]));
+        Map<String, Object> result = execResult(r);
+        if (!r.success()) {
+            String output = r.output();
+            if (output.contains("CONFLICT") || output.contains("冲突")) {
+                result.put("error", "合并产生冲突，需手动解决冲突文件后暂存并提交。\n" + output);
+            }
+        }
+        return result;
+    }
+
+    // ==================== 历史操作（reset / revert） ====================
+
+    @Operation(summary = "回退提交", description = "git reset --soft/--mixed/--hard <target>；hard 必须 confirm=true")
+    @PostMapping("/reset")
+    public Map<String, Object> reset(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String mode = getStr(body, "mode");
+        if (mode == null || mode.isBlank()) mode = "mixed";
+        String target = getStr(body, "target");
+        boolean confirm = getBool(body, "confirm");
+
+        if (target == null || target.isBlank()) {
+            return errorResult("缺少必要参数 target（如 'HEAD~1'）");
+        }
+        if (!List.of("soft", "mixed", "hard").contains(mode)) {
+            return errorResult("mode 仅支持 soft / mixed / hard，当前值：" + mode);
+        }
+        if ("hard".equals(mode) && !confirm) {
+            return errorResult("reset --hard 会永久丢弃未提交改动，必须显式传 confirm=true 才执行");
+        }
+
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot, "reset", "--" + mode, target);
+        return execResult(r);
+    }
+
+    @Operation(summary = "撤销指定提交", description = "git revert --no-edit [--no-commit] <commit>")
+    @PostMapping("/revert")
+    public Map<String, Object> revert(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String commit = getStr(body, "commit");
+        if (commit == null || commit.isBlank()) commit = "HEAD";
+        boolean noCommit = getBool(body, "noCommit");
+
+        List<String> args = new ArrayList<>();
+        args.add("revert");
+        args.add("--no-edit");
+        if (noCommit) {
+            args.add("--no-commit");
+        }
+        args.add(commit);
+
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot, args.toArray(new String[0]));
+        Map<String, Object> result = execResult(r);
+        if (!r.success()) {
+            String output = r.output();
+            if (output.contains("CONFLICT") || output.contains("冲突")) {
+                result.put("error", "撤销提交产生冲突，需手动解决冲突文件后暂存并提交。\n" + output);
+            }
+        }
+        return result;
+    }
+
+    // ==================== 标签（tag） ====================
+
+    @Operation(summary = "获取标签列表", description = "git tag -l，返回标签数组")
+    @GetMapping("/tags")
+    public Map<String, Object> getTags(@RequestParam String projectRoot) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        GitCommandExecutor.GitResult r = gitExecutor.execute(projectRoot, "tag", "-l");
+        if (!r.success()) {
+            result.put("success", false);
+            result.put("error", r.output());
+            return result;
+        }
+        List<String> tags = new ArrayList<>();
+        for (String line : r.output().split("\n")) {
+            String name = line.trim();
+            if (!name.isEmpty()) {
+                tags.add(name);
+            }
+        }
+        result.put("success", true);
+        result.put("tags", tags);
+        return result;
+    }
+
+    @Operation(summary = "创建标签", description = "git tag [-a -m message] <name>")
+    @PostMapping("/tag")
+    public Map<String, Object> tagCreate(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        String name = getStr(body, "name");
+        if (projectRoot == null || projectRoot.isEmpty() || name == null || name.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot 或 name");
+        }
+        String message = getStr(body, "message");
+
+        List<String> args = new ArrayList<>();
+        args.add("tag");
+        if (message != null && !message.isBlank()) {
+            args.add("-a");
+            args.add(name);
+            args.add("-m");
+            args.add(message);
+        } else {
+            args.add(name);
+        }
+        return execResult(gitExecutor.execute(projectRoot, args.toArray(new String[0])));
+    }
+
+    @Operation(summary = "删除本地标签", description = "git tag -d <name>")
+    @DeleteMapping("/tag")
+    public Map<String, Object> tagDelete(@RequestParam String projectRoot, @RequestParam String name) {
+        return execResult(gitExecutor.execute(projectRoot, "tag", "-d", name));
+    }
+
+    @Operation(summary = "推送标签", description = "git push <remote> <name>；不传 name 则推送全部标签 --tags")
+    @PostMapping("/tag/push")
+    public Map<String, Object> tagPush(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot");
+        }
+        String name = getStr(body, "name");
+        String remote = getStr(body, "remote");
+        if (remote == null || remote.isBlank()) remote = "origin";
+
+        List<String> args = new ArrayList<>();
+        args.add("push");
+        args.add(remote);
+        if (name != null && !name.isBlank()) {
+            args.add(name);
+        } else {
+            args.add("--tags");
+        }
+        return execResult(gitExecutor.executeWithStoredAuth(projectRoot, args.toArray(new String[0])));
+    }
+
+    // ==================== 远程仓库管理（remote） ====================
+
+    @Operation(summary = "获取远程仓库列表", description = "git remote -v（返回原始文本）")
+    @GetMapping("/remotes")
+    public Map<String, Object> getRemotes(@RequestParam String projectRoot) {
+        return execResult(gitExecutor.execute(projectRoot, "remote", "-v"));
+    }
+
+    @Operation(summary = "添加/修改远程仓库", description = "不存在则 git remote add，已存在则 git remote set-url")
+    @PostMapping("/remote")
+    public Map<String, Object> remoteSave(@RequestBody Map<String, Object> body) {
+        String projectRoot = getStr(body, "projectRoot");
+        String name = getStr(body, "name");
+        String url = getStr(body, "url");
+        if (projectRoot == null || projectRoot.isEmpty() || name == null || name.isEmpty() || url == null || url.isEmpty()) {
+            return errorResult("缺少必要参数 projectRoot、name 或 url");
+        }
+
+        // 已存在则更新 URL，否则新增（与 /init 中的逻辑一致）
+        GitCommandExecutor.GitResult check = gitExecutor.execute(projectRoot, "remote", "get-url", name);
+        GitCommandExecutor.GitResult r = check.success()
+                ? gitExecutor.execute(projectRoot, "remote", "set-url", name, url)
+                : gitExecutor.execute(projectRoot, "remote", "add", name, url);
+        return execResult(r);
+    }
+
+    @Operation(summary = "删除远程仓库", description = "git remote remove <name>（仅移除本地配置）")
+    @DeleteMapping("/remote")
+    public Map<String, Object> remoteRemove(@RequestParam String projectRoot, @RequestParam String name) {
+        return execResult(gitExecutor.execute(projectRoot, "remote", "remove", name));
+    }
+
+    // ==================== 内部辅助 ====================
+
+    /** 从请求体安全读取字符串参数 */
+    private static String getStr(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        return v != null ? String.valueOf(v) : null;
+    }
+
+    /** 从请求体安全读取布尔参数（兼容 Boolean 与 "true" 字符串） */
+    private static boolean getBool(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        return Boolean.TRUE.equals(v) || "true".equalsIgnoreCase(String.valueOf(v));
+    }
+
+    /** 将 index 参数转换为 stash@{n}；未提供/非法时返回 null（使用默认最新） */
+    private static String buildStashRef(Object indexObj) {
+        if (indexObj == null) return null;
+        try {
+            int idx = Integer.parseInt(String.valueOf(indexObj).trim());
+            return "stash@{" + Math.max(idx, 0) + "}";
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 统一封装 git 执行结果为接口返回 */
+    private Map<String, Object> execResult(GitCommandExecutor.GitResult r) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", r.success());
+        result.put("output", r.output());
+        if (!r.success()) {
+            result.put("error", r.output());
+        }
+        return result;
+    }
+
+    private Map<String, Object> errorResult(String message) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", false);
+        result.put("error", message);
         return result;
     }
 

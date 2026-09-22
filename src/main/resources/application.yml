@@ -184,6 +184,8 @@ desktop:
     max-per-minute: 0
     # 截图频率限制：同一会话最小间隔（毫秒；0 = 不限制）
     min-interval-ms: 0
+    # 截图时自动检测 UI 元素并编号（SoM：图上 #编号徽标 + 返回文本【元素清单】；Windows UIAutomation，失败静默降级）
+    element-detection: true
   control:
     # 单次批量动作上限（desktop_control 键鼠模拟；M6 实施）
     max-actions-per-call: 20
@@ -191,6 +193,12 @@ desktop:
     action-delay-ms: 150
     # 预检闸门（先验证后执行；M6.2）：点击/拖拽坐标未经准星校验时先返回带准星的校验图（不执行动作），确认后再次调用即执行
     verify-before-click: true
+    # hover 悬停探测默认等待时长（毫秒；动作参数 waitMs 未提供时使用，等待 tooltip 出现后自动截图）
+    hover-wait-ms: 800
+    # 点击命中回执：mouse_click 自动做点击前后帧差分并以 note 返回回执（失败自动跳过，不影响点击）
+    click-feedback: true
+    # 点击回执等待时长（毫秒；点击后等待界面渲染再采集对比帧）
+    click-feedback-wait-ms: 400
 
 # 文件资产配置（本地副本目录 file-asset.store.dir 用代码默认值 data/file-assets）
 file-asset:
@@ -250,6 +258,9 @@ deepseek:
       - "git_query"
       - "git_submit"
       - "git_branch"
+      - "git_stash"
+      - "git_tag"
+      - "git_remote"
       - "agent"
       - "skill"
       - "query_tool_history"

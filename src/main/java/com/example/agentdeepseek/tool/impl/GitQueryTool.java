@@ -1,6 +1,8 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.tool.Tool;
+import com.example.agentdeepseek.tool.permission.OperationCategory;
+import com.example.agentdeepseek.tool.permission.ToolPermission;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -12,11 +14,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Git 查询工具 — 合并 git_status / git_diff / git_log
+ * Git 查询工具 — 合并 git_status / git_diff / git_log / git_show
  * 通过 action 参数区分操作，均为只读，不修改仓库状态
  */
 @Slf4j
 @Component
+@ToolPermission(category = OperationCategory.GIT, affectsData = false, description = "查询Git仓库状态与历史")
 public class GitQueryTool implements Tool {
 
     private final GitCommandExecutor gitExecutor;
@@ -33,10 +36,10 @@ public class GitQueryTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "【适用场景】查看 Git 仓库的状态、差异和提交历史，所有操作均为只读。\n"
-                + "【action 说明】status=查看工作区/暂存区文件变更列表；diff=查看文件具体代码差异；log=查看提交历史。\n"
+        return "【适用场景】查看 Git 仓库的状态、差异、提交历史和提交详情，所有操作均为只读。\n"
+                + "【action 说明】status=查看工作区/暂存区文件变更列表；diff=查看文件具体代码差异；log=查看提交历史；show=查看某次提交的详情或某文件中该提交的改动。\n"
                 + "【使用方式】指定 projectRoot（项目根目录）和 action，根据需要传入可选参数。\n"
-                + "【注意事项】所有操作均为只读，不会修改仓库状态；diff 不传 file 则查看全部未暂存变更；log 默认显示最近 20 条。";
+                + "【注意事项】所有操作均为只读，不会修改仓库状态；diff 不传 file 则查看全部未暂存变更；log 默认显示最近 20 条；show 的 ref 可为 HEAD / 提交哈希 / HEAD~2 等。";
     }
 
     @Override
@@ -54,16 +57,17 @@ public class GitQueryTool implements Tool {
         // action
         ObjectNode action = properties.putObject("action");
         action.put("type", "string");
-        action.put("description", "【必填】查询操作类型。status=查看工作区/暂存区文件变更状态；diff=查看文件代码差异详情；log=查看提交历史记录。");
+        action.put("description", "【必填】查询操作类型。status=查看工作区/暂存区文件变更状态；diff=查看文件代码差异详情；log=查看提交历史记录；show=查看某次提交的详情。");
         ArrayNode actionEnum = action.putArray("enum");
         actionEnum.add("status");
         actionEnum.add("diff");
         actionEnum.add("log");
+        actionEnum.add("show");
 
-        // file（diff 和 log 共用）
+        // file（diff / log / show 共用）
         ObjectNode file = properties.putObject("file");
         file.put("type", "string");
-        file.put("description", "【可选，diff/log 时有效】指定要查看的文件相对路径。diff 时示例：'src/main/App.java'；log 时示例：'src/main/App.java' 仅查看该文件的提交历史。不传则查看全部。");
+        file.put("description", "【可选，diff/log/show 时有效】指定要查看的文件相对路径。diff 时示例：'src/main/App.java'；log 时示例：'src/main/App.java' 仅查看该文件的提交历史；show 时示例：'src/main/App.java' 仅查看该提交对此文件的改动。不传则查看全部。");
 
         // staged（仅 diff 有效）
         ObjectNode staged = properties.putObject("staged");
@@ -79,6 +83,16 @@ public class GitQueryTool implements Tool {
         ObjectNode graph = properties.putObject("graph");
         graph.put("type", "boolean");
         graph.put("description", "【可选，仅 log 时有效】设为 true 以文本图形展示分支合并关系。查看多分支协作历史时建议开启。");
+
+        // ref（仅 show 有效）
+        ObjectNode ref = properties.putObject("ref");
+        ref.put("type", "string");
+        ref.put("description", "【可选，仅 show 时有效】要查看的提交引用，默认 HEAD。可为提交哈希、HEAD~2、分支名、标签名等。示例：'HEAD~1' 查看上一次提交。");
+
+        // stat（仅 show 有效）
+        ObjectNode stat = properties.putObject("stat");
+        stat.put("type", "boolean");
+        stat.put("description", "【可选，仅 show 时有效】设为 true 只显示本次提交的文件统计（--stat），不显示完整 diff。适合先概览再细看。");
 
         // required
         ArrayNode required = root.putArray("required");
@@ -99,7 +113,8 @@ public class GitQueryTool implements Tool {
             case "status" -> doStatus(projectRoot);
             case "diff" -> doDiff(projectRoot, arguments);
             case "log" -> doLog(projectRoot, arguments);
-            default -> "错误：未知的 action '" + action + "'，支持 status / diff / log";
+            case "show" -> doShow(projectRoot, arguments);
+            default -> "错误：未知的 action '" + action + "'，支持 status / diff / log / show";
         };
     }
 
@@ -234,6 +249,42 @@ public class GitQueryTool implements Tool {
         String output = result.output();
         if (output.isBlank()) {
             return "暂无提交记录。";
+        }
+        return output;
+    }
+
+    // ========== git show ==========
+
+    private String doShow(String projectRoot, JsonNode args) {
+        String ref = args.has("ref") ? args.get("ref").asText() : "HEAD";
+        if (ref == null || ref.isBlank()) ref = "HEAD";
+        String file = args.has("file") ? args.get("file").asText() : null;
+        boolean stat = args.has("stat") && args.get("stat").asBoolean();
+
+        List<String> cmdArgs = new ArrayList<>();
+        cmdArgs.add("show");
+        if (stat) {
+            cmdArgs.add("--stat");
+        }
+        cmdArgs.add(ref);
+        if (file != null && !file.isBlank()) {
+            cmdArgs.add("--");
+            cmdArgs.add(file);
+        }
+
+        GitCommandExecutor.GitResult result = gitExecutor.execute(projectRoot, cmdArgs.toArray(new String[0]));
+        if (!result.success()) {
+            return "git show 失败：" + result.output();
+        }
+        String output = result.output();
+        if (output.isBlank()) {
+            return "该提交没有可显示的内容（可能是空提交或路径不匹配）。";
+        }
+        // 防止输出过大挤占上下文
+        final int maxLen = 20000;
+        if (output.length() > maxLen) {
+            return output.substring(0, maxLen)
+                    + "\n\n【提示】输出过长已截断（仅显示前 " + maxLen + " 字符）。可用 stat=true 先看文件统计，或用 file 参数缩小范围。";
         }
         return output;
     }

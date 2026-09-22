@@ -238,6 +238,16 @@ public class ToolExecutor {
                 "错误：未知工具 \"" + toolName + "\"，请检查工具名称是否正确");
         }
 
+        // ★ 修复（P0 工具授权）：执行前做「授权白名单」校验——
+        //   当前请求允许的工具集由 DeepSeekServiceImpl 写入 ToolContext（= Agent 授权列表，技能不再扩展授权）。
+        //   未设置白名单（null）时保持旧行为，兼容尚未接入白名单的执行入口。
+        List<String> allowedTools = ToolContext.getAllowedTools();
+        if (allowedTools != null && !allowedTools.contains(toolName)) {
+            log.warn("工具未授权，拒绝执行: tool={}, conversationId={}", toolName, ToolContext.getConversationId());
+            return new ToolCallResult(toolCallId, toolName,
+                "错误：工具 \"" + toolName + "\" 不在当前智能体的授权工具列表内，已拒绝执行。请改用已授权的工具，或告知用户调整智能体配置。");
+        }
+
         // ================================================================
         // 🔧 智能补齐：检测缺失的 action 参数并自动修复
         // ================================================================
@@ -686,7 +696,8 @@ public class ToolExecutor {
     /**
      * 推断 desktop_control 的单动作类型（仅单动作兼容形态；批量形态由 actions 数组携带 action，不走此处）。
      * 按参数特征安全推断：文本→type、按键→key、滚轮→mouse_scroll、拖拽→mouse_drag、
-     * 按键次数→mouse_click；仅有坐标时最保守推断为 mouse_move（移动无副作用）。
+     * 按键次数→mouse_click；★ 带 waitMs/capture 特征→hover（悬停探测）；仅有坐标时最保守推断为
+     * mouse_move（移动无副作用）。
      */
     private String inferDesktopControlAction(JsonNode args) {
         boolean hasText = isNonEmpty(args, "text");
@@ -694,6 +705,7 @@ public class ToolExecutor {
         boolean hasAmount = args.has("amount");
         boolean hasFrom = args.has("fromX") || args.has("fromY");
         boolean hasButton = isNonEmpty(args, "button") || args.has("clicks");
+        boolean hasHoverHint = args.has("waitMs") || args.has("capture");
         boolean hasXY = args.has("x") && args.has("y");
 
         if (hasText) return "type";
@@ -701,6 +713,7 @@ public class ToolExecutor {
         if (hasAmount) return "mouse_scroll";
         if (hasFrom) return "mouse_drag";
         if (hasButton) return "mouse_click";
+        if (hasHoverHint) return "hover";
         if (hasXY) return "mouse_move";
         return null;
     }
@@ -752,7 +765,7 @@ public class ToolExecutor {
             case "task_manager" -> "create / complete / batch_complete / batch_reopen / list";
             case "chat_attachment" -> "read_by_path / read_by_attachment / read_by_file_asset";
             case "schedule_task" -> "create / list / update / delete / toggle";
-            case "desktop_control" -> "mouse_move / mouse_click / mouse_drag / mouse_scroll / key / type / screen_size"
+            case "desktop_control" -> "mouse_move / mouse_click / mouse_drag / mouse_scroll / key / type / hover / screen_size"
                     + "（多动作用 actions 数组）";
             default -> "（未知）";
         };
@@ -790,7 +803,8 @@ public class ToolExecutor {
             case "chat_attachment" -> "{ \"action\": \"read_by_path\", \"file_path\": \"E:\\\\docs\\\\report.pdf\" }";
             case "schedule_task" -> "{ \"action\": \"list\" }";
             case "desktop_control" -> "{ \"actions\": [{\"action\": \"mouse_click\", \"x\": 640, \"y\": 360}] }"
-                    + " 或单动作 { \"action\": \"mouse_click\", \"x\": 640, \"y\": 360 }";
+                    + " 或单动作 { \"action\": \"mouse_click\", \"x\": 640, \"y\": 360 }"
+                    + " 或悬停探测 { \"action\": \"hover\", \"x\": 640, \"y\": 360, \"waitMs\": 800 }";
             default -> "{ \"action\": \"...\" }";
         };
     }

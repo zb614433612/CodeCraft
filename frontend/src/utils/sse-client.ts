@@ -18,6 +18,17 @@ export interface ToolCallStartData {
   summaries: string[]
 }
 
+/** 委托进度心跳事件数据（后端 delegate_progress JSON事件，2026-09-21）：
+ *  A 会话在 await 阻塞期间每 ~5s 收到一次，用于委托工具卡展示「已等待时长」与跳转 B 会话。
+ *  ⚠️ 目标会话用 targetSessionId 字段（sessionId 被解析器占用为「当前会话 ID」）。 */
+export interface DelegateProgressData {
+  callId?: string
+  targetSessionId?: number
+  targetAgent?: string
+  status?: string
+  elapsedSec?: number
+}
+
 export type StreamChatEvent = {
   type: 'thinking' | 'content' | 'complete' | 'resume'
   data: string
@@ -37,6 +48,10 @@ export type StreamChatEvent = {
 } | {
   type: 'tool_call_start'
   data: ToolCallStartData
+  sessionId?: number
+} | {
+  type: 'delegate_progress'
+  data: DelegateProgressData
   sessionId?: number
 } | {
   type: 'error'
@@ -94,6 +109,21 @@ export class SseParser {
       // 处理 skill_match 事件
       if (parsed.event === 'skill_match') {
         return { type: 'skill_match', data: parsed.skills || [], sessionId: this.sessionId }
+      }
+      // 处理 delegate_progress 事件（委托进度心跳：A 会话 await 阻塞期间每 ~5s 一次，2026-09-21）
+      // ⚠️ 目标会话用 targetSessionId 字段（sessionId 被解析器占用为「当前会话 ID」，不可占用）
+      if (parsed.event === 'delegate_progress') {
+        return {
+          type: 'delegate_progress',
+          data: {
+            callId: parsed.callId,
+            targetSessionId: parsed.targetSessionId,
+            targetAgent: parsed.targetAgent,
+            status: parsed.status,
+            elapsedSec: parsed.elapsedSec
+          },
+          sessionId: this.sessionId
+        }
       }
       // 处理子Agent事件（agent_forked / agent_thinking / agent_tool_call 等）
       if (typeof parsed.event === 'string' && parsed.event.startsWith('agent_')) {

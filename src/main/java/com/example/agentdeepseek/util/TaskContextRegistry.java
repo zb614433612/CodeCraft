@@ -17,7 +17,10 @@ import java.util.concurrent.CopyOnWriteArraySet;
  * 因此会话索引使用 {@link Set} 而非单值，取消时遍历全部置位，避免"只取消最后一个注册者"导致的父任务幽灵运行。
  * </p>
  * <p>
- * 注册的生命周期：任务开始（startBackgroundTask）时 register，任务结束（complete/fail/cancel）时 unregister。
+ * 注册的生命周期（2026-09-21 双写修复后语义更新）：
+ * 任务开始（startBackgroundTask）时 register；任务<b>真正退出</b>（complete/error 回调入口）时 unregister。
+ * 取消（cancel）仅置位 cancelFlag、<b>不再立即注销</b>——「ctx 存在 = 工具循环活跃」，
+ * 注销保留到循环实际退出：供取消检查点读取自身标志（P0-1）与新任务准入等待（P0-2）使用。
  * </p>
  */
 @Slf4j
@@ -79,7 +82,14 @@ public class TaskContextRegistry {
         return new java.util.HashSet<>(set);
     }
 
-    /** 按会话ID请求取消（置位该会话所有活跃上下文的 cancelFlag，含子Agent） */
+    /**
+     * 按会话ID请求取消：置位该会话所有活跃上下文的 cancelFlag（含子Agent）。
+     * <p>
+     * 2026-09-21 双写修复：本方法仅置位标志、<b>不注销</b>——注销由任务真正退出时的
+     * complete/error 回调统一执行。旧「取消即注销」的 cancelAndUnregisterByConversationId
+     * 已删除（会使取消标志对检查点不可达 → 幽灵任务继续运行；且后续取消动作遍历不到 → 无法再停止）。
+     * </p>
+     */
     public boolean cancelByConversationId(Long conversationId) {
         Set<TaskContext> contexts = getByConversationId(conversationId);
         if (contexts.isEmpty()) return false;
@@ -87,17 +97,5 @@ public class TaskContextRegistry {
             ctx.cancel();
         }
         return true;
-    }
-
-    /**
-     * 按会话ID取消并注销（取消路径专用）
-     * 取消时 dispose 订阅不会触发 complete 回调，必须在这里同步注销，防止注册表泄漏
-     */
-    public void cancelAndUnregisterByConversationId(Long conversationId) {
-        Set<TaskContext> contexts = getByConversationId(conversationId);
-        for (TaskContext ctx : contexts) {
-            ctx.cancel();
-            unregister(ctx.getTaskId());
-        }
     }
 }

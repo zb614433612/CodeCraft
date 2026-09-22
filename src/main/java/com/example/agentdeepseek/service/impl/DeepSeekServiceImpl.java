@@ -81,9 +81,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -199,6 +201,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
     /** P4：授权等待超时分钟数（超时后跳过该受限操作并向前端发送提示事件，任务继续执行） */
     private static final int AUTH_WAIT_TIMEOUT_MINUTES = 5;
+    /**
+     * 2026-09-21 双写修复（P0-2 准入控制）：新任务启动前「旧任务退出等待」上限（毫秒）。
+     * 等待已取消的旧任务真正退出（从注册表注销）后再启动新任务，消除旧任务残余迭代与新任务
+     * 并行读写同一批文件的窗口；超时则放行并告警（旧任务已被置取消标志，将在下个检查点退出）。
+     */
+    private static final long PREVIOUS_TASK_EXIT_WAIT_MS = 2000;
 
     /**
      * 事件重放缓冲上限：SSE 断线重连时最多能重放的历史事件数。
@@ -915,10 +923,16 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         // 技能列表
                         StringBuilder skillsList = new StringBuilder();
                         for (Skill skill : matchedSkills) {
-                            // 合并技能所需工具
+                            // ★ 修复（P0 工具授权）：合并技能所需工具必须过「授权闸门」——
+                            //   仅追加 Agent 授权列表（toolNames）内的工具；技能引用但未授权的工具跳过注入，
+                            //   防止技能绕过 tool_names 授权、把授权外工具带给 LLM（授权漏洞根因 A）。
                             try {
                                 List<String> skillTools = objectMapper.readValue(skill.getToolNames(), List.class);
                                 for (String toolName : skillTools) {
+                                    if (!toolNames.contains(toolName)) {
+                                        log.info("技能 {} 需要的工具 [{}] 不在 Agent 授权列表内，跳过注入", skill.getId(), toolName);
+                                        continue;
+                                    }
                                     if (!filteredToolNames.contains(toolName)) {
                                         filteredToolNames.add(toolName);
                                     }
@@ -1173,6 +1187,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (injectedSkillsSection != null) {
             apiRequest.put("_skillsSection", injectedSkillsSection);
         }
+        // ★ 修复（P0 工具授权）：将「最终允许的工具集」存入隐藏字段，供工具执行前的授权白名单校验使用
+        //   （修复后技能工具必须 ⊆ 授权列表，因此该集合等效于 Agent 授权列表 tool_names）
+        apiRequest.put("_allowedToolNames", new ArrayList<>(filteredToolNames));
 
         log.debug("调用 LLM API{}接口，Provider=[{}], 会话ID: {}, 模型: {}, 消息长度: {}, 用户ID: {}",
                 stream ? "流式" : "非流式", llmClient.getProviderCode(),
@@ -1324,8 +1341,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     private void cancelRunningTask(Long conversationId) {
         supplementStore.clear(conversationId);
-        // Phase 18：置位 cancelFlag 并注销上下文（工具循环每轮迭代检查，实现真正中断；dispose 不触发 complete，需同步注销防泄漏）
-        taskContextRegistry.cancelAndUnregisterByConversationId(conversationId);
+        // 2026-09-21 修复（智能体互调误杀·任务级精确）：级联取消委托前先采集「本次动作实际取消的任务 id 集合」——
+        // 仅取消这些任务委托出去的 B 任务（防孤儿）：① A 的普通新消息（上一回合已结束、无活跃任务）不再牵连任何委托；
+        // ② A 的后续任务被打断时，不误杀其更早回合发起的独立后台委托（await=false / 超时后仍在跑的委托）
+        Set<Long> cancelledTaskIds = new HashSet<>();
+        for (TaskContext ctx : taskContextRegistry.getByConversationId(conversationId)) {
+            if (ctx.getTaskId() != null) {
+                cancelledTaskIds.add(ctx.getTaskId());
+            }
+        }
+        // 2026-09-21 双写修复（P0-2）：取消仅置位 cancelFlag，不再「置位后立即注销上下文」——
+        // 旧方案使被取消任务的 ctx 离开注册表：检查点读不到其取消标志（幽灵任务继续运行=双写），
+        // 且后续任何取消动作都遍历不到它（用户找不到可停止的线程，只能重启应用终止）。
+        // 注销时机后移至任务真正退出（complete/error 回调统一 unregister，且已前置到回调入口），
+        // 注册表语义变为「ctx 存在 = 工具循环活跃」，供准入控制（等待旧任务退出）与兜底标记使用。
+        taskContextRegistry.cancelByConversationId(conversationId);
         // Phase 18：级联取消该会话的所有子 Agent（防止幽灵运行挤占共享线程池）
         if (agentForkManager != null) {
             try {
@@ -1338,10 +1368,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
         toolLoopManager.cancelRunningTask(conversationId, taskSubscriptions, judgeGrantedIterations);
-        // Phase 19 智能体互调：级联取消该会话委托给其他智能体的任务（B 会话级取消，防孤儿委托）
-        if (agentInvokeService != null) {
+        // Phase 19 智能体互调：级联取消该会话委托给其他智能体的任务（任务级精确：只取消本轮被取消任务发起的委托）
+        if (agentInvokeService != null && !cancelledTaskIds.isEmpty()) {
             try {
-                int cancelled = agentInvokeService.cancelByCallerConversation(conversationId);
+                int cancelled = agentInvokeService.cancelByCallerConversation(conversationId, cancelledTaskIds);
                 if (cancelled > 0) {
                     log.info("级联取消智能体互调委托任务: callerConversationId={}, count={}", conversationId, cancelled);
                 }
@@ -1366,6 +1396,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             TaskContext taskContext = new TaskContext(taskId, agentConfigId, conversationId, workDir);
             boolean registered = taskContextRegistry.registerIfAbsent(taskContext);
             apiRequest.put("_ctxRegistered", registered);
+            // 2026-09-21 双写修复（P0-1）：任务自身持有 ctx 引用——取消检查点读「自己的 cancelFlag」判定终止
+            // （unregister 不影响对象引用与标志）；（浅拷贝的）后续各轮 apiRequest 副本自动携带本引用。
+            apiRequest.put("_taskContext", taskContext);
             return taskContext;
         } catch (Exception e) {
             log.warn("注册任务上下文失败: taskId={}, error={}", taskId, e.getMessage());
@@ -1375,10 +1408,43 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
+     * 等待「已取消的旧任务」真正退出（2026-09-21 双写修复 P0-2·准入控制）
+     * <p>
+     * 轮询注册表：直到会话内不存在「已置位取消标志」的上下文（= 旧任务已到达终态并在回调入口自行注销），
+     * 或到达 {@link #PREVIOUS_TASK_EXIT_WAIT_MS} 上限。任务自我注销位于 complete/error 回调入口
+     * （由取消检查点终止工具循环后触发），即「真正退出」的可靠信号。
+     * 超时未退出时放行并告警：任务已被置取消标志，P0-1 修复保证其在下个迭代检查点终止；
+     * 残余并行窗口从「无限持续（幽灵）」收敛为「至多一个迭代的收尾时间」。
+     * </p>
+     */
+    private void waitForPreviousTaskExit(Long conversationId) {
+        long deadline = System.currentTimeMillis() + PREVIOUS_TASK_EXIT_WAIT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            boolean anyCancelled = taskContextRegistry.getByConversationId(conversationId).stream()
+                    .anyMatch(TaskContext::isCancelled);
+            if (!anyCancelled) {
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        log.warn("上一任务退出等待超时（{}ms），可能存在短暂并行收尾窗口（任务已被取消，将在下个检查点退出）: conversationId={}",
+                PREVIOUS_TASK_EXIT_WAIT_MS, conversationId);
+    }
+
+    /**
      * 在后台启动工具循环，事件通过 Sinks 转发
      * SSE 断开后工具循环继续执行，不销毁
      */
     private Flux<String> startBackgroundTask(Long conversationId, Long storageConversationId, Map<String, Object> apiRequest) {
+        // 2026-09-21 双写修复（P0-2·准入控制）：本方法被调用前，doStreamChat 已对旧任务发起取消（置 cancelFlag）。
+        // 此处先等待旧任务真正退出（注册表清空该任务的已取消上下文）再创建/启动新任务，
+        // 消除「旧任务残余迭代 + 新任务」并行读写同一批文件的窗口（单智能体双写的直接成因）。
+        waitForPreviousTaskExit(conversationId);
         // 从 apiRequest 提取当前会话的 providerCode（供子Agent/评委/压缩等辅助调用跟随）
         LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
         final String providerCode = ctxClient != null ? ctxClient.getProviderCode() : null;
@@ -1397,6 +1463,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 此时 _ctxRegistered=false → 取消检查点不误判「已取消」）
         if (task.getId() != null) {
             registerTaskContext(task.getId(), apiRequest, conversationId);
+            // 2026-09-21：任务 id 透传至工具执行上下文（agent_invoke 记录 callerTaskId，供任务级精确级联取消）
+            apiRequest.put("_taskId", task.getId());
         } else {
             apiRequest.put("_ctxRegistered", false);
         }
@@ -1424,6 +1492,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         },
                         error -> {
                             log.error("后台任务失败: {}", error.getMessage());
+                            // 2026-09-21 双写修复（P0-2 配套）：上下文注销前置到回调入口——
+                            // 「ctx 存在 = 工具循环活跃」语义精确化（循环退出瞬间即注销，不含善后阶段），
+                            // 使新任务准入等待（waitForPreviousTaskExit）可即时观测旧任务退出。
+                            if (task.getId() != null) {
+                                taskContextRegistry.unregister(task.getId());
+                            }
                             sink.tryEmitError(error);
                             if (task.getId() != null) {
                                 try {
@@ -1433,14 +1507,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             error.getMessage() != null ? error.getMessage().substring(0, Math.min(500, error.getMessage().length())) : "未知错误", task.getId());
                                 } catch (Exception ignored) {}
                             }
-                            agentEventBus.unregister(conversationId);
+                            // 2026-09-21 双写修复：条件注销（仅当总线仍为本任务的 sink）——
+                            // 旧任务清理迟到时（准入等待超时放行的残余窗口）不得误拆新任务的事件通道
+                            agentEventBus.unregisterIfSame(conversationId, sink);
                             taskSubscriptions.remove(conversationId);
-                            if (task.getId() != null) {
-                                taskContextRegistry.unregister(task.getId());
-                            }
                         },
                         () -> {
                             log.info("后台任务完成: conversationId={}", conversationId);
+                            // 2026-09-21 双写修复（P0-2 配套）：上下文注销前置到回调入口——
+                            // 「ctx 存在 = 工具循环活跃」；后续「等待子Agent结果收集」属善后阶段（最长 5 分钟），
+                            // 不应计入活跃期（否则新任务准入等待与取消检查会将其误判为仍在运行）。
+                            if (task.getId() != null) {
+                                taskContextRegistry.unregister(task.getId());
+                            }
 
                             // 自动收集所有子Agent结果（在[DONE]之前发出，确保前端能收到）
                             try {
@@ -1487,11 +1566,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             }
                             // 后台异步预压缩：提前压缩最早的历史，降低下次请求延迟
                             compactionService.asyncPrecompress(conversationId, providerCode);
-                            agentEventBus.unregister(conversationId);
+                            // 2026-09-21 双写修复：条件注销（仅当总线仍为本任务的 sink），防迟到清理误拆新任务通道
+                            agentEventBus.unregisterIfSame(conversationId, sink);
                             taskSubscriptions.remove(conversationId);
-                            if (task.getId() != null) {
-                                taskContextRegistry.unregister(task.getId());
-                            }
                         }
                 );
         taskSubscriptions.put(conversationId, sub);
@@ -1767,16 +1844,27 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         return Flux.defer(() -> {
             // ===== 取消检查点（多 Agent 并行任务）=====
             // 取消任务时置位 cancelFlag，这里每轮迭代检查，实现"主动停止"而非"等订阅结束"
-            // ★ 取消路径会立即注销上下文（cancelAndUnregisterByConversationId），因此：
-            //   会话上下文集合为空也视为已取消（普通聊天取消后上下文已注销）
-            // ★ M1 修复：仅当「注册成功过」（_ctxRegistered=true）才按上述逻辑判取消——
-            //   注册失败（INSERT/register 异常，仅 log 不阻断）的任务 registry 里查不到 ctx，
-            //   若直接判「已取消」会误杀整个工具执行（上轮 M5 回归）；从未注册 = 无法取消但应继续执行
-            boolean ctxRegistered = Boolean.TRUE.equals(initialApiRequest.get("_ctxRegistered"));
-            java.util.Set<TaskContext> sessionCtxs = ctxRegistered
-                    ? taskContextRegistry.getByConversationId(conversationId)
-                    : java.util.Set.of();
-            boolean cancelled = ctxRegistered && (sessionCtxs.isEmpty() || sessionCtxs.stream().anyMatch(TaskContext::isCancelled));
+            // ★ 2026-09-21 双写修复（P0-1）：判定改为「读任务自己的取消标志」——
+            //   旧逻辑读「会话上下文集合」（isEmpty() || anyMatch(isCancelled)）存在致命缺陷：
+            //   旧取消方案会注销本任务 ctx，本任务 ctx 离开集合后其取消标志不可达；
+            //   用户随后重发（新任务 ctx 注册使集合非空且未取消）→ 本任务被误判「未取消」继续运行，
+            //   形成幽灵任务并与新任务并行读写同一批文件（单智能体双写）。
+            //   现读取任务自身持有的 ctx 引用（registerTaskContext 存入 _taskContext 并经各轮浅拷贝传递）：
+            //   unregister 不影响对象引用与 cancelFlag，取消信号永不丢失。
+            //   "等待旧任务退出再启动新任务"由 startBackgroundTask 准入控制（waitForPreviousTaskExit）负责。
+            // ★ M1 语义保留：从未注册成功（ownCtx==null 且 _ctxRegistered=false）视为"不可取消"，继续执行。
+            TaskContext ownCtx = (TaskContext) initialApiRequest.get("_taskContext");
+            boolean cancelled;
+            if (ownCtx != null) {
+                cancelled = ownCtx.isCancelled();
+            } else {
+                // 兜底（正常路径不可达：注册成功/失败均会存入 _taskContext）：退回 M1 会话集合判定
+                boolean ctxRegistered = Boolean.TRUE.equals(initialApiRequest.get("_ctxRegistered"));
+                java.util.Set<TaskContext> sessionCtxs = ctxRegistered
+                        ? taskContextRegistry.getByConversationId(conversationId)
+                        : java.util.Set.of();
+                cancelled = ctxRegistered && (sessionCtxs.isEmpty() || sessionCtxs.stream().anyMatch(TaskContext::isCancelled));
+            }
             if (cancelled) {
                 log.info("任务已取消，终止工具循环: conversationId={}", conversationId);
                 return Flux.just(createReasoningSSEEvent("【任务已取消】"));
@@ -3062,6 +3150,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                             : null);
                                                             // Phase 19：同步信任链（供 agent_invoke 多级委托传递）
                                                             ToolContext.setTrustChain((List<Long>) apiRequest.get("_trustChain"));
+                                                            // 2026-09-21：同步当前任务 id（agent_invoke 记录 callerTaskId，供任务级精确级联取消）
+                                                            ToolContext.setTaskId((Long) apiRequest.get("_taskId"));
+                                                            // ★ 修复（P0 工具授权）：同步允许工具集（请求级授权白名单，供 ToolExecutor 执行前校验）
+                                                            ToolContext.setAllowedTools((List<String>) apiRequest.get("_allowedToolNames"));
                                                             PermissionContext.set(pendingQuestionStore, objectMapper);
                                                             PermissionContext.setApproved();
 
@@ -3146,6 +3238,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         ToolContext.setProviderCode(tempCli != null ? tempCli.getProviderCode() : null);
                                         // Phase 19：同步信任链（供 agent_invoke 多级委托传递）
                                         ToolContext.setTrustChain((List<Long>) apiRequest.get("_trustChain"));
+                                        // 2026-09-21：同步当前任务 id（agent_invoke 记录 callerTaskId，供任务级精确级联取消）
+                                        ToolContext.setTaskId((Long) apiRequest.get("_taskId"));
+                                        // ★ 修复（P0 工具授权）：同步允许工具集（请求级授权白名单，供 ToolExecutor 执行前校验）
+                                        ToolContext.setAllowedTools((List<String>) apiRequest.get("_allowedToolNames"));
                                         PermissionContext.set(pendingQuestionStore, objectMapper);
                                         // Phase 19 智能体互调：内部委托调用 → 批次级 approved（三层授权放行），
                                         // 不持久 setSessionApproved，避免污染 B 会话后续手动操作的正常授权流程
@@ -3605,7 +3701,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 回填判据依赖该前缀（见 {@link #afterPropertiesSet()}）。协议说明用于引导模型：视觉服务端
      * 可能对图片二次压缩、绝对像素不可靠，请按截图上 10×10 网格与四边三级刻度"读数"，以 0~1000
      * 归一化坐标调用 desktop_control / screen_capture(region)，系统自动换算，无需模型自行折算；
-     * 并引导用 mark 准星做点击前校验（M6.2 预检闸门：未校验坐标会被拦截，先验证后执行）。</p>
+     * 并引导用 mark 准星做点击前校验（M6.2 预检闸门：未校验坐标会被拦截，先验证后执行）；
+     * ★ 本批新增：引导"#编号徽标/【元素清单】存在时优先使用清单坐标"（SoM，机器计算坐标）。</p>
      *
      * <p>v2 协议下不向模型暴露"标准化尺寸/缩放比"等元信息（与坐标换算完全解耦，避免诱导"像素思维"）。</p>
      */
@@ -3620,9 +3717,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 + "请使用 0~1000 归一化坐标——x 读顶部刻度（0=最左、1000=最右），y 读左侧刻度（0=最上、1000=最下），"
                 + "取目标位置对应的刻度值即可；只传 0~1000 的数值、不要传像素值——系统会自动换算为屏幕物理坐标，"
                 + "无需自行折算，图片被进一步缩放/压缩也不影响。"
+                + "\n【元素清单】若截图含 #编号徽标/【元素清单】，点击优先使用清单坐标（机器计算，比目测更准）；"
+                + "未在清单中的目标仍用网格刻度读数。"
                 + "\n【操作前校验（默认流程）】执行点击/拖拽前先 screen_capture(mark={x,y}) 校验目标坐标：准星正中即执行、"
                 + "有偏差按刻度修正后再校验；未校验的坐标执行时会被系统预检拦截（自动返回校验图、不执行动作），"
-                + "已校验坐标（3 分钟内）直接放行。小目标/密集列表可先用 region 放大再读数。";
+                + "已校验坐标（3 分钟内）直接放行。"
+                + "\n【操作纪律】① 小目标（<50px）先 region 放大到目标占画面 5% 以上，在放大图空间内完成校验与点击（直接用放大图坐标，勿跨图心算）；"
+                + "② 图标类/语义不明的目标先 hover 看 tooltip 确认语义后再点击；"
+                + "③ 先标定、再批量：批量前先做单点标定（优先用【元素清单】坐标，结合点击回执确认命中），未命中先停下重新校验，不要盲目重试。";
     }
 
     /**

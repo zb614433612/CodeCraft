@@ -45,10 +45,10 @@ public final class DesktopActionSummary {
         return act == null ? "" : act.path("action").asText("").trim().toLowerCase(Locale.ROOT);
     }
 
-    /** 该动作是否需要坐标基准（mouse_* 需要；key / type / screen_size 不需要） */
+    /** 该动作是否需要坐标基准（mouse_* / hover 需要；key / type / screen_size 不需要） */
     public static boolean needsCoordinateBase(String actionType) {
         return switch (actionType) {
-            case "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll" -> true;
+            case "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll", "hover" -> true;
             default -> false;
         };
     }
@@ -76,6 +76,8 @@ public final class DesktopActionSummary {
                 String dir = amount >= 0 ? "向上" : "向下";
                 yield "滚轮 (" + intOf(act, "x") + ", " + intOf(act, "y") + ") " + dir + " " + Math.abs(amount) + " 格";
             }
+            case "hover" -> "悬停至 (" + intOf(act, "x") + ", " + intOf(act, "y") + ")" +
+                    (act.path("waitMs").isNumber() ? "，等待 " + act.path("waitMs").asInt() + "ms" : "");
             case "key" -> {
                 String key = act.path("key").asText("?");
                 String mods = modifierPrefix(act.path("modifiers"));

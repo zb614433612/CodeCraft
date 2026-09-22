@@ -75,7 +75,7 @@
 
 # 通用规则
 
-1. 所有 Git 相关操作必须使用 git_query / git_submit / git_branch，禁止用 command 执行 git 命令
+1. 所有 Git 相关操作必须使用 git_query / git_submit / git_branch / git_stash / git_tag / git_remote，禁止用 command 执行 git 命令
 2. 所有命令执行必须使用 command，禁止用其他工具代替
 3. 文件操作使用 file_explorer（读/搜）和 file_writer（写/改/删），不要混淆
 4. 数据库操作使用 execute_sql，禁止直接修改数据库配置文件
@@ -102,7 +102,10 @@
 ## 智能体互调（agent_invoke）
 - **agent_invoke 与 agent（fork 子 Agent）是两套机制**：agent=fork 子 Agent（共享你的会话上下文，结果必须 collect）；agent_invoke=委托**另一个智能体实例**（agent_config，有自己的角色/模型/工作目录/会话）独立执行。
 - 需要其他智能体的专业能力或独立工作目录时使用 agent_invoke（如把「前端页面实现」委托给前端专家智能体）；能自己干的小活不要委托。
-- **委托后必须拿到真实结果**：await=true（默认）会阻塞等待 B 完成并返回【最终答复】+【工具轨迹摘要】；await=false 则记下 callId，之后用 action=poll 查询。**禁止编造 B 的结果**。
+- **委托后必须拿到真实结果**：await=true（默认）会阻塞等待 B 完成并返回【最终答复】+【工具轨迹摘要】；await=false 立即返回 callId，你继续其他工作，之后用 action=poll 查进度。**禁止编造 B 的结果**。
+- **同步/异步怎么选**：预计 2 分钟内完成的短任务用 await=true；预计更长的任务、或你想同时推进其他工作 / 一次委托多个任务时，用 await=false（记下 callId）。
+- **随时可查进度**：poll 支持 wait_sec（1~120 秒短暂等待，完成立即返回；到点返回进度快照），避免连续空转轮询；**超时（TIMEOUT）≠失败**——任务仍在后台执行，用 poll（可 wait_sec=60）继续查，不要因超时重新发起相同委托。
+- **并行委托**：多个独立任务可先 await=false 批量派发，再用 `action=wait call_ids=[...] wait_mode=all` 统一等待（总耗时≈最慢的一个）。
 - **继续会话**：invoke 返回的【B 会话 ID】是继续会话的钥匙——需要 B 带着历史上下文继续干活时，再调 `action=invoke mode=continue_session session_id=<B会话ID>`。
 - 委托会为用户创建可见的 B 会话（名称带「[A 委托]」前缀），可让用户在 B 的会话列表查看与继续。
 - 不要调用自己（会被环检测拒绝）；信任链最深 3 层（A→B→C）。

@@ -36,6 +36,10 @@ public class DesktopConfig {
 
         /** 截图频率限制：同一会话最小间隔（毫秒；0 = 不限制） */
         private int minIntervalMs = 0;
+
+        /** ★ 本次新增：截图时自动检测 UI 元素并编号（SoM / Set-of-Mark：图上#编号徽标 + 返回文本【元素清单】；
+         *  Windows UIAutomation，检测失败静默降级为空清单，绝不影响截图主链；非 Windows 自动跳过） */
+        private boolean elementDetection = true;
     }
 
     @Data
@@ -48,5 +52,14 @@ public class DesktopConfig {
 
         /** 预检闸门（先验证后执行；M6.2）：mouse_click/mouse_drag 坐标未经准星校验时先返回校验图（不执行动作），确认后再次调用执行 */
         private boolean verifyBeforeClick = true;
+
+        /** hover 悬停探测默认等待时长（毫秒；★ 新增：动作参数 waitMs 未提供时使用，0~3000 内 clamp） */
+        private int hoverWaitMs = 800;
+
+        /** ★ 本次新增：点击命中回执——mouse_click 前后帧差分检测界面变化并以 note 返回回执；失败/尺寸不一致自动跳过，绝不阻断点击 */
+        private boolean clickFeedback = true;
+
+        /** ★ 本次新增：点击回执等待时长（毫秒；点击后等待界面渲染再采集对比帧；0~3000 内 clamp） */
+        private int clickFeedbackWaitMs = 400;
     }
 }

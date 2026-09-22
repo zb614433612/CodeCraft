@@ -77,15 +77,14 @@ public class ToolLoopManager {
         agentEventBus.unregister(conversationId);
         judgeGrantedIterations.remove(conversationId);
         try {
-            // M1 修复：H2 数据库不支持 UPDATE...ORDER BY...LIMIT 语法（MySQL 专有），
-            // 改为「先 SELECT 最新 running 记录 id，再按 id 精确 UPDATE」——只取消最新记录，
-            // 避免把同会话历史残留的 running 记录全部误标取消
-            List<Long> ids = jdbcTemplate.queryForList(
-                    "SELECT id FROM agent_task WHERE conversation_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
-                    Long.class, conversationId);
-            if (!ids.isEmpty()) {
-                jdbcTemplate.update("UPDATE agent_task SET status = 'cancelled', updated_at = NOW() WHERE id = ?", ids.get(0));
-            }
+            // 2026-09-21 双写修复（P0-2 兜底·僵尸清场）：将该会话【全部】running 记录标记为 cancelled——
+            // 旧实现只标最新一条（SELECT 最新 id 再 UPDATE），多任务并存故障（双写）时会遗留僵尸 running 记录；
+            // 进入新任务前清场所有 running 是正确语义（单会话同一时刻应只存在一条 running；
+            // 本方法调用时点早于新任务 INSERT，不会误标新任务）。
+            // 注：全量 UPDATE 的 WHERE 为 conversation_id + status（无 ORDER BY/LIMIT 子句），H2 与 MySQL 均兼容。
+            jdbcTemplate.update(
+                    "UPDATE agent_task SET status = 'cancelled', updated_at = NOW() WHERE conversation_id = ? AND status = 'running'",
+                    conversationId);
         } catch (Exception e) {
             log.debug("取消任务记录失败: {}", e.getMessage());
         }
@@ -178,7 +177,11 @@ public class ToolLoopManager {
                     String action = args.path("action").asText("");
                     String label = "file_explorer".equals(toolName) && !action.isEmpty()
                             ? toolName + ":" + action : toolName;
-                    yield label + ":" + (path.isEmpty() ? "*" : path);
+                    // 【修复】grep/glob 的 pattern（关键词）纳入签名：连续搜索「不同关键词」属正常批处理，
+                    // 不应因「同 action+同目录」被误判为重复调用（与「连续读不同文件」同类误判场景）
+                    String keyword = args.path("pattern").asText("");
+                    yield label + ":" + (path.isEmpty() ? "*" : path)
+                            + (keyword.isEmpty() ? "" : ":" + keyword);
                 }
                 case "command" -> {
                     String cmdAction = args.path("action").asText("");

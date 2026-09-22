@@ -13,7 +13,7 @@
       </div>
       <div class="header-right">
         <div class="stat-item">
-          <span class="stat-num">{{ files.length }}</span>
+          <span class="stat-num">{{ total }}</span>
           <span class="stat-label">文件总数</span>
         </div>
         <div class="stat-divider"></div>
@@ -33,19 +33,19 @@
             v-model="keyword"
             placeholder="搜索文件名..."
             class="search-input"
-            @keyup.enter="loadFiles(true)"
+            @keyup.enter="resetAndLoad()"
           />
           <CloseCircleFilled
             v-if="keyword"
             class="search-clear"
-            @click="keyword = ''; loadFiles(true)"
+            @click="keyword = ''; resetAndLoad()"
           />
         </div>
         <a-select
           v-model:value="statusFilter"
           placeholder="全部状态"
           style="width: 130px"
-          @change="loadFiles(true)"
+          @change="resetAndLoad()"
         >
           <a-select-option value="">全部状态</a-select-option>
           <a-select-option value="active">正常</a-select-option>
@@ -55,18 +55,22 @@
           v-model:value="storageFilter"
           placeholder="全部存储"
           style="width: 130px"
-          @change="loadFiles(true)"
+          @change="resetAndLoad()"
         >
           <a-select-option value="">全部存储</a-select-option>
           <a-select-option value="cloud">云端</a-select-option>
           <a-select-option value="local">本地</a-select-option>
         </a-select>
-        <a-button class="refresh-btn" @click="loadFiles(true)">
+        <a-button class="refresh-btn" @click="loadPage({ force: true })">
           <template #icon><ReloadOutlined /></template>
           刷新
         </a-button>
       </div>
       <div class="toolbar-right">
+        <a-button class="cloud-btn" @click="openCloudDrawer">
+          <template #icon><CloudOutlined /></template>
+          云端文件
+        </a-button>
         <a-button type="primary" :loading="uploading" @click="triggerUpload" class="upload-btn">
           <template #icon><PlusOutlined /></template>
           上传文件
@@ -105,8 +109,9 @@
         <a-button v-else @click="clearFilters" class="empty-cta">清除筛选</a-button>
       </div>
 
-      <!-- 文件列表 -->
-      <div v-else class="file-list">
+      <!-- 文件列表（2026-09-21：滚动链改造——列表在卡片内独立滚动、不破框；分页器替代「加载更多」） -->
+      <div v-else class="file-list-container">
+        <div ref="listScrollRef" class="file-list">
         <div v-for="f in files" :key="f.id" class="file-row" @click="openDetail(f)">
           <!-- 缩略图（图片→缩略图；文档→文件格式图标） -->
           <div class="row-thumb">
@@ -161,10 +166,27 @@
             </a-tooltip>
           </div>
         </div>
+        </div>
 
-        <!-- 加载更多 -->
-        <div v-if="hasMore" class="load-more">
-          <a-button :loading="loadingMore" @click="loadFiles(false)">加载更多</a-button>
+        <!-- 分页器（2026-09-21：标准分页替代「加载更多」；页码/每页条数/快速跳转） -->
+        <div v-if="total > 0" class="list-footer">
+          <a-pagination
+            :current="currentPage"
+            :page-size="pageSize"
+            :total="total"
+            :show-size-changer="true"
+            :page-size-options="['10', '20', '50', '100']"
+            :show-quick-jumper="true"
+            :show-total="(t: number) => `共 ${t} 个文件`"
+            :disabled="pageLoading || loading"
+            @change="handlePageChange"
+            @show-size-change="handlePageChange"
+          />
+        </div>
+
+        <!-- 翻页轻量加载遮罩（保留列表可见，防连点） -->
+        <div v-if="pageLoading" class="list-loading-mask">
+          <a-spin size="small" />
         </div>
       </div>
     </div>
@@ -232,6 +254,62 @@
           <a-button @click="downloadCurrent">⬇️ 下载</a-button>
           <a-button @click="openRename(currentFile!)">✏️ 重命名</a-button>
           <a-button danger @click="handleDelete(currentFile!)">🗑️ 删除</a-button>
+        </div>
+      </div>
+    </a-drawer>
+
+    <!-- ===== 云端文件抽屉（Files API 账号级视图，2026-09-21） ===== -->
+    <a-drawer
+      v-model:open="cloudDrawerVisible"
+      title="云端文件（Files API）"
+      placement="right"
+      :width="560"
+      :body-style="{ padding: '16px' }"
+    >
+      <div class="cloud-body">
+        <p class="cloud-intro">
+          这里展示当前账号在云端（Files API）保存的全部文件，与本地记录自动比对。标记「仅云端」的文件本地没有记录（如软件重装/清理数据后），可在此删除清理——云端真删，不留孤儿。
+        </p>
+
+        <!-- 统计条 -->
+        <div v-if="cloudData" class="cloud-stats">
+          <span class="cloud-stat">云端共 <b>{{ cloudData.total }}</b> 个</span>
+          <span class="cloud-stat" :class="{ 'cloud-stat--warn': cloudData.cloudOnlyCount > 0 }">
+            仅云端 <b>{{ cloudData.cloudOnlyCount }}</b> 个<template v-if="cloudData.cloudOnlyCount > 0">（{{ formatAssetSize(cloudData.cloudOnlySize) }}）</template>
+          </span>
+          <span class="cloud-stat cloud-stat--muted">{{ cloudData.providerCode }}</span>
+          <a-button size="small" type="text" :loading="cloudLoading" @click="loadCloudFiles">刷新</a-button>
+        </div>
+        <div v-if="cloudData?.truncated" class="cloud-truncated">云端文件过多，仅展示拉取上限内的部分文件</div>
+
+        <!-- 加载 / 错误 / 空 / 列表 -->
+        <div v-if="cloudLoading && !cloudData" class="cloud-state">
+          <a-spin size="large" />
+          <p>正在查询云端文件...</p>
+        </div>
+        <div v-else-if="cloudError" class="cloud-state cloud-error">
+          <p>⚠️ {{ cloudError }}</p>
+          <a-button size="small" @click="loadCloudFiles">重试</a-button>
+        </div>
+        <div v-else-if="cloudFiles.length === 0" class="cloud-state">
+          <p>云端暂无文件</p>
+        </div>
+        <div v-else class="cloud-list">
+          <div v-for="cf in cloudFiles" :key="cf.fileId" class="cloud-row">
+            <div class="cloud-row-icon">🖼️</div>
+            <div class="cloud-row-info">
+              <div class="cloud-row-name" :title="cf.filename">{{ cf.filename }}</div>
+              <div class="cloud-row-meta">
+                {{ formatAssetSize(cf.bytes ?? 0) }} · {{ formatEpoch(cf.createdAtEpoch) }} ·
+                {{ cf.expiresAtEpoch ? `到期 ${formatEpoch(cf.expiresAtEpoch)}` : '永久保存' }}
+              </div>
+              <div class="cloud-row-id" :title="cf.fileId">{{ cf.fileId }}</div>
+            </div>
+            <div class="cloud-row-side">
+              <a-tag :color="cf.linked ? 'blue' : 'orange'" size="small">{{ cf.linked ? '已登记' : '仅云端' }}</a-tag>
+              <a-button size="small" danger @click="handleCloudDelete(cf)">删除</a-button>
+            </div>
+          </div>
         </div>
       </div>
     </a-drawer>
@@ -317,17 +395,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
-  SearchOutlined, PlusOutlined, ReloadOutlined, CloseCircleFilled
+  SearchOutlined, PlusOutlined, ReloadOutlined, CloseCircleFilled, CloudOutlined
 } from '@ant-design/icons-vue'
 import {
-  listFileAssets, uploadFileAsset, getFileAsset, renameFileAsset, deleteFileAsset,
+  listFileAssetsPaged, uploadFileAsset, getFileAsset, renameFileAsset, deleteFileAsset,
   getFilePreviewBlobUrl, downloadFileAsset, invalidatePreviewCache, fileAssetDisplayName, formatAssetSize,
   docTypeOf, docTypeIcon, isImageMime,
-  type FileAssetData
+  listCloudFiles, deleteCloudFile,
+  type FileAssetData, type ListFileAssetsPagedParams, type CloudFileData, type CloudFileListData
 } from '@/api/file-asset'
 import { useFileRefStore } from '@/store/file-ref'
 import { compressImageIfNeeded } from '@/utils/image-compress'
@@ -339,14 +418,24 @@ const fileRefStore = useFileRefStore()
 // ===== 状态 =====
 const files = ref<FileAssetData[]>([])
 const loading = ref(false)
-const loadingMore = ref(false)
+/** 翻页/刷新轻量加载态（保留列表可见的遮罩；2026-09-21 分页改造） */
+const pageLoading = ref(false)
 const uploading = ref(false)
 const keyword = ref('')
 const statusFilter = ref('')
 /** M7：存储类型筛选（''=全部 / cloud=云端 / local=本地） */
 const storageFilter = ref('')
-const hasMore = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+
+// ===== 分页状态（2026-09-21 分页改造） =====
+const currentPage = ref(1)
+const pageSize = ref(20)
+/** 筛选条件下的文件总数（全量，由后端统计——不再用当前页列表长度） */
+const total = ref(0)
+/** 筛选条件下占用空间合计（字节，由后端统计） */
+const totalSize = ref(0)
+/** 文件列表滚动容器（翻页后归顶用） */
+const listScrollRef = ref<HTMLElement | null>(null)
 
 // 缩略图 blob URL 映射（id → objectURL）
 const previewUrlMap = ref<Record<number, string>>({})
@@ -360,53 +449,96 @@ const renameValue = ref('')
 const renameTarget = ref<FileAssetData | null>(null)
 const renameSubmitting = ref(false)
 
-const PAGE_SIZE = 50
-const MAX_UPLOAD_SIZE = 64 * 1024 * 1024
+// ===== 云端文件抽屉（Files API 账号级视图，2026-09-21） =====
+const cloudDrawerVisible = ref(false)
+const cloudLoading = ref(false)
+const cloudError = ref('')
+const cloudData = ref<CloudFileListData | null>(null)
+/** 云端文件列表（来自最近一次查询结果；与本地比对状态由后端标注） */
+const cloudFiles = computed<CloudFileData[]>(() => cloudData.value?.files || [])
 
-const totalSize = computed(() => files.value.reduce((sum, f) => sum + (f.size || 0), 0))
+const MAX_UPLOAD_SIZE = 64 * 1024 * 1024
 
 /** 是否有激活的筛选条件（空状态文案切换用） */
 const hasActiveFilter = computed(() => !!(keyword.value || statusFilter.value || storageFilter.value))
 
-// ===== 数据加载 =====
-const loadFiles = async (reset = true) => {
-  if (reset) {
+// ===== 数据加载（2026-09-21 分页改造：标准页码分页） =====
+/** 请求序号：快速翻页/筛选竞态时丢弃过期响应（防止慢响应覆盖新页数据） */
+let loadSeq = 0
+/** 上次成功发起的请求参数指纹：防「change + showSizeChange」双触发重复请求 */
+let lastReqKey = ''
+
+const buildReqKey = () =>
+  `${currentPage.value}|${pageSize.value}|${keyword.value.trim()}|${statusFilter.value}|${storageFilter.value}`
+
+/**
+ * 加载当前页
+ * @param opts.resetView 大 spinner 整体视图（首载/筛选重置用）；默认翻页轻量遮罩
+ * @param opts.force     强制刷新（参数未变也重新请求：刷新按钮/删除后/上传后用）
+ * @param opts.silent    静默刷新（不显示任何加载态：删除后用）
+ */
+const loadPage = async (opts: { resetView?: boolean; force?: boolean; silent?: boolean } = {}) => {
+  const reqKey = buildReqKey()
+  if (!opts.force && reqKey === lastReqKey) return
+  lastReqKey = reqKey
+
+  const seq = ++loadSeq
+  if (opts.resetView) {
     loading.value = true
-  } else {
-    loadingMore.value = true
+  } else if (!opts.silent) {
+    pageLoading.value = true
   }
   try {
-    const params: Parameters<typeof listFileAssets>[0] = {
-      limit: PAGE_SIZE,
+    const params: ListFileAssetsPagedParams = {
+      page: currentPage.value,
+      pageSize: pageSize.value,
       order: 'desc'
     }
     if (keyword.value.trim()) params.keyword = keyword.value.trim()
     if (statusFilter.value) params.status = statusFilter.value
     if (storageFilter.value) params.storageType = storageFilter.value
-    if (!reset && files.value.length > 0) {
-      params.after = files.value[files.value.length - 1].id
-    }
-    const res = await listFileAssets(params)
+    const res = await listFileAssetsPaged(params)
+    if (seq !== loadSeq) return // 过期响应：已被更新的请求取代
     if (res.code === 200 && res.data) {
-      if (reset) {
-        files.value = res.data
-        // 重置后重新计算 hasMore：拉满一页说明可能还有
-        hasMore.value = res.data.length >= PAGE_SIZE
-        await ensurePreviews(res.data)
-      } else {
-        files.value = [...files.value, ...res.data]
-        hasMore.value = res.data.length >= PAGE_SIZE
-        await ensurePreviews(res.data)
-      }
+      files.value = res.data.records
+      total.value = res.data.total
+      totalSize.value = res.data.totalSize
+      await ensurePreviews(res.data.records)
+      // 翻页/刷新后列表滚动回顶部
+      await nextTick()
+      if (listScrollRef.value) listScrollRef.value.scrollTop = 0
     } else {
+      lastReqKey = '' // 失败回滚指纹，允许重试
       message.error(res.message || '加载文件列表失败')
     }
   } catch (e: any) {
+    if (seq !== loadSeq) return
+    lastReqKey = '' // 失败回滚指纹，允许重试
     message.error(e.message || '加载文件列表失败')
   } finally {
-    loading.value = false
-    loadingMore.value = false
+    if (seq === loadSeq) {
+      loading.value = false
+      pageLoading.value = false
+    }
   }
+}
+
+/** 筛选/搜索变化：回到第 1 页 + 大 spinner 视图 */
+const resetAndLoad = () => {
+  currentPage.value = 1
+  loadPage({ resetView: true })
+}
+
+/** 分页器变化（页码翻页 / 每页条数切换） */
+const handlePageChange = (page: number, size: number) => {
+  if (size !== pageSize.value) {
+    // 每页条数变化：回到第 1 页
+    pageSize.value = size
+    currentPage.value = 1
+  } else {
+    currentPage.value = page
+  }
+  loadPage()
 }
 
 /** 异步加载缩略图（仅图片，blob URL 带全局缓存；文档显示图标无需加载） */
@@ -431,7 +563,7 @@ const clearFilters = () => {
   keyword.value = ''
   statusFilter.value = ''
   storageFilter.value = ''
-  loadFiles(true)
+  resetAndLoad()
 }
 
 // ===== 上传 =====
@@ -471,7 +603,9 @@ const handleUpload = async (event: Event) => {
     }
     if (okCount > 0) {
       message.success(`成功上传 ${okCount} 个文件${failCount > 0 ? `，${failCount} 个失败` : ''}`)
-      loadFiles(true)
+      // 回到第 1 页展示最新上传（轻量刷新，不闪大 spinner）
+      currentPage.value = 1
+      loadPage({ force: true })
     }
   } finally {
     uploading.value = false
@@ -646,6 +780,85 @@ const handleDelete = (f: FileAssetData) => {
             drawerVisible.value = false
             currentFile.value = null
           }
+          // 2026-09-21 分页：当前页删空且有上一页时回退一页；静默刷新总数/分页器（无加载态）
+          if (files.value.length === 0 && currentPage.value > 1) {
+            currentPage.value -= 1
+          }
+          loadPage({ force: true, silent: true })
+        } else {
+          message.error(res.message || '删除失败')
+        }
+      } catch (e: any) {
+        message.error(e.message || '删除失败')
+      }
+    }
+  })
+}
+
+// ===== 云端文件（Files API 账号级视图，2026-09-21） =====
+
+/** 打开云端文件抽屉（每次打开重新拉取，保证「已登记」状态最新） */
+const openCloudDrawer = () => {
+  cloudDrawerVisible.value = true
+  loadCloudFiles()
+}
+
+/** 拉取云端文件清单（与本地记录的比对由后端完成，标注「已登记 / 仅云端」） */
+const loadCloudFiles = async () => {
+  cloudLoading.value = true
+  cloudError.value = ''
+  try {
+    const res = await listCloudFiles()
+    if (res.code === 200 && res.data) {
+      cloudData.value = res.data
+    } else {
+      cloudError.value = res.message || '云端文件查询失败'
+    }
+  } catch (e: any) {
+    cloudError.value = e.message || '云端文件查询失败'
+  } finally {
+    cloudLoading.value = false
+  }
+}
+
+/** 删除云端文件（幂等；本地记录联动清理 → 同步刷新主列表/详情/预览缓存） */
+const handleCloudDelete = (cf: CloudFileData) => {
+  const name = cf.linked ? (cf.linkedDisplayName || cf.filename) : cf.filename
+  Modal.confirm({
+    title: '确认删除云端文件',
+    content: cf.linked
+      ? `将从云端（Files API）永久删除「${name}」，并同步清理本地记录（引用/副本）。此操作不可恢复。`
+      : `将从云端（Files API）永久删除「${name}」（本地无记录）。此操作不可恢复。`,
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      try {
+        const res = await deleteCloudFile(cf.fileId)
+        if (res.code === 200 && res.data) {
+          message.success(res.data.localRecordDeleted ? '已删除（本地记录已联动清理）' : '已删除')
+          // 本地记录被联动清理：同步刷新主列表/详情/预览缓存
+          if (res.data.localRecordDeleted) {
+            const assetId = cf.linkedAssetId
+            if (assetId != null) {
+              invalidatePreviewCache(assetId)
+              const map = { ...previewUrlMap.value }
+              delete map[assetId]
+              previewUrlMap.value = map
+              files.value = files.value.filter(x => x.id !== assetId)
+              if (currentFile.value?.id === assetId) {
+                drawerVisible.value = false
+                currentFile.value = null
+              }
+            }
+            // 当前页删空且有上一页时回退一页；静默刷新总数/分页器（无加载态）
+            if (files.value.length === 0 && currentPage.value > 1) {
+              currentPage.value -= 1
+            }
+            loadPage({ force: true, silent: true })
+          }
+          // 刷新云端列表（条目移除或状态变化）
+          await loadCloudFiles()
         } else {
           message.error(res.message || '删除失败')
         }
@@ -676,8 +889,17 @@ const formatTime = (iso?: string): string => {
   }
 }
 
+/** Unix 秒 → 本地时间字符串（云端文件时间戳展示；null/非法返回 '-'） */
+const formatEpoch = (epoch?: number | null): string => {
+  if (epoch == null || epoch <= 0) return '-'
+  const d = new Date(epoch * 1000)
+  if (isNaN(d.getTime())) return '-'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 onMounted(() => {
-  loadFiles(true)
+  loadPage({ resetView: true })
 })
 </script>
 
@@ -755,18 +977,67 @@ onMounted(() => {
   padding: 8px;
   flex: 1;
   min-height: 300px;
+  /* 2026-09-21 溢出修复：卡片改为纵向 flex 容器 + 裁切——
+     高度锁定为剩余空间（flex:1），内容不再以 overflow:visible 冲出卡片边框
+     （修复「文件列表文件多了之后超出外层框体」）；滚动交给内部 .file-list（滚动链见下） */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .state-box {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 70px 20px; gap: 10px;
+  flex: 1; /* 滚动链（2026-09-21）：状态块在卡片内居中占满 */
 }
 .state-text { color: var(--text-3, #9ca3af); font-size: 13px; }
 .empty-icon { font-size: 44px; }
 .empty-title { margin: 6px 0 0; font-size: 15px; font-weight: 600; color: var(--text-1, #111827); }
 .empty-desc { margin: 0 0 10px; font-size: 12.5px; color: var(--text-3, #9ca3af); max-width: 420px; text-align: center; }
 
+/* ===== 文件列表（滚动链，2026-09-21 溢出修复） ===== */
+/* 外层容器：占满卡片剩余高度 + 相对定位（遮罩定位基准） */
+.file-list-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0; /* 关键：允许收缩到内容高度以下，滚动链生效 */
+  position: relative;
+}
+/* 列表滚动区：在卡片内独立滚动（不撑破外层框体） */
+.file-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px; /* 滚动条与行内容的间隙 */
+}
+/* 滚动条样式（对齐项目规范，明暗双主题） */
+.file-list::-webkit-scrollbar { width: 5px; height: 5px; }
+.file-list::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+.file-list::-webkit-scrollbar-track { background: transparent; }
+/* 分页器区：固定在卡片底部（不参与滚动） */
+.list-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 10px 4px 6px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border, #e5e7eb);
+}
+/* 翻页轻量加载遮罩（保留列表可见，防连点） */
+.list-loading-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 /* ===== 文件行 ===== */
-.file-list { display: flex; flex-direction: column; }
 .file-row {
   display: flex; align-items: center; gap: 14px;
   padding: 10px 12px;
@@ -806,7 +1077,6 @@ onMounted(() => {
 }
 .action-btn:hover { background: var(--bg-hover, #f3f4f6); opacity: 1; }
 .action-btn.danger:hover { background: #fef2f2; }
-.load-more { display: flex; justify-content: center; padding: 14px; }
 
 /* ===== 详情抽屉 ===== */
 .detail-body { display: flex; flex-direction: column; gap: 14px; }
@@ -873,4 +1143,50 @@ onMounted(() => {
 .ref-conv-title { font-size: 13px; color: var(--text-1, #111827); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-conv-time { font-size: 11.5px; color: var(--text-3, #9ca3af); flex-shrink: 0; }
 .ref-conv-empty { text-align: center; padding: 24px 0; font-size: 12.5px; color: var(--text-3, #9ca3af); }
+
+/* ===== 深色主题（滚动链配套，2026-09-21） ===== */
+[data-theme="dark"] .file-list::-webkit-scrollbar-thumb { background: #3a3850; }
+[data-theme="dark"] .list-loading-mask { background: rgba(18, 17, 28, 0.6); }
+
+/* ===== 云端文件抽屉（2026-09-21） ===== */
+.cloud-body { display: flex; flex-direction: column; gap: 12px; }
+.cloud-intro { margin: 0; font-size: 12px; color: var(--text-3, #9ca3af); line-height: 1.6; }
+.cloud-stats {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 8px;
+  background: var(--bg-hover, #f9fafb);
+  font-size: 12px; color: var(--text-2, #6b7280);
+}
+.cloud-stat b { color: var(--accent, #8b5cf6); }
+.cloud-stat--warn b { color: #f59e0b; }
+.cloud-stat--muted { color: var(--text-3, #9ca3af); margin-left: auto; }
+.cloud-truncated {
+  font-size: 12px; color: #f59e0b; padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.08); border-radius: 6px;
+}
+.cloud-state {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 48px 0; color: var(--text-3, #9ca3af); font-size: 13px;
+}
+.cloud-error { color: #ef4444; }
+.cloud-list { display: flex; flex-direction: column; gap: 8px; }
+.cloud-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px; background: var(--bg-card, #fff);
+  transition: border-color 0.15s;
+}
+.cloud-row:hover { border-color: var(--accent, #8b5cf6); }
+.cloud-row-icon { font-size: 20px; flex-shrink: 0; }
+.cloud-row-info { flex: 1; min-width: 0; }
+.cloud-row-name {
+  font-size: 13px; font-weight: 500; color: var(--text-1, #111827);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cloud-row-meta { font-size: 11px; color: var(--text-3, #9ca3af); margin-top: 2px; }
+.cloud-row-id {
+  font-size: 10px; color: var(--text-3, #9ca3af); font-family: monospace;
+  margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cloud-row-side { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 </style>

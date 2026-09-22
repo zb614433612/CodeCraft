@@ -415,7 +415,7 @@
           </transition>
         </div>
         <!-- 询问用户需求面板（默认/clarification）：保持原有输入框 -->
-        <div v-else>
+        <div v-else class="ask-user-clarify-panel">
           <div class="ask-user-header">
             <span class="ask-user-header-icon">💬</span>
             需要确认
@@ -912,6 +912,7 @@ import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 import { setConfig } from '@/api/config'
 import type { SkillMatchInfo } from '@/utils/sse-client'
 import type { AgentStreamEvent } from '@/utils/sse-client'
+import type { DelegateProgressData } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
 import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, getSnapshotFileContent, type SessionChanges } from '@/api/snapshot'
 import { useSettingsStore } from '@/store/settings'
@@ -990,6 +991,11 @@ interface ChatMessage {
     toolName?: string         // 工具名称
     pending?: boolean          // 是否正在执行（加载中），true 时 content 为空
     operationSummary?: string  // 操作摘要（如 "📄 创建文件: xxx"）
+    // 2026-09-21：委托进度（agent_invoke pending 卡片展示「已等待 N 秒」+「前往 B 会话」跳转）
+    delegateSessionId?: number    // B 会话 ID（心跳 / 完成卡解析后填充）
+    delegateTarget?: string       // 目标智能体名（显示用）
+    delegateStatus?: string       // RUNNING 等（预留）
+    delegateElapsedSec?: number   // 已等待秒数
   }[]
   matchedSkills?: { name: string; confidence: number; triggerWords: string }[]
   timestamp: number
@@ -4262,6 +4268,11 @@ const sendMessage = async () => {
           })
         }
         scheduleMessageUpdate(convId, assistantMsg.id)
+      } else if (event.type === 'delegate_progress') {
+        // 委托进度心跳（2026-09-21）：更新当前 agent_invoke pending 卡片为「已委托「B」· 已等待 N 秒」+ 跳转入口
+        if (updateAgentInvokePending(assistantMsg, event.data as DelegateProgressData)) {
+          scheduleMessageUpdate(convId, assistantMsg.id)
+        }
       } else if (event.type === 'content') {
         setStreamStatus(convId, '正在生成回答...')
         // 实时更新消息内容
@@ -4549,6 +4560,11 @@ const reconnectToTaskStream = async (convId: number, cursor = 0) => {
         }
       } else if (event.type === 'resume') {
         setStreamStatus(stringConvId, '继续执行中...')
+      } else if (event.type === 'delegate_progress') {
+        // 委托进度心跳（2026-09-21，重连场景）：更新最近的 agent_invoke pending 卡片（无 pending 条目时忽略）
+        if (targetMsg && updateAgentInvokePending(targetMsg, event.data as DelegateProgressData)) {
+          scheduleMessageUpdate(stringConvId, targetMsg.id)
+        }
       } else if (event.type === 'complete') {
         break
       }
@@ -4616,6 +4632,9 @@ const checkAndReconnect = async (convId: string) => {
       } else {
         // 任务已完成/失败/取消，清除 activeTask（数据已在 DB 中）
         setActiveTask(convId, null)
+        // 缺陷B修复（2026-09-18）：任务已结束的会话强制刷新消息，避免停留过期缓存
+        //（如委托任务完成后再切回时界面仍是旧内容、需重启软件才可见）
+        await fetchMessages(convId, true)
       }
     }
   } catch (e) {
@@ -4877,7 +4896,7 @@ function extractActionFromToolContent(content: string, toolName: string): string
       if (isError) {
         if (/action=(\w+)/.test(content)) {
           const act = content.match(/action=(\w+)/)![1]
-          const map: Record<string, string> = { add: '暂存', commit: '提交', push: '推送' }
+          const map: Record<string, string> = { add: '暂存', commit: '提交', push: '推送', pull: '拉取', fetch: '获取', unstage: '取消暂存', restore: '还原', reset: '回退', revert: '撤销提交' }
           return map[act] || act
         }
         return 'Git'
@@ -4885,10 +4904,12 @@ function extractActionFromToolContent(content: string, toolName: string): string
       if (/📌|暂存/.test(firstLines)) return '暂存'
       if (/📦|提交|commit/.test(firstLines)) return '提交'
       if (/⬆️|推送|push/.test(firstLines)) return '推送'
+      if (/拉取|pull/.test(firstLines)) return '拉取'
+      if (/获取远程|fetch/.test(firstLines)) return '获取'
       const gsMatch = content.match(/action=(\w+)/)
       if (gsMatch) {
         const act = gsMatch[1]
-        const map: Record<string, string> = { add: '暂存', commit: '提交', push: '推送' }
+        const map: Record<string, string> = { add: '暂存', commit: '提交', push: '推送', pull: '拉取', fetch: '获取', unstage: '取消暂存', restore: '还原', reset: '回退', revert: '撤销提交' }
         return map[act] || act
       }
       return 'Git'
@@ -4899,6 +4920,7 @@ function extractActionFromToolContent(content: string, toolName: string): string
       if (isError) return '查询'
       if (/状态|Status|status/.test(firstLines)) return '状态'
       if (/差异|diff|Diff/.test(firstLines)) return '差异'
+      if (/^commit [0-9a-f]{6,}/m.test(content)) return '提交详情'
       if (/历史|log|提交|commit/.test(firstLines)) return '日志'
       return '查询'
     }
@@ -4908,7 +4930,7 @@ function extractActionFromToolContent(content: string, toolName: string): string
       if (isError) {
         if (/action=(\w+)/.test(content)) {
           const act = content.match(/action=(\w+)/)![1]
-          const map: Record<string, string> = { create: '创建分支', switch: '切换分支', delete: '删除分支', list: '列出分支' }
+          const map: Record<string, string> = { create: '创建分支', switch: '切换分支', delete: '删除分支', list: '列出分支', merge: '合并分支' }
           return map[act] || act
         }
         return '分支管理'
@@ -4916,13 +4938,83 @@ function extractActionFromToolContent(content: string, toolName: string): string
       if (/创建分支/.test(firstLines)) return '创建分支'
       if (/切换分支/.test(firstLines)) return '切换分支'
       if (/删除分支/.test(firstLines)) return '删除分支'
+      if (/合并/.test(firstLines)) return '合并分支'
       const gbMatch = content.match(/action=(\w+)/)
       if (gbMatch) {
         const act = gbMatch[1]
-        const map: Record<string, string> = { create: '创建分支', switch: '切换分支', delete: '删除分支', list: '列出分支' }
+        const map: Record<string, string> = { create: '创建分支', switch: '切换分支', delete: '删除分支', list: '列出分支', merge: '合并分支' }
         return map[act] || act
       }
       return '分支管理'
+    }
+
+    // ======== git_stash ========
+    case 'git_stash': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { save: '储藏', list: '储藏列表', pop: '弹出储藏', drop: '删除储藏' }
+          return map[act] || act
+        }
+        return '储藏'
+      }
+      if (/已储藏/.test(firstLines)) return '储藏'
+      if (/储藏记录|没有储藏/.test(firstLines)) return '储藏列表'
+      if (/已恢复储藏|已弹出/.test(firstLines)) return '弹出储藏'
+      if (/已删除储藏/.test(firstLines)) return '删除储藏'
+      const stashMatch = content.match(/action=(\w+)/)
+      if (stashMatch) {
+        const act = stashMatch[1]
+        const map: Record<string, string> = { save: '储藏', list: '储藏列表', pop: '弹出储藏', drop: '删除储藏' }
+        return map[act] || act
+      }
+      return '储藏'
+    }
+
+    // ======== git_tag ========
+    case 'git_tag': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { list: '标签列表', create: '创建标签', delete: '删除标签', push: '推送标签' }
+          return map[act] || act
+        }
+        return '标签'
+      }
+      if (/标签列表|暂无标签/.test(firstLines)) return '标签列表'
+      if (/创建成功/.test(firstLines)) return '创建标签'
+      if (/已删除/.test(firstLines)) return '删除标签'
+      if (/推送成功/.test(firstLines)) return '推送标签'
+      const tagMatch = content.match(/action=(\w+)/)
+      if (tagMatch) {
+        const act = tagMatch[1]
+        const map: Record<string, string> = { list: '标签列表', create: '创建标签', delete: '删除标签', push: '推送标签' }
+        return map[act] || act
+      }
+      return '标签'
+    }
+
+    // ======== git_remote ========
+    case 'git_remote': {
+      if (isError) {
+        if (/action=(\w+)/.test(content)) {
+          const act = content.match(/action=(\w+)/)![1]
+          const map: Record<string, string> = { list: '远程列表', add: '添加远程', set_url: '修改远程', remove: '删除远程' }
+          return map[act] || act
+        }
+        return '远程仓库'
+      }
+      if (/远程仓库列表|未配置远程/.test(firstLines)) return '远程列表'
+      if (/已添加/.test(firstLines)) return '添加远程'
+      if (/已更新/.test(firstLines)) return '修改远程'
+      if (/已删除/.test(firstLines)) return '删除远程'
+      const remoteMatch = content.match(/action=(\w+)/)
+      if (remoteMatch) {
+        const act = remoteMatch[1]
+        const map: Record<string, string> = { list: '远程列表', add: '添加远程', set_url: '修改远程', remove: '删除远程' }
+        return map[act] || act
+      }
+      return '远程仓库'
     }
 
     // ======== task_manager ========
@@ -4996,6 +5088,19 @@ function extractActionFromToolContent(content: string, toolName: string): string
       // inspect 第一行：可能含 "详情" 等
       if (/详情|inspect/i.test(line1)) return '查看详情'
       return '子Agent'
+    }
+
+    // ======== agent_invoke（Phase 19 智能体互调，2026-09-21 卡片标签） ========
+    case 'agent_invoke': {
+      const line1 = content.split('\n')[0] || ''
+      if (isError) return '委托操作'
+      if (/异步派发|委托已受理/.test(line1)) return '发起委托'
+      if (/任务已完成/.test(line1)) return '委托完成'
+      if (/任务失败|执行失败/.test(line1)) return '委托失败'
+      if (/等待|超时|TIMEOUT/i.test(firstLines)) return '批量等待'
+      if (/取消/.test(firstLines)) return '取消委托'
+      if (/执行中|运行中|状态/.test(firstLines)) return '查询进度'
+      return '委托操作'
     }
 
     // ======== schedule_task ========
@@ -5106,9 +5211,50 @@ function renderSkillUsageCard(content: string, expanded = false, full = false): 
 /** thinking 渲染段：key 稳定（供 v-for DOM 复用）；cardAt 供点击定位卡片（pending 卡片无此标记，不响应折叠） */
 type ThinkSegment = { key: string; html: string; cardAt?: number }
 
+/** 已等待时长格式化（秒 → 「N 秒」/「N 分 M 秒」；委托心跳展示用，2026-09-21） */
+const formatWaitSec = (sec: number): string =>
+  sec >= 60 ? `${Math.floor(sec / 60)} 分 ${sec % 60} 秒` : `${sec} 秒`
+
+/** 更新最近的 agent_invoke pending 条目（委托进度心跳 delegate_progress，2026-09-21）：
+ *  卡片文案 → 「已委托「B」· 执行中 · 已等待 N 秒」，并携带 B 会话信息供「前往 B 会话」跳转。
+ *  无 pending 条目（如刷新重连后）时返回 false，调用方跳过刷新。 */
+const updateAgentInvokePending = (msg: ChatMessage, dp: DelegateProgressData): boolean => {
+  const pendings = (msg.toolResults || []).filter(tr => tr.pending && tr.toolName === 'agent_invoke')
+  if (pendings.length === 0) return false
+  const t = pendings[pendings.length - 1]
+  t.delegateSessionId = dp.targetSessionId
+  t.delegateTarget = dp.targetAgent
+  t.delegateStatus = dp.status
+  t.delegateElapsedSec = dp.elapsedSec
+  t.operationSummary = `🤝 已委托「${dp.targetAgent || 'B'}」· 执行中 · 已等待 ${formatWaitSec(dp.elapsedSec ?? 0)}`
+  return true
+}
+
 /** 构建 pending 卡片 HTML（工具执行中；不响应折叠） */
-const buildPendingCardHtml = (tr: { toolName?: string; operationSummary?: string }) => {
+const buildPendingCardHtml = (tr: { toolName?: string; operationSummary?: string; delegateSessionId?: number; delegateTarget?: string; delegateElapsedSec?: number }) => {
   const toolLabel = tr.toolName || '工具'
+  // 2026-09-21：委托卡片特判（agent_invoke 等待中）——「已委托「B」· 已等待 N 秒」+「前往 B 会话」跳转入口
+  if (tr.toolName === 'agent_invoke' && tr.delegateSessionId) {
+    const targetName = escapeHtml(tr.delegateTarget || 'B')
+    const waitText = formatWaitSec(tr.delegateElapsedSec ?? 0)
+    return `<div class="tool-result-card tool-result-pending">
+      <div class="tool-result-header">
+        <span class="tr-toggle tr-toggle-spin">⏳</span>
+        <span class="tr-icon tr-icon-pending">
+          <span class="tr-pending-dot"></span>
+        </span>
+        <span class="tr-label">🤝 已委托「${targetName}」· 执行中</span>
+        <span class="tr-summary">已等待 ${escapeHtml(waitText)}</span>
+        <button class="jump-to-session-btn" data-session-id="${tr.delegateSessionId}">前往 B 会话 →</button>
+      </div>
+      <div class="tool-result-body tool-result-loading">
+        <div class="tool-loading-bar">
+          <div class="tool-loading-bar-inner"></div>
+        </div>
+        <div class="tool-loading-hint">智能体正在独立执行任务，可前往 B 会话查看实时详情...</div>
+      </div>
+    </div>`
+  }
   const summaryText = tr.operationSummary || `正在调用 ${toolLabel}...`
   // 提取操作摘要的第一行（去掉 markdown 标记后截取前80字符）
   const cleanSummary = summaryText.replace(/^>\s*/, '').replace(/[*`]/g, '').substring(0, 80)
@@ -5144,6 +5290,14 @@ const buildToolCardHtml = (displayContent: string, toolName: string | undefined,
   const labelText = isError
     ? ('执行出错' + (toolName ? ' ' + toolName : ''))
     : (toolName ? (toolName + ' · ' + actionLabel) : '工具执行')
+  // 2026-09-21：agent_invoke 完成卡——解析【B 会话 ID】附「前往 B 会话」跳转入口（invoke/poll/wait 结果均含此字段）
+  let delegateJumpBtn = ''
+  if (toolName === 'agent_invoke') {
+    const bm = displayContent.match(/【B 会话 ID】\s*(\d+)/)
+    if (bm) {
+      delegateJumpBtn = `<button class="jump-to-session-btn" data-session-id="${bm[1]}">前往 B 会话 →</button>`
+    }
+  }
   // M3：折叠态不生成正文 DOM（全文转义/渲染成本仅在展开时支付）；展开态走超长截断逻辑
   return `<div class="tool-result-card ${expanded ? '' : 'tool-result-collapsed'} ${isError ? 'tool-result-error' : ''}">
     <div class="tool-result-header">
@@ -5151,6 +5305,7 @@ const buildToolCardHtml = (displayContent: string, toolName: string | undefined,
       <span class="tr-icon ${isError ? 'tr-icon-error' : 'tr-icon-success'}">${isError ? '&#10007;' : '&#10003;'}</span>
       <span class="tr-label">${labelText}</span>
       <span class="tr-summary">${escapeHtml(firstLine)}</span>
+      ${delegateJumpBtn}
     </div>
     ${expanded ? buildToolBodyHtml(displayContent, full) : ''}
   </div>`
@@ -5351,6 +5506,13 @@ const handleToolCardClick = (e: MouseEvent, msg: ChatMessage) => {
   // M3：「显示全部」入口在卡片正文内，先行拦截
   if (target.closest('.tr-expand-all')) {
     handleToolCardExpandAll(e, msg)
+    return
+  }
+  // 2026-09-21：委托卡片「前往 B 会话」入口（先于折叠判断，点击不触发折叠）
+  const jumpBtn = target.closest('.jump-to-session-btn') as HTMLElement | null
+  if (jumpBtn) {
+    const sid = jumpBtn.dataset.sessionId
+    if (sid) selectConversation(sid)
     return
   }
   const header = target.closest('.tool-result-header')
@@ -7726,6 +7888,14 @@ watch(currentConversationId, (newId) => {
   animation: panelSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   text-align: left;
   align-self: flex-start;
+  /* 2026-09-21 修复：问题内容（LLM 输出）过长时面板会撑出聊天区，被 .chat-messages-area 的
+     overflow:hidden 裁剪底部回答按钮/输入框，导致用户无法回答问题。
+     限制面板最大高度（至多占聊天区 70% 且不超过 640px），配合内部滚动链：
+     「标题 + 内容滚动区 + 操作区」始终完整可见 */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: min(70%, 640px);
 }
 .ask-user-header {
   font-weight: 700;
@@ -7735,6 +7905,7 @@ watch(currentConversationId, (newId) => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0; /* 滚动链（2026-09-21）：标题始终可见，不参与压缩 */
 }
 .ask-user-header-icon { font-size: 18px; line-height: 1; }
 /* P3：后台授权等待角标 */
@@ -7772,7 +7943,15 @@ watch(currentConversationId, (newId) => {
   padding: 12px 14px;
   border-radius: var(--radius-sm);
   border-left: 3px solid var(--accent);
+  /* 滚动链（2026-09-21）：内容超长时在内部滚动，不撑破面板（flex 收缩 + 独立滚动） */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
+/* 滚动链配套：滚动条样式对齐项目规范（2026-09-21） */
+.ask-user-question::-webkit-scrollbar { width: 5px; height: 5px; }
+.ask-user-question::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
+.ask-user-question::-webkit-scrollbar-track { background: transparent; }
 /* markdown 渲染后的块级元素间距优化 */
 .ask-user-question p { margin: 0 0 8px; }
 .ask-user-question p:last-child { margin-bottom: 0; }
@@ -7782,6 +7961,7 @@ watch(currentConversationId, (newId) => {
 .ask-user-input-row {
   display: flex;
   gap: 8px;
+  flex-shrink: 0; /* 滚动链（2026-09-21）：回答输入框始终可见 */
 }
 .ask-user-input-row .a-input { flex: 1; }
 
@@ -7789,6 +7969,15 @@ watch(currentConversationId, (newId) => {
 .permission-panel {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* 询问（clarification）分支容器：与 permission-panel 同构，支撑内容区滚动链（2026-09-21） */
+.ask-user-clarify-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* ===== 权限授权按钮 ===== */
@@ -7798,6 +7987,7 @@ watch(currentConversationId, (newId) => {
   gap: 10px;
   margin-top: 0;
   justify-content: flex-start;
+  flex-shrink: 0; /* 滚动链（2026-09-21）：授权按钮始终可见 */
 }
 .permission-btn {
   height: 40px !important;
@@ -7859,6 +8049,7 @@ watch(currentConversationId, (newId) => {
   display: flex;
   gap: 8px;
   margin-top: 10px;
+  flex-shrink: 0; /* 滚动链（2026-09-21）：自定义回答输入行始终可见 */
 }
 .permission-custom-row .a-input { flex: 1; }
 .custom-send-btn { flex-shrink: 0; }
@@ -8142,6 +8333,18 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .message-list::-webkit-scrollbar-track {
   background: transparent;
 }
+/* 滚动链配套（2026-09-21）：ask_user 问题内容区滚动条（深色主题） */
+[data-theme="dark"] .ask-user-question::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+[data-theme="dark"] .ask-user-question::-webkit-scrollbar-thumb {
+  background: #3a3850;
+  border-radius: 3px;
+}
+[data-theme="dark"] .ask-user-question::-webkit-scrollbar-track {
+  background: transparent;
+}
 [data-theme="dark"] .thinking-content::-webkit-scrollbar {
   width: 4px;
 }
@@ -8268,6 +8471,25 @@ watch(currentConversationId, (newId) => {
 }
 .tr-expand-all { color: #7c3aed; cursor: pointer; font-weight: 600; }
 .tr-expand-all:hover { text-decoration: underline; }
+
+/* ===== 2026-09-21：委托卡片「前往 B 会话」按钮 ===== */
+.jump-to-session-btn {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #7c3aed;
+  background: #f3e8ff;
+  border: 1px solid #c4b5fd;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.jump-to-session-btn:hover {
+  background: #ede9fe;
+  border-color: #a78bfa;
+}
 
 /* ===== 工具调用加载中（pending）卡片 ===== */
 .tool-result-pending {
@@ -8763,6 +8985,16 @@ watch(currentConversationId, (newId) => {
 }
 [data-theme="dark"] .tr-label {
   color: #e4e2f0;
+}
+/* 2026-09-21：委托卡片「前往 B 会话」按钮（深色主题） */
+[data-theme="dark"] .jump-to-session-btn {
+  color: #c4b5fd;
+  background: rgba(124,58,237,0.15);
+  border-color: rgba(124,58,237,0.45);
+}
+[data-theme="dark"] .jump-to-session-btn:hover {
+  background: rgba(124,58,237,0.28);
+  border-color: #a78bfa;
 }
 
 /* 技能使用卡片 */

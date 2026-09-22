@@ -297,3 +297,86 @@ ALTER TABLE agent_task ADD COLUMN IF NOT EXISTS trust_chain VARCHAR(100);       
 3. **B busy fallback 靠提示词**：continue_session 遇 BUSY 时由 A 的 LLM 决策改 create_session 或等待（无自动排队）
 4. **R2 免授权边界维持 v0.1 决策**：internal 放行 B 工具集内全部操作（用户已确认）；「internal 只放行 A 已获授权类别」留 v1.1 候选
 5. **fork 子 Agent 内不可发起 agent_invoke**：子 Agent 线程未设置 agentConfigId（caller=null 被工具拒绝）——fork 与互调两机制本就独立，符合设计边界
+
+---
+
+## 十一、后续增强记录
+
+### 11.1 可用智能体清单动态注入（2026-09-17）
+
+**背景**：原始实现中调用方 A 无法感知「有哪些智能体可用」（工具描述为静态文本、无清单注入、无查询工具），委托目标只能依赖用户告知名称/ID 或试错（AGENT_NOT_FOUND 报错不列候选）。本次增强让 A 直接从工具描述看到可用智能体清单，支持自主发现与更准确的目标选择。
+
+**实现**（最小侵入）：
+- `AgentInvokeTool.getDescription()` 末尾动态追加【可用智能体清单】段：名称 + ID + 能力描述（描述压缩空白并截断 60 字符；条数上限 20，超出提示「其余 N 个未列出」）
+- `AgentInvokeTool.getParameters()`：`target_agent` 参数说明补充「候选见工具描述【可用智能体清单】，推荐直接用 ID」引导
+- `AgentConfigMapper.selectAllEnabled()`：新增查询（全部 enabled=1；ORDER BY is_builtin DESC, sort_order ASC, created_at DESC）——单机产品不做用户过滤，与调用链 resolveAgent（数字 ID 走 selectById）语义一致
+- **不依赖请求上下文**：构建工具 schema 时 ToolContext 通常为空（工具执行窗口之外），故清单查询不读 ToolContext；`agentConfigId` 恰好可用时防御性排除自身
+- 异常降级：查询失败（如启动期 DB 未就绪）仅记 warn、不注入清单，绝不阻断工具注册与请求构建
+- 实时性：每次构建工具 schema 现场查询——新建/停用/改名智能体后，下一次请求即生效
+
+**验证**（2026-09-17，全部通过）：
+- `mvn compile` BUILD SUCCESS（304 源文件，无新增告警）
+- 真实系统库 SQL 验证通过（H2）
+- 临时验证类 8/8：基本清单（ID/描述/无 null 文本、基础描述保留）/ 空清单降级文案 / mapper 异常静默降级 / 上下文可用时排除自身 / 长描述截断 / 20 条上限与省略提示 / target_agent 参数指引 / 空名降级 `Agent#id`（验证类已按惯例删除）
+- GitNexus detect-changes：2 文件 7 符号，受影响流程符合预期（仅工具描述构建链路，无破坏性影响）
+
+**说明**：名称调用仍仅限系统级智能体（resolveAgent 语义，本次未改动）；清单同时给出 ID 并推荐用 ID 调用，以覆盖用户自建智能体场景。
+
+---
+
+## 十二、异步委托与进度查询增强（2026-09-21）
+
+**背景**（用户实测痛点，三个问题）：
+1) 委托后 A 阻塞等待（await 默认 true，最长 600 秒），体感差、无法并行推进其他工作；
+2) **600 秒超时后「想再看执行状态也不行了」**——根因是新消息触发的级联取消**无条件**取消该会话全部未终态委托（误杀超时后仍在后台执行的独立委托）；
+3) poll 只返回「仍在执行中」空态、无进度信息，也无法「等一会儿再查」（只能空转轮询）。
+
+### 12.1 级联取消误伤修复（任务级精确）
+
+- **问题链路**：`DeepSeekServiceImpl.cancelRunningTask`（任一新消息/取消动作触发）此前无条件级联取消该会话所有未终态委托 → A 的普通新消息即误杀后台委托。
+- **修复**：升级为「任务级精确级联」——
+  - `ToolContext` 新增 `taskId` ThreadLocal（工具执行前从 `apiRequest._taskId` 同步，null 清除）；
+  - `agent_task` 创建时将任务 id 透传至执行上下文（`_taskId`）；
+  - `agent_invoke` 发起时记录 `InvokeRecord.callerTaskId`（委托发起自哪个任务）；
+  - 取消动作先采集「本次实际被取消的任务 id 集合」（`cancelledTaskIds`），仅级联取消**这些任务发起**的委托：`cancelByCallerConversation(callerConversationId, cancelledTaskIds)` 逐条过滤 `rec.callerTaskId ∈ 集合`。
+- **效果**：① A 的普通新消息（无活跃任务 → 集合为空）不再牵连任何委托；② A 后续任务被打断时，不误杀其更早回合发起的独立后台委托；③ 用户主动停止/打断当前任务时，其委托照常级联取消（防孤儿设计不变）。
+
+### 12.2 poll 进度增强 + wait_sec
+
+- **进度快照**：poll 查询到 running 时输出「已运行时长 + 事件数 + 最近工具动作（截断 150 字）+ 建议」，让查询有信息量（`buildRunningProgress` / `queryLatestToolAction`）。
+- **wait_sec**（默认 0、上限 120）：短暂等待——循环（查 → 等 1s → 再查），期间任务完成立即返回完整结果，到点返回最新进度快照。适合「等一会儿再查」，无需连续空转轮询。
+
+### 12.3 批量等待 wait（新 action）
+
+- `agent_invoke action=wait call_ids=[...] wait_mode=all|any timeout_sec=N`：配合 `await=false` 批量派发实现并行委托，统一等待（总耗时 ≈ max(各任务)）。
+- 默认 120 秒、上限 300 秒（`DEFAULT_BATCH_WAIT_SEC` / `MAX_BATCH_WAIT_SEC`）；`all`=等全部到达终态，`any`=任一到达终态即返回。
+- 汇总输出：每条 callId 一行状态（终态展开结果摘要，运行中给进度快照）；超时未满足条件 → 返回 TIMEOUT + 各自最新状态（任务不销毁，仍可继续查）。
+
+### 12.4 session_id 直查兜底（兑现 §3.3「不依赖注册表」承诺）
+
+- 内存注册表未命中且提供 `session_id` 时，直接查 DB 构建降级记录（`resolveRecord` 3 参 → `buildDegradedRecord`）：校验会话存在、归属（B 会话 userId 与调用方一致），target 名称回填，标记 `degraded=true` 并在返回文案注明「按会话最新任务/最近委托消息近似查询」。
+- 适用场景：服务重启、内存记录清理（TTL 过期）后，仍可按 session_id 查询/取消委托。
+
+### 12.5 引导与文案更新
+
+- **工具描述**（`AgentInvokeTool`）：await 选择策略（短任务 true / 长任务·并行推进 false）、poll wait_sec、wait action 用法、【典型工作流】「超时后：poll（可 wait_sec=60）继续查，勿重复委托」；
+- **提示词**（`code_agent_prompt.txt` 智能体互调段）：同步/异步选择、超时（TIMEOUT）≠失败、批量派发 + wait 范式；
+- **超时文案**：`awaitCompletion` TIMEOUT 返回含【继续查】`poll call_id=… wait_sec=60` 与「请勿重复委托」；`buildImmediateMessage`（await=false 立即返回）含【B 会话 ID】/【调用 ID】/批量等待引导。
+
+### 12.6 前端委托卡片 + 后端进度心跳
+
+- **后端心跳**：await 阻塞期间「进入等待立即 1 次 + 每 ~5s 一次」向 A 会话发 `delegate_progress` 事件（payload：`callId / targetSessionId / targetAgent / status / elapsedSec`；经 `AgentEventBus`，无 sink 静默忽略）。⚠️ 目标会话字段必须用 `targetSessionId`——前端 SseParser 会把 `sessionId` 认作「当前会话 ID」，不可占用。
+- **前端卡片**：`sse-client` 解析 `delegate_progress`；`CodeAssistantView` 将最近的 `agent_invoke` pending 卡片更新为「🤝 已委托「B」· 执行中 · 已等待 N 秒」+「前往 B 会话」按钮；**完成卡**同样解析【B 会话 ID】附跳转入口（invoke/poll/wait 结果均适用）；点击走 `selectConversation` 跳转；重连（taskStream）路径同样处理。
+- 性能约束：进度展示由后端 5s 心跳驱动（放弃前端秒级本地计时器，避免高频繁重渲染）。
+
+### 12.7 已知限制（v1）
+
+- **完成事件不主动唤醒 A**（B 终态注入 A 会话为后续评估项）——A 侧感知依赖 poll/wait；
+- 任务级级联的保守策略：`callerTaskId` 缺失（异常/旧数据）时**不**级联取消（防误杀优先）；
+- 前端页面刷新后 pending 条目丢失场景，心跳仅更新已有条目、不重建（完成卡不受影响）；
+- 批量 wait 期间无逐条的心跳推送（wait 返回汇总为一次性输出）。
+
+### 12.8 验证
+
+- `mvn clean compile`：BUILD SUCCESS（308 源文件，无新增告警）；前端 `vite build` + `vue-tsc --noEmit` 通过；
+- 代码级走查：M1 三场景（新消息不误杀 / 打断级联 / 主动停止级联）+ poll wait 边界（0/1/120 秒）+ wait 批量 all|any + 降级查询路径（详见规划目录 `.planning/2026-09-21-agent-invoke-async/`）。

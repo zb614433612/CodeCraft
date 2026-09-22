@@ -75,3 +75,10 @@ progress.md
 
 ### Build logs ###
 electron/build-log.txt
+build.log
+build2.log
+compile-verify.txt
+
+### Local AI tool config (keep local, not in repo) ###
+.claude/
+CLAUDE.md

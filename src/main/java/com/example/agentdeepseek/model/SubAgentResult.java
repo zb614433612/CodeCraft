@@ -53,6 +53,9 @@ public class SubAgentResult {
     /** 错误信息（failed/timeout时填写） */
     private String errorMessage;
 
+    /** 【完成判定（M4）】疑似未完成：true=子Agent结束时未携带【任务完成】标记，结果可能不完整——主Agent须核验目标物后方可采信 */
+    private boolean completionSuspicious = false;
+
     // ==================== 第二层：可选层 ====================
 
     /** 试错记录：尝试过但放弃的方案及原因 */
@@ -156,6 +159,10 @@ public class SubAgentResult {
             default:          statusIcon = "❓";
         }
         sb.append(statusIcon).append(" 子Agent「").append(agentId).append("」").append(getStatusText()).append("\n");
+        // 【完成判定（M4）】疑似未完成提示：要求主Agent核验目标物后再采信
+        if (completionSuspicious) {
+            sb.append("⚠️ [疑似未完成] 该子Agent结束前未携带【任务完成】标记，结果可能不完整——请核验目标物（对照任务清单检查产物），不要直接采信其\"已完成\"结论；必要时 fork 续作补全。\n");
+        }
         sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
         // 执行摘要

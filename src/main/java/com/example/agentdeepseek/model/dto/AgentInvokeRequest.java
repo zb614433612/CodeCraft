@@ -50,6 +50,9 @@ public class AgentInvokeRequest {
     /** 调用方 A 的会话 ID（溯源/审计） */
     private Long callerConversationId;
 
+    /** 委托发起自哪个任务（agent_task.id；2026-09-21：供任务级精确级联取消——仅取消被取消任务发起的委托，防误杀独立后台委托。由工具层从 ToolContext 填充） */
+    private Long callerTaskId;
+
     /** 调用方 A 的名称（溯源注记展示用） */
     private String callerAgentName;
 

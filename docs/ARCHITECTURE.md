@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v2.0.0 | 更新：2026-09-16 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.1 | 更新：2026-09-22 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -262,13 +262,13 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolInitializer        # 启动时自动初始化所有工具
 │   ├── ExecutionTokenManager  # 工具执行 Token 管理
 │   ├── PermissionContext      # 会话级权限上下文
-│   ├── impl/                  # 24 个工具实现（新命名，一工具多 action）
+│   ├── impl/                  # 27 个工具实现（新命名，一工具多 action）
 │   │   ├── 文件操作: FileExplorerTool (read/glob/grep/tree),
 │   │   │            FileWriterTool (write/edit/delete)
 │   │   ├── 命令执行: CommandTool (exec/start/list/logs/stop)
 │   │   ├── 网络请求: SearchTool, WebFetchTool, HttpRequestTool, NetworkCheckTool
 │   │   ├── 数据库:   ExecuteSqlTool
-│   │   ├── Git 操作: GitQueryTool, GitSubmitTool, GitBranchTool
+│   │   ├── Git 操作: GitQueryTool, GitSubmitTool, GitBranchTool, GitStashTool, GitTagTool, GitRemoteTool
 │   │   ├── Agent协作: AgentTool (fork/collect/batch_collect/inspect)
 │   │   ├── 技能管理: SkillTool (create/update/delete/list/report)
 │   │   ├── 经验库:   LessonTool (search/record/complete/feedback/list) ★成长体系
@@ -466,7 +466,7 @@ src/main/java/com/example/agentdeepseek/
 | **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~900 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~800 |
 | **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~5000 (整个p2p包) |
-| **工具系统** | 24 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
+| **工具系统** | 27 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
 | **文件资产** | 文件上传/本地存储/Files API 适配/图像理解 | FileAssetService + FilesApiClientManager | ~900 |
 | **桌面自动化** | 截图（网格刻度）/键鼠模拟/坐标预检 | ScreenCaptureTool + DesktopControlTool | ~1500 |
 | **成长体系** | 经验检索/自动捕获/复盘/归一化/弯路提炼 | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |

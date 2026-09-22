@@ -75,6 +75,21 @@ public class AgentEventBus {
     }
 
     /**
+     * 条件注销：仅当会话当前通道仍是给定 sink 时才移除（2026-09-21 双写修复配套）
+     * <p>
+     * 任务终态回调清理自身通道时使用：旧任务的清理回调可能晚于新任务注册
+     * （准入等待超时放行的残余并行窗口），无条件 unregister 会把新任务通道误拆导致其事件丢失；
+     * 身份比对 + computeIfPresent 原子完成，不误拆新通道。
+     * </p>
+     */
+    public void unregisterIfSame(Long conversationId, Sinks.Many<TaskEventEnvelope> sink) {
+        if (conversationId == null || sink == null) {
+            return;
+        }
+        channels.computeIfPresent(conversationId, (k, ch) -> ch.sink == sink ? null : ch);
+    }
+
+    /**
      * 获取会话的SSE事件通道
      */
     public Sinks.Many<TaskEventEnvelope> getSink(Long conversationId) {

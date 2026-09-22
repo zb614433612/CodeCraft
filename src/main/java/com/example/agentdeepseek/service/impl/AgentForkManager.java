@@ -80,6 +80,9 @@ public class AgentForkManager {
     /** 评委累计扩展上限 */
     private static final int MAX_JUDGE_GRANTED = 100;
 
+    /** 【完成判定】完成标记：子Agent 最终报告须以其开头，作为「显式交差」信号（防止「无工具调用」被误判为任务完成） */
+    private static final String COMPLETION_SIGNAL = "【任务完成】";
+
     /** 子Agent运行线程池（独立于主Agent线程池，避免互相影响）
      *  <p>
      *  corePoolSize = MAX_CONCURRENT_AGENTS 确保所有子Agent立即获得线程并行执行，
@@ -533,6 +536,8 @@ public class AgentForkManager {
         List<String> unexpectedFindings = new ArrayList<>();
         StringBuilder fullMessagesJson = new StringBuilder("[");
         boolean firstMsg = true;
+        // 【完成判定】「无工具调用」轮是否已打回一次：防止模型中途停手（打滑/截断）被误判为任务完成
+        boolean completionNudged = false;
 
         for (int iteration = 0; iteration < maxIterations + totalGranted; iteration++) {
 
@@ -569,9 +574,10 @@ public class AgentForkManager {
             String assistantContent = client.extractContentFromBlockingResponse(response);
             if (assistantContent == null) assistantContent = "";
 
-            // 手动解析 reasoning_content 和 tool_calls（兼容 OpenAI 格式的 Provider）
+            // 手动解析 reasoning_content、tool_calls 和 finish_reason（兼容 OpenAI 格式的 Provider）
             String reasoningContent = "";
             JsonNode toolCalls = null;
+            String finishReason = "stop";
             JsonNode responseNode;
             try {
                 responseNode = objectMapper.readTree(response);
@@ -582,10 +588,13 @@ public class AgentForkManager {
                 if (!openaiReasoning.isEmpty()) reasoningContent = openaiReasoning;
                 // OpenAI 格式的 tool_calls
                 toolCalls = messageNode.path("tool_calls");
+                // 【完成判定】本轮停止原因：stop=正常结束 / length=被截断 / tool_calls=发起了工具调用
+                finishReason = choice.path("finish_reason").asText("stop");
             } catch (Exception e) {
                 log.warn("子Agent API响应解析失败: {}", e.getMessage());
                 result.setCompileResult("failed");
                 result.setErrorMessage("API响应解析失败: " + e.getMessage());
+                result.setCompletionSuspicious(true); // 【退出路径收口】结果不完整，统一打疑似未完成标记
                 break;
             }
 
@@ -619,12 +628,45 @@ public class AgentForkManager {
             firstMsg = false;
 
             if (toolCalls == null || toolCalls.isMissingNode() || !toolCalls.isArray() || toolCalls.isEmpty()) {
-                // 没有工具调用，任务完成
+                // 【完成判定】不再把「无工具调用」无条件等同于「任务完成」：
+                //  - 被截断（finish_reason=length）→ 必须继续，绝不判完成；
+                //  - 未携带完成标记 COMPLETION_SIGNAL → 疑似模型中途停手（打滑），先打回一次给补救机会；
+                //  - 携带标记、或打回一次后再次出现 → 按完成处理（仍未携带标记时在结果上打警告前缀）。
                 // 优先用 assistantContent；如果为空（thinking模式下可能如此），fallback 到 reasoning_content
                 String summaryText = assistantContent;
                 if (summaryText == null || summaryText.isBlank()) {
                     summaryText = reasoningContent;
                 }
+                boolean truncated = "length".equals(finishReason);
+                boolean signalled = assistantContent != null && assistantContent.contains(COMPLETION_SIGNAL);
+
+                if ((truncated || !signalled) && !completionNudged) {
+                    // 疑似中途停手：注入继续提示，给模型一轮补救机会（不退出循环）
+                    completionNudged = true;
+                    log.info("[完成判定] 子Agent {} 疑似未完成（finishReason={}, 携带完成标记={}, iteration={}），注入继续提示打回重试",
+                            context.getAgentId(), finishReason, signalled, iteration);
+                    Map<String, Object> nudgeMsg = new HashMap<>();
+                    nudgeMsg.put("role", "user");
+                    nudgeMsg.put("content", truncated
+                            ? "你上一条回复因长度限制被截断。请从断点继续：若有未完成的步骤，直接调用工具继续执行；不要重复已完成的内容。"
+                            : "你本轮没有调用任何工具。若任务尚未全部完成，请立即继续调用工具执行剩余步骤（后续每一轮都必须包含工具调用，直到任务全部完成）；"
+                                    + "若已全部完成，请重新输出最终报告，且报告第一行必须以【任务完成】开头。");
+                    messages.add(nudgeMsg);
+                    if (!firstMsg) fullMessagesJson.append(",");
+                    fullMessagesJson.append(toMessageJson(nudgeMsg));
+                    continue;
+                }
+
+                if (!signalled) {
+                    // 打回后仍未携带完成标记：放行但打上警告，提示主Agent核验（工作不静默丢弃）
+                    summaryText = "⚠️[未检测到完成标记，疑似未完成，请核验目标物] " + (summaryText == null ? "" : summaryText);
+                    result.setCompletionSuspicious(true); // 【第二档·保险丝】结构化标记，供下游在收集结果中提示核验
+                    log.warn("[完成判定] 子Agent {} 连续两轮未携带完成标记（finishReason={}, iteration={}），按疑似未完成放行",
+                            context.getAgentId(), finishReason, iteration);
+                } else {
+                    log.info("[完成判定] 子Agent {} 收到完成标记，正常完成（iteration={}）", context.getAgentId(), iteration);
+                }
+
                 result.setSummary(summaryText);
                 result.setIterationsUsed(iteration + 1);
                 result.setModifiedFiles(modifiedFiles);
@@ -659,6 +701,14 @@ public class AgentForkManager {
                     args = objectMapper.createObjectNode();
                 }
                 Tool tool = toolRegistry.getTool(tcName);
+                // ★ 修复（P0 工具授权）：子Agent仅允许执行其工具集（fork 时指定）内的工具；
+                //   未授权工具直接拒绝执行，且不进入高危授权流程（防止经用户批准流程放行授权外工具）。
+                if (tool != null && !toolNames.contains(tcName)) {
+                    log.warn("子Agent {} 工具 {} 不在其授权工具集内，拒绝执行", context.getAgentId(), tcName);
+                    toolResults.add(new ToolExecutor.ToolCallResult(tcId, tcName,
+                            "错误：工具 \"" + tcName + "\" 不在本子Agent的授权工具列表内，已拒绝执行", false, ""));
+                    continue;
+                }
                 boolean restricted = highRiskTools.contains(tcName);
 
                 // 对于高危工具，检查会话级别授权
@@ -759,6 +809,7 @@ public class AgentForkManager {
                                 result.setSummary("用户拒绝了子Agent的工具调用");
                                 result.setIterationsUsed(iteration + 1);
                                 result.setCompileResult("not_run");
+                                result.setCompletionSuspicious(true); // 【退出路径收口】工作未完成，统一打疑似未完成标记
                                 break;
                             }
                             log.info("子Agent {} 工具调用已获用户批准", context.getAgentId());
@@ -819,9 +870,14 @@ public class AgentForkManager {
 
             // 检测重复调用（防止死循环）
             if (hasRepeatedCalls(messages, 4)) {
+                // 【修复】此前该路径零日志、状态保持初始值（completed + passed），造成静默"伪装成功"；
+                // 现在打警告日志 + 置疑似未完成标记（复用 ⚠️ 核验通道），主Agent须核验目标物后方可采信
+                log.warn("[完成判定] 子Agent {} 检测到连续 4 轮重复工具调用（相同工具+相同关键参数），终止循环（iteration={}），结果按疑似未完成处理",
+                        context.getAgentId(), iteration);
                 keyDecisions.add("检测到重复工具调用，终止循环");
                 result.setIterationsUsed(iteration + 1);
                 result.setCompileResult("not_run");
+                result.setCompletionSuspicious(true);
                 break;
             }
 
@@ -834,9 +890,13 @@ public class AgentForkManager {
                     log.info("子Agent {} 评委允许扩展 {} 次迭代，累计扩展 {}", context.getAgentId(), additional, totalGranted);
                     keyDecisions.add("评委评估通过，扩展 " + additional + " 次迭代");
                 } else {
+                    // 【退出路径收口】此前仅写 keyDecisions、无日志；补警告日志 + 疑似标记
+                    log.warn("[完成判定] 子Agent {} 评委评估终止（iteration={}，累计扩展={}），未正常收尾，结果按疑似未完成处理",
+                            context.getAgentId(), iteration, totalGranted);
                     keyDecisions.add("评委评估终止或已达扩展上限");
                     result.setIterationsUsed(iteration + 1);
                     result.setCompileResult("not_run");
+                    result.setCompletionSuspicious(true);
                     break;
                 }
             }
@@ -931,10 +991,12 @@ public class AgentForkManager {
         sb.append("5. 请使用中文思考和回复\n");
         sb.append("6. **【重要】最终输出的汇总报告必须写在 content 字段中**（而不是只写在 reasoning/思考过程中），\n");
         sb.append("   以确保主Agent能清晰看到你的执行结果。最终报告格式如下：\n");
+        sb.append("   【任务完成】（必须作为最终报告的第一行）\n");
         sb.append("   【已完成】简述完成了什么\n");
         sb.append("   【文件变更】列出创建/修改/删除的文件路径\n");
         sb.append("   【关键决策】记录重要方案选择的理由\n");
         sb.append("   【其他说明】试错记录、意外发现等\n");
+        sb.append("7. **【完成标记（强制）】任务未全部完成之前，每一轮回复都必须继续调用工具推进任务，禁止只输出计划/小结文字，也不得输出【任务完成】标记；确认全部完成后，最终报告的第一行必须以【任务完成】开头。**\n");
 
         return sb.toString();
     }
@@ -1102,36 +1164,14 @@ public class AgentForkManager {
 
     /**
      * 检测最近工具调用是否重复
+     * <p>
+     * 【修复（P0）】委托 ToolLoopManager 的判据（「相同工具 + 相同关键参数」才计为重复），
+     * 与主Agent循环及 DeepSeekServiceImpl 保持一致；原实现仅比对第一个工具调用的「工具名」，
+     * 连续读取不同文件等正常批处理（每轮首个工具都是 file_explorer）会被误判为死循环。
+     * </p>
      */
     private boolean hasRepeatedCalls(List<Map<String, Object>> messages, int threshold) {
-        int repeatCount = 0;
-        String lastPattern = null;
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            Map<String, Object> msg = messages.get(i);
-            if (!"assistant".equals(msg.get("role")) || !msg.containsKey("tool_calls")) {
-                continue;
-            }
-            Object toolCallsObj = msg.get("tool_calls");
-            if (!(toolCallsObj instanceof JsonNode)) continue;
-            JsonNode toolCalls = (JsonNode) toolCallsObj;
-            String pattern = buildCallPattern(toolCalls);
-            if (pattern == null || pattern.isEmpty()) continue;
-            if (lastPattern == null) {
-                lastPattern = pattern;
-                repeatCount = 1;
-            } else if (pattern.equals(lastPattern)) {
-                repeatCount++;
-                if (repeatCount >= threshold) return true;
-            } else {
-                return false;
-            }
-        }
-        return false;
-    }
-
-    private String buildCallPattern(JsonNode toolCalls) {
-        if (!toolCalls.isArray() || toolCalls.isEmpty()) return "";
-        return toolCalls.get(0).path("function").path("name").asText("");
+        return toolLoopManager.hasRepeatedCalls(messages, threshold);
     }
 
     /**
@@ -1287,6 +1327,10 @@ public class AgentForkManager {
         result.setIterationsUsed(log.getIterationsUsed() != null ? log.getIterationsUsed() : 0);
         result.setErrorMessage(log.getErrorMessage());
         result.setFullMessagesJson(log.getFullMessages());
+        // 【第二档·保险丝】从落库摘要恢复「疑似未完成」标记（库表无独立列，以摘要前缀为准）
+        if (log.getSummary() != null && log.getSummary().contains("未检测到完成标记")) {
+            result.setCompletionSuspicious(true);
+        }
         return result;
     }
 

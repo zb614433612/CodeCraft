@@ -50,12 +50,14 @@ public class FileExplorerTool implements Tool {
     );
     private static final Set<String> TEXT_EXTENSIONS = Set.of(
             ".java", ".kt", ".groovy", ".scala",
-            ".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".scss", ".less", ".html",
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".css", ".scss", ".less", ".html",
             ".json", ".xml", ".yml", ".yaml",
             ".py", ".rb", ".go", ".rs", ".php", ".pl", ".pm", ".sh", ".bat", ".cmd",
             ".md", ".txt", ".properties", ".cfg", ".conf", ".ini", ".toml",
             ".sql", ".gradle", ".mvn", ".dockerfile",
-            ".c", ".cpp", ".h", ".hpp", ".cs", ".swift", ".m", ".mm"
+            ".c", ".cpp", ".h", ".hpp", ".cs", ".swift", ".m", ".mm",
+            // 日志/数据/补丁类文本 — 2026-09-22 增补（修复 .log 等文件被 grep 静默跳过的缺陷）
+            ".log", ".csv", ".tsv", ".diff", ".patch", ".rst", ".adoc", ".jsonl", ".ndjson", ".lock"
     );
 
     private static final int GLOB_MAX_RESULTS = 200;
@@ -470,6 +472,7 @@ public class FileExplorerTool implements Tool {
             sb.append("  3. 去掉 path 或 include 限制扩大搜索范围\n");
             sb.append("  4. 尝试更短或更通用的关键词\n");
             sb.append("  5. 如果是正则搜索，尝试 regex=false 做纯文本搜索\n");
+            sb.append("  6. 目标文件为特殊后缀（非常见文本类型）时，用 include 参数显式指定该类型（如 '*.log'）即可搜索\n");
         } else {
             String currentFile = null;
             int fileMatchCount = 0;
@@ -521,8 +524,13 @@ public class FileExplorerTool implements Tool {
                             if (!m) return FileVisitResult.CONTINUE;
                         }
                         // 只跳过有已知扩展名但不在文本扩展名列表中的文件（如 .jar/.png），
-                        // 无扩展名文件（Dockerfile/Makefile/.gitignore 等）保留，可能是文本文件
-                        if (!ext.isEmpty() && !TEXT_EXTENSIONS.contains(ext)) return FileVisitResult.CONTINUE;
+                        // 无扩展名文件（Dockerfile/Makefile/.gitignore 等）保留，可能是文本文件。
+                        // 【2026-09-22 修复】显式传入 include 时不再套用默认白名单（逃生通道）：
+                        // 此前即使 include='*.log' 显式指定，非白名单扩展名仍被静默跳过，
+                        // 导致日志文件等内容永远搜不到（且无任何提示）。
+                        if (includeMatcher == null && !ext.isEmpty() && !TEXT_EXTENSIONS.contains(ext)) {
+                            return FileVisitResult.CONTINUE;
+                        }
                         searchInFile(file, searchRoot, pattern, ctxLines, maxResults, results);
                     } catch (Exception e) { log.debug("跳过文件: {} - {}", file, e.getMessage()); }
                     return FileVisitResult.CONTINUE;

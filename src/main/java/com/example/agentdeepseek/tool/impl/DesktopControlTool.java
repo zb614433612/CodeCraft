@@ -4,6 +4,7 @@ import com.example.agentdeepseek.config.DesktopConfig;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.desktop.CaptureContext;
 import com.example.agentdeepseek.tool.desktop.CaptureContextRegistry;
+import com.example.agentdeepseek.tool.desktop.ClickFeedbackSupport;
 import com.example.agentdeepseek.tool.desktop.DesktopActionSummary;
 import com.example.agentdeepseek.tool.desktop.DesktopPlatformAdapter;
 import com.example.agentdeepseek.tool.desktop.DesktopVerifyRegistry;
@@ -30,6 +31,7 @@ import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -43,6 +45,14 @@ import java.util.Set;
  *
  * <p>坐标约定（v2 归一化协议）：所有坐标使用 <b>0~1000 归一化值</b>（读最近一次 screen_capture
  * 截图的网格刻度；换算见 {@link CaptureContext}）；无截图基准时坐标类动作拒绝执行并引导先截图。</p>
+ *
+ * <p>hover 悬停探测（★ 新增）：移入目标坐标 → 等待 tooltip（waitMs，默认 800ms）→ 自动生成带准星的
+ * 校验图（复用 {@link VerifyPreviewRenderer} 链路）并登记该点校验——用于点击前确认图标/按钮语义；
+ * hover 不点击任何控件、不进预检拦截范围，走正常桌面授权。</p>
+ *
+ * <p>点击命中回执（★ 本次新增）：mouse_click 自动做"点击前后帧差分"——点击前抓基准帧、点击后等待
+ * {@code desktop.control.click-feedback-wait-ms}（默认 400ms）再抓对比帧，由 {@link ClickFeedbackSupport}
+ * 判定"检测到界面变化 / 未检测到明显变化"并随动作摘要返回；截图/差分失败时自动跳过回执，绝不阻断点击本身。</p>
  *
  * <p>安全机制：DESKTOP 高危权限（授权弹窗展示动作摘要）+ 单次动作数上限 + 动作间延迟 +
  * 每动作前取消检查（配合工具循环检查点）+ 红线约束（禁止密码/支付类输入，写入 description）。</p>
@@ -62,9 +72,9 @@ import java.util.Set;
 )
 public class DesktopControlTool implements Tool, SideEffectFreePreflight {
 
-    /** 已知动作类型 */
+    /** 已知动作类型（★ hover=悬停探测：移入等待 tooltip 后自动出校验图） */
     private static final Set<String> KNOWN_ACTIONS = Set.of(
-            "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll", "key", "type", "screen_size");
+            "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll", "key", "type", "screen_size", "hover");
 
     /** type 动作文本长度上限（防超大文本刷剪贴板） */
     private static final int TYPE_TEXT_MAX_LENGTH = 10000;
@@ -77,6 +87,12 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
 
     /** 拖拽分步间隔（毫秒） */
     private static final int DRAG_STEP_INTERVAL_MS = 10;
+
+    /** ★ hover 等待时长上限（毫秒；动作参数 waitMs 超出时 clamp，防止长时间阻塞） */
+    private static final int HOVER_WAIT_MAX_MS = 3000;
+
+    /** ★ 点击回执等待时长上限（毫秒；配置值超出时 clamp，防止点击后长时间阻塞） */
+    private static final int CLICK_FEEDBACK_WAIT_MAX_MS = 3000;
 
     private final DesktopConfig config;
     private final CaptureContextRegistry captureContextRegistry;
@@ -122,7 +138,16 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
                 + "\n【批量多动作】使用 actions 数组一次执行 1~" + config.getControl().getMaxActionsPerCall()
                 + " 个动作（按序执行，减少往返）；也支持单动作形态（顶层直接传 action 与动作参数）。"
                 + "\n【动作集】mouse_move(x,y) / mouse_click(x,y,button,clicks) / mouse_drag(fromX,fromY,toX,toY) / "
-                + "mouse_scroll(x,y,amount 正上负下) / key(key,modifiers[]) / type(text 键入文本) / screen_size(查屏幕尺寸)。"
+                + "mouse_scroll(x,y,amount 正上负下) / key(key,modifiers[]) / type(text 键入文本) / "
+                + "hover(x,y,waitMs?,capture?)（悬停探测：移入等待 tooltip 后自动生成校验图） / screen_size(查屏幕尺寸)。"
+                + "\n【hover 悬停探测】对拿不准语义的图标/按钮：先 hover 到目标坐标 → 等待 waitMs 毫秒（默认 800，0~3000）"
+                + "等 tooltip 出现 → 自动截图并在悬停点绘制准星（校验图，同时完成该点校验登记，之后点击同点直接放行）——"
+                + "你确认图标/按钮语义后再决定是否点击；hover 本身只有鼠标移动+等待，不会点击任何控件。"
+                + "\n【操作纪律（定位精度）】① 小目标先放大闭环：目标小于约 50px（小图标/小按钮）时，先用 region 放大到目标约占画面 5% 以上，"
+                + "并在【放大图空间】内完成校验与点击——直接使用放大图坐标（系统按最近基准自动换算），绝不跨图心算；"
+                + "② 先探测、后点击：图标类/语义不明的目标（任务栏图标、桌面图标、纯图标按钮）先 hover(x,y) 看 tooltip 确认语义，再决定是否点击；"
+                + "③ 先标定、再批量：批量操作前先做单点标定（优先使用【元素清单】中的机器坐标），首个点击结合回执确认命中后再继续；"
+                + "出现未检测到变化的回执时先停下重新校验坐标，不要盲目重试。"
                 + "\n【重要约束】① 能用 API 级工具（command/file_writer/git 等）完成的事，不要用 GUI 自动化；"
                 + "② 严禁用于输入密码、支付确认、验证码等敏感操作；③ 需要坐标基准（先截图），无基准时坐标类动作会被拒绝。"
                 + "\n【系统边界】UAC 提权窗口、锁屏界面不可操控；部分全屏 DirectX 场景受限；Wayland 下可能不可用。";
@@ -166,6 +191,8 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
         modifiers.set("items", modifierItems);
         itemProps.set("modifiers", modifiers);
         itemProps.set("text", strNode("要键入的文本（type 用；支持中文/任意字符，经剪贴板粘贴）"));
+        itemProps.set("waitMs", intNode("悬停等待毫秒数（hover 用，可选；默认 800，0~3000——等待 tooltip 出现后再截图）"));
+        itemProps.set("capture", boolNode("悬停后是否自动截图生成校验图（hover 用，可选；默认 true）"));
         items.set("properties", itemProps);
         items.set("required", objectMapper.createArrayNode().add("action"));
         actions.set("items", items);
@@ -192,6 +219,8 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
         topModifiers.set("items", topModifierItems);
         properties.set("modifiers", topModifiers);
         properties.set("text", strNode("单动作模式：要键入的文本"));
+        properties.set("waitMs", intNode("单动作模式：hover 等待毫秒数（可选；默认 800，0~3000）"));
+        properties.set("capture", boolNode("单动作模式：hover 是否自动截图生成校验图（可选；默认 true）"));
 
         parameters.set("properties", properties);
         return parameters;
@@ -296,8 +325,10 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
             String type = DesktopActionSummary.actionType(act);
             String summary = DesktopActionSummary.summarize(act);
             try {
-                executeAction(robot, act, type, captureContext);
-                doneSummaries.add(summary);
+                // ★ 动作附加说明（如 hover 的校验图生成结果；其余动作为 null）
+                String actionNote = executeAction(robot, act, type, captureContext);
+                doneSummaries.add(actionNote == null || actionNote.isEmpty()
+                        ? summary : summary + "：" + actionNote);
                 log.info("桌面动作已执行 [{}/{}]: {}", i + 1, actions.size(), summary);
             } catch (ActionFailedException e) {
                 log.warn("桌面动作失败 [{}/{}] {}: {}", i + 1, actions.size(), summary, e.getMessage());
@@ -360,10 +391,13 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
     // ==================== 动作执行 ====================
 
     /**
-     * 执行单个动作（坐标类动作经 CaptureContext 归一化换算回物理屏幕坐标）
+     * 执行单个动作（坐标类动作经 CaptureContext 归一化换算回物理屏幕坐标）。
+     *
+     * @return 动作附加说明（★ 如 hover 的校验图生成结果；其余动作返回 null，不改变原有行为）
      */
-    private void executeAction(Robot robot, JsonNode act, String type, CaptureContext ctx)
+    private String executeAction(Robot robot, JsonNode act, String type, CaptureContext ctx)
             throws ActionFailedException {
+        String note = null;
         switch (type) {
             case "mouse_move" -> {
                 int x = toScreenX(ctx, act, "x");
@@ -376,6 +410,9 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
                 int buttonMask = resolveButtonMask(act.path("button").asText("left"));
                 int clicks = Math.max(1, Math.min(3, act.path("clicks").asInt(1)));
                 robot.mouseMove(x, y);
+                // ★ 点击命中回执：点击前抓基准帧 F0（在 mouseMove 之后抓取——隔离 hover 视觉变化，
+                //   避免"未命中"场景因 hover 变色误报；配置关闭/抓取失败返回 null → 自动跳过回执）
+                BufferedImage feedbackBefore = captureClickBeforeFrame(ctx);
                 for (int i = 0; i < clicks; i++) {
                     robot.mousePress(buttonMask);
                     robot.mouseRelease(buttonMask);
@@ -383,6 +420,8 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
                         sleepQuietly(CLICK_INTERVAL_MS);
                     }
                 }
+                // ★ 点击后：等待渲染 → 抓对比帧 F1 → 差分 → 回执 note（失败自动降级，不阻断点击）
+                note = buildClickFeedbackNote(ctx, feedbackBefore);
             }
             case "mouse_drag" -> {
                 int fromX = toScreenX(ctx, act, "fromX");
@@ -446,11 +485,42 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
                 }
                 pasteViaClipboard(robot, text);
             }
+            case "hover" -> {
+                // ★ hover 悬停探测：移入 → 等待 tooltip → 自动截图出校验图（复用预检图链路，无点击副作用）
+                int normX = requireNormCoordinate(act, "x");
+                int normY = requireNormCoordinate(act, "y");
+                if (ctx == null) {
+                    throw new ActionFailedException("缺少坐标基准，请先调用 screen_capture 截图（坐标使用 0~1000 归一化值）");
+                }
+                robot.mouseMove(ctx.normToScreenX(normX), ctx.normToScreenY(normY));
+                int waitMs = resolveHoverWaitMs(act);
+                sleepQuietly(waitMs);
+                boolean capture = act.path("capture").asBoolean(true);
+                if (!capture) {
+                    note = "已悬停 " + waitMs + " 毫秒（capture=false，未自动截图）";
+                } else {
+                    Long conversationId = ToolContext.getConversationId();
+                    String renderError = (verifyPreviewRenderer == null || conversationId == null)
+                            ? "当前上下文不支持自动校验图（仅完成悬停）"
+                            : verifyPreviewRenderer.renderVerifyPreview(
+                                    conversationId, ToolContext.getUserId(), List.of(new int[]{normX, normY}));
+                    if (renderError == null) {
+                        // 顺带完成该点校验登记：后续点击/拖拽同点（±容差内）直接放行
+                        if (verifyRegistry != null) {
+                            verifyRegistry.record(conversationId, normX, normY);
+                        }
+                        note = "已悬停并生成校验图；如 tooltip 未出现可增大 waitMs 重试";
+                    } else {
+                        note = "已悬停，但校验图生成失败：" + renderError + "；可手动调用 screen_capture 截图确认";
+                    }
+                }
+            }
             case "screen_size" -> {
                 // 无副作用：仅作为信息型动作（实际尺寸在结果文本中统一返回）
             }
             default -> throw new ActionFailedException("未知动作类型: " + type);
         }
+        return note;
     }
 
     /**
@@ -668,6 +738,112 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
         }
     }
 
+    /**
+     * 解析 hover 等待时长（★ 新增）：动作参数 waitMs 优先，缺省用配置
+     * desktop.control.hover-wait-ms（默认 800）；统一 clamp 到 [0, {@link #HOVER_WAIT_MAX_MS}]。
+     */
+    private int resolveHoverWaitMs(JsonNode act) {
+        int defaultMs = Math.max(0, config.getControl().getHoverWaitMs());
+        int waitMs = act.path("waitMs").asInt(defaultMs);
+        return Math.max(0, Math.min(HOVER_WAIT_MAX_MS, waitMs));
+    }
+
+    // ==================== 点击命中回执（★ 本次新增：前后帧差分） ====================
+
+    /**
+     * 点击前抓取基准帧 F0（★ 新增）：截取 captureContext 物理区域（clamp 到屏幕范围）。
+     *
+     * <p>配置关闭（desktop.control.click-feedback=false）、无坐标基准、区域无效或截图异常时
+     * 返回 null = 跳过回执——回执采集失败绝不影响点击本身。</p>
+     */
+    private BufferedImage captureClickBeforeFrame(CaptureContext ctx) {
+        if (!config.getControl().isClickFeedback() || ctx == null) {
+            return null;
+        }
+        Rectangle area = resolveClickFeedbackArea(ctx);
+        if (area == null) {
+            return null;
+        }
+        try {
+            return new Robot().createScreenCapture(area);
+        } catch (Exception e) {
+            log.debug("点击回执基准帧采集失败（跳过回执）: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 点击后生成回执 note（★ 新增）：等待配置时长（clamp）→ 抓对比帧 F1 → 差分 → 文案。
+     *
+     * <p>降级策略（任一环节失败均返回 null = note 保持原样，不阻断点击、不输出误导文案）：
+     * F0 缺失、无坐标基准、区域无效、截图异常、帧尺寸不一致（分辨率突变时
+     * {@link ClickFeedbackSupport#compare} 返回 null）。</p>
+     */
+    private String buildClickFeedbackNote(CaptureContext ctx, BufferedImage before) {
+        if (before == null || ctx == null) {
+            return null;
+        }
+        Rectangle area = resolveClickFeedbackArea(ctx);
+        if (area == null) {
+            return null;
+        }
+        sleepQuietly(resolveClickFeedbackWaitMs());
+        BufferedImage after;
+        try {
+            after = new Robot().createScreenCapture(area);
+        } catch (Exception e) {
+            log.debug("点击回执对比帧采集失败（跳过回执）: {}", e.getMessage());
+            return null;
+        }
+        return describeClickFeedbackNote(ClickFeedbackSupport.compare(before, after));
+    }
+
+    /**
+     * 差分结果 → 回执文案（★ 静态纯函数，便于独立验证；null = 降级不输出）。
+     *
+     * <p>文案谨慎：无变化时不做"点击失败"的断言（元素可能本就无视觉反馈/异步响应）。</p>
+     */
+    static String describeClickFeedbackNote(ClickFeedbackSupport.Result result) {
+        if (result == null) {
+            return null;
+        }
+        if (result.changed()) {
+            return String.format(Locale.ROOT, "检测到界面变化（差异 %.1f%%）", result.diffRatio() * 100);
+        }
+        return "未检测到明显变化（可能未命中，或该元素无视觉反馈——可作校准信号：建议先重新用 mark 校验坐标，确认映射后再继续批量操作）";
+    }
+
+    /**
+     * 回执捕获区域：captureContext 物理区域 clamp 到全虚拟屏范围（★ 新增）。
+     *
+     * <p>防御显示器拔插/分辨率变化导致基准区域越界（此时 Robot 截图可能异常）；
+     * 与屏幕完全不相交时返回 null = 跳过回执。</p>
+     */
+    private Rectangle resolveClickFeedbackArea(CaptureContext ctx) {
+        if (ctx.physicalWidth() <= 0 || ctx.physicalHeight() <= 0) {
+            return null;
+        }
+        Rectangle virtualBounds = new Rectangle();
+        for (GraphicsDevice device : GraphicsEnvironment.getLocalGraphicsEnvironment().getScreenDevices()) {
+            virtualBounds = virtualBounds.union(device.getDefaultConfiguration().getBounds());
+        }
+        Rectangle area = new Rectangle(ctx.physicalX(), ctx.physicalY(),
+                ctx.physicalWidth(), ctx.physicalHeight());
+        if (!virtualBounds.intersects(area)) {
+            return null;
+        }
+        return area.intersection(virtualBounds);
+    }
+
+    /**
+     * 解析点击回执等待时长（★ 新增）：配置 desktop.control.click-feedback-wait-ms（默认 400），
+     * 统一 clamp 到 [0, {@link #CLICK_FEEDBACK_WAIT_MAX_MS}]。
+     */
+    private int resolveClickFeedbackWaitMs() {
+        int waitMs = Math.max(0, config.getControl().getClickFeedbackWaitMs());
+        return Math.min(CLICK_FEEDBACK_WAIT_MAX_MS, waitMs);
+    }
+
     // ==================== 结果文本 ====================
 
     private String buildSuccessText(List<String> doneSummaries, int total) {
@@ -723,6 +899,14 @@ public class DesktopControlTool implements Tool, SideEffectFreePreflight {
     private ObjectNode intNode(String description) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", "integer");
+        node.put("description", description);
+        return node;
+    }
+
+    /** 布尔参数节点（★ 新增：hover 的 capture 等） */
+    private ObjectNode boolNode(String description) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("type", "boolean");
         node.put("description", description);
         return node;
     }

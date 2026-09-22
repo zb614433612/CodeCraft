@@ -58,7 +58,8 @@ public class AgentTool implements Tool {
                 + "  1) 创建子Agent后必须等待所有子Agent完成并收集结果，才能给出最终回答\n"
                 + "  2) collect 会阻塞等待，timeout 默认120秒（建议300秒）\n"
                 + "  3) batch_collect 一次性传入所有 agent_id 数组，默认超时300秒，省去逐轮 LLM 等待\n"
-                + "  4) 最多同时运行 20 个子Agent，batch_collect 完成后释放并发槽位";
+                + "  4) 最多同时运行 20 个子Agent，batch_collect 完成后释放并发槽位\n"
+                + "  5) 收集结果出现 ⚠️「疑似未完成」标记时，必须先核验其目标物（对照任务清单检查产物是否齐全），禁止直接采信；必要时用 agent action=inspect 查看详情或 fork 续作补全";
     }
 
     @Override
@@ -182,6 +183,22 @@ public class AgentTool implements Tool {
 
             List<String> toolsList = parseStringList(args, "tools");
             if (toolsList.isEmpty()) return "【参数缺失】action=fork 需要 tools 参数。示例：tools=[\"file_explorer\", \"file_writer\", \"command\"]";
+
+            // ★ 修复（P0 工具授权）：子Agent的工具指定不得超出当前请求的授权白名单
+            //   （防止借 fork 旁路把授权外工具分配给子Agent执行；白名单未设置时保持旧行为兼容）
+            List<String> forkAllowedTools = ToolContext.getAllowedTools();
+            if (forkAllowedTools != null) {
+                List<String> exceededTools = new ArrayList<>();
+                for (String t : toolsList) {
+                    if (!forkAllowedTools.contains(t)) {
+                        exceededTools.add(t);
+                    }
+                }
+                if (!exceededTools.isEmpty()) {
+                    return "【工具未授权】以下工具不在当前智能体的授权列表内，无法分配给子Agent：" + exceededTools
+                            + "。请改用已授权的工具（当前授权：" + forkAllowedTools + "）。";
+                }
+            }
 
             List<String> skillsList = parseStringList(args, "skills");
 
@@ -376,9 +393,10 @@ public class AgentTool implements Tool {
         sb.append("📊 批量收集子Agent结果（共 ").append(results.size()).append(" 个）\n");
         sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-        int completed = 0, failed = 0, timeout = 0;
+        int completed = 0, failed = 0, timeout = 0, suspicious = 0;
         List<String> allModified = new ArrayList<>();
         List<String> allCreated = new ArrayList<>();
+        List<String> suspiciousIds = new ArrayList<>();
 
         for (SubAgentResult r : results) {
             String icon;
@@ -387,6 +405,12 @@ public class AgentTool implements Tool {
                 case "failed":    icon = "❌"; failed++; break;
                 case "timeout":   icon = "⏰"; timeout++; break;
                 default:          icon = "❓";
+            }
+            // 【第二档·保险丝】疑似未完成：改用 ⚠️ 角标并计入清单（不再显示为纯完成）
+            if (r.isCompletionSuspicious()) {
+                icon = "⚠️";
+                suspicious++;
+                suspiciousIds.add(r.getAgentId());
             }
             sb.append("\n").append(icon).append(" 【").append(r.getAgentId()).append("】").append(r.getStatus());
 
@@ -416,6 +440,14 @@ public class AgentTool implements Tool {
         if (failed > 0 || timeout > 0) {
             sb.append("\n⚠️ 存在失败/超时的子Agent，请检查上面标记 ❌/⏰ 的条目，"
                     + "必要时用 agent action=inspect 查看详情或重试。\n");
+        }
+
+        // 【第二档·保险丝】疑似未完成清单：提示主Agent履行核验义务
+        if (suspicious > 0) {
+            sb.append("\n⚠️ 有 ").append(suspicious).append(" 个子Agent未携带完成标记（疑似未完成）：")
+                    .append(String.join(", ", suspiciousIds)).append("\n")
+                    .append("   请先核验其目标物（对照任务清单检查产物是否齐全），不要直接采信其\"已完成\"结论；")
+                    .append("必要时用 agent action=inspect 查看详情，或 fork 续作补全缺口。\n");
         }
 
         return sb.toString();

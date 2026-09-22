@@ -17,6 +17,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * 智能体互相调用工具（Phase 19 P2）
  * <p>
@@ -36,6 +39,11 @@ import org.springframework.stereotype.Component;
         description = "智能体互相调用（委托其他智能体执行任务；manual 模式批准即委托授权凭证）")
 public class AgentInvokeTool implements Tool {
 
+    /** 工具描述中可用智能体清单的条数上限（防止清单过长膨胀工具 schema） */
+    private static final int ROSTER_MAX_ITEMS = 20;
+    /** 清单中单个智能体描述的截断长度 */
+    private static final int ROSTER_DESC_MAX_CHARS = 60;
+
     private final ObjectMapper objectMapper;
     private final AgentInvokeService agentInvokeService;
     private final AgentConfigMapper agentConfigMapper;
@@ -53,20 +61,29 @@ public class AgentInvokeTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "【适用场景】智能体互相调用（Phase 19）：当前智能体 A 委托另一个智能体 B（agent_config 实例）执行任务。\n"
-                + "B 以自身身份（角色/模型/工作目录/工具集）在独立会话中执行，执行期间免用户授权（委托即授权）。\n"
-                + "【action 说明】\n"
-                + "  invoke — 发起调用。mode=create_session（为 B 新建会话）| continue_session（按 session_id 继续 B 既有会话）\n"
-                + "  poll   — 查询调用结果（异步模式/超时追查/任意时刻状态），scope=summary|full|final\n"
-                + "  cancel — 取消 B 侧任务\n"
-                + "【典型工作流】invoke（await=true 同步等待完成）→ 基于结果继续；"
-                + "或 invoke await=false → 稍后 poll 查询\n"
-                + "【注意事项】\n"
-                + "  1. invoke/poll 返回的【最终答复】【工具轨迹摘要】是 B 的真实产出，禁止编造 B 的结果\n"
-                + "  2. 返回的【B 会话 ID】用于后续继续让 B 干活：agent_invoke action=invoke mode=continue_session session_id=<B会话ID>\n"
-                + "  3. 仅当任务需要其他智能体的专业能力/独立工作目录时才委托；能自己干的小活不要委托\n"
-                + "  4. manual 模式下本工具需用户批准一次（= 委托授权）；B 执行期间不再弹窗\n"
-                + "  5. 禁止调用自己；信任链最深 3 层（A→B→C），环调用会被拒绝";
+        StringBuilder sb = new StringBuilder();
+        sb.append("【适用场景】智能体互相调用（Phase 19）：当前智能体 A 委托另一个智能体 B（agent_config 实例）执行任务。\n")
+                .append("B 以自身身份（角色/模型/工作目录/工具集）在独立会话中执行，执行期间免用户授权（委托即授权）。\n")
+                .append("【action 说明】\n")
+                .append("  invoke — 发起调用。mode=create_session（为 B 新建会话）| continue_session（按 session_id 继续 B 既有会话）\n")
+                .append("  poll   — 查询进度/结果（任意时刻可用；wait_sec 可短暂等待，完成立即返回），scope=summary|full|final\n")
+                .append("  wait   — 批量等待多个委托（call_ids + wait_mode=all|any）——配合 await=false 派发实现并行委托\n")
+                .append("  cancel — 取消 B 侧任务\n")
+                .append("【典型工作流】短任务：invoke（await=true）同步拿结果；长任务/并行：invoke await=false 派发（记下 callId）")
+                .append("→ 继续其他工作或 wait/poll 查进度；超时后：poll（可 wait_sec=60）继续查，勿重复委托\n")
+                .append("【注意事项】\n")
+                .append("  1. invoke/poll 返回的【最终答复】【工具轨迹摘要】是 B 的真实产出，禁止编造 B 的结果\n")
+                .append("  2. 返回的【B 会话 ID】用于后续继续让 B 干活：agent_invoke action=invoke mode=continue_session session_id=<B会话ID>\n")
+                .append("  3. 仅当任务需要其他智能体的专业能力/独立工作目录时才委托；能自己干的小活不要委托\n")
+                .append("  4. manual 模式下本工具需用户批准一次（= 委托授权）；B 执行期间不再弹窗\n")
+                .append("  5. 禁止调用自己；信任链最深 3 层（A→B→C），环调用会被拒绝\n")
+                .append("  6. 超时（TIMEOUT）≠失败：任务仍在后台执行，用 poll/wait 继续查，不要因超时重新发起相同委托");
+        // 动态注入可用智能体清单（构建工具 schema 时实时查询；新建/停用智能体后下一次请求即生效）
+        String roster = buildAgentRoster();
+        if (roster != null && !roster.isEmpty()) {
+            sb.append("\n").append(roster);
+        }
+        return sb.toString();
     }
 
     @Override
@@ -78,14 +95,14 @@ public class AgentInvokeTool implements Tool {
         // === action ===
         ObjectNode action = props.putObject("action");
         action.put("type", "string");
-        action.put("description", "【必填】invoke=发起调用；poll=查询结果；cancel=取消 B 侧任务");
+        action.put("description", "【必填】invoke=发起调用；poll=查询进度/结果；wait=批量等待多个委托；cancel=取消 B 侧任务");
         ArrayNode actionEnum = action.putArray("enum");
-        actionEnum.add("invoke").add("poll").add("cancel");
+        actionEnum.add("invoke").add("poll").add("wait").add("cancel");
 
         // === invoke 参数 ===
         ObjectNode targetAgent = props.putObject("target_agent");
         targetAgent.put("type", "string");
-        targetAgent.put("description", "【invoke 必填】目标智能体 B：agent_config_id（数字）或名称");
+        targetAgent.put("description", "【invoke 必填】目标智能体 B：agent_config_id（数字）或名称；候选见工具描述【可用智能体清单】，推荐直接用 ID");
 
         ObjectNode mode = props.putObject("mode");
         mode.put("type", "string");
@@ -119,9 +136,28 @@ public class AgentInvokeTool implements Tool {
 
         ObjectNode scope = props.putObject("scope");
         scope.put("type", "string");
-        scope.put("description", "【poll 可选，默认 summary】summary=最终答复+工具轨迹摘要；full=完整轨迹；final=仅最终答复（省 token）");
+        scope.put("description", "【poll/wait 可选，默认 summary】summary=最终答复+工具轨迹摘要；full=完整轨迹；final=仅最终答复（省 token）");
         ArrayNode scopeEnum = scope.putArray("enum");
         scopeEnum.add("summary").add("full").add("final");
+
+        ObjectNode waitSec = props.putObject("wait_sec");
+        waitSec.put("type", "integer");
+        waitSec.put("description", "【poll 可选，默认 0】短暂等待秒数（0=立即返回；1~120）：期间任务完成立即返回完整结果，到点返回最新进度快照。适合「等一会儿再查」，无需连续空转轮询");
+
+        ObjectNode callIds = props.putObject("call_ids");
+        callIds.put("type", "array");
+        callIds.putObject("items").put("type", "string");
+        callIds.put("description", "【wait 必填】要等待的调用 ID 列表（invoke 返回的 callId，可多个；也兼容逗号分隔字符串）");
+
+        ObjectNode waitMode = props.putObject("wait_mode");
+        waitMode.put("type", "string");
+        waitMode.put("description", "【wait 可选，默认 all】all=等全部委托到达终态；any=任一委托到达终态即返回");
+        ArrayNode waitModeEnum = waitMode.putArray("enum");
+        waitModeEnum.add("all").add("any");
+
+        ObjectNode timeoutSec = props.putObject("timeout_sec");
+        timeoutSec.put("type", "integer");
+        timeoutSec.put("description", "【wait 可选】批量等待最大秒数（默认 120，上限 300）；到点未达条件则返回各自最新状态");
 
         ArrayNode required = root.putArray("required");
         required.add("action");
@@ -134,14 +170,15 @@ public class AgentInvokeTool implements Tool {
     public String execute(JsonNode arguments) {
         String action = arguments.path("action").asText("");
         if (action.isEmpty()) {
-            return "【参数缺失】'action' 参数缺失或为空。agent_invoke 的 action 必须为 invoke / poll / cancel 之一。\n"
+            return "【参数缺失】'action' 参数缺失或为空。agent_invoke 的 action 必须为 invoke / poll / wait / cancel 之一。\n"
                     + "示例：{ \"action\": \"invoke\", \"target_agent\": \"2\", \"mode\": \"create_session\", \"instructions\": \"...\" }";
         }
         return switch (action) {
             case "invoke" -> doInvoke(arguments);
             case "poll" -> doPoll(arguments);
+            case "wait" -> doWait(arguments);
             case "cancel" -> doCancel(arguments);
-            default -> "❌ 错误：未知的 action '" + action + "'，仅支持 invoke / poll / cancel 三种取值。";
+            default -> "❌ 错误：未知的 action '" + action + "'，仅支持 invoke / poll / wait / cancel 四种取值。";
         };
     }
 
@@ -195,6 +232,8 @@ public class AgentInvokeTool implements Tool {
         // ===== 调用方上下文（服务内部信任依据，非 LLM 可注入）=====
         req.setCallerAgentConfigId(callerAgentConfigId);
         req.setCallerConversationId(callerConversationId);
+        // 2026-09-21：携带当前任务 id（任务级精确级联取消：仅取消「被取消任务发起」的委托，防误杀独立后台委托）
+        req.setCallerTaskId(ToolContext.getTaskId());
         req.setCallerAgentName(resolveCallerName(callerAgentConfigId));
         req.setCallerUserId(ToolContext.getUserId());
         // 信任链传递：A 若本身处于某委托链中（B→C 场景），链信息来自 apiRequest._trustChain
@@ -235,12 +274,51 @@ public class AgentInvokeTool implements Tool {
             return "【参数缺失】action=poll 需要 call_id 或 session_id（二选一）。";
         }
         String scope = args.path("scope").asText("summary");
+        int waitSec = args.hasNonNull("wait_sec") ? Math.max(0, args.get("wait_sec").asInt()) : 0;
         try {
-            AgentInvokeResult result = agentInvokeService.poll(callId.isEmpty() ? null : callId, sessionId, scope, callerConversationId);
+            AgentInvokeResult result = agentInvokeService.poll(callId.isEmpty() ? null : callId, sessionId, scope, waitSec, callerConversationId);
             return result != null ? result.getMessage() : "❌ 查询结果为空（内部异常）。";
         } catch (Exception e) {
             log.error("[AgentInvokeTool] poll 异常: callId={}, err={}", callId, e.getMessage(), e);
             return "❌ poll 执行异常，请稍后重试（详情见服务端日志）。";
+        }
+    }
+
+    private String doWait(JsonNode args) {
+        Long callerConversationId = ToolContext.getConversationId();
+        if (callerConversationId == null) {
+            return "❌ 无法执行 wait：当前缺少会话上下文（conversationId 为空）。\n【说明】agent_invoke 只能在智能体会话执行中调用。";
+        }
+        // call_ids：数组或逗号分隔字符串（兼容两种写法）
+        List<String> callIds = new ArrayList<>();
+        JsonNode idsNode = args.path("call_ids");
+        if (idsNode.isArray()) {
+            for (JsonNode n : idsNode) {
+                String v = n.asText("").trim();
+                if (!v.isEmpty()) {
+                    callIds.add(v);
+                }
+            }
+        } else if (idsNode.isTextual() && !idsNode.asText().isBlank()) {
+            for (String v : idsNode.asText().split(",")) {
+                if (!v.trim().isEmpty()) {
+                    callIds.add(v.trim());
+                }
+            }
+        }
+        if (callIds.isEmpty()) {
+            return "【参数缺失】action=wait 需要 call_ids（invoke 返回的调用 ID 列表，数组或逗号分隔字符串）。\n"
+                    + "示例：{ \"action\": \"wait\", \"call_ids\": [\"call_xxx\", \"call_yyy\"], \"wait_mode\": \"all\", \"timeout_sec\": 120 }";
+        }
+        String waitMode = args.path("wait_mode").asText("all");
+        int timeoutSec = args.hasNonNull("timeout_sec") ? args.get("timeout_sec").asInt() : 0;
+        String scope = args.path("scope").asText("summary");
+        try {
+            AgentInvokeResult result = agentInvokeService.waitBatch(callIds, waitMode, timeoutSec, scope, callerConversationId);
+            return result != null ? result.getMessage() : "❌ 等待结果为空（内部异常）。";
+        } catch (Exception e) {
+            log.error("[AgentInvokeTool] wait 异常: callIds={}, err={}", callIds, e.getMessage(), e);
+            return "❌ wait 执行异常，请稍后重试（详情见服务端日志）。";
         }
     }
 
@@ -264,6 +342,65 @@ public class AgentInvokeTool implements Tool {
     }
 
     // ==================== 辅助 ====================
+
+    /**
+     * 动态构建可用智能体清单（注入工具描述，供调用方 A 自主发现委托目标）。
+     * <p>
+     * 查询范围 = 全部 enabled=1 的智能体（单机产品不做用户过滤，与 resolveAgent/selectById 调用链语义一致）；
+     * 构建工具 schema 时 ToolContext 通常为空，故不依赖请求上下文（agentConfigId 可用时防御性排除自身）。
+     * 任何异常（如启动期 DB 未就绪）降级为不注入清单，绝不阻断工具注册与请求构建。
+     * </p>
+     */
+    private String buildAgentRoster() {
+        try {
+            List<AgentConfig> candidates = agentConfigMapper.selectAllEnabled();
+            Long selfId = ToolContext.getAgentConfigId();
+            StringBuilder sb = new StringBuilder("【可用智能体清单】（委托目标的候选，推荐直接用 ID 调用）：");
+            int listed = 0;
+            int omitted = 0;
+            if (candidates != null) {
+                for (AgentConfig cfg : candidates) {
+                    if (cfg == null || cfg.getId() == null) {
+                        continue;
+                    }
+                    if (selfId != null && selfId.equals(cfg.getId())) {
+                        continue; // 防御性排除自身（调用自己会被环检测拒绝）
+                    }
+                    if (listed >= ROSTER_MAX_ITEMS) {
+                        omitted++;
+                        continue;
+                    }
+                    String name = (cfg.getName() != null && !cfg.getName().isBlank())
+                            ? cfg.getName() : ("Agent#" + cfg.getId());
+                    sb.append("\n  - ").append(name).append("（ID: ").append(cfg.getId()).append("）");
+                    String desc = cfg.getDescription();
+                    if (desc != null && !desc.isBlank()) {
+                        sb.append("：").append(truncateRosterDesc(desc));
+                    }
+                    listed++;
+                }
+            }
+            if (listed == 0) {
+                return "【可用智能体清单】（当前没有其他可委托的智能体，可在「智能体管理」页创建或启用）";
+            }
+            if (omitted > 0) {
+                sb.append("\n  …其余 ").append(omitted).append(" 个智能体未列出");
+            }
+            log.debug("[AgentInvokeTool] 工具描述注入可用智能体清单: listed={}, omitted={}", listed, omitted);
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("[AgentInvokeTool] 构建可用智能体清单失败（降级为不注入）: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 清单描述压缩：空白归一 + 超长截断 */
+    private String truncateRosterDesc(String desc) {
+        String oneLine = desc.replaceAll("\\s+", " ").trim();
+        return oneLine.length() > ROSTER_DESC_MAX_CHARS
+                ? oneLine.substring(0, ROSTER_DESC_MAX_CHARS) + "…"
+                : oneLine;
+    }
 
     /** 解析调用方 A 的名称（溯源注记展示；查不到时降级占位） */
     private String resolveCallerName(Long callerAgentConfigId) {

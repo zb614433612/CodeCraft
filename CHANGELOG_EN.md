@@ -5,6 +5,42 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [2.0.1] - 2026-09-22
+
+### 🔧 Enhancement: Git Tool Family Completion (AI Tools / REST / Frontend UI)
+
+- **3 new Git tools added (built-in tools 24 → 27)**: `git_stash` (save/list/pop/drop), `git_tag` (list/create/delete/push), `git_remote` (list/add/set_url/remove)
+- **`git_submit` extended with 6 actions**: pull, fetch, unstage, restore, reset (--hard requires confirm=true), revert; fixed the dead-end message "run git pull first" when push is rejected (no pull tool existed before)
+- **`git_query` new `show` action**: view a commit's details or a file's changes in a commit (ref/file/stat params, output auto-truncated)
+- **`git_branch` new `merge` action**: merge a branch into the current one (no_ff/message); `create` supports switch=true; fixed the "stash if necessary" hint that pointed to a non-existent stash tool
+- **Permission annotations unified**: `@ToolPermission` added to `git_query` / `git_submit` (write tools have affectsData=true → manual-mode approval; git_submit was previously unapproved)
+- **REST layer**: 22 new GitController endpoints (pull / push / fetch / stash×4 / merge / reset / revert / branches / branch×3 / tags / tag×3 / remotes / remote×2); /restore supports `all`
+- **Frontend**: GitSidebar gains sync buttons (pull/push/fetch), stash/branch/tag collapsible sections, file restore button; fixed the "unstage" bug that actually called /add; `api/git.ts` +18 functions; tool label mapping updated
+- **Config & docs**: tool-groups & prompt tool list updated to 6 Git tools; README(_EN) / BUILD_AND_RUN(_EN) / docs (TOOL_SYSTEM(_EN), ARCHITECTURE(_EN), MCP_SYSTEM) synced (built-in tools 24 → 27)
+
+### 🐛 Fix: Sub-agent repeated-call detection wrongly killing normal batch operations (F3)
+
+- **Root cause**: the fork loop (AgentForkManager) compared only the FIRST tool call's name per round; reading different files / searching different keywords in consecutive rounds (normal batch behavior) was misdetected as an infinite loop. The termination path was a silent `break` — zero logging, status left at its initial value (completed) — surfacing as "sub-agent stopped early with no trace at all"
+- **Fix**: ① criteria aligned with the main loop ToolLoopManager ("same tool + same key args" only; all tool calls are iterated), the local incomplete implementation removed; ② termination now logs a warning + sets `completionSuspicious=true` (reusing the ⚠️ verification channel); ③ judge-termination / user-rejection / API parse-failure exits now also set the suspicious flag (exit-path consolidation); ④ `ToolLoopManager.extractToolKey` now includes `pattern` (grep/glob keyword) in the file_explorer/file_writer signature — consecutive searches with different keywords are no longer misdetected
+- **Verification**: new regression test SubAgentRepeatDetectTest (8 cases covering both "different files not killed" and "true loop still detected"), 8/8 passed
+
+### 🐛 Fix: file_explorer grep cannot search .log and other non-whitelisted text files
+
+- **Root cause**: grep filtered files by the `TEXT_EXTENSIONS` whitelist; `.log` (plus .csv/.diff/.mjs etc.) was not listed and got silently skipped. Even an explicit `include` could not bypass it — log contents were unsearchable (unrelated to file size: a 372KB log was equally affected; read has no such limit, and the inconsistent behavior easily misled "the file doesn't contain it" conclusions)
+- **Fix**: ① whitelist expanded (.mjs/.cjs/.log/.csv/.tsv/.diff/.patch/.rst/.adoc/.jsonl/.ndjson/.lock); ② new include escape hatch (explicitly specified types bypass the default whitelist; binary blocking preserved); ③ zero-hit hint now suggests using include for special suffixes
+- **Verification**: new regression test FileExplorerGrepLogTest (6 cases, red-green: 2/6 before fix → 6/6 after)
+
+### 🏷️ Version Numbers
+
+- Backend: `2.0.0` → `2.0.1` (pom.xml)
+- Frontend: `2.0.0` → `2.0.1` (package.json + package-lock.json)
+- Electron: `2.0.0` → `2.0.1` (packaged jar path synced to `code-craft-2.0.1.jar`)
+- MCP Server handshake version: `2.0.0` → `2.0.1`
+- Build artifacts: `code-craft-2.0.0.jar` → `code-craft-2.0.1.jar`
+- Docs: BUILD_AND_RUN(_EN) / docs (ARCHITECTURE, DEEPSEEK_SERVICE_IMPL, LLM_PROVIDER_SYSTEM, TOOL_SYSTEM, DEV_QUICKREF, RELEASE_CHECKLIST, etc.) synced to v2.0.1
+
+---
+
 ## [2.0.0] - 2026-09-16
 
 ### 🖼️ New: Vision & File Management (Files API)
@@ -38,6 +74,7 @@ This document records all important version changes of the CodeCraft project.
 - **Global exception handling**: new GlobalExceptionHandler as unified fallback
 - **Permission pipeline**: OperationCategory gains DESKTOP; new SideEffectFreePreflight (no-side-effect preflight exemption) and ToolPermissionLevel
 - **DB connections**: connection test fix
+- **Agent-to-agent invocation enhancement**: the `agent_invoke` tool description now dynamically injects an "available agents" roster (delegating agents can discover targets on their own; calling by ID is recommended)
 
 ### 🏷️ Version Numbers
 

@@ -4,8 +4,13 @@ import com.example.agentdeepseek.mapper.FileAssetMapper;
 import com.example.agentdeepseek.mapper.FileReferenceMapper;
 import com.example.agentdeepseek.model.entity.FileAsset;
 import com.example.agentdeepseek.model.entity.FileReference;
+import com.example.agentdeepseek.model.vo.CloudFileDeleteResultVO;
+import com.example.agentdeepseek.model.vo.CloudFileListVO;
+import com.example.agentdeepseek.model.vo.CloudFileVO;
 import com.example.agentdeepseek.model.vo.FileAssetVO;
+import com.example.agentdeepseek.model.vo.FilePageVO;
 import com.example.agentdeepseek.service.files.model.FileObject;
+import com.example.agentdeepseek.service.files.model.FilePage;
 import com.example.agentdeepseek.service.files.model.FileUploadRequest;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
 import lombok.extern.slf4j.Slf4j;
@@ -78,6 +83,15 @@ public class FileAssetService {
 
     /** 列表默认条数 */
     private static final int DEFAULT_PAGE_SIZE = 50;
+
+    /** 云端文件清单拉取单页条数（DeepSeek Files API 单页上限 1000） */
+    private static final int CLOUD_LIST_PAGE_SIZE = 1000;
+
+    /** 云端文件清单拉取页数上限（10×1000=10000 条；超出置 truncated=true，防异常量级拉爆） */
+    private static final int CLOUD_LIST_MAX_PAGES = 10;
+
+    /** 远端 fileId 最大长度（防御性校验，防异常入参滥用） */
+    private static final int MAX_REMOTE_FILE_ID_LENGTH = 256;
 
     /** orphan 补偿单批扫描条数（防单次任务过长；剩余批次由下一轮调度继续） */
     private static final int ORPHAN_CLEANUP_BATCH_SIZE = 100;
@@ -397,7 +411,7 @@ public class FileAssetService {
                                   Long conversationId, boolean withRefs) {
         int pageSize = (limit == null || limit <= 0) ? DEFAULT_PAGE_SIZE : Math.min(limit, MAX_PAGE_SIZE);
         boolean orderDesc = !"asc".equalsIgnoreCase(order);
-        List<FileAsset> assets = fileAssetMapper.selectByUser(userId, afterId, pageSize, orderDesc,
+        List<FileAsset> assets = fileAssetMapper.selectByUser(userId, afterId, null, pageSize, orderDesc,
                 (keyword != null && !keyword.isBlank()) ? keyword.trim() : null,
                 (status != null && !status.isBlank()) ? status.trim() : null,
                 (storageType != null && !storageType.isBlank()) ? storageType.trim() : null,
@@ -410,6 +424,59 @@ public class FileAssetService {
             }
             result.add(vo);
         }
+        return result;
+    }
+
+    /**
+     * 分页查询文件列表（2026-09-21 文件管理页分页改造）
+     * <p>
+     * 标准页码分页（page 从 1 开始；offset = (page-1)*pageSize），
+     * 同时返回筛选条件下的「总数」与「占用空间合计」（后端全量统计，供分页组件与头部展示）。
+     * 与游标版 {@link #list} 并存：旧前端通道（聊天页历史图片/引用回显）继续走游标版，互不影响。
+     * </p>
+     *
+     * @param userId         用户ID（必填，"仅本人"数据隔离）
+     * @param page           页码（从 1 开始，小于 1 时归一为 1）
+     * @param pageSize       每页条数（≤0 用默认值，上限 200）
+     * @param order          排序（asc/desc，缺省 desc=最新在前）
+     * @param keyword        文件名/显示名模糊筛选（可空）
+     * @param status         状态筛选（可空）
+     * @param storageType    存储类型筛选：cloud/local（可空）
+     * @param conversationId 按引用会话筛选（可空）
+     * @param withRefs       是否附带引用信息
+     * @return 分页结果（含总数与占用空间合计）
+     */
+    public FilePageVO listPaged(Long userId, int page, int pageSize, String order,
+                                String keyword, String status, String storageType,
+                                Long conversationId, boolean withRefs) {
+        int safePage = Math.max(page, 1);
+        int safeSize = Math.max(1, Math.min(pageSize <= 0 ? DEFAULT_PAGE_SIZE : pageSize, MAX_PAGE_SIZE));
+        int offset = (safePage - 1) * safeSize;
+        boolean orderDesc = !"asc".equalsIgnoreCase(order);
+        String kw = (keyword != null && !keyword.isBlank()) ? keyword.trim() : null;
+        String st = (status != null && !status.isBlank()) ? status.trim() : null;
+        String stype = (storageType != null && !storageType.isBlank()) ? storageType.trim() : null;
+
+        List<FileAsset> assets = fileAssetMapper.selectByUser(userId, null, offset, safeSize, orderDesc,
+                kw, st, stype, conversationId);
+        List<FileAssetVO> records = new ArrayList<>(assets.size());
+        for (FileAsset asset : assets) {
+            FileAssetVO vo = toVO(asset);
+            if (withRefs) {
+                vo.setReferences(fileReferenceMapper.selectByAssetId(asset.getId()));
+            }
+            records.add(vo);
+        }
+
+        long total = fileAssetMapper.countByUser(userId, kw, st, stype, conversationId);
+        Long sum = fileAssetMapper.sumSizeByUser(userId, kw, st, stype, conversationId);
+
+        FilePageVO result = new FilePageVO();
+        result.setRecords(records);
+        result.setTotal(total);
+        result.setPage(safePage);
+        result.setPageSize(safeSize);
+        result.setTotalSize(sum == null ? 0L : sum);
         return result;
     }
 
@@ -459,6 +526,170 @@ public class FileAssetService {
         fileAssetMapper.deleteById(id);
         fileAssetStore.deleteQuietly(asset.getLocalPath());
         log.info("文件资产已删除: id={}, fileId={}, storageType={}", id, asset.getFileId(), asset.getStorageType());
+    }
+
+    // ==================== 云端文件（Files API 账号级视图，2026-09-21） ====================
+
+    /**
+     * 查询云端文件清单（Files API 账号级）并与本地记录比对
+     *
+     * <p>场景：软件重装/清理数据后本地 file_asset 记录丢失，而云端（永久保存）文件仍在——
+     * 本方法从远端拉取全量清单（游标循环，order=desc 最新在前），与本地同 Provider 记录比对，
+     * 标注「已登记 / 仅云端」，供前端展示与清理（仅云端 = 云端孤儿的主要形态）。</p>
+     *
+     * <ul>
+     *   <li>拉取上限：{@value #CLOUD_LIST_MAX_PAGES} 页 × {@value #CLOUD_LIST_PAGE_SIZE} 条，超出置 {@code truncated=true}；</li>
+     *   <li>Provider 解析规则与上传一致：缺省用首个（未配置 → 明确报错，不静默降级）。</li>
+     * </ul>
+     *
+     * @param providerCode 目标 Provider（可空：缺省用首个 Provider）
+     * @return 云端文件列表 + 本地比对统计
+     */
+    public CloudFileListVO listCloudFiles(String providerCode) {
+        // 1) Provider 解析（与上传同一套规则）
+        String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
+        if (code == null || code.isBlank()) {
+            throw new IllegalStateException("没有可用的 LLM Provider，无法查询云端文件");
+        }
+        FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
+        if (client == null) {
+            throw new IllegalStateException("当前 Provider（" + code + "）不支持 Files API，无法查询云端文件");
+        }
+
+        // 2) 游标循环拉取云端全量清单（上限保护：防异常量级拉爆内存/响应）
+        List<FileObject> remoteFiles = new ArrayList<>();
+        boolean truncated = false;
+        String cursor = null;
+        for (int pageNo = 0; pageNo < CLOUD_LIST_MAX_PAGES; pageNo++) {
+            FilePage page = client.list(cursor, CLOUD_LIST_PAGE_SIZE, "desc");
+            if (page == null || page.getData() == null || page.getData().isEmpty()) {
+                break;
+            }
+            remoteFiles.addAll(page.getData());
+            if (!page.isHasMore()) {
+                break;
+            }
+            String lastId = page.getLastId();
+            if (lastId == null || lastId.isBlank()) {
+                break; // 防御：远端声明有更多但未给出游标（无法继续翻页）
+            }
+            cursor = lastId;
+            if (pageNo == CLOUD_LIST_MAX_PAGES - 1) {
+                truncated = true; // 还有更多但已达上限
+            }
+        }
+
+        // 3) 本地比对索引（fileId → 首个本地记录；按 id 升序，异常多记录时取最早一条）
+        List<FileAsset> locals = fileAssetMapper.selectByProvider(code);
+        Map<String, FileAsset> localIndex = new LinkedHashMap<>();
+        for (FileAsset asset : locals) {
+            if (asset.getFileId() != null && !asset.getFileId().isBlank()) {
+                localIndex.putIfAbsent(asset.getFileId(), asset);
+            }
+        }
+
+        // 4) 组装（标注 linked / 统计仅云端占用；防御跳过无 fileId 的异常条目）
+        List<CloudFileVO> items = new ArrayList<>(remoteFiles.size());
+        int linkedCount = 0;
+        long cloudOnlySize = 0L;
+        int skipped = 0;
+        for (FileObject remote : remoteFiles) {
+            if (remote.getFileId() == null || remote.getFileId().isBlank()) {
+                skipped++;
+                continue; // 远端异常数据：无 id 无法管理与删除，跳过
+            }
+            CloudFileVO vo = new CloudFileVO();
+            vo.setFileId(remote.getFileId());
+            vo.setFilename(remote.getFilename());
+            vo.setBytes(remote.getBytes());
+            vo.setCreatedAtEpoch(remote.getCreatedAtEpoch());
+            vo.setExpiresAtEpoch(remote.getExpiresAtEpoch());
+            FileAsset local = localIndex.get(remote.getFileId());
+            if (local != null) {
+                linkedCount++;
+                vo.setLinked(true);
+                vo.setLinkedAssetId(local.getId());
+                vo.setLinkedDisplayName(local.getDisplayName());
+                vo.setLinkedStatus(local.getStatus());
+            } else {
+                vo.setLinked(false);
+                if (remote.getBytes() != null) {
+                    cloudOnlySize += remote.getBytes();
+                }
+            }
+            items.add(vo);
+        }
+
+        if (skipped > 0) {
+            log.warn("云端清单存在 {} 条无 fileId 异常条目，已跳过", skipped);
+        }
+
+        CloudFileListVO result = new CloudFileListVO();
+        result.setProviderCode(code);
+        result.setTotal(items.size());
+        result.setLinkedCount(linkedCount);
+        result.setCloudOnlyCount(items.size() - linkedCount);
+        result.setCloudOnlySize(cloudOnlySize);
+        result.setTruncated(truncated);
+        result.setFiles(items);
+        log.info("云端文件清单查询: provider={}, total={}, linked={}, cloudOnly={}, truncated={}",
+                code, items.size(), linkedCount, items.size() - linkedCount, truncated);
+        return result;
+    }
+
+    /**
+     * 删除云端文件（Files API 账号级）并联动清理本地记录
+     *
+     * <p>保证「云端不留孤儿文件」：以远端删除为第一优先（幂等：404/deleted:false 视为已删除）；
+     * 远端成功后清理本地同 provider+fileId 记录（引用 + 记录 + 本地副本；跨用户全量，
+     * 防「云端已删、本地悬空」的不一致）。远端失败抛异常 → 本地保留，用户可重试（与既有 delete 语义一致）。</p>
+     *
+     * @param fileId       远端 Files API 文件 ID（file-api-...）
+     * @param providerCode 目标 Provider（可空：缺省用首个 Provider）
+     * @param userId       操作者用户ID（审计日志用；本地记录清理不按用户过滤，保证一致性）
+     * @return 删除结果（含本地联动清理计数）
+     */
+    public CloudFileDeleteResultVO deleteCloudFile(String fileId, String providerCode, Long userId) {
+        // 1) 参数校验（fileId 来自远端清单，格式受控；长度做防御）
+        if (fileId == null || fileId.isBlank()) {
+            throw new IllegalArgumentException("fileId 不能为空");
+        }
+        String trimmed = fileId.trim();
+        if (trimmed.length() > MAX_REMOTE_FILE_ID_LENGTH) {
+            throw new IllegalArgumentException("fileId 格式非法（长度超限）");
+        }
+
+        // 2) Provider 解析（与上传/查询同一套规则）
+        String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
+        if (code == null || code.isBlank()) {
+            throw new IllegalStateException("没有可用的 LLM Provider，无法删除云端文件");
+        }
+        FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
+        if (client == null) {
+            throw new IllegalStateException("当前 Provider（" + code + "）不支持 Files API，无法删除云端文件");
+        }
+
+        // 3) 先删远端（幂等；失败抛异常，本地保留可重试）
+        client.delete(trimmed);
+
+        // 4) 联动清理本地记录（跨用户全量：云端已删，任何本地记录都成为悬空引用）
+        List<FileAsset> locals = fileAssetMapper.selectByProviderAndFileId(code, trimmed);
+        for (FileAsset asset : locals) {
+            fileReferenceMapper.deleteByAssetId(asset.getId());
+            fileAssetMapper.deleteById(asset.getId());
+            fileAssetStore.deleteQuietly(asset.getLocalPath());
+            log.info("云端文件删除联动清理本地记录: assetId={}, fileId={}, userId={}",
+                    asset.getId(), trimmed, userId);
+        }
+
+        CloudFileDeleteResultVO result = new CloudFileDeleteResultVO();
+        result.setFileId(trimmed);
+        result.setDeleted(true);
+        result.setLocalRecordDeleted(!locals.isEmpty());
+        result.setLocalRecordCount(locals.size());
+        log.info("云端文件已删除: provider={}, fileId={}, localRecordCount={}, operator={}",
+                code, trimmed, locals.size(), userId);
+        return result;
     }
 
     // ==================== 能力查询 ====================
