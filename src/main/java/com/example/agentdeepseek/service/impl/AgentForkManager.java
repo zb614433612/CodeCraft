@@ -7,7 +7,6 @@ import com.example.agentdeepseek.service.ConfigService;
 import com.example.agentdeepseek.model.dto.ForkAgentRequest;
 import com.example.agentdeepseek.model.entity.Skill;
 import com.example.agentdeepseek.model.entity.SubAgentLog;
-import com.example.agentdeepseek.service.SkillMatcher;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.model.dto.PendingQuestion;
 import com.example.agentdeepseek.service.PendingQuestionStore;
@@ -51,7 +50,6 @@ public class AgentForkManager {
     private final ToolRegistry toolRegistry;
     private final SubAgentLogMapper subAgentLogMapper;
     private final SkillService skillService;
-    private final SkillMatcher skillMatcher;
     private final AgentEventBus agentEventBus;
     private final PendingQuestionStore pendingQuestionStore;
     private final ConfigService configService;
@@ -110,7 +108,6 @@ public class AgentForkManager {
             ToolRegistry toolRegistry,
             SubAgentLogMapper subAgentLogMapper,
             SkillService skillService,
-            SkillMatcher skillMatcher,
             AgentEventBus agentEventBus,
             PendingQuestionStore pendingQuestionStore,
             ConfigService configService,
@@ -123,7 +120,6 @@ public class AgentForkManager {
         this.toolRegistry = toolRegistry;
         this.subAgentLogMapper = subAgentLogMapper;
         this.skillService = skillService;
-        this.skillMatcher = skillMatcher;
         this.agentEventBus = agentEventBus;
         this.pendingQuestionStore = pendingQuestionStore;
         this.configService = configService;

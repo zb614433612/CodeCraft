@@ -29,6 +29,25 @@ export interface DelegateProgressData {
   elapsedSec?: number
 }
 
+/** 任务错误事件数据（后端 task_error JSON事件）：LLM 接口错误的用户友好反馈
+ *  任务因错误停止（非人为停止、非正常完成）时由后端下发：
+ *  前端在聊天区展示错误详情（标题+原因+解决建议），并在输入区提供「一键继续」任务恢复入口。
+ *  映射自 DeepSeek 官方错误码表：https://api-docs.deepseek.com/zh-cn/quick_start/error_codes */
+export interface TaskErrorData {
+  /** 简短标题（如「余额不足（HTTP 402）」） */
+  title?: string
+  /** 完整说明（原因 + 解决建议 + 原始信息） */
+  message: string
+  /** HTTP 状态码（网络类异常无） */
+  status?: number
+  /** 错误分类键（如 insufficient_balance / rate_limit / network_error / context_length_exceeded） */
+  errorKey?: string
+  /** 是否建议稍后重试（429/5xx/网络类为 true） */
+  retryable?: boolean
+  /** 原始错误详情（截断） */
+  raw?: string
+}
+
 export type StreamChatEvent = {
   type: 'thinking' | 'content' | 'complete' | 'resume'
   data: string
@@ -36,10 +55,6 @@ export type StreamChatEvent = {
 } | {
   type: 'ask_user'
   data: { uuid: string; question: string; askType?: string; toolName?: string; filePath?: string; fullDetail?: string }
-  sessionId?: number
-} | {
-  type: 'skill_match'
-  data: SkillMatchInfo[]
   sessionId?: number
 } | {
   type: 'agent_event'
@@ -52,6 +67,10 @@ export type StreamChatEvent = {
 } | {
   type: 'delegate_progress'
   data: DelegateProgressData
+  sessionId?: number
+} | {
+  type: 'task_error'
+  data: TaskErrorData
   sessionId?: number
 } | {
   type: 'error'
@@ -106,10 +125,6 @@ export class SseParser {
           sessionId: this.sessionId
         }
       }
-      // 处理 skill_match 事件
-      if (parsed.event === 'skill_match') {
-        return { type: 'skill_match', data: parsed.skills || [], sessionId: this.sessionId }
-      }
       // 处理 delegate_progress 事件（委托进度心跳：A 会话 await 阻塞期间每 ~5s 一次，2026-09-21）
       // ⚠️ 目标会话用 targetSessionId 字段（sessionId 被解析器占用为「当前会话 ID」，不可占用）
       if (parsed.event === 'delegate_progress') {
@@ -136,6 +151,22 @@ export class SseParser {
       // 处理 resume 事件
       if (parsed.event === 'resume') {
         return { type: 'resume', data: '', sessionId: this.sessionId }
+      }
+      // 处理 task_error 事件（任务因 LLM 接口错误停止：标题+原因+解决建议，
+      // 供前端展示错误详情并提供「一键继续」任务恢复入口）——映射自 DeepSeek 官方错误码表
+      if (parsed.event === 'task_error') {
+        return {
+          type: 'task_error',
+          data: {
+            title: parsed.title,
+            message: parsed.message || '任务因错误中断，可点击「继续任务」重试。',
+            status: parsed.status,
+            errorKey: parsed.errorKey,
+            retryable: parsed.retryable,
+            raw: parsed.raw
+          },
+          sessionId: this.sessionId
+        }
       }
       // 处理新的DeepSeek流式格式 (choices[0].delta)
       if (parsed.choices && Array.isArray(parsed.choices) && parsed.choices.length > 0) {
@@ -270,7 +301,24 @@ export async function* readSseStream(
         }
       } catch { /* ignore */ }
     }
-    throw new Error(`SSE请求失败，状态码: ${response.status}`)
+    // ★ 尝试读取错误响应体，提取后端返回的具体错误信息
+    //   （如「没有可用的 LLM Provider，请先在 LLM管理 页面配置一个 Provider」），
+    //   替代只显示状态码——聊天页 catch 会把该 message 直接展示给用户
+    let detail = ''
+    try {
+      const text = await response.text()
+      if (text) {
+        try {
+          const json = JSON.parse(text)
+          detail = json?.message || json?.error || ''
+        } catch {
+          detail = text.length > 200 ? text.slice(0, 200) : text
+        }
+      }
+    } catch { /* ignore */ }
+    throw new Error(detail
+      ? `请求失败（HTTP ${response.status}）：${detail}`
+      : `SSE请求失败，状态码: ${response.status}`)
   }
 
   const reader = response.body?.getReader()

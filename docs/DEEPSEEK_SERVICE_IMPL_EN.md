@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v2.0.1 | Updated: 2026-09-22 | Audience: Developers / AI Collaborators
+> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
 > This document dissects the 187KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -58,7 +58,7 @@ DeepSeekServiceImpl (28 dependencies)
 │   └─ SnapshotService                 → Code snapshots
 ├─ Skill System
 │   ├─ SkillService                    → Skill CRUD
-│   ├─ SkillMatcher                    → Skill matching
+│   ├─ SkillCatalogBuilder             → Skill catalog builder (progressive disclosure)
 │   └─ DeepSeekAnalyzer                → AI analyzer
 ├─ Growth System (★new in v1.1.5, evolved in v1.1.6: P0 normalization / P1 detour channel / P2 env awareness)
 │   ├─ LessonService                   → CRUD + on-demand retrieval + state machine
@@ -89,10 +89,10 @@ Entry: streamChat(ChatRequest)
 ├─ ① prepareConversationContext(request, stream=true)
 │   ├─ Get/Create Conversation
 │   ├─ Get AgentConfig (tool list, model, thinking mode, etc.)
-│   ├─ Load skills → SkillMatcher.match()
+│   ├─ Load skill catalog → SkillCatalogBuilder.buildCatalogSection()
 │   │   ├─ Load lessons → LessonService.retrieveRelevant (passive injection, dedup per conversation)
 │   ├─ Build API request body (messages + tool definitions + params)
-│   └─ Return ConversationContext (apiRequest, toolNames, skillMatchEvent)
+│   └─ Return ConversationContext (apiRequest, toolNames)
 ├─ ② toolExecutor.buildToolDefinitions(toolNames)
 │   └─ Build OpenAI Function Calling tools array
 ├─ ③ cancelRunningTask(conversationId)
@@ -110,7 +110,7 @@ Entry: streamChat(ChatRequest)
 │       │
 │       ├─ Reset PermissionContext (clear "approve all" from last round)
 │       ├─ Load history messages (contextBuilder.buildMessagesFromHistory)
-│       ├─ Inject skill-matched content into user message
+│       ├─ Inject skill catalog into the system prompt
 │       ├─ Inject language enforcement directive
 │       ├─ Call handleToolCallIteration(iteration=0, maxIterations=50)
 │       │   │
@@ -144,8 +144,8 @@ Entry: streamChat(ChatRequest)
 │       │       │   └─ If finish_reason == "stop" → return done event
 │       │       │
 │       │       └─ Error handling:
-│       │           ├─ WebClientResponseException → error event
-│       │           └─ Generic Exception → error event
+│       │           ├─ WebClientResponseException → friendly message via LLMErrorFormatter → task_error event
+│       │           └─ Generic Exception → friendly message → task_error event (with task-interruption recovery)
 │       │
 │       │   ├─ After tool loop → lessonReviewService.reviewAsync (async review, distill root cause/solution, C2)
 │       └─ concatWith(Flux.defer(sub-agent auto-collect))
@@ -219,13 +219,14 @@ Entry: streamChat(ChatRequest)
 | Event Type | Trigger | JSON Structure |
 |-----------|---------|---------------|
 | `sessionId` | Stream start | `{"sessionId": 123}` |
-| `skill_match` | Skill matching complete | `{"type":"skill_match","skills":[...]}` |
 | `reasoning` | AI thinking process | `{"type":"reasoning","content":"..."}` |
 | `text` | AI text output | `{"type":"text","content":"..."}` |
 | `tool_start` | Tool execution begins | `{"type":"tool_start","tools":["write_file"]}` |
 | `tool_result` | Tool execution completes | `{"type":"tool_result","tool":"write_file","result":"..."}` |
 | `ask_user` | User confirmation needed | `{"type":"ask_user","uuid":"...","question":"..."}` |
 | `resume` | User confirmed, resume | `{"type":"resume"}` |
+| `delegate_progress` | Delegation progress heartbeat (every ~5s while session A awaits) | `{"type":"delegate_progress","targetSessionId":123,"elapsedSec":5}` |
+| `task_error` | Task stopped by LLM API error (title + cause + suggestion, for "task interrupted" recovery) | `{"type":"task_error","title":"...","message":"...","retryable":true}` |
 | `error` | Error occurred | `{"type":"error","message":"..."}` |
 | `done` | Current task complete | `{"type":"done"}` |
 
@@ -291,7 +292,7 @@ prepareConversationContext()
     │   ├─ System prompt
     │   ├─ Compaction summary (if any)
     │   ├─ Last N complete dialogue rounds
-    │   ├─ Skill matched content injection
+    │   ├─ Skill catalog injection (SkillCatalogBuilder)
     │   ├─ Language directive injection
     │   └─ Token budget check (trimToTokenBudget)
     ↓

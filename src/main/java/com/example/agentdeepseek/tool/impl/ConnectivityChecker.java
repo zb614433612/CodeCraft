@@ -1,13 +1,13 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.NetworkToolConfig;
+import com.example.agentdeepseek.config.ProxyResolver;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
-import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.URI;
 
@@ -15,31 +15,61 @@ import java.net.URI;
  * 网络连通性检测器（公共组件）
  * 使用 HTTP HEAD 请求检测目标 URL 可达性，比原始 TCP Socket 检测更准确
  * WebFetchTool 和 NetworkCheckTool 共用此组件
+ *
+ * <p>代理不再是启动时固化的开关，而是每次检测前按 {@link ProxyResolver} 的当前解析结果决定：
+ * 探测到可用本地代理就走代理，探测不到就直连（国内网络兜底），运行中启停代理无需重启。</p>
  */
 @Slf4j
 @Component
 public class ConnectivityChecker {
 
-    /** HEAD 请求的超时时间（毫秒） */
-    private static final int HEAD_TIMEOUT = 5000;
+    /** 默认检测超时（毫秒），可被 network-tool.connectivity-check-timeout 覆盖 */
+    private static final int DEFAULT_TIMEOUT = 5000;
 
-    private final RestTemplate restTemplate;
+    private final ProxyResolver proxyResolver;
 
-    public ConnectivityChecker(NetworkToolConfig config) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(HEAD_TIMEOUT);
-        factory.setReadTimeout(HEAD_TIMEOUT);
+    /** 检测超时（毫秒） */
+    private final int timeoutMs;
 
-        if (config.getProxy() != null && config.getProxy().isEnabled()) {
-            Proxy proxy = new Proxy(
-                    Proxy.Type.HTTP,
-                    new InetSocketAddress(config.getProxy().getHost(), config.getProxy().getPort())
-            );
-            factory.setProxy(proxy);
-            log.info("连通性检测器已配置代理: {}:{}", config.getProxy().getHost(), config.getProxy().getPort());
+    /** 与当前代理状态绑定的 RestTemplate；代理启停时自动重建 */
+    private volatile RestTemplate restTemplate;
+    private volatile String templateProxyKey;
+
+    public ConnectivityChecker(NetworkToolConfig config, ProxyResolver proxyResolver) {
+        this.proxyResolver = proxyResolver;
+        this.timeoutMs = config.getConnectivityCheckTimeout() > 0
+                ? config.getConnectivityCheckTimeout()
+                : DEFAULT_TIMEOUT;
+        this.restTemplate = buildRestTemplate();
+        this.templateProxyKey = proxyResolver.signature();
+    }
+
+    /** 取与当前网络模式匹配的 RestTemplate（代理开关变化时自动重建，无需重启应用） */
+    private RestTemplate template() {
+        String key = proxyResolver.signature();
+        RestTemplate current = restTemplate;
+        if (current != null && key.equals(templateProxyKey)) {
+            return current;
         }
+        synchronized (this) {
+            if (restTemplate == null || !key.equals(templateProxyKey)) {
+                restTemplate = buildRestTemplate();
+                templateProxyKey = key;
+                log.info("连通性检测器网络模式变更: {}", proxyResolver.describe());
+            }
+            return restTemplate;
+        }
+    }
 
-        this.restTemplate = new RestTemplate(factory);
+    private RestTemplate buildRestTemplate() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(timeoutMs);
+        factory.setReadTimeout(timeoutMs);
+        Proxy proxy = proxyResolver.resolve();
+        if (proxy != Proxy.NO_PROXY) {
+            factory.setProxy(proxy);
+        }
+        return new RestTemplate(factory);
     }
 
     /**
@@ -51,6 +81,7 @@ public class ConnectivityChecker {
      * @return 检测结果，可达时 error 为 null
      */
     public CheckResult check(String url) {
+        RestTemplate restTemplate = template();
         CheckResult result = new CheckResult();
         result.url = url;
 
@@ -106,7 +137,7 @@ public class ConnectivityChecker {
 
         } catch (Exception e) {
             // 所有请求都失败，判定为不可达
-            result.timeMs = HEAD_TIMEOUT;
+            result.timeMs = timeoutMs;
             result.reachable = false;
             result.error = e.getMessage();
             log.debug("连通性检测失败: {} ({})", url, e.getMessage());

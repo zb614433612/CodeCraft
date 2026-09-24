@@ -53,6 +53,7 @@ public class SkillTool implements Tool {
                 + "  update — 编辑已有技能\n"
                 + "  delete — 删除技能\n"
                 + "  list   — 查看技能列表\n"
+                + "  load   — 加载指定技能的完整使用说明（目录只给简介，判断相关后必须先 load 再按说明执行）\n"
                 + "  report — 反馈技能执行结果（成功/失败），系统据此自动调整置信度\n"
                 + "【典型工作流】\n"
                 + "  1) list 查看已有技能\n"
@@ -74,10 +75,11 @@ public class SkillTool implements Tool {
         // === action（必填） ===
         ObjectNode action = objectMapper.createObjectNode();
         action.put("type", "string");
-        action.put("description", "【必填】操作类型。create=创建技能；update=编辑技能；delete=删除技能；list=查看技能列表；report=反馈执行结果。"
+        action.put("description", "【必填】操作类型。create=创建技能；update=编辑技能；delete=删除技能；list=查看技能列表；"
+                + "load=加载指定技能的完整使用说明（配合 system prompt 中的技能目录使用）；report=反馈执行结果。"
                 + "各操作所需参数不同，详见各参数字段说明。");
         ArrayNode enumValues = objectMapper.createArrayNode();
-        enumValues.add("create").add("update").add("delete").add("list").add("report");
+        enumValues.add("create").add("update").add("delete").add("list").add("load").add("report");
         action.set("enum", enumValues);
         properties.set("action", action);
 
@@ -163,9 +165,10 @@ public class SkillTool implements Tool {
             case "update" -> handleUpdate(arguments, userId);
             case "delete" -> handleDelete(arguments, userId);
             case "list"   -> handleList(userId, agentConfigId);
+            case "load"   -> handleLoad(arguments, userId, agentConfigId);
             case "report" -> handleReport(arguments, userId);
             default -> "【无效操作】action=\"" + action + "\" 不是有效操作。"
-                    + "可选值：create、update、delete、list、report。";
+                    + "可选值：create、update、delete、list、load、report。";
         };
     }
 
@@ -391,6 +394,57 @@ public class SkillTool implements Tool {
     }
 
     // ============================================================
+    // load（L2：按需加载技能完整说明）
+    // ============================================================
+
+    /**
+     * 加载指定技能的完整「使用说明」（渐进式披露 L2 层）。
+     * system prompt 中的技能目录只给简介，LLM 判断相关后调用本操作拉取详情再执行。
+     */
+    private String handleLoad(JsonNode args, Long userId, Long agentConfigId) {
+        if (!args.has("skill_id") || args.path("skill_id").isNull()) {
+            return "【参数缺失】action=load 需要 skill_id 参数。请传入 system prompt 技能目录中标注的技能 ID（数字）。";
+        }
+        if (userId == null) {
+            return "【会话上下文丢失】无法获取当前用户信息。请重试，若持续失败请联系管理员。";
+        }
+        long skillId = safeLong(args, "skill_id");
+
+        Skill skill;
+        try {
+            skill = skillService.getSkillById(skillId);
+        } catch (IllegalArgumentException e) {
+            return "【技能不存在】未找到 ID=" + skillId + " 的技能。请核对技能目录中的 ID，或用 action=list 查看全部技能。";
+        }
+        // 归属校验：技能必须属于当前用户
+        if (skill.getUserId() != null && !skill.getUserId().equals(userId)) {
+            return "【权限拒绝】技能 ID=" + skillId + " 不属于当前用户，无法加载。";
+        }
+        // 若当前会话绑定了 Agent 配置，则技能须为「该 Agent 专属」或「全局技能」
+        if (agentConfigId != null && skill.getAgentConfigId() != null
+                && !skill.getAgentConfigId().equals(agentConfigId)) {
+            return "【不可用】技能 ID=" + skillId + " 未授权给当前 Agent 使用。";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("【技能详情】").append(skill.getName()).append(" (ID:").append(skill.getId()).append(")\n");
+        sb.append("描述：").append(skill.getDescription() == null ? "" : skill.getDescription()).append("\n");
+        sb.append("置信度：").append(String.format("%.0f%%", skill.getConfidence() * 100))
+                .append("（使用 ").append(skill.getUsageCount()).append(" 次 / 成功 ").append(skill.getSuccessCount())
+                .append(" / 失败 ").append(skill.getFailCount()).append("）\n");
+        String tools = formatToolNames(skill.getToolNames());
+        if (!tools.isEmpty()) {
+            sb.append("关联工具：").append(tools).append("\n");
+        }
+        sb.append("\n--- 使用说明（请严格按此执行） ---\n");
+        sb.append(skill.getInstructions() == null || skill.getInstructions().isBlank()
+                ? "（该技能未提供详细使用说明，请依据描述与常识执行）" : skill.getInstructions());
+        sb.append("\n\n【提示】按上述说明执行完毕后，请调用 skill action=report（skill_id=")
+                .append(skill.getId()).append(", success=true/false）反馈结果，以更新技能置信度。");
+        return sb.toString();
+    }
+
+    // ============================================================
     // report（原 report_skill_result）
     // ============================================================
 
@@ -436,6 +490,19 @@ public class SkillTool implements Tool {
     }
 
     // ==================== 工具方法 ====================
+
+    /** 把技能的 tool_names（JSON 数组字符串）格式化为 "a, b" */
+    private String formatToolNames(String toolNamesJson) {
+        if (toolNamesJson == null || toolNamesJson.isBlank() || "[]".equals(toolNamesJson.trim())) {
+            return "";
+        }
+        try {
+            List<String> tools = objectMapper.readValue(toolNamesJson, List.class);
+            return (tools == null || tools.isEmpty()) ? "" : String.join(", ", tools);
+        } catch (Exception e) {
+            return toolNamesJson;
+        }
+    }
 
     private long safeLong(JsonNode args, String key) {
         try {

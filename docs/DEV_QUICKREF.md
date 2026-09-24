@@ -20,10 +20,10 @@ mvn clean package -DskipTests && mvn spring-boot:run
 
 ```bash
 # Windows
-scripts\build.bat v2.0.1
+scripts\build.bat v2.0.2
 
 # Mac / Linux
-./scripts/build.sh v2.0.1
+./scripts/build.sh v2.0.2
 ```
 
 ---
@@ -82,7 +82,7 @@ cp application-local.yml.example application-local.yml
 
 此文件已在 `.gitignore` 中，不会提交。
 
-> 💡 **LLM Provider / API Key**：统一通过页面「配置 → Provider 配置」添加（存储于 `llm_provider` 表），不再从环境变量或配置文件读取。
+> 💡 **LLM Provider / API Key**：统一通过页面「模型配置」添加（存储于 `llm_provider` 表），不再从环境变量或配置文件读取。
 
 ---
 
@@ -112,15 +112,15 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 
 ```
 项目根目录
-├── src/main/java/...        → 后端源码（304 个 Java 文件）
-│   ├── tool/impl/           → 24 个 AI 工具实现（含 lesson 成长体系）
+├── src/main/java/...        → 后端源码（323 个 Java 文件）
+│   ├── tool/impl/           → 27 个 AI 工具实现（含 lesson 成长体系）
 │   ├── p2p/                 → P2P 远程协作
 │   └── service/lesson/      → 成长体系（经验库：检索/记录/复盘/归一化）
 │   └── service/impl/        → 核心业务逻辑
 ├── frontend/src/            → Vue3 前端源码
 │   ├── views/               → 16 个页面视图
-│   ├── components/          → 16 个通用组件
-│   └── api/                 → 23 个 API 调用模块
+│   ├── components/          → 19 个通用组件
+│   └── api/                 → 25 个 API 调用模块
 ├── electron/                → Electron 桌面壳
 ├── data/                    → H2 数据库文件（运行时）
 ├── logs/                    → 日志文件（运行时）

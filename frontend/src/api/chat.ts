@@ -165,6 +165,14 @@ export async function checkActiveTask(conversationId: number): Promise<{
   seq?: number
   pendingQuestionUuid?: string
   pendingQuestionText?: string
+  /** 最近一次失败任务摘要（active=false 时可能返回）：
+   *  任务异常停止（错误停止，非人为停止/非正常完成）后，前端据此恢复
+   *  「任务中断」提示与「一键继续」入口（刷新页面/切换会话场景） */
+  lastTask?: {
+    id?: number
+    status?: string
+    errorMessage?: string
+  } | null
 }> {
   try {
     const response = await authFetch(`/api/deepseek/task/${conversationId}`)

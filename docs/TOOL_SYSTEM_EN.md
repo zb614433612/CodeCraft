@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v2.0.1 | Updated: 2026-09-22 | Audience: Developers / AI Collaborators
+> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -322,7 +322,7 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 
 ## 8.5. Growth System: Lesson Knowledge Base
 
-The `lesson` tool is the entry point of the growth system (knowledge base), complementary to `skill` (standing, always-matched workflow templates): **lessons are "on-demand failure experiences"** — zero standing context cost, auto-hit on errors.
+The `lesson` tool is the entry point of the growth system (knowledge base), complementary to `skill` (catalog-resident, load-on-demand workflow templates): **lessons are "on-demand failure experiences"** — zero standing context cost, auto-hit on errors.
 
 ### 8.5.1 Data Flow
 
@@ -355,7 +355,7 @@ LLM fails again        → F3 marks "ineffective" → demoted/hidden (HIDDEN)
 
 ### 8.5.4 Management UI
 
-"Lesson" management page (`/lesson-manage`, SETTING menu group): paginated browsing, details, manual editing/completion, feedback, delete, plus a growth dashboard (total/draft/active/hidden/hits/success rate).
+"Lesson" management page (`/lesson-manage`, "AI Capabilities" menu group): paginated browsing, details, manual editing/completion, feedback, delete, plus a growth dashboard (total/draft/active/hidden/hits/success rate).
 
 ---
 

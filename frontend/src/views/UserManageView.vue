@@ -77,6 +77,11 @@
         class="user-table"
       >
         <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'avatar'">
+            <img v-if="isImageAvatar(record.avatar)" :src="record.avatar" class="table-avatar-img" alt="" />
+            <span v-else class="table-avatar-text">{{ (record.nickname || record.username || 'U').charAt(0).toUpperCase() }}</span>
+          </template>
+
           <template v-if="column.key === 'role'">
             <a-tag :color="record.role === 'admin' ? 'red' : 'blue'">
               {{ getRoleName(record.role) }}
@@ -181,6 +186,15 @@
 
           <div class="form-section">
             <div class="form-section-title">个人资料</div>
+            <a-form-item label="头像">
+              <AvatarUploader
+                v-model="formData.avatar"
+                :name="formData.nickname || formData.username"
+                :size="64"
+                fallback-emoji="👤"
+              />
+            </a-form-item>
+
             <a-form-item label="昵称" name="nickname">
               <a-input v-model:value="formData.nickname" placeholder="请输入昵称" />
             </a-form-item>
@@ -222,6 +236,8 @@ import { message } from 'ant-design-vue'
 import type { TablePaginationConfig } from 'ant-design-vue'
 import { PlusOutlined, SearchOutlined, CloseCircleFilled } from '@ant-design/icons-vue'
 import { useUserStore } from '@/store/user'
+import AvatarUploader from '@/components/AvatarUploader.vue'
+import { isImageAvatar } from '@/utils/avatar'
 import {
   getUserList,
   createUser,
@@ -271,6 +287,7 @@ const pageSize = ref(10)
 const total = ref(0)
 
 const columns = [
+  { title: '头像', key: 'avatar', width: 70 },
   { title: '用户名', dataIndex: 'username', key: 'username', width: 120 },
   { title: '昵称', dataIndex: 'nickname', key: 'nickname', width: 110 },
   { title: '角色', key: 'role', width: 100 },
@@ -305,7 +322,8 @@ const formData = reactive({
   role: 'user',
   email: '',
   phone: '',
-  status: 1
+  status: 1,
+  avatar: ''
 })
 
 const formRules = {
@@ -372,6 +390,7 @@ const openEditModal = (record: UserItem) => {
   formData.email = record.email || ''
   formData.phone = record.phone || ''
   formData.status = record.status
+  formData.avatar = record.avatar || ''
   modalVisible.value = true
 }
 
@@ -383,6 +402,7 @@ const resetForm = () => {
   formData.email = ''
   formData.phone = ''
   formData.status = 1
+  formData.avatar = ''
 }
 
 const handleModalOk = async () => {
@@ -398,7 +418,8 @@ const handleModalOk = async () => {
         role: formData.role,
         email: formData.email,
         phone: formData.phone,
-        status: formData.status
+        status: formData.status,
+        avatar: formData.avatar
       }
       if (formData.password) {
         params.password = formData.password
@@ -412,7 +433,8 @@ const handleModalOk = async () => {
         nickname: formData.nickname,
         role: formData.role,
         email: formData.email,
-        phone: formData.phone
+        phone: formData.phone,
+        avatar: formData.avatar
       }
       await createUser(params)
       message.success('用户创建成功')
@@ -473,6 +495,28 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* 表格头像 */
+.table-avatar-img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+.table-avatar-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: #fff;
+  font-weight: 600;
+  font-size: 15px;
 }
 
 /* ================================================================

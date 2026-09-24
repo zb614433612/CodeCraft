@@ -5,6 +5,7 @@ import com.example.agentdeepseek.model.entity.AgentTask;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * DeepSeek API服务接口
@@ -39,6 +40,13 @@ public interface DeepSeekService {
      * 获取会话的活跃任务状态
      */
     AgentTask getActiveTask(Long conversationId);
+
+    /**
+     * 查询会话「最近一次任务」的失败摘要（任务异常停止 → 前端展示错误 + 一键继续 的刷新恢复）
+     *
+     * @return {id, status, errorMessage}；无匹配返回 null
+     */
+    Map<String, Object> getLastTaskSummary(Long conversationId);
 
     /**
      * 订阅活跃任务的事件流（用于页面刷新后重连）

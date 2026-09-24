@@ -8,7 +8,8 @@
       @click="switchAgent(agent)"
       :title="agent.name"
     >
-      <span class="agent-collapsed-avatar">{{ agent.avatar || '🤖' }}</span>
+      <img v-if="isImageAvatar(agent.avatar)" :src="agent.avatar" class="agent-collapsed-avatar-img" alt="" />
+      <span v-else class="agent-collapsed-avatar">{{ agent.avatar || '🤖' }}</span>
     </div>
   </div>
 
@@ -24,7 +25,8 @@
       :class="['agent-menu-item', { active: selectedId === agent.id }]"
       @click="switchAgent(agent)"
     >
-      <span class="agent-avatar">{{ agent.avatar || '🤖' }}</span>
+      <img v-if="isImageAvatar(agent.avatar)" :src="agent.avatar" class="agent-avatar-img" alt="" />
+      <span v-else class="agent-avatar">{{ agent.avatar || '🤖' }}</span>
       <span class="agent-name">{{ agent.name }}</span>
     </div>
     <div v-if="agentList.length > 3" class="agent-expand-btn" @click="expandAll = !expandAll">
@@ -39,6 +41,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { RobotOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
 import { listAgentConfigs, updateAgentRuntime, type AgentConfig } from '@/api/agent-config'
+import { isImageAvatar } from '@/utils/avatar'
 
 const props = defineProps<{
   collapsed?: boolean
@@ -187,6 +190,13 @@ defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime, switchToA
   font-size: 18px;
   line-height: 1;
 }
+.agent-collapsed-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 12px;
+  display: block;
+}
 
 /* ===== 正常模式 ===== */
 .agent-panel { padding: 0; margin: 0 8px 8px; }
@@ -204,6 +214,14 @@ defineExpose({ refresh: fetchAgents, selectedId, runtime, saveRuntime, switchToA
 .agent-menu-item:hover { background: #f0f2f5; }
 .agent-menu-item.active { background: #e6f4ff; color: #1677ff; font-weight: 500; }
 .agent-avatar { font-size: 16px; flex-shrink: 0; }
+.agent-avatar-img {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: block;
+}
 .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-expand-btn {
   display: flex; align-items: center; gap: 6px;

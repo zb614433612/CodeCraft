@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v2.0.1 | Updated: 2026-09-22 | Audience: Developers / AI Collaborators
+> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -32,7 +32,7 @@
 │ │          Spring Boot 3.4 Backend (src/main/java/)                   │ │
 │ │                       │                                             │ │
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
-│ │ │        Controller Layer (23 Controllers)    │                      │ │
+│ │ │        Controller Layer (25 Controllers)    │                      │ │
 │ │ │ DeepSeekController / GitController /       │                      │ │
 │ │ │ P2pController / SnapshotController / ...   │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
@@ -75,7 +75,7 @@ User Input Message
 │    ├─ Compacted history summary (CompactionService)                    │
 │    ├─ Last N complete conversation rounds                              │
 │    ├─ Current user message + attachments/file content                  │
-│    └─ Matched skill injection (SkillMatcher)                           │
+│    └─ Skill catalog injection (SkillCatalogBuilder)                           │
 │                                                                         │
 │  Send HTTP request to DeepSeek API (WebFlux + SSE streaming)           │
 │                                                                         │
@@ -156,10 +156,10 @@ src/main/java/com/example/agentdeepseek/
 │   └── response/              # ApiResponse<T>, PageResult
 ├── config/                    # Spring Configuration
 │   ├── DeepSeekConfig         # API Key, Model, URL config
-│   ├── NetworkToolConfig      # Proxy/Network config
+│   ├── NetworkToolConfig      # Network tool config (auto proxy / search engines / UA pool)
 │   ├── OpenApiConfig          # Swagger/OpenAPI docs
 │   └── SpaConfig              # SPA routing fallback
-├── controller/                # REST API Controllers (23) + GlobalExceptionHandler
+├── controller/                # REST API Controllers (25) + GlobalExceptionHandler
 │   ├── DeepSeekController     # ★Core: Chat, Agent task status
 │   ├── ConversationController # Conversation CRUD
 │   ├── GitController          # Git operations
@@ -183,6 +183,8 @@ src/main/java/com/example/agentdeepseek/
 │   ├── DbConnectionController # External DB connections (Phase 20)
 │   ├── FileAssetController    # File assets (upload/list/reference, vision-files-api)
 │   ├── ProviderBalanceController # Provider balance query
+│   ├── AppearanceController    # Appearance settings (background image upload/serve)
+│   ├── AvatarController        # Avatar upload/serve
 │   └── ScheduleTaskController # Scheduled tasks
 ├── filter/                    # TokenAuthenticationFilter
 ├── initializer/               # UserInitializer (first-launch admin setup)
@@ -223,7 +225,9 @@ src/main/java/com/example/agentdeepseek/
 │   ├── DeepSeekService        # Core chat service interface
 │   ├── ShellDiscoveryService  # Smart Shell discovery (Win/Mac/Linux multi-shell)
 │   ├── files/                 # ★File assets & Files API adapter (upload/vision/reference)
-│   ├── llm/                   # LLM client layer (LLMClient + 6 providers + ProviderBalanceService)
+│   ├── DataTransferService    # Backup export/import (data management)
+│   ├── AvatarStore / BackgroundStore # Avatar & background image local storage
+│   ├── llm/                   # LLM client layer (LLMClient + 6 providers + ProviderBalanceService + LLMErrorFormatter)
 │   └── impl/
 │       ├── DeepSeekServiceImpl    # ★★★Core Engine (187KB)
 │       ├── ToolLoopManager        # Tool loop (dead loop / judge / cancel)
@@ -234,8 +238,7 @@ src/main/java/com/example/agentdeepseek/
 │       ├── MessagePersister       # Async message persistence
 │       ├── SnapshotService        # Code snapshot backup/rollback (32.2KB)
 │       ├── ProjectBuildService    # Project build
-│       ├── SkillMatcher           # BM25 + trigger word matching
-│       ├── SkillIndexer           # Skill index builder
+│       ├── SkillCatalogBuilder    # Skill catalog builder (progressive disclosure L1)
 │       ├── lesson/                 # ★Growth System: Lesson Knowledge Base (per-project, zero context cost)
 │       │   ├── LessonService       # CRUD + on-demand retrieval + state machine (48KB)
 │       │   ├── LessonRecorder      # Auto-capture drafts / LLM proactive record
@@ -252,7 +255,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolRegistry           # Tool registry (singleton)
 │   ├── ToolExecutor           # Tool execution engine
 │   ├── ToolInitializer        # Auto-init all tools on startup
-│   ├── impl/                  # 24 tool implementations (new naming, one tool many actions)
+│   ├── impl/                  # 27 tool implementations (new naming, one tool many actions)
 │   │   ├── File: file_explorer, file_writer
 │   │   ├── Command: command
 │   │   ├── Network: web_search, web_fetch, http_request, check_network
@@ -440,7 +443,7 @@ src/main/java/com/example/agentdeepseek/
 | **Sub-Agent Mgmt** | fork/collect/inspect lifecycle | AgentForkManager | ~1600 |
 | **Shell Discovery** | Smart shell detection (Win/Mac/Linux) | ShellDiscoveryService | ~260 |
 | **Context Compaction** | LLM summary compression + async pre-compact | CompactionService | ~640 |
-| **Message Assembly** | Token estimation + skill injection + language directives | ContextBuilder | ~900 |
+| **Message Assembly** | Token estimation + skill catalog injection + language directives | ContextBuilder | ~900 |
 | **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~800 |
 | **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~5000 |
 | **Tool System** | 27 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
@@ -449,8 +452,11 @@ src/main/java/com/example/agentdeepseek/
 | **Growth System** | Retrieval/capture/review/normalization/detour | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **User Permissions** | RBAC, Token auth, menu control | UserServiceImpl + Filter | ~500 |
 | **Scheduled Tasks** | Cron/one-time scheduling, execution tracking | ScheduleTaskScheduler | ~350 |
-| **Skill System** | BM25 matching, Bayesian confidence | SkillMatcher + SkillIndexer | ~250 |
-| **Multi-LLM Provider** | Provider CRUD, client routing, hot refresh | LLMClientManager + LLMClient + 6 implementations | ~1600 |
+| **Skill System** | Skill catalog injection (progressive disclosure), Bayesian confidence | SkillCatalogBuilder + SkillService | ~300 |
+| **Multi-LLM Provider** | Provider CRUD, client routing, hot refresh, friendly error formatting | LLMClientManager + LLMClient + 6 implementations + LLMErrorFormatter | ~1900 |
+| **External DB Connections** | Connection mgmt / credential encryption / run SQL | DbConnectionService + SqlExecutor | ~600 |
+| **Data Management (Backup)** | Config data export/import (UPSERT merge) | DataTransferService | ~400 |
+| **Appearance & Avatars** | Background image & avatar local storage/serving | BackgroundStore + AvatarStore | ~300 |
 
 ---
 
@@ -461,7 +467,7 @@ src/main/java/com/example/agentdeepseek/
 3. **Default Admin**: Auto-created by `UserInitializer` on first launch
 4. **Password Encryption**: MD5 (32-bit), not bcrypt — upgrade recommended for security-sensitive scenarios
 5. **Tool Return Format**: Unified `ApiResponse<T>`, code referenced from `ResponseEnum`
-6. **SSE Events**: OpenAI-compatible streaming format (`choices[].delta.content` / `reasoning_content`) + custom events `tool_call_start` / `ask_user` / `skill_match`
+6. **SSE Events**: OpenAI-compatible streaming format (`choices[].delta.content` / `reasoning_content`) + custom events `tool_call_start` / `ask_user` / `delegate_progress` / `task_error`
 7. **Sub-Agent Concurrency Limit**: 20 (hardcoded in AgentForkManager)
 8. **Tool Loop Max Iterations**: 50
 9. **Snapshot Quota**: 500MB limit, auto-clean to 300MB when exceeded

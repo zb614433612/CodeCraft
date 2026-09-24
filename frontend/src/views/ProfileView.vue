@@ -32,10 +32,13 @@
         <div class="card-body">
           <!-- 头像区域 - 增强版 -->
           <div class="avatar-section-enhanced">
-            <div class="profile-avatar">
-              <span class="avatar-letter">{{ profileData.username?.charAt(0).toUpperCase() || 'U' }}</span>
-              <div class="avatar-ring"></div>
-            </div>
+            <AvatarUploader
+              v-model="profileData.avatar"
+              :name="profileData.nickname || profileData.username"
+              :size="72"
+              fallback-emoji="U"
+              @uploaded="onAvatarUploaded"
+            />
             <div class="avatar-details">
               <div class="display-name">{{ profileData.nickname || profileData.username || '用户' }}</div>
               <div class="display-username">@{{ profileData.username }}</div>
@@ -187,6 +190,10 @@ import {
   CheckCircleOutlined
 } from '@ant-design/icons-vue'
 import { getProfile, updateProfile, changePassword } from '@/api/user-admin'
+import AvatarUploader from '@/components/AvatarUploader.vue'
+import { useUserStore } from '@/store/user'
+
+const userStore = useUserStore()
 
 // 个人信息数据
 const profileData = reactive({
@@ -194,7 +201,8 @@ const profileData = reactive({
   nickname: '',
   role: '',
   email: '',
-  phone: ''
+  phone: '',
+  avatar: ''
 })
 
 // 密码表单数据
@@ -240,6 +248,7 @@ const loadProfile = async () => {
       profileData.role = response.data.role || 'user'
       profileData.email = response.data.email || ''
       profileData.phone = response.data.phone || ''
+      profileData.avatar = response.data.avatar || ''
     }
   } catch (error: any) {
     message.error(error.message || '加载个人信息失败')
@@ -258,13 +267,34 @@ const handleSaveProfile = async () => {
     await updateProfile({
       nickname: profileData.nickname,
       email: profileData.email,
-      phone: profileData.phone
+      phone: profileData.phone,
+      avatar: profileData.avatar
     })
+    syncUserStore()
     message.success('个人信息已更新')
   } catch (error: any) {
     message.error(error.message || '保存失败')
   } finally {
     profileSaving.value = false
+  }
+}
+
+/** 上传头像后即时保存并同步全局用户信息 */
+const onAvatarUploaded = async (url: string) => {
+  try {
+    await updateProfile({ avatar: url })
+    syncUserStore()
+    message.success('头像已更新')
+  } catch (error: any) {
+    message.error(error.message || '头像保存失败')
+  }
+}
+
+/** 同步全局用户信息（侧边栏 / 聊天页头像） */
+const syncUserStore = () => {
+  if (userStore.userInfo) {
+    userStore.userInfo.avatar = profileData.avatar
+    userStore.userInfo.nickname = profileData.nickname
   }
 }
 

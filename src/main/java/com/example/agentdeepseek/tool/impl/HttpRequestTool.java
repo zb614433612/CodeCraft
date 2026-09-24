@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.NetworkToolConfig;
+import com.example.agentdeepseek.config.ProxyResolver;
 import com.example.agentdeepseek.tool.Tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -15,6 +16,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.net.Proxy;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
@@ -33,20 +35,51 @@ import com.example.agentdeepseek.tool.permission.ToolPermission;
 public class HttpRequestTool implements Tool {
 
     private final ObjectMapper objectMapper;
-    private final RestTemplate restTemplate;
     private final NetworkToolConfig config;
+    private final ProxyResolver proxyResolver;
     private final Set<String> allowedMethods;
 
-    public HttpRequestTool(ObjectMapper objectMapper, NetworkToolConfig config) {
+    /** 与当前代理状态绑定的 RestTemplate；代理启停时自动重建 */
+    private volatile RestTemplate restTemplate;
+    private volatile String templateProxyKey;
+
+    public HttpRequestTool(ObjectMapper objectMapper, NetworkToolConfig config, ProxyResolver proxyResolver) {
         this.objectMapper = objectMapper;
         this.config = config;
+        this.proxyResolver = proxyResolver;
+        this.allowedMethods = Set.copyOf(config.getHttpRequestAllowedMethods());
+        this.restTemplate = buildRestTemplate();
+        this.templateProxyKey = proxyResolver.signature();
+    }
 
+    /** 取与当前网络模式匹配的 RestTemplate（代理开关变化时自动重建，无需重启应用） */
+    private RestTemplate template() {
+        String key = proxyResolver.signature();
+        RestTemplate current = restTemplate;
+        if (current != null && key.equals(templateProxyKey)) {
+            return current;
+        }
+        synchronized (this) {
+            if (restTemplate == null || !key.equals(templateProxyKey)) {
+                restTemplate = buildRestTemplate();
+                templateProxyKey = key;
+                log.info("HTTP 请求工具网络模式变更: {}", proxyResolver.describe());
+            }
+            return restTemplate;
+        }
+    }
+
+    private RestTemplate buildRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(config.getHttpRequestConnectTimeout());
         factory.setReadTimeout(config.getHttpRequestReadTimeout());
-        this.restTemplate = new RestTemplate(factory);
 
-        this.allowedMethods = Set.copyOf(config.getHttpRequestAllowedMethods());
+        // 代理动态解析：探测到本地代理则走代理，否则直连（国内网络兜底）
+        Proxy proxy = proxyResolver.resolve();
+        if (proxy != Proxy.NO_PROXY) {
+            factory.setProxy(proxy);
+        }
+        return new RestTemplate(factory);
     }
 
     @Override
@@ -127,7 +160,7 @@ public class HttpRequestTool implements Tool {
             return "HTTP " + e.getStatusCode() + "\n" + e.getResponseBodyAsString();
         } catch (org.springframework.web.client.ResourceAccessException e) {
             log.error("HTTP 请求连接失败: {} {}", methodStr, url, e);
-            return "【连接失败】网络不通或目标服务器无响应。建议：1) 使用 check_network 工具检测目标 URL 域名是否可达 2) 如果域名不可达，尝试启用代理 3) 检查 URL 协议是否正确（应为 https:// 而非 http:// 或缺少前缀）";
+            return "【连接失败】网络不通或目标服务器无响应。建议：1) 使用 check_network 工具检测目标 URL 域名是否可达 2) 若目标是境外站点，请确认本机代理（Clash 等）已启动——工具会自动检测本地代理并优先使用，未检测到则直连兜底 3) 检查 URL 协议是否正确（应为 https:// 而非 http:// 或缺少前缀）";
         } catch (Exception e) {
             log.error("HTTP 请求失败: {} {}", methodStr, url, e);
             return "【未知错误】请求异常（" + e.getClass().getSimpleName() + "）。建议：1) 检查 URL 格式是否正确（是否遗漏 https://）2) 检查 body 是否为合法 JSON 字符串 3) 检查 headers 格式是否为 {\"key\": \"value\"} 对象";
@@ -163,7 +196,7 @@ public class HttpRequestTool implements Tool {
             }
         }
 
-        ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.valueOf(method), entity, String.class);
+        ResponseEntity<String> response = template().exchange(uri, HttpMethod.valueOf(method), entity, String.class);
 
         String responseBody = response.getBody();
         int maxBytes = config.getHttpRequestMaxResponseBytes();

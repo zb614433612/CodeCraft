@@ -1,7 +1,9 @@
 package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
+import com.example.agentdeepseek.model.dto.SqlExecuteRequest;
 import com.example.agentdeepseek.model.entity.DbConnection;
+import com.example.agentdeepseek.model.vo.SqlExecuteResult;
 import com.example.agentdeepseek.service.dbconnection.DbConnectionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -98,6 +100,24 @@ public class DbConnectionController {
                     : ApiResponse.error(400, error);
         } catch (IllegalArgumentException e) {
             return ApiResponse.error(400, e.getMessage());
+        }
+    }
+
+    /** 执行 SQL（管理页「执行 SQL」：支持多条语句按顺序执行；查询结果按 maxRows 截断） */
+    @Operation(summary = "执行 SQL")
+    @PostMapping("/{id}/execute")
+    public ApiResponse<SqlExecuteResult> execute(@PathVariable Long id,
+                                                 @RequestBody SqlExecuteRequest requestBody,
+                                                 HttpServletRequest request) {
+        Long userId = (Long) request.getAttribute("userId");
+        try {
+            SqlExecuteResult result = dbConnectionService.executeSql(userId, id, requestBody.getSql(), requestBody.getMaxRows());
+            return ApiResponse.success(result);
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.error(400, e.getMessage());
+        } catch (Exception e) {
+            log.error("执行 SQL 失败: id={}, err={}", id, e.getMessage(), e);
+            return ApiResponse.error(400, "执行失败: " + e.getMessage());
         }
     }
 }

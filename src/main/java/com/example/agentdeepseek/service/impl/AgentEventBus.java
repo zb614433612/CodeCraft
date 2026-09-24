@@ -116,6 +116,27 @@ public class AgentEventBus {
      */
     public synchronized Sinks.EmitResult emit(Long conversationId, String payload) {
         EventChannel channel = conversationId != null ? channels.get(conversationId) : null;
+        return emitToChannel(channel, payload);
+    }
+
+    /**
+     * 条件发射（身份校验版）：仅当会话当前通道仍是给定 sink 时发射。
+     * <p>
+     * 任务 error 回调使用（用户友好错误反馈配套）：错误事件必须发到「本任务自己的事件通道」——
+     * 若通道已被新任务替换（准入等待超时放行的残余清理窗口），不得把旧任务的错误事件
+     * 误发到新任务的流上。语义与 {@link #unregisterIfSame} 对称。
+     * </p>
+     */
+    public synchronized Sinks.EmitResult emitIfSame(Long conversationId, Sinks.Many<TaskEventEnvelope> sink, String payload) {
+        EventChannel channel = conversationId != null ? channels.get(conversationId) : null;
+        if (channel == null || channel.sink != sink) {
+            return Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER;
+        }
+        return emitToChannel(channel, payload);
+    }
+
+    /** 发射实现（调用方需持有本对象锁）：分配 seq → tryEmitNext → 成功后推进游标 */
+    private Sinks.EmitResult emitToChannel(EventChannel channel, String payload) {
         if (channel == null) {
             return Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER;
         }

@@ -39,7 +39,7 @@ CodeCraft 需要配置至少一个 LLM Provider 才能正常使用。支持 Deep
 启动后端服务后，打开浏览器访问 `http://localhost:8084`，按以下步骤操作：
 
 1. 使用默认账号登录（如需）
-2. 点击左侧菜单 **「配置」** 或 **「Provider 配置」**
+2. 点击左侧菜单 **「模型配置」**（原「配置」）
 3. 点击 **「新增 Provider」**，填写 Provider 信息（编码、名称、Base URL、API Key、模型列表等）
 4. 点击 **「创建 Provider」** 即可
 
@@ -48,11 +48,11 @@ CodeCraft 需要配置至少一个 LLM Provider 才能正常使用。支持 Deep
 > 💡 支持添加多个 Provider，运行时可在聊天界面随时切换。每个 Agent 也可以绑定特定的 Provider。
 > 详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
 >
-> ⚠️ API Key 统一通过页面「Provider 配置」管理并存储在数据库中（`llm_provider` 表），代码已不再从环境变量或配置文件读取 API Key。
+> ⚠️ API Key 统一通过「模型配置」页面管理并存储在数据库中（`llm_provider` 表），代码已不再从环境变量或配置文件读取 API Key。
 
 ### 其他配置（可选）
 
-- **代理配置**：如果需要通过代理访问外部网络，可在 `application.yml` 的 `network-tool.proxy` 中配置
+- **代理配置**：网络工具（web_search / web_fetch / http_request / check_network）默认**自动探测**本机代理（`network-tool.proxy.mode: auto`，自动识别 Clash / Clash Verge / v2rayN 等常用代理端口并验证出网），无需手动配置；如需固定使用指定代理，可改为 `mode: always` 并填写 `host`/`port`
 - **服务器端口**：默认 `8084`，可通过环境变量 `SERVER_PORT` 或修改 `application.yml` 中的 `server.port`
 
 > 💡 **可选配置**：项目启动时会自动加载 `application-local.yml`（Spring Boot local profile，优先级高于 `application.yml`）。
@@ -62,7 +62,7 @@ CodeCraft 需要配置至少一个 LLM Provider 才能正常使用。支持 Deep
 > ```
 > 该文件已在 `.gitignore` 中排除，不会提交到 Git。
 >
-> ⚠️ 注意：API Key **不通过** `application-local.yml` 配置——请在页面「Provider 配置」中添加 LLM Provider（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等多种模型）。
+> ⚠️ 注意：API Key **不通过** `application-local.yml` 配置——请在「模型配置」页面中添加 LLM Provider（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等多种模型）。
 
 ---
 
@@ -107,7 +107,7 @@ cd electron
 npm install
 
 # 启动桌面应用
-npm start            # 生产模式：自动启动 JAR + 打开窗口
+npm start            # 生产模式：自动启动 JAR + 打开窗口（启动画面实时展示后端启动进度）
 npm run dev          # 开发模式：不启动 JAR，需先手动启动后端
 ```
 
@@ -123,7 +123,7 @@ mvn clean package -DskipTests
 mvn clean package -DskipTests -DskipFrontend=true
 
 # 输出文件
-# target/code-craft-2.0.1.jar  （约 67MB）
+# target/code-craft-2.0.2.jar  （约 67MB）
 ```
 
 ---
@@ -189,18 +189,18 @@ npm run dist:win
 
 ```
 electron/release/
-├── CodeCraft-Setup-2.0.1.exe       # NSIS 安装程序（发行用）
-└── CodeCraft-2.0.1-win.zip         # 绿色版压缩包（可选）
+├── CodeCraft-Setup-2.0.2.exe       # NSIS 安装程序（发行用）
+└── CodeCraft-2.0.2-win.zip         # 绿色版压缩包（可选）
 ```
 
 ### 安装运行
 
-双击 `CodeCraft-Setup-2.0.1.exe` 安装，安装后桌面会生成快捷方式。
+双击 `CodeCraft-Setup-2.0.2.exe` 安装，安装后桌面会生成快捷方式。
 
 > **运行注意事项：**
 > - ? **无需安装 Java** — JRE 已内置在 EXE 中
 > - ? 后端 JAR 已内置，无需额外放置
-> - ? 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒），然后加载前端页面
+> - ? 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒，启动画面实时展示进度），然后加载前端页面
 > - 💡 H2 数据库文件默认存储在 `./data/codecraft`，无需额外配置
 
 ---
@@ -300,22 +300,22 @@ npm run dist:mac
 
 ```
 electron/release/
-├── CodeCraft-2.0.1.dmg              # DMG 磁盘映像（发行用）
-├── CodeCraft-2.0.1-mac.zip          # 绿色版压缩包（可选）
+├── CodeCraft-2.0.2.dmg              # DMG 磁盘映像（发行用）
+├── CodeCraft-2.0.2-mac.zip          # 绿色版压缩包（可选）
 └── mac/                             # 未打包的 .app 目录
     └── CodeCraft.app
 ```
 
 ### 安装运行
 
-1. 双击 `CodeCraft-2.0.1.dmg` 挂载磁盘映像
+1. 双击 `CodeCraft-2.0.2.dmg` 挂载磁盘映像
 2. 将 `CodeCraft.app` 拖到 `Applications` 文件夹
 3. 首次打开时，由于未签名，需要**右键 → 打开**（或到「系统偏好设置 → 安全性与隐私」中允许）
 
 > **运行注意事项：**
 > - ? **无需安装 Java** — JRE 已内置在 .app 中
 > - ? 后端 JAR 已内置，无需额外放置
-> - ? 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒），然后加载前端页面
+> - ? 启动时自动使用内置 JRE 启动后端（等待约 10-30 秒，启动画面实时展示进度），然后加载前端页面
 > - 💡 H2 数据库文件默认存储在 `~/Library/Application Support/CodeCraft/data`，无需额外配置
 
 ### macOS 代码签名（可选）
@@ -372,8 +372,8 @@ npm run dist:linux
 输出：
 ```
 electron/release/
-├── CodeCraft-2.0.1.AppImage    # AppImage（免安装，双击运行）
-└── CodeCraft-2.0.1.deb         # deb 包（Debian/Ubuntu）
+├── CodeCraft-2.0.2.AppImage    # AppImage（免安装，双击运行）
+└── CodeCraft-2.0.2.deb         # deb 包（Debian/Ubuntu）
 ```
 
 ---
@@ -399,7 +399,7 @@ npm install
 npm run dist:win
 
 # 4. 安装
-# 双击 electron/release/CodeCraft-Setup-2.0.1.exe
+# 双击 electron/release/CodeCraft-Setup-2.0.2.exe
 ```
 
 ### macOS 全流程
@@ -439,7 +439,7 @@ npm install
 npm run dist:mac
 
 # 5. 安装
-# 双击 electron/release/CodeCraft-2.0.1.dmg 挂载后拖入 Applications
+# 双击 electron/release/CodeCraft-2.0.2.dmg 挂载后拖入 Applications
 ```
 
 ---
@@ -472,7 +472,8 @@ codecraft/
 │   │   └── utils/              # 工具函数
 │   └── public/                 # 静态资源
 ├── electron/                   # Electron 桌面壳
-│   ├── main.js                 # Electron 主进程
+│   ├── main.js                 # Electron 主进程（启动画面 / 透明标题栏 / 窗口透明度）
+│   ├── loading.html            # 启动画面（进度条 + 启动日志锚点）
 │   ├── preload.js              # Electron 预加载脚本
 │   ├── package.json            # Electron 构建配置（含 win/mac/linux 打包设置）
 │   ├── entitlements.mac.plist  # macOS 代码签名权限声明

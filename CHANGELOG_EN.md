@@ -5,6 +5,98 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [2.0.2] - 2026-09-24
+
+### 🎨 New: Appearance Settings (Global Background Image / Window Opacity)
+
+- **New "Appearance" drawer at the sidebar bottom** (AppearanceSettingsDrawer): upload a global background image (≤10MB) and the whole app (sidebar / content area / title bar) shows it through; three sliders for "background opacity / background blur / window overall opacity" plus "Reset to defaults"
+- **Backend**: new BackgroundStore (files under `data/backgrounds/`) and AppearanceController — `POST /api/appearance/background` (auth required) uploads and returns a URL; `GET /api/appearance/file/{name}` is token-free for CSS/img references
+- **Frontend**: App.vue gains a fixed global background layer; style.css gains the `html.has-app-bg` translucent rule chain (root containers transparent + semi-transparent panels on pages); appearance settings persisted (bgImageUrl / bgOpacity / bgBlur / windowOpacity)
+- **Electron**: preload exposes `setWindowOpacity` → main process `mainWindow.setOpacity()` (clamped 0.2~1, fails silently) — "window overall opacity" applies to the entire window including the title bar
+
+### 🖥️ Desktop: Transparent Custom Title Bar + Splash Screen
+
+- **Transparent title bar**: the title-bar overlay color is now fully transparent — the title-bar area directly reveals the web content (following the app background when a background image is set); window-control symbol color switches with light/dark theme
+- **Splash screen**: new `electron/loading.html` and a Splash window (centered, borderless & transparent, mouse-through, non-focus-stealing, minimum display 600ms):
+  - Dual progress channels: Spring Boot startup log anchors (Starting / Tomcat initialized / Tomcat started / Started) jump the progress + time-based smooth fallback
+  - On ready the progress fills to 100% and fades out into the main window; if the backend process exits early, waiting fails immediately (error reason shown + native dialog, no more idle polling until timeout)
+- **preload gains `openExternal`**: the "Open in browser" button of in-app web tabs launches the system default browser
+
+### 🧩 Refactor: Skill System Now Uses "Progressive Disclosure"
+
+- **New SkillCatalogBuilder (L1 catalog layer)**: condenses all active skills into a "skill catalog" (name / ID / confidence / trigger words / one-line description) dynamically injected into the system prompt, so the LLM always has a global view of all skills; the catalog is capped at a 3500-char budget, truncated by confidence descending when exceeded
+- **Skill instructions loaded on demand (L2 layer)**: the LLM reads full usage instructions via `skill action=load` — changed from "BM25 auto-match injection" to "catalog resident + LLM active loading", removing the implicit matching step
+- **Removed SkillIndexer / SkillMatcher** (BM25 + trigger-word matching) and the SSE event `skill_match`; the frontend "thinking process" now shows "hit skills" tags (dynamically appended when the LLM actually executes skill load)
+
+### 🌐 Optimization: Network Tools (Search Sources / Cache / Anti-Bot / Jina / Adaptive Proxy)
+
+- **web_search source upgrade**: multi-source priority — with a proxy: Bing Global → Bing CN → Baidu; without a proxy (China direct fallback): only CN-reachable sources; new search-result cache (TTL 300s / max 100 entries); low-quality domains (e.g. Baijiahao) down-ranked
+- **web_fetch upgraded to "Jina first + local fallback"**: with a working local proxy, fetch prefers Jina Reader rendering (friendly to anti-bot / JS-rendered pages); when Jina is unavailable (429 quota cooldown) or no proxy is present, it automatically falls back to local fetching
+- **Local fetching hardened**: a UA pool picked per-domain, retries with rotating UAs (403/429/503/5xx/timeouts/anti-bot interception pages detected; 429 honors Retry-After)
+- **Proxy strategy rebuilt as "auto detection"**: `network-tool.proxy.mode` = auto (default) / always / never; AUTO probes candidate ports in order (Clash 7890 / Clash Verge 7897 / socks 7891 / v2rayN 10809) + egress verification (detects "port listening but proxy dead") + directional caching (300s when proxied / 30s when direct, quickly adapting when a proxy is started later)
+- **Deprecated `web-fetch.proxy`** (WebFetchConfig removed): all network-tool proxies are unified under `network-tool.proxy`; new ProxyResolver component with unit tests
+
+### 💾 New: Data Management (Backup Export / Import)
+
+- **"Data Management" page gains "Export Backup / Import Backup"**: table-level snapshot JSON export of 7 categories (LLM configs / agents / skills / chat history / lessons / MCP servers / DB connections, 10 tables); import merges via primary-key UPSERT (same id overwritten, new ids appended, existing data never cleared) and repairs auto-increment sequences
+- **Backend**: new DataTransferService; SystemController gains `/data-stats`, `/export-data`, `/import-data` endpoints (admin); LLM Provider cache is refreshed after import (newly imported configs take effect immediately); single-row failures do not abort the import (inserted/updated/failed stats returned)
+- **Security note**: backup files contain sensitive data such as API keys and encrypted DB passwords (so re-install / cross-device migration needs no reconfiguration); the UI warns users to keep them safe
+
+### 🗄️ Enhancement: Database Connections (Run SQL in Management Page)
+
+- **"Database Connections" page gains a "Run SQL" drawer** (SqlExecutorDrawer): pick a connection → type SQL (Ctrl+Enter to run) → results shown as tables — multiple statements run in order, per-statement error isolation, max-row selection (100~1000), statement count / total elapsed / affected rows / truncation hints
+- **New SqlExecutor core component** (shared by the management page and the `execute_sql` AI tool): two-tier checking — strict mode (AI tool: single statement + whitelist + 5000 chars) and relaxed mode (management page: multi-statement + 20000 chars); a single SELECT without LIMIT gets one appended; 30s per-statement timeout
+- **API**: new `POST /api/db-connections/{id}/execute`; the shared frontend request helper now supports custom timeouts (long-running SQL)
+
+### 🖼️ New: Avatar Upload (Users / Agents)
+
+- **Local avatar image upload supported** (≤5MB, png/jpg/jpeg/gif/webp/bmp): new AvatarController + AvatarStore (files under `data/avatars/`); `GET /api/avatar/file/{name}` is token-free for direct img references
+- **Frontend**: new AvatarUploader component; wired into the profile page, agent config page, and chat avatar rendering (image avatar / default emoji dual form)
+- **Database**: `agent_config.avatar` column enlarged VARCHAR(20) → VARCHAR(255) (to store local URLs; existing databases migrate automatically on startup)
+
+### 📎 New: In-App Viewer (File / Image / Link Tabs)
+
+- **Project file paths, images and external links in AI replies are clickable**, opening in in-app tabs (closable anytime):
+  - Markdown pipeline extension: local paths in image syntax / link syntax / inline code / plain text are auto-converted into clickable links (file chips / image chips)
+  - Local file → file tab; local image → image tab (blob-loaded); http(s) link → embedded `<webview>` web tab (with reload and "Open in browser")
+- **Backend**: ProjectService gains `resolveFilePath` (partial path → in-project candidate resolution, exact matches first, max 50, blacklist dirs excluded) and `readFileBytes`; ProjectController gains `GET /api/project/resolve` and `GET /api/project/raw` (Content-Type inferred by extension)
+- **Prompt**: the core agent prompt gains "content citation rules" and "in-app viewing" instructions (relative path style / image syntax / link format)
+
+### ⚠️ Enhancement: Friendly LLM API Error Messages (task_error)
+
+- **New LLMErrorFormatter**: converts low-level LLM API exceptions into "title + cause + suggestion" Chinese messages following the official DeepSeek error-code table (400 / 401 / 402 / 422 / 429 / 500 / 503 + context-length special case + network errors)
+- **Unified task-level error exit** (tool-loop exceptions / direct no-tool path) emits the `task_error` SSE event; the message is also written to `agent_task.error_message`
+- **Task interruption recovery**: the task-status API returns a "last failed task" summary → after page refresh, the chat shows error details and the input area restores the "Task interrupted" banner with a "Continue task" button; AgentEventBus gains identity-checked emission (error events go only to the task's own channel, never to a new task's stream)
+- **P2P Agent** handles `task_error` events as well (remote tasks carry the friendly failure reason)
+
+### 🗂️ Optimization: Sidebar Menu Restructure (4 Groups)
+
+- **Menu consolidated into 4 groups + bottom management**: "Chat" / "AI Capabilities" (agents, skills, MCP servers, scheduled tasks, lessons) / "Data & Tools" (database connections, file management, device interconnect) / "System" (model config, run logs, data management) + bottom (profile, user management, menu permissions)
+- **Renames**: "Collaboration" → "Device Interconnect", "Config" → "Model Config"
+- **Frontend**: Layout.vue switched to MENU_GROUPS config-driven rendering (empty groups auto-hidden) + parallel group loading; MenuPermissionView and api/menu.ts synced to the 5-type menu enum
+- **Database**: schema.sql gains idempotent migrations (grouping / ordering / renaming conditional UPDATEs + fixing the user role's broken "AI Assistant" link); new SchemaMenuMigrationTest regression test
+
+### 🛠️ Fixes & Adjustments
+
+- **Fresh-database init fix**: `agent_config` inline indexes replaced with H2-compatible `CREATE INDEX IF NOT EXISTS` (the original index names clashed with the conversation table, causing agent_config creation to fail on a fresh database)
+- **Prompt**: core agent prompt slimmed (redundant language-mandate block removed); chat streaming status bar background made transparent (blends into the background image)
+- **In-App Viewer fixes** (clicking file / image links in LLM output):
+  - Fixed "tab opens but content stays blank / image stuck loading": tab objects now wrapped with `reactive` — the previous implementation mutated raw objects asynchronously after insertion, which does not trigger Vue reactivity
+  - Path joining normalized to forward slashes: the old `workDir + '/' + path` produced mixed forms like `C:\dir/sub/file` (poor display, unreliable cross-entry dedup); the same pattern in file-tree double-click / Git actions / permission panel was unified too, with normalized tab-dedup comparison
+  - Fixed bare file names (e.g. `README.md` / `main.py`) being linkified into http links (`.md` / `.py` happen to be valid TLDs) — they are now restored as local file links (handled by the "click to open file" flow; real domains like `example.com` are unaffected)
+  - File editor / image / web tabs now adapt to the background image: the dark editor becomes translucent + frosted glass (header / gutter / highlight layer backgrounds removed), image & web tab toolbars translucent
+
+### 🏷️ Version Numbers
+
+- Backend: `2.0.1` → `2.0.2` (pom.xml)
+- Frontend: `2.0.1` → `2.0.2` (package.json + package-lock.json)
+- Electron: `2.0.1` → `2.0.2` (packaged jar path synced to `code-craft-2.0.2.jar`)
+- MCP Server handshake version: `2.0.1` → `2.0.2`
+- Build artifacts: `code-craft-2.0.1.jar` → `code-craft-2.0.2.jar`
+- Docs: README(_EN) / BUILD_AND_RUN(_EN) / docs (ARCHITECTURE, DEEPSEEK_SERVICE_IMPL, TOOL_SYSTEM, LLM_PROVIDER_SYSTEM, DEV_QUICKREF, RELEASE_CHECKLIST, etc.) synced to v2.0.2
+
+---
+
 ## [2.0.1] - 2026-09-22
 
 ### 🔧 Enhancement: Git Tool Family Completion (AI Tools / REST / Frontend UI)

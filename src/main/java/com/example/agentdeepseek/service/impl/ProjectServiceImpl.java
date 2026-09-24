@@ -9,12 +9,17 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -180,6 +185,24 @@ public class ProjectServiceImpl implements ProjectService {
     }
 
     @Override
+    public byte[] readFileBytes(String filePath) {
+        if (filePath == null || filePath.trim().isEmpty()) {
+            throw new IllegalArgumentException("文件路径不能为空");
+        }
+        try {
+            Path path = Paths.get(filePath);
+            if (!path.isAbsolute()) {
+                path = Paths.get(ProjectRootContext.get(), filePath);
+            }
+            log.debug("读取文件字节: {}", path);
+            return Files.readAllBytes(path);
+        } catch (java.io.IOException e) {
+            log.error("读取文件字节失败: {}", filePath, e);
+            throw new RuntimeException("读取文件失败: " + e.getMessage());
+        }
+    }
+
+    @Override
     public void writeFile(String filePath, String content) {
         if (filePath == null || filePath.trim().isEmpty()) {
             throw new IllegalArgumentException("文件路径不能为空");
@@ -197,6 +220,96 @@ public class ProjectServiceImpl implements ProjectService {
             log.error("写入文件失败: {}", filePath, e);
             throw new RuntimeException("写入文件失败: " + e.getMessage());
         }
+    }
+
+    /** resolveFilePath 候选数量上限（防御性：避免超大项目返回巨大候选列表） */
+    private static final int RESOLVE_MAX_CANDIDATES = 50;
+
+    @Override
+    public List<String> resolveFilePath(String rootPath, String partialPath) {
+        if (partialPath == null || partialPath.trim().isEmpty()) {
+            return List.of();
+        }
+        // 归一化待解析路径：统一斜杠、去除前导 ./
+        String partial = partialPath.trim().replace('\\', '/');
+        while (partial.startsWith("./")) {
+            partial = partial.substring(2);
+        }
+        if (partial.isEmpty()) {
+            return List.of();
+        }
+        // 仅解析相对路径：绝对路径没有"后缀歧义"可解析
+        if (partial.startsWith("/") || partial.matches("^[A-Za-z]:/.*")) {
+            return List.of();
+        }
+        final String target = partial;
+
+        String root = (rootPath == null || rootPath.trim().isEmpty())
+                ? ProjectRootContext.get()
+                : rootPath;
+        root = root.replace('\\', '/');
+        if (root.endsWith("/")) {
+            root = root.substring(0, root.length() - 1);
+        }
+        Path rootDir = Paths.get(root);
+        if (!Files.isDirectory(rootDir)) {
+            return List.of();
+        }
+
+        List<String> exact = new ArrayList<>();
+        List<String> suffix = new ArrayList<>();
+        try {
+            Files.walkFileTree(rootDir, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (!dir.equals(rootDir)) {
+                        String name = dir.getFileName() != null ? dir.getFileName().toString() : "";
+                        // 排除黑名单目录（.git、node_modules、target、dist 等），整棵子树跳过
+                        if (EXCLUDED_NAMES.contains(name)) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
+                        String rel = rootDir.relativize(dir).toString().replace('\\', '/');
+                        for (String prefix : EXCLUDED_PREFIXES) {
+                            if (rel.startsWith(prefix)) {
+                                return FileVisitResult.SKIP_SUBTREE;
+                            }
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (exact.size() + suffix.size() >= RESOLVE_MAX_CANDIDATES) {
+                        return FileVisitResult.TERMINATE;
+                    }
+                    String rel = rootDir.relativize(file).toString().replace('\\', '/');
+                    if (rel.equals(target)) {
+                        exact.add(rel);
+                    } else if (rel.endsWith("/" + target)) {
+                        suffix.add(rel);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE; // 个别文件不可访问不影响整体解析
+                }
+            });
+        } catch (IOException e) {
+            log.warn("解析文件路径失败: root={}, partial={}", root, target, e);
+            return List.of();
+        }
+
+        suffix.sort(Comparator.naturalOrder());
+        List<String> result = new ArrayList<>(exact);
+        result.addAll(suffix);
+        if (result.size() > RESOLVE_MAX_CANDIDATES) {
+            result = result.subList(0, RESOLVE_MAX_CANDIDATES);
+        }
+        log.debug("路径解析: partial={}, 候选数量={}", target, result.size());
+        return result;
     }
 
     /**

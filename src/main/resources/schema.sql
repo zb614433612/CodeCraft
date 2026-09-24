@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS sub_agent_log (
 -- 角色菜单权限管理模块
 -- ============================================================
 
--- 1. 菜单表（menu_type: LINK=左侧菜单栏, MANAGE=管理页面/底部菜单）
+-- 1. 菜单表（menu_type: LINK=对话组, AI=AI能力组, TOOL=数据与工具组, SYSTEM=系统组, MANAGE=管理页面/底部菜单）
 CREATE TABLE IF NOT EXISTS sys_menu (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(50) NOT NULL COMMENT '菜单名称',
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS sys_menu (
   parent_id BIGINT DEFAULT NULL COMMENT '父菜单ID',
   sort_order INT DEFAULT 0 COMMENT '排序号',
   permission_code VARCHAR(100) COMMENT '权限标识',
-  menu_type VARCHAR(20) DEFAULT 'LINK' COMMENT '类型：LINK=左侧菜单栏, MANAGE=管理页面',
+  menu_type VARCHAR(20) DEFAULT 'LINK' COMMENT '类型：LINK=对话, AI=AI能力, TOOL=数据与工具, SYSTEM=系统, MANAGE=管理页面',
   visible TINYINT DEFAULT 1 COMMENT '是否可见',
   status TINYINT DEFAULT 1 COMMENT '状态：1=启用, 0=禁用',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -171,7 +171,7 @@ CREATE TABLE IF NOT EXISTS sys_role_menu (
 INSERT IGNORE INTO sys_role (id, name, code, description) VALUES (1, '管理员', 'admin', '系统管理员，拥有所有权限');
 INSERT IGNORE INTO sys_role (id, name, code, description) VALUES (2, '普通用户', 'user', '普通用户，仅基础功能');
 
--- 菜单项（LINK=左侧菜单栏, MANAGE=管理页面/底部菜单入口, SETTING=左侧底部设置菜单）
+-- 菜单项（LINK=对话组, AI=AI能力组, TOOL=数据与工具组, SYSTEM=系统组, MANAGE=管理页面/底部菜单入口）
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
 (4, 'AI 助手', '/code-assistant', 'CodeOutlined', NULL, 4, 'LINK'),
 (5, '用户管理', '/user-management', 'UserOutlined', NULL, 5, 'MANAGE'),
@@ -186,7 +186,7 @@ SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin';
 -- 普通用户分配左侧菜单 + 个人信息
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT r.id, m.id FROM sys_role r, sys_menu m
-WHERE r.code = 'user' AND m.name IN ('编码助手','个人信息');
+WHERE r.code = 'user' AND m.name IN ('AI 助手','个人信息');
 
 -- ============================================================
 -- 系统配置表（用户动态配置，如 DeepSeek API Key）
@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS agent_config (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) NOT NULL COMMENT 'Agent 名称',
   description VARCHAR(500) COMMENT 'Agent 描述',
-  avatar VARCHAR(20) DEFAULT '🤖' COMMENT '头像 emoji',
+  avatar VARCHAR(255) DEFAULT '🤖' COMMENT '头像（本地 /api/avatar/file/... URL 或默认 emoji，如 🤖）',
   system_prompt TEXT COMMENT '系统提示词（为空则使用默认 code_agent_prompt.txt）',
   tool_names TEXT COMMENT '可用工具列表，JSON数组，null=全部工具',
   model_name VARCHAR(100) DEFAULT 'deepseek-v4-flash' COMMENT '模型名称',
@@ -261,11 +261,14 @@ CREATE TABLE IF NOT EXISTS agent_config (
   character_profile TEXT DEFAULT NULL COMMENT '角色设定',
   user_id BIGINT COMMENT '创建者用户ID（null=系统级）',
   created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL,
-  INDEX idx_user_id (user_id),
-  INDEX idx_enabled (enabled),
-  INDEX idx_sort (sort_order)
+  updated_at DATETIME NOT NULL
 ) DEFAULT CHARSET=utf8mb4 COMMENT='Agent配置表';
+
+-- H2 兼容的索引创建（照 skill/file_asset 表惯例）：H2 的索引名是 schema 级唯一，而 MySQL 是表级，
+-- 原内联索引名 idx_user_id 与 conversation 表重名会导致本表建表失败（全新库执行 schema.sql 时 agent_config 缺失）
+CREATE INDEX IF NOT EXISTS idx_agent_config_user ON agent_config(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_config_enabled ON agent_config(enabled);
+CREATE INDEX IF NOT EXISTS idx_agent_config_sort ON agent_config(sort_order);
 
 -- ============================================================
 -- LLM Provider 配置表（多模型平台适配）
@@ -637,3 +640,43 @@ ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS turn_id VARCHAR(50) CO
 -- 存量旧数据回填由 DeepSeekServiceImpl.afterPropertiesSet 幂等执行。
 -- ============================================================
 ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS message_type VARCHAR(32) DEFAULT NULL COMMENT '消息类型：NULL=普通消息，desktop_inject=桌面截图自动注入（前端不渲染为用户气泡）';
+
+-- ============================================================
+-- 侧边栏菜单结构整理（2026-09-23）：分组(menu_type)/排序(sort_order)/命名优化
+-- 设计：4 组结构 —— 对话(LINK) / AI 能力(AI) / 数据与工具(TOOL) / 系统(SYSTEM)，底部菜单(MANAGE)
+-- 条件式幂等迁移：仅当记录仍为旧值时更新，不覆盖用户后续自定义；重复执行无副作用
+-- （前端 Layout.vue / MenuPermissionView.vue 已同步支持菜单组配置）
+-- ============================================================
+-- 「对话」（LINK）：仅排序
+UPDATE sys_menu SET sort_order = 1 WHERE id = 4 AND menu_type = 'LINK';
+-- 「AI 能力」（AI）：智能体 / 技能 / MCP 服务器 / 定时任务 / 踩坑经验
+UPDATE sys_menu SET menu_type = 'AI', sort_order = 1 WHERE id = 11 AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'AI', sort_order = 2 WHERE id = 12 AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'AI', sort_order = 3 WHERE id = 15 AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'AI', sort_order = 4 WHERE id = 9  AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'AI', sort_order = 5 WHERE id = 16 AND menu_type = 'SETTING';
+-- 「数据与工具」（TOOL）：数据库连接 / 文件管理 / 设备互联（原“协作”）
+UPDATE sys_menu SET menu_type = 'TOOL', sort_order = 1 WHERE id = 17 AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'TOOL', sort_order = 2 WHERE id = 18 AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'TOOL', sort_order = 3, name = '设备互联' WHERE id = 13 AND menu_type = 'SETTING' AND name = '协作';
+-- 「系统」（SYSTEM）：模型配置（原“配置”）/ 运行日志 / 数据管理
+UPDATE sys_menu SET menu_type = 'SYSTEM', sort_order = 1, name = '模型配置' WHERE id = 8 AND menu_type = 'SETTING' AND name = '配置';
+UPDATE sys_menu SET menu_type = 'SYSTEM', sort_order = 2 WHERE id = 10 AND menu_type = 'SETTING';
+UPDATE sys_menu SET menu_type = 'SYSTEM', sort_order = 3 WHERE id = 14 AND menu_type = 'SETTING';
+-- 底部（MANAGE）：个人信息 / 用户管理 / 菜单权限管理
+UPDATE sys_menu SET sort_order = 1 WHERE id = 7 AND menu_type = 'MANAGE';
+UPDATE sys_menu SET sort_order = 2 WHERE id = 5 AND menu_type = 'MANAGE';
+UPDATE sys_menu SET sort_order = 3 WHERE id = 6 AND menu_type = 'MANAGE';
+-- 附带修复：普通用户角色补上「AI 助手」（历史分配语句按旧名'编码助手'断链；初始化语句已同步修正）
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'user' AND m.id = 4;
+
+-- ============================================================
+-- 头像上传支持：agent_config.avatar 列扩容（VARCHAR(20) → VARCHAR(255)）
+-- 原因：头像支持上传本地图片，avatar 列需存储形如 /api/avatar/file/<uuid>.<ext> 的本地 URL，
+--      原 VARCHAR(20) 仅够存 emoji，存 URL 会被截断。
+-- 老库由下方 ALTER 迁移（新库 CREATE 定义已同步为 VARCHAR(255)；重复执行由 continue-on-error 容忍）。
+-- ============================================================
+ALTER TABLE agent_config ALTER COLUMN avatar SET DATA TYPE VARCHAR(255);
+-- MySQL/MariaDB 语法兜底（H2 下该句报语法错误但被 continue-on-error 容忍，不影响启动）
+ALTER TABLE agent_config MODIFY COLUMN avatar VARCHAR(255);

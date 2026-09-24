@@ -152,7 +152,7 @@
       <div class="tab-content">
         <!-- ===== 聊天标签 ===== -->
         <template v-if="activeTab?.type === 'chat'">
-          <div class="chat-messages-area">
+          <div class="chat-messages-area" @click="handleMessageLinkClick">
             <!-- ★ 无 Provider 时：全屏引导界面 -->
             <div v-if="providerOptions.length === 0" class="no-provider-guide">
               <div class="guide-icon">🔌</div>
@@ -181,14 +181,22 @@
         v-slot="{ item: msg, active }"
         @scroll.passive="handleMessageListScroll"
       >
-        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [streamingUpdateTick] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '']">
+        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [streamingUpdateTick] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '', msg.taskError?.message?.length || 0]">
         <div :class="['message-item', msg.role]">
           <div class="message-avatar">
             <div v-if="msg.role === 'user'" class="avatar user-avatar">
-              {{ userStore.userInfo?.username?.charAt(0).toUpperCase() || 'U' }}
+              <img
+                v-if="isImageAvatar(userStore.userInfo?.avatar)"
+                :src="userStore.userInfo?.avatar"
+                class="avatar-img"
+                alt=""
+              />
+              <span v-else>{{ userStore.userInfo?.username?.charAt(0).toUpperCase() || 'U' }}</span>
             </div>
             <div v-else class="avatar ai-avatar">
-              <CodeOutlined />
+              <img v-if="isImageAvatar(currentAgentAvatar)" :src="currentAgentAvatar" class="avatar-img" alt="" />
+              <template v-else-if="currentAgentAvatar">{{ currentAgentAvatar }}</template>
+              <CodeOutlined v-else />
             </div>
           </div>
           <div class="message-content">
@@ -212,18 +220,17 @@
             </div>
 
             <!-- 思考过程（仅AI消息） -->
-            <div v-if="msg.role === 'assistant' && (msg.thinking || msg.toolResults?.length || msg.matchedSkills?.length)" class="thinking-section">
+            <div v-if="msg.role === 'assistant' && (msg.thinking || msg.toolResults?.length || msg.hitSkills?.length)" class="thinking-section">
               <div class="thinking-header" @click="toggleThinkingVisibility(msg.id)">
                 <span class="thinking-title">
                   <DownOutlined v-if="!getThinkingVisible(msg.id)" />
                   <UpOutlined v-else />
                   思考过程
                 </span>
-                <span v-if="msg.matchedSkills?.length" class="skill-match-tags">
-                  <span v-for="skill in msg.matchedSkills" :key="skill.name" class="skill-match-tag" :title="skill.name" :class="skill.confidence >= 0.7 ? 'skill-tag-high' : skill.confidence >= 0.4 ? 'skill-tag-mid' : 'skill-tag-low'">
-                    🔧 {{ skill.name }}
-                    <span class="skill-tag-conf">{{ (skill.confidence * 100).toFixed(0) }}%</span>
-                  </span>
+                <!-- 命中技能（动态）：仅当 LLM 真正加载执行技能（skill action=load）时展示；
+                     技能目录已改为全量简介注入，不再展示全量「技能匹配」列表 -->
+                <span v-if="msg.hitSkills?.length" class="skill-hit-tags" :title="`本次已执行技能：${msg.hitSkills.join('、')}`">
+                  <span v-for="name in msg.hitSkills" :key="name" class="skill-hit-tag">🎯 命中技能：{{ name }}</span>
                 </span>
                 <span class="thinking-summary" v-if="msg.toolResults?.length">
                   · {{ msg.toolResults.length }} 次工具调用
@@ -272,6 +279,11 @@
             </div>
             <div class="message-text code-message" v-if="msg.content">
               <div v-for="seg in buildMessageSegments(msg)" :key="seg.key" class="msg-seg" v-html="seg.html"></div>
+            </div>
+            <!-- 任务错误（LLM 接口错误停止）：错误详情（标题 + 原因 + 解决建议） -->
+            <div v-if="msg.role === 'assistant' && msg.taskError" class="message-task-error">
+              <div class="task-error-title">⚠️ {{ msg.taskError.title || '任务已中断' }}</div>
+              <div class="task-error-detail">{{ msg.taskError.message }}</div>
             </div>
           </div>
         </div>
@@ -477,6 +489,57 @@
             </div>
           </div>
         </template>
+        <!-- ===== 网页标签（内嵌浏览 LLM 输出的链接，可自由关闭） ===== -->
+        <template v-else-if="activeTab?.type === 'web'">
+          <div class="web-tab-layout">
+            <div class="web-tab-toolbar">
+              <span class="web-tab-url" :title="activeTab.url">{{ activeTab.url }}</span>
+              <div class="web-tab-actions">
+                <a-button size="small" class="tb-btn" @click="reloadWebTab(activeTab)">
+                  <ReloadOutlined /> 刷新
+                </a-button>
+                <a-button size="small" type="primary" class="tb-btn" @click="openWebExternal(activeTab.url)">
+                  <ExportOutlined /> 在浏览器打开
+                </a-button>
+              </div>
+            </div>
+            <div class="web-tab-body">
+              <!-- Electron：<webview> 可加载绝大多数站点（不受 X-Frame-Options 限制） -->
+              <webview
+                v-if="canUseWebview"
+                :key="'wv-' + activeTab.id + '-' + (webTabReloadKeys[activeTab.id] || 0)"
+                :src="activeTab.url"
+                class="web-tab-frame"
+              ></webview>
+              <!-- 浏览器环境兜底：iframe -->
+              <iframe
+                v-else
+                :key="'if-' + activeTab.id + '-' + (webTabReloadKeys[activeTab.id] || 0)"
+                :src="activeTab.url"
+                class="web-tab-frame"
+                referrerpolicy="no-referrer"
+              ></iframe>
+            </div>
+          </div>
+        </template>
+        <!-- ===== 图片标签（内嵌展示本地/项目图片，可自由关闭） ===== -->
+        <template v-else-if="activeTab?.type === 'image'">
+          <div class="image-tab-layout">
+            <div class="image-tab-toolbar">
+              <span class="image-tab-path" :title="activeTab.imagePath">{{ activeTab.imagePath }}</span>
+              <div class="image-tab-actions">
+                <a-button size="small" class="tb-btn" @click="reloadImageTab(activeTab)">
+                  <ReloadOutlined /> 重新加载
+                </a-button>
+              </div>
+            </div>
+            <div class="image-tab-body">
+              <div v-if="activeTab.imageLoading" class="image-tab-hint">正在加载图片…</div>
+              <div v-else-if="activeTab.imageError" class="image-tab-hint error">{{ activeTab.imageError }}</div>
+              <img v-else :src="activeTab.imageBlobUrl" :alt="activeTab.title" class="image-tab-img" />
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- ===== 底部运行日志面板 ===== -->
@@ -514,6 +577,20 @@
           style="display: none"
           @change="handleFileSelected"
         />
+        <!-- 任务中断提示（LLM 接口错误导致任务停止）：错误详情 + 一键继续任务 -->
+        <div v-if="currentInterruptedTask" class="task-interrupted-banner">
+          <div class="interrupted-info">
+            <span class="interrupted-icon">⚠️</span>
+            <div class="interrupted-texts">
+              <div class="interrupted-title">{{ currentInterruptedTask.title }}</div>
+              <div class="interrupted-message">{{ currentInterruptedTask.message }}</div>
+            </div>
+          </div>
+          <a-button type="primary" size="small" class="continue-task-btn" @click="continueInterruptedTask">
+            <ReloadOutlined />
+            继续任务
+          </a-button>
+        </div>
         <!-- 附件标签区 -->
         <div v-if="attachedFiles.length > 0" class="attachment-tags">
           <div
@@ -570,7 +647,7 @@
             placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送，Ctrl+V粘贴截图）"
             :auto-size="{ minRows: 1, maxRows: 8 }"
             :disabled="hasRunningTask || isOptimizing"
-            @keydown.enter.exact.prevent="sendMessage"
+            @keydown.enter.exact.prevent="sendMessage()"
             @keydown.shift.enter="handleShiftEnter"
             @paste="handlePasteImage"
           />
@@ -594,7 +671,7 @@
             v-else
             type="primary"
             class="send-btn"
-            @click="sendMessage"
+            @click="sendMessage()"
             :disabled="!inputMessage.trim() && attachedFiles.length === 0"
           >
             <SendOutlined />
@@ -910,9 +987,9 @@ import { getConversationList, mapConversationResponseToConversation, getConversa
 import { streamChat, checkActiveTask, taskStream, cancelTask, supplementRequest, optimizePrompt } from '@/api/chat'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 import { setConfig } from '@/api/config'
-import type { SkillMatchInfo } from '@/utils/sse-client'
 import type { AgentStreamEvent } from '@/utils/sse-client'
 import type { DelegateProgressData } from '@/utils/sse-client'
+import type { TaskErrorData } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
 import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, getSnapshotFileContent, type SessionChanges } from '@/api/snapshot'
 import { useSettingsStore } from '@/store/settings'
@@ -939,7 +1016,9 @@ import {
   ClearOutlined,
   UploadOutlined,
   HistoryOutlined,
-  SearchOutlined
+  SearchOutlined,
+  ReloadOutlined,
+  ExportOutlined
 } from '@ant-design/icons-vue'
 import FileTree from '@/components/FileTree.vue'
 import FileEditor from '@/components/FileEditor.vue'
@@ -953,12 +1032,13 @@ import SplitLayout from '@/components/SplitLayout.vue'
 import DirectoryBrowser from '@/components/DirectoryBrowser.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
-import { readProjectFile, buildProject, runProject, stopProject, getRunStatus, getRunOutput } from '@/api/project'
+import { readProjectFile, getProjectFileBlobUrl, resolveProjectFilePath, buildProject, runProject, stopProject, getRunStatus, getRunOutput } from '@/api/project'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { getGitDiff, gitRestore, gitShowFile } from '@/api/git'
 import AgentSelector from '@/components/AgentSelector.vue'
+import { isImageAvatar } from '@/utils/avatar'
 import { listProviders, parseModelList, getProviderBalance, type ProviderConfig, type ProviderBalance, type ProviderBalanceInfo } from '@/api/llm-provider'
 // M4：图像理解（文件资产上传/历史回显/跨页引用）
 import { uploadFileAsset, getFilePreviewBlobUrl, downloadFileAsset, listFileAssets, fileAssetDisplayName, docTypeOf, docTypeIcon, isImageMime, type FileAssetData } from '@/api/file-asset'
@@ -997,7 +1077,8 @@ interface ChatMessage {
     delegateStatus?: string       // RUNNING 等（预留）
     delegateElapsedSec?: number   // 已等待秒数
   }[]
-  matchedSkills?: { name: string; confidence: number; triggerWords: string }[]
+  /** 命中技能（LLM 真正执行 skill action=load 时动态追加；去重，供「思考过程」横栏标签展示） */
+  hitSkills?: string[]
   timestamp: number
   isStreaming?: boolean
   tokenCount?: number
@@ -1010,6 +1091,9 @@ interface ChatMessage {
   /** 修复：桌面截图注入消息id列表（role=user 的 desktop_inject 消息不渲染气泡，
    *  其截图资产由 loadMessageFileRefs 归并到本 AI 消息的 fileAssets 回显） */
   injectSourceIds?: string[]
+  /** 任务错误（LLM 接口错误停止时由 task_error 事件写入；聊天区展示错误详情，
+   *  输入区同步展示「任务中断」横幅 + 「一键继续」入口） */
+  taskError?: TaskErrorData
 }
 
 /** M4/M7：消息气泡中展示的文件（图片→缩略图；文档→文件图标卡片） */
@@ -1228,6 +1312,11 @@ const getAgentMeta = (agentConfigId: number | null | undefined): { name: string;
   const a = agentOptions.value.find(x => x.id === agentConfigId)
   return { name: a?.name || `Agent#${agentConfigId ?? '?'}`, workDir: a?.workDir || '' }
 }
+/** 当前智能体头像（对话消息 AI 头像用：本地图片 URL 或默认 emoji） */
+const currentAgentAvatar = computed(() => {
+  const a = agentOptions.value.find(x => x.id === currentAgentConfigId.value)
+  return a?.avatar || ''
+})
 // 组件初始化时拉取一次 Agent 列表（授权归属标识/完成通知需要）
 fetchAgentList()
 
@@ -2087,7 +2176,7 @@ onMounted(() => {
 // ===== 标签页系统（Tab 管理） =====
 interface EditorTab {
   id: string
-  type: 'chat' | 'file' | 'diff'
+  type: 'chat' | 'file' | 'diff' | 'web' | 'image'
   title: string
   filePath?: string
   content?: string
@@ -2098,6 +2187,11 @@ interface EditorTab {
   currentContent?: string    // 当前工作区版本（diff 右侧）
   highlightLines?: { line: number; type: 'remove' | 'add'; content?: string }[]  // 行高亮标记
   language?: string
+  url?: string               // 'web' 标签：内嵌的网页地址
+  imagePath?: string         // 'image' 标签：本地/项目图片路径
+  imageBlobUrl?: string      // 'image' 标签：图片的 blob URL（用于 <img> 显示）
+  imageLoading?: boolean     // 'image' 标签：是否正在加载
+  imageError?: string        // 'image' 标签：加载失败信息
 }
 
 // ===== 分屏系统 =====
@@ -2375,14 +2469,17 @@ const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value
 // 判断是否为绝对路径（Windows盘符或Unix绝对路径）
 const isAbsolutePath = (p: string) => /^[a-zA-Z]:[/\\]/.test(p) || p.startsWith('/')
 
+// 规范化路径：反斜杠统一为正斜杠（避免 "C:\a/b" 混合形式；供拼接与去重比较使用）
+const normalizeFsPath = (p: string) => p.replace(/\\/g, '/')
+
 // 双击文件树中的文件，打开文件编辑标签
 const onFileDblClick = async (path: string, isDirectory: boolean) => {
   if (isDirectory) return
   // 将相对路径转为绝对路径：文件树返回的 path 是相对于 fileTreeLoadPath 的相对路径
   // 直接传给后端 /api/project/read 时，后端用 user.dir 拼接可能路径不对（Electron桌面端 user.dir 是jar目录）
   const resolvedPath = (!isAbsolutePath(path) && fileTreeLoadPath.value)
-    ? fileTreeLoadPath.value.replace(/[/\\]$/, '') + '/' + path
-    : path
+    ? normalizeFsPath(fileTreeLoadPath.value).replace(/\/+$/, '') + '/' + normalizeFsPath(path)
+    : normalizeFsPath(path)
   const existing = tabs.value.find(t => t.type === 'file' && t.filePath === resolvedPath)
   if (existing) {
     activeTabId.value = existing.id
@@ -2413,10 +2510,262 @@ const onFileDblClick = async (path: string, isDirectory: boolean) => {
   }
 }
 
+// ===== 网页标签页（LLM 输出的链接 → 应用内嵌浏览）=====
+// 是否可使用 Electron <webview>（需主进程开启 webviewTag）；否则自动降级为 <iframe>
+const canUseWebview = (() => {
+  if (typeof window === 'undefined' || !(window as any).electronAPI) return false
+  try {
+    const el = document.createElement('webview') as any
+    return typeof el.getWebContentsId === 'function' || typeof el.loadURL === 'function'
+  } catch {
+    return false
+  }
+})()
+
+// 网页标签刷新计数（改变 key 触发重新加载）
+const webTabReloadKeys = ref<Record<string, number>>({})
+
+// 打开网页标签（聊天中的链接 / 手动调用）
+const openWebTab = (url: string) => {
+  if (!/^https?:\/\//i.test(url)) return
+  // 已打开相同地址则直接切换
+  const existing = tabs.value.find(t => t.type === 'web' && t.url === url)
+  if (existing) {
+    activeTabId.value = existing.id
+    if (splitState.value.enabled) syncPrimaryPane()
+    return
+  }
+  let label = url
+  try {
+    const u = new URL(url)
+    label = u.hostname + (u.pathname && u.pathname !== '/' ? u.pathname : '')
+  } catch { /* 保留原始 url */ }
+  const tabId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const tab: EditorTab = {
+    id: tabId,
+    type: 'web',
+    title: `🌐 ${label}`,
+    url
+  }
+  tabs.value.push(tab)
+  activeTabId.value = tabId
+  if (splitState.value.enabled) syncPrimaryPane()
+}
+
+// 刷新网页标签（重建组件 key 触发重新加载）
+const reloadWebTab = (tab?: EditorTab) => {
+  if (!tab?.id) return
+  webTabReloadKeys.value[tab.id] = (webTabReloadKeys.value[tab.id] || 0) + 1
+}
+
+// 用系统默认浏览器打开（Electron 走 IPC）；非 Electron 环境退回 window.open
+const openWebExternal = (url?: string) => {
+  if (!url) return
+  const api = (window as any).electronAPI
+  if (api?.openExternal) {
+    api.openExternal(url)
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}
+
+// 是否为图片文件路径
+const isImageFilePath = (p: string) => /\.(png|jpe?g|gif|webp|bmp|svg|ico)$/i.test(p.split(/[?#]/)[0])
+
+// 将"相对路径"转为"绝对路径"（基于当前工作目录；已是绝对路径则统一斜杠后返回）
+// 说明：后端 /api/project/read 对相对路径用后端进程 user.dir 拼接（Electron 下是 jar 目录，不可靠），
+// 故与文件树双击 / 授权面板一致，统一在前端拼好绝对路径再请求；
+// 输出统一为正斜杠（避免 "C:\dir\sub/name.md" 混合形式——显示观感一致、tab 去重可靠，后端亦可正常读取）。
+const toAbsolutePath = (path: string): string => {
+  const normalized = normalizeFsPath(path)
+  if (isAbsolutePath(normalized)) return normalized
+  const workDir = agentRuntime.value.workDir
+  if (!workDir) return normalized
+  return normalizeFsPath(workDir).replace(/\/+$/, '') + '/' + normalized
+}
+
+// 读取失败兜底：LLM 常输出省略前缀的短路径（如 api/appearance.ts），
+// 调用后端按路径后缀在项目内匹配；返回候选"相对路径"列表（已过滤原始路径自身）
+const resolvePathCandidates = async (path: string): Promise<string[]> => {
+  const workDir = agentRuntime.value.workDir
+  if (!workDir || isAbsolutePath(path)) return []
+  try {
+    const res = await resolveProjectFilePath(workDir, path)
+    if (res.code === 200 && Array.isArray(res.data)) {
+      const normalized = normalizeFsPath(path)
+      return res.data.filter(c => !!c && normalizeFsPath(c) !== normalized)
+    }
+  } catch { /* 解析接口异常按无候选处理 */ }
+  return []
+}
+
+// 文件读取失败后的兜底：
+//   ① 尝试把短路径解析为项目内真实文件（唯一命中时关掉失败标签、用完整路径重新打开）；
+//   ② 多个候选 / 无候选 → 在原标签内给出明确提示（避免用户看到"空白"不知道原因）。
+const handleFileReadFailure = async (failedTab: EditorTab, originalPath: string, failMsg: string) => {
+  const candidates = await resolvePathCandidates(originalPath)
+  if (candidates.length === 1) {
+    closeTab(failedTab.id)
+    await openLocalFileTab(candidates[0])
+    return
+  }
+  if (candidates.length > 1) {
+    failedTab.content = `// 无法唯一确定文件：${originalPath}\n// 项目内找到多个匹配文件，请改用完整路径或从文件树打开：\n`
+      + candidates.map(c => `//   - ${c}`).join('\n')
+  } else {
+    failedTab.content = `${failMsg}\n// 提示：项目内未找到与「${originalPath}」匹配的文件（可让 AI 输出相对项目根目录的完整路径）`
+  }
+  failedTab.originalContent = failedTab.content
+}
+
+// 打开本地/项目文件标签（文本文件，复用现有 file 标签与编辑器）
+const openLocalFileTab = async (path: string) => {
+  if (!path) return
+  const readPath = toAbsolutePath(path)
+  // 去重比较：统一斜杠后比较（同一文件可能以不同斜杠形式出现，避免重复开标签）
+  const pathNorm = normalizeFsPath(path)
+  const readNorm = normalizeFsPath(readPath)
+  const existing = tabs.value.find(t => t.type === 'file' && !!t.filePath
+    && (normalizeFsPath(t.filePath) === pathNorm || normalizeFsPath(t.filePath) === readNorm))
+  if (existing) {
+    activeTabId.value = existing.id
+    if (splitState.value.enabled) syncPrimaryPane()
+    return
+  }
+  const fileName = readPath.split(/[/\\]/).pop() || readPath
+  const tabId = `file-${readPath}`
+  // ★ 必须用 reactive 包装：tab 入列后读文件是异步的（await），之后要回填 content——
+  //   若对原始对象直接赋值，不会触发 Vue 响应式更新（现象：标签已打开但内容区空白）
+  const tab = reactive<EditorTab>({
+    id: tabId,
+    type: 'file',
+    title: fileName,
+    filePath: readPath,
+    content: '',
+    originalContent: '',
+    isDirty: false
+  })
+  tabs.value.push(tab)
+  activeTabId.value = tabId
+  if (splitState.value.enabled) syncPrimaryPane()
+  try {
+    const res = await readProjectFile(readPath)
+    if (res.code === 200 && res.data !== null) {
+      tab.content = res.data
+      tab.originalContent = res.data
+      return
+    }
+    await handleFileReadFailure(tab, path, `// 无法读取文件：${readPath}`)
+  } catch (err: any) {
+    await handleFileReadFailure(tab, path, `// 读取文件失败：${err?.message || err}`)
+  }
+}
+
+// 打开图片标签（本地/项目图片，通过后端原始字节接口加载为 blob）
+const openImageTab = async (path: string) => {
+  if (!path) return
+  const readPath = toAbsolutePath(path)
+  // 去重比较：统一斜杠后比较（同一图片可能以不同斜杠形式出现）
+  const pathNorm = normalizeFsPath(path)
+  const readNorm = normalizeFsPath(readPath)
+  const existing = tabs.value.find(t => t.type === 'image' && !!t.imagePath
+    && (normalizeFsPath(t.imagePath) === pathNorm || normalizeFsPath(t.imagePath) === readNorm))
+  if (existing) {
+    activeTabId.value = existing.id
+    if (splitState.value.enabled) syncPrimaryPane()
+    return
+  }
+  const fileName = readPath.split(/[/\\]/).pop() || readPath
+  const tabId = `image-${readPath}`
+  // ★ 同 openLocalFileTab：异步回填（blob 加载 / 失败态）必须经响应式对象赋值才会更新 UI
+  const tab = reactive<EditorTab>({
+    id: tabId,
+    type: 'image',
+    title: `🖼️ ${fileName}`,
+    imagePath: readPath,
+    imageBlobUrl: '',
+    imageLoading: true,
+    imageError: ''
+  })
+  tabs.value.push(tab)
+  activeTabId.value = tabId
+  if (splitState.value.enabled) syncPrimaryPane()
+  try {
+    const blobUrl = await getProjectFileBlobUrl(readPath)
+    tab.imageBlobUrl = blobUrl
+    tab.imageLoading = false
+  } catch (err: any) {
+    // 兜底：LLM 输出的短路径尝试在项目内解析，唯一命中则用完整路径重新打开
+    const candidates = await resolvePathCandidates(path)
+    if (candidates.length === 1) {
+      closeTab(tab.id)
+      await openImageTab(candidates[0])
+      return
+    }
+    tab.imageLoading = false
+    tab.imageError = candidates.length > 1
+      ? `找到多个匹配图片，请使用完整路径：${candidates.join('、')}`
+      : (err?.message || '图片加载失败')
+  }
+}
+
+// 重新加载图片标签（释放旧 blob 后重新拉取）
+const reloadImageTab = async (tab?: EditorTab) => {
+  if (!tab?.imagePath) return
+  if (tab.imageBlobUrl) {
+    try { URL.revokeObjectURL(tab.imageBlobUrl) } catch { /* 忽略 */ }
+  }
+  tab.imageBlobUrl = ''
+  tab.imageError = ''
+  tab.imageLoading = true
+  try {
+    tab.imageBlobUrl = await getProjectFileBlobUrl(tab.imagePath)
+  } catch (err: any) {
+    tab.imageError = err?.message || '图片加载失败'
+  } finally {
+    tab.imageLoading = false
+  }
+}
+
+// 聊天消息区点击（事件委托）：
+//   ① 本地文件/图片（markdown 渲染时挂了 data-cc-path）→ 应用内标签页打开
+//   ② http(s) 外链 → 应用内「网页标签页」打开（不再让窗口导航走）
+const handleMessageLinkClick = (e: MouseEvent) => {
+  const el = e.target as HTMLElement | null
+  if (!el) return
+  // ① 本地文件/图片
+  const localEl = el.closest?.('[data-cc-path]') as HTMLElement | null
+  if (localEl) {
+    const path = localEl.getAttribute('data-cc-path') || ''
+    const kind = localEl.getAttribute('data-cc-kind') || ''
+    if (path) {
+      e.preventDefault()
+      if (kind === 'image' || isImageFilePath(path)) {
+        openImageTab(path)
+      } else {
+        openLocalFileTab(path)
+      }
+      return
+    }
+  }
+  // ② http(s) 外链
+  const anchor = el.closest?.('a') as HTMLAnchorElement | null
+  if (!anchor) return
+  const href = anchor.getAttribute('href') || ''
+  if (!/^https?:\/\//i.test(href)) return
+  e.preventDefault()
+  openWebTab(href)
+}
+
 // 关闭标签
 const closeTab = (tabId: string) => {
   const idx = tabs.value.findIndex(t => t.id === tabId)
   if (idx === -1 || tabs.value[idx].type === 'chat') return
+  const closingTab = tabs.value[idx]
+  // 图片标签：释放 blob URL，避免内存泄漏
+  if (closingTab.type === 'image' && closingTab.imageBlobUrl) {
+    try { URL.revokeObjectURL(closingTab.imageBlobUrl) } catch { /* 忽略 */ }
+  }
   tabs.value.splice(idx, 1)
 
   // 分屏模式下也同步从面板移除
@@ -2477,10 +2826,7 @@ const onHunksRestored = async (filePath: string) => {
   if (!tab) return
 
   // 构建绝对路径
-  const isAbsPath = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
-  const absFilePath = isAbsPath
-    ? filePath
-    : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
+  const absFilePath = toAbsolutePath(filePath)
 
   // 重新获取 HEAD 版本 + 工作区文件 + diff
   const [showResult, fileResult, diffResult] = await Promise.all([
@@ -2526,11 +2872,11 @@ const openDiffTab = async (filePath: string, projectRoot: string) => {
   const tabId = `diff-${filePath}`
   const existing = tabs.value.find(t => t.id === tabId)
 
-  // 构建绝对文件路径（readProjectFile 需要绝对路径）
+  // 构建绝对文件路径（readProjectFile 需要绝对路径；projectRoot 为调用方指定的项目根）
   const isAbsPath = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
   const absFilePath = isAbsPath
-    ? filePath
-    : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
+    ? normalizeFsPath(filePath)
+    : normalizeFsPath(projectRoot).replace(/\/+$/, '') + '/' + normalizeFsPath(filePath)
 
   try {
     // 并行获取 HEAD 版本内容和当前工作区内容
@@ -2609,6 +2955,31 @@ const hasRunningTask = computed(() => {
   if (reconnectingConvIds.has(convId)) return true
   if (activeTaskMap.get(convId)) return true
   return false
+})
+
+// ===== 任务中断状态（LLM 接口错误停止 → 错误反馈 + 一键继续） =====
+
+/** 任务异常中断信息（按会话维度） */
+interface InterruptedTaskInfo {
+  title: string
+  message: string
+  status?: number
+  retryable?: boolean
+}
+
+/**
+ * 「任务中断」状态表：convId → 中断信息。
+ * 写入来源：① 实时流收到 task_error 事件（后端把 DeepSeek 错误码转为友好提示下发）；
+ * ② 刷新页面/切换会话时 checkAndReconnect 发现最近一次任务 failed（异常停止）。
+ * 用途：输入区横幅展示错误详情 + 「继续任务」按钮（一键续跑，无需用户复制上次发言重发）。
+ */
+const interruptedTasks = ref<Record<string, InterruptedTaskInfo>>({})
+
+/** 当前会话的中断任务（任务运行中不展示——新一轮任务已在进行，旧中断已由用户响应） */
+const currentInterruptedTask = computed<InterruptedTaskInfo | null>(() => {
+  const cid = currentConversationId.value
+  if (!cid || hasRunningTask.value) return null
+  return interruptedTasks.value[cid] || null
 })
 
 const isOptimizing = ref(false)
@@ -3840,7 +4211,7 @@ watch(() => pendingQuestion.value, async (q) => {
   const projectRoot = q.workDir || agentRuntime.value.workDir
   if (!projectRoot) return
   const isAbs = /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith('/')
-  const absPath = isAbs ? filePath : projectRoot.replace(/[/\\]$/, '') + '/' + filePath.replace(/\\/g, '/')
+  const absPath = isAbs ? normalizeFsPath(filePath) : normalizeFsPath(projectRoot).replace(/\/+$/, '') + '/' + normalizeFsPath(filePath)
   try {
     const res = await readProjectFile(absPath)
     const tabId = `permission-${Date.now()}-${filePath.replace(/[/\\:]/g, '_')}`
@@ -4048,8 +4419,10 @@ const optimizeMessage = async () => {
 
 // 发送消息
 // 发送消息
-const sendMessage = async () => {
-  const text = inputMessage.value.trim()
+const sendMessage = async (textOverride?: string) => {
+  // ★ 「继续任务」等程序化续跑场景：传入覆盖文本（字符串）；模板事件对象等非字符串入参忽略
+  const overrideText = typeof textOverride === 'string' ? textOverride : ''
+  const text = (overrideText || inputMessage.value).trim()
   // ★ 2026-08-14：守卫改用 hasRunningTask——输入框 disabled 后 Enter 等路径虽不会触发，
   //   双保险防止「切回智能体后任务仍在后台执行」时误发新消息造成同会话双流冲突
   if (hasRunningTask.value) return
@@ -4074,6 +4447,18 @@ const sendMessage = async () => {
 
   // 发送新消息时清除旧的任务清单
   clearTaskList()
+
+  // ★ 发送（含「继续任务」一键续跑）即视为用户已响应中断：清除该会话的「任务中断」提示
+  //   （若本轮再次异常停止，新的 task_error 事件会重新写入）
+  const clearInterruptedKeys = [
+    currentConversationId.value,
+    currentStreamSessionId.value != null ? String(currentStreamSessionId.value) : ''
+  ]
+  for (const key of clearInterruptedKeys) {
+    if (key && interruptedTasks.value[key]) {
+      delete interruptedTasks.value[key]
+    }
+  }
 
   // 发送新消息时重置自动滚动状态：重新固定到底部
   autoScrollToBottom.value = true
@@ -4177,6 +4562,9 @@ const sendMessage = async () => {
   // H1 修复：标记流式是否「正常完成」——try 正常走完才置 true；
   // 用户中止（__USER_ABORT__）/发送失败路径保持 false，onStreamComplete 据此不误报「后台任务已完成」
   let streamCompleted = false
+  // ★ 任务错误标志：收到 task_error 事件（LLM 接口错误异常停止）后置 true——
+  //   流会以 complete 正常收尾，但任务实际是「错误停止」，不得标记为「正常完成」
+  let streamHadTaskError = false
 
   try {
     const sessionId = convId.startsWith('local-') ? undefined : parseInt(convId)
@@ -4243,6 +4631,15 @@ const sendMessage = async () => {
             // 解析 task_manager 工具的任务清单（P2：按会话隔离）
             console.log('[TaskList] toolContent:', toolContent.substring(0, 200))
             parseTaskManagerResult(toolContent, convId)
+            // ★ 技能命中兜底：若摘要通道缺失，从技能加载结果（skill load 固定输出「【技能详情】xxx (ID:n)」）解析
+            const skillDetailMatch = toolContent.match(/【技能详情】(.+?)\s*\(ID:/)
+            if (skillDetailMatch) {
+              const hitName = skillDetailMatch[1].trim()
+              if (hitName) {
+                if (!assistantMsg.hitSkills) assistantMsg.hitSkills = []
+                if (!assistantMsg.hitSkills.includes(hitName)) assistantMsg.hitSkills.push(hitName)
+              }
+            }
           }
         } else {
           thinkingContent += event.data
@@ -4258,6 +4655,17 @@ const sendMessage = async () => {
         const tools = tcData.tools || []
         const summaries = tcData.summaries || []
         maybeShowDesktopPrivacyNotice(tools)
+        // ★ 技能命中（动态展示）：后端在 skill action=load 时生成「🎯 命中技能」操作摘要，
+        //   随 tool_call_start.summaries 一起下发——到此才代表 LLM 真正选中执行该技能
+        for (const s of summaries) {
+          if (!s) continue
+          const m = s.match(/🎯\s*命中技能[:：]?\*{0,2}\s*(.+)/)
+          const hitName = m ? m[1].trim() : ''
+          if (hitName) {
+            if (!assistantMsg.hitSkills) assistantMsg.hitSkills = []
+            if (!assistantMsg.hitSkills.includes(hitName)) assistantMsg.hitSkills.push(hitName)
+          }
+        }
         for (let i = 0; i < tools.length; i++) {
           assistantMsg.toolResults!.push({
             at: thinkingContent.length,
@@ -4296,6 +4704,29 @@ const sendMessage = async () => {
           }
         }
         scheduleMessageUpdate(convId)
+      } else if (event.type === 'task_error') {
+        // ★ 任务因 LLM 接口错误停止（非人为停止、非正常完成）：
+        //   1) 消息区展示友好错误详情（标题+原因+解决建议，映射自 DeepSeek 官方错误码表）
+        //   2) 会话级中断状态 → 输入区横幅 + 「继续任务」一键续跑入口
+        const errData = event.data as TaskErrorData
+        assistantMsg.taskError = errData
+        assistantMsg.isStreaming = false
+        streamHadTaskError = true
+        const errConvId = realSessionId || convId
+        const interruptedInfo: InterruptedTaskInfo = {
+          title: errData.title || '任务已中断',
+          message: errData.message,
+          status: errData.status,
+          retryable: errData.retryable
+        }
+        interruptedTasks.value[errConvId] = interruptedInfo
+        if (errConvId !== convId) {
+          // 局部会话尚未迁移：同时挂到当前键，保证横幅即时可见
+          interruptedTasks.value[convId] = interruptedInfo
+        }
+        setStreamStatus(convId, '')
+        flushMessageUpdate(convId, assistantMsg.id)
+        message.error(errData.title ? `任务中断：${errData.title}` : '任务已中断')
       } else if (event.type === 'complete' && event.sessionId) {
         // 保存真实会话ID，流式结束后在 finally 中统一迁移
         realSessionId = String(event.sessionId)
@@ -4336,16 +4767,7 @@ const sendMessage = async () => {
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
         }
-      } else if (event.type === 'skill_match') {
-          const skills = event.data as SkillMatchInfo[]
-          if (skills.length > 0) {
-            assistantMsg.matchedSkills = skills.map(s => ({
-              name: s.name,
-              confidence: s.confidence,
-              triggerWords: s.triggerWords
-            }))
-          }
-        } else if (event.type === 'agent_event') {
+      } else if (event.type === 'agent_event') {
           const agentEvent = event.data as AgentStreamEvent
           handleAgentEvent(agentEvent)
         }
@@ -4371,8 +4793,9 @@ const sendMessage = async () => {
     if (conv && !conv.isLocal) {
       // 从后端刷新获取标题
     }
-    // H1 修复：try 正常走完（流式完整结束无异常/无中止）才标记完成
-    streamCompleted = true
+    // H1 修复：try 正常走完（流式完整结束无异常/无中止）才标记完成；
+    // ★ 收到 task_error（任务错误停止）时不算正常完成，避免误报「后台任务已完成」通知
+    streamCompleted = !streamHadTaskError
   } catch (error: any) {
     if (error.message === '__USER_ABORT__') {
       console.log('用户中断流式响应')
@@ -4438,6 +4861,21 @@ const sendMessage = async () => {
     // ★ 每次对话结束后刷新一次 DeepSeek 余额（当前 Provider 为 DeepSeek 时自动展示）
     refreshBalance()
   }
+}
+
+/** 「继续任务」指令文案：任务异常中断后一键续跑（程序化发送，用户无需复制上次发言重发） */
+const CONTINUE_TASK_TEXT = '请从中断处继续完成刚才因错误中断的任务。注意：先检查当前进度，不要重复已完成的工作。'
+
+/**
+ * 「继续任务」：一键续跑异常中断的任务。
+ * 程序化发送续跑指令（等价于用户主动发消息，但无需手动复制重发）——
+ * sendMessage 开头会清除该会话的「任务中断」提示并走正常发送流程；
+ * 若本轮再次异常停止，新的 task_error 事件会重新写入中断状态。
+ */
+const continueInterruptedTask = async () => {
+  const cid = currentConversationId.value
+  if (!cid || !interruptedTasks.value[cid] || hasRunningTask.value) return
+  await sendMessage(CONTINUE_TASK_TEXT)
 }
 
 const handleShiftEnter = () => {
@@ -4565,6 +5003,20 @@ const reconnectToTaskStream = async (convId: number, cursor = 0) => {
         if (targetMsg && updateAgentInvokePending(targetMsg, event.data as DelegateProgressData)) {
           scheduleMessageUpdate(stringConvId, targetMsg.id)
         }
+      } else if (event.type === 'task_error') {
+        // ★ 重连场景：后台任务因 LLM 接口错误停止——记录错误详情 + 恢复「一键继续」入口
+        const errData = event.data as TaskErrorData
+        if (targetMsg) {
+          targetMsg.taskError = errData
+          flushMessageUpdate(stringConvId, targetMsg.id)
+        }
+        interruptedTasks.value[stringConvId] = {
+          title: errData.title || '任务已中断',
+          message: errData.message,
+          status: errData.status,
+          retryable: errData.retryable
+        }
+        message.error(errData.title ? `任务中断：${errData.title}` : '任务已中断')
       } else if (event.type === 'complete') {
         break
       }
@@ -4635,6 +5087,14 @@ const checkAndReconnect = async (convId: string) => {
         // 缺陷B修复（2026-09-18）：任务已结束的会话强制刷新消息，避免停留过期缓存
         //（如委托任务完成后再切回时界面仍是旧内容、需重启软件才可见）
         await fetchMessages(convId, true)
+      }
+    } else if (task.lastTask && task.lastTask.status === 'failed') {
+      // ★ 任务上次异常停止（错误停止，非人为停止/非正常完成）：恢复「任务中断」提示
+      //   与「一键继续」入口（输入区横幅）。用户手动停止（cancelled）/正常完成不触发。
+      //   后端已保证：仅「最近一次任务 failed 且之后没有新用户消息」时返回该摘要。
+      interruptedTasks.value[convId] = {
+        title: '上次任务执行失败',
+        message: task.lastTask.errorMessage || '任务因错误中断，可点击「继续任务」重试。'
       }
     }
   } catch (e) {
@@ -6457,6 +6917,105 @@ watch(currentConversationId, (newId) => {
   position: relative;
 }
 
+/* ===== 网页标签布局 ===== */
+.web-tab-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.web-tab-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, #e8e5f0);
+  background: var(--bg-secondary, #f7f6fb);
+}
+.web-tab-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+}
+.web-tab-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+}
+.web-tab-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
+/* webview 需显式 display:flex 才能撑满高度（Electron 已知表现） */
+.web-tab-frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: flex;
+}
+
+/* ===== 图片标签布局 ===== */
+.image-tab-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.image-tab-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, #e8e5f0);
+  background: var(--bg-secondary, #f7f6fb);
+}
+.image-tab-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+}
+.image-tab-actions {
+  flex: 0 0 auto;
+}
+.image-tab-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+.image-tab-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+}
+.image-tab-hint {
+  color: var(--text-secondary, #888);
+  font-size: 13px;
+}
+.image-tab-hint.error {
+  color: #e5484d;
+}
+
 /* ===== 文件标签布局 ===== */
 .file-tab-layout {
   flex: 1;
@@ -6747,12 +7306,19 @@ watch(currentConversationId, (newId) => {
   width: 38px;
   height: 38px;
   border-radius: 12px;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
   font-size: 14px;
   box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+}
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .user-avatar {
   background: linear-gradient(135deg, var(--accent), var(--accent-dk));
@@ -6854,6 +7420,36 @@ watch(currentConversationId, (newId) => {
   text-align: left;
 }
 
+/* ===== 任务错误（消息区：LLM 接口错误停止的详情展示） ===== */
+.message-task-error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #ffccc7;
+  border-left: 3px solid #ff4d4f;
+  border-radius: 8px;
+  background: rgba(255, 241, 240, 0.7);
+}
+.task-error-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cf1322;
+}
+.task-error-detail {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-line;
+  word-break: break-word;
+}
+[data-theme="dark"] .message-task-error {
+  background: rgba(70, 30, 32, 0.55);
+  border-color: #5c2224;
+}
+[data-theme="dark"] .task-error-title {
+  color: #ff7875;
+}
+
 /* ===== 思考过程 ===== */
 .thinking-section {
   margin-bottom: 12px;
@@ -6889,7 +7485,8 @@ watch(currentConversationId, (newId) => {
   font-size: 11px;
   color: var(--text-4);
 }
-.skill-match-tags {
+/* 命中技能标签（动态展示：LLM 真正执行 skill action=load 时出现） */
+.skill-hit-tags {
   display: flex;
   gap: 4px;
   margin-right: 8px;
@@ -6897,24 +7494,24 @@ watch(currentConversationId, (newId) => {
   flex: 1;
   min-width: 0;
 }
-.skill-match-tag {
+.skill-hit-tag {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 2px 9px;
+  padding: 2px 10px;
   border-radius: 12px;
   font-size: 11px;
   font-weight: 600;
-  max-width: 160px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  color: #7c3aed;
+  background: rgba(139, 92, 246, 0.10);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  animation: skillHitIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.skill-tag-high { background: #f0fdf4; color: #16a34a; border: 1px solid #86efac; }
-.skill-tag-mid  { background: #fffbeb; color: #d97706; border: 1px solid #fcd34d; }
-.skill-tag-low  { background: #fef2f2; color: #dc2626; border: 1px solid #fca5a5; }
-.skill-tag-conf { font-size: 10px; opacity: 0.75; }
+@keyframes skillHitIn {
+  from { opacity: 0; transform: translateY(-3px) scale(0.92); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 .thinking-content {
   padding: 10px 14px;
   max-height: 600px;
@@ -7002,6 +7599,56 @@ watch(currentConversationId, (newId) => {
   border-top: 1px solid var(--border);
   position: relative;
   backdrop-filter: blur(10px);
+}
+
+/* ===== 任务中断横幅（输入区：错误详情 + 一键继续任务） ===== */
+.task-interrupted-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #ffccc7;
+  border-radius: 10px;
+  background: rgba(255, 241, 240, 0.6);
+}
+.interrupted-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.interrupted-icon {
+  font-size: 15px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+.interrupted-texts {
+  min-width: 0;
+}
+.interrupted-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cf1322;
+}
+.interrupted-message {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-line;
+  word-break: break-word;
+}
+.continue-task-btn {
+  flex-shrink: 0;
+}
+[data-theme="dark"] .task-interrupted-banner {
+  background: rgba(70, 30, 32, 0.5);
+  border-color: #5c2224;
+}
+[data-theme="dark"] .interrupted-title {
+  color: #ff7875;
 }
 
 /* ===== 附件 ===== */
@@ -7849,7 +8496,9 @@ watch(currentConversationId, (newId) => {
   gap: 10px;
   padding: 10px 24px;
   flex-shrink: 0;
-  background: var(--bg-chat);
+  /* 背景透明：与聊天区背景融为一体（透出背景图 / 页面遮罩），
+     只保留圆点 + 状态文字 + 用时，不再形成实心横条挡在背景上 */
+  background: transparent;
 }
 .stream-pulse-dot {
   width: 9px;
@@ -8243,21 +8892,11 @@ watch(currentConversationId, (newId) => {
   background: var(--accent-lt);
 }
 
-/* 技能标签 */
-[data-theme="dark"] .skill-tag-high {
-  background: rgba(16,185,129,0.12);
-  color: #4ade80;
-  border-color: rgba(16,185,129,0.25);
-}
-[data-theme="dark"] .skill-tag-mid {
-  background: rgba(245,158,11,0.12);
-  color: #fbbf24;
-  border-color: rgba(245,158,11,0.25);
-}
-[data-theme="dark"] .skill-tag-low {
-  background: rgba(239,68,68,0.12);
-  color: #f87171;
-  border-color: rgba(239,68,68,0.25);
+/* 命中技能标签（暗色） */
+[data-theme="dark"] .skill-hit-tag {
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.16);
+  border-color: rgba(139, 92, 246, 0.4);
 }
 
 /* ===== 暗色：发送面板 ===== */

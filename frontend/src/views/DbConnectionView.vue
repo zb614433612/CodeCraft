@@ -2,7 +2,7 @@
   <div class="db-connection-view">
     <div class="page-header">
       <h2>外部数据库连接</h2>
-      <span class="page-desc">配置业务数据库（MySQL / PostgreSQL / H2），AI 的 execute_sql 工具可通过 connection 参数指定连接执行 SQL。密码加密存储，仅显示是否已配置。</span>
+      <span class="page-desc">配置业务数据库（MySQL / PostgreSQL / H2），AI 的 execute_sql 工具可通过 connection 参数指定连接执行 SQL；也可在操作列「执行 SQL」直接调试。密码加密存储，仅显示是否已配置。</span>
       <a-button type="primary" @click="openCreate">
         <template #icon><PlusOutlined /></template>
         新增连接
@@ -42,9 +42,13 @@
           <span v-else style="color: #999">无</span>
         </template>
       </a-table-column>
-      <a-table-column title="操作" width="220">
+      <a-table-column title="操作" width="330">
         <template #default="{ record }">
           <a-space>
+            <a-button size="small" :disabled="record.enabled !== 1" @click="openSqlExecutor(record)">
+              <template #icon><CodeOutlined /></template>
+              执行 SQL
+            </a-button>
             <a-button size="small" @click="handleTest(record)">测试连接</a-button>
             <a-button size="small" type="link" @click="openEdit(record)">编辑</a-button>
             <a-popconfirm title="确认删除该数据库连接？" @confirm="handleDelete(record.id)">
@@ -123,13 +127,17 @@
         </div>
       </template>
     </a-modal>
+
+    <!-- 执行 SQL 抽屉 -->
+    <SqlExecutorDrawer v-model:open="sqlDrawerOpen" :connection="sqlTarget" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { PlusOutlined } from '@ant-design/icons-vue'
+import { CodeOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import SqlExecutorDrawer from '@/components/SqlExecutorDrawer.vue'
 import {
   listDbConnections, createDbConnection, updateDbConnection, deleteDbConnection,
   testDbConnection, testSavedDbConnection,
@@ -158,6 +166,15 @@ const emptyForm = (): DbConnectionConfig => ({
   enabled: 1
 })
 const form = reactive<DbConnectionConfig>(emptyForm())
+
+// ===== 执行 SQL 抽屉 =====
+const sqlDrawerOpen = ref(false)
+const sqlTarget = ref<DbConnectionVO | null>(null)
+
+const openSqlExecutor = (record: DbConnectionVO) => {
+  sqlTarget.value = record
+  sqlDrawerOpen.value = true
+}
 
 const typeColor = (t: string) => (t === 'mysql' ? 'blue' : t === 'postgresql' ? 'purple' : 'green')
 
@@ -294,6 +311,9 @@ onMounted(loadList)
 <style scoped>
 .db-connection-view {
   padding: 20px;
+  /* 铺满内容区高度：保证「背景图」模式下页面遮罩覆盖整页（避免下半截露出无遮罩原始背景图） */
+  min-height: 100%;
+  box-sizing: border-box;
 }
 .page-header {
   display: flex;

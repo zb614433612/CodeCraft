@@ -49,6 +49,990 @@
   filter: invert(1) brightness(2);
 }
 
+/* ============================================================
+   外观：全局背景图（html.has-app-bg 时生效）
+   —— 让各层容器背景半透明，使「外观设置」上传的窗口背景图透出。
+   html.has-app-bg 由 App.vue 在 bgImageUrl 非空时添加。
+   ============================================================ */
+
+/* 根 / 页面背景透明，露出底层背景图 */
+html.has-app-bg,
+html.has-app-bg body,
+html.has-app-bg #app {
+  background: transparent !important;
+}
+
+/* Layout：根容器透明 + 侧边栏半透明（覆盖 Layout.vue 局部 CSS 变量 --bg-root/--bg-card） */
+html.has-app-bg .layout-container {
+  --bg-root: transparent;
+  --bg-card: rgba(255, 255, 255, 0.72);
+  background-color: transparent !important;
+}
+html.has-app-bg[data-theme="dark"] .layout-container {
+  --bg-card: rgba(26, 29, 34, 0.72);
+}
+
+/* 侧边栏底部用户信息区（.sidebar-footer）：Layout.vue 里它与外层 .sidebar 同用 --bg-card，
+   透明化后双层半透明叠加（0.72+0.72≈有效 0.92）会比侧边栏其他区域明显更实、
+   深色模式下色差尤其突出 —— 因此置为透明，统一露出侧边栏底色，保证整条侧边栏色调一致 */
+html.has-app-bg .sidebar-footer {
+  background: transparent !important;
+}
+
+/* 主内容区透明 */
+html.has-app-bg .main-content {
+  background: transparent !important;
+}
+
+/* 业务页根容器半透明：router-view 渲染的组件根元素是 .main-content 的直接子元素
+   （仅作用于根容器，不影响内部卡片；保证背景图在内容区也能透出且文字可读） */
+html.has-app-bg .main-content > * {
+  background-color: rgba(255, 255, 255, 0.72) !important;
+}
+html.has-app-bg[data-theme="dark"] .main-content > * {
+  background-color: rgba(26, 29, 34, 0.72) !important;
+}
+
+/* ---------- 以下为各业务页的背景图适配 ---------- */
+
+/* 兜底：页面根容器至少铺满内容区高度。
+   修复 MCP 服务器 / 数据库连接等未设置高度的页面「下半截露出无遮罩原始背景图」的问题 */
+html.has-app-bg .main-content > * {
+  min-height: 100%;
+}
+
+/* AI 助手页：会话侧栏 / 聊天主区为全屏铺满容器，让位于页面遮罩（背景图透出）；
+   会话项、标签页、消息气泡、输入区等小卡片保留自身颜色，形成层次 */
+html.has-app-bg .chat-container .sidebar,
+html.has-app-bg .chat-container .agent-panel-wrapper,
+html.has-app-bg .chat-container .chat-main,
+html.has-app-bg .chat-container .tab-content,
+html.has-app-bg .chat-container .message-list {
+  background: transparent !important;
+}
+
+/* 设备互联页：左侧面板 / 聊天主体同上 */
+html.has-app-bg .p2p-app .side-panel,
+html.has-app-bg .p2p-app .chat-main {
+  background: transparent !important;
+}
+
+/* 大内容卡片毛玻璃化（定时任务 / 技能 / 踩坑经验 / 文件管理 / 用户管理共用 .content-card）：
+   避免大面积实色卡片盖住背景图，同时保留卡片浮层的层次感 */
+html.has-app-bg .content-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .content-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 个人信息页：两张长资料卡片毛玻璃化（避免页面主体被大卡片大面积遮挡） */
+html.has-app-bg .profile-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .profile-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+/* 数据管理页：多张大卡片毛玻璃化（避免大面积实色遮挡背景图） */
+html.has-app-bg .setting-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .setting-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 毛玻璃卡片内的标题条同步透明（靠底边框分隔，避免实色条挡住毛玻璃） */
+html.has-app-bg .content-card .card-header,
+html.has-app-bg .setting-card .card-header,
+html.has-app-bg .setting-card .danger-header,
+html.has-app-bg .profile-card .card-header,
+html.has-app-bg .panel-card .panel-header {
+  background: transparent !important;
+}
+
+/* 上述卡片内的表格同步透明（表格行的 hover 高亮仍由各页面样式保留） */
+html.has-app-bg .content-card .ant-table,
+html.has-app-bg .content-card .ant-table-container,
+html.has-app-bg .content-card .ant-table-thead > tr > th,
+html.has-app-bg .content-card .ant-table-placeholder {
+  background: transparent !important;
+}
+
+/* 菜单权限页：双栏面板毛玻璃化 */
+html.has-app-bg .panel-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .panel-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第二轮：页面头部 / AI 助手页 / 右侧抽屉） ---------- */
+
+/* 全页面通用页头（智能体/技能/MCP/数据库/文件/踩坑/模型配置/用户管理/数据管理/个人信息/菜单权限等
+   共用 .page-header）：毛玻璃化。修复「卡片组件能看到背景图、页面标题组件完全看不到」的观感不一致 */
+html.has-app-bg .page-header {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .page-header {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* AI 助手页：整页容器显式半透明（页面级遮罩，不再依赖 .main-content > * 是否命中），
+   修复「聊天页面整个看不到背景图」——页面根容器实色把背景图全挡住 */
+html.has-app-bg .chat-container {
+  background-color: rgba(255, 255, 255, 0.72) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container {
+  background-color: rgba(26, 29, 34, 0.72) !important;
+}
+
+/* AI 助手页：内部铺满型实色容器透明化（会话列表 / 标签栏 / 按钮组 / 消息区 / 输入区 / 分屏容器 / 差异视图 / 流式状态条） */
+html.has-app-bg .chat-container .conversation-list,
+html.has-app-bg .chat-container .tab-bar,
+html.has-app-bg .chat-container .tab-actions,
+html.has-app-bg .chat-container .chat-input-area,
+html.has-app-bg .chat-container .chat-messages-area,
+html.has-app-bg .chat-container .diff-tab-content,
+html.has-app-bg .chat-container .split-container,
+html.has-app-bg .chat-container .stream-indicator {
+  background: transparent !important;
+}
+
+/* 右侧工具栏与抽屉面板（文件 / Git / 技能 / 终端）：竖条透明 + 抽屉毛玻璃 + 内部头部条透明 */
+html.has-app-bg .right-toolbar-strip {
+  background: transparent !important;
+}
+html.has-app-bg .right-drawer {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .right-drawer {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .right-drawer .drawer-header,
+html.has-app-bg .right-drawer .project-root-bar,
+html.has-app-bg .git-sidebar,
+html.has-app-bg .git-sidebar .git-status-header,
+html.has-app-bg .git-sidebar .commit-section,
+html.has-app-bg .ft-header {
+  background: transparent !important;
+}
+
+/* ---------- 组件级穿透适配（第二轮·补充批次：其余页面组件） ---------- */
+
+/* 踩坑经验页头部：紫色品牌渐变横幅（白字）——保留渐变观感，降为半透明让背景图透出
+   （不用通用 .page-header 毛玻璃规则，避免压平品牌渐变） */
+html.has-app-bg .lesson-manage > .page-header {
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.8), rgba(118, 75, 162, 0.8)) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 排除项 2：MCP 服务器 / 数据库连接页头部原本无背景（天然透出），不额外加底 */
+html.has-app-bg .mcp-config-view > .page-header,
+html.has-app-bg .db-connection-view > .page-header {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 页面工具栏条（技能 / 文件管理 / 踩坑经验 / 用户管理共用 .toolbar-card）：毛玻璃 */
+html.has-app-bg .toolbar-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .toolbar-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 统计卡片（定时任务 / 踩坑经验页顶部）：毛玻璃 */
+html.has-app-bg .stat-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .stat-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 智能体页 / 模型配置页的卡片与空态卡：半透明化
+   （普通卡实色 → 半透明；品牌渐变卡保留渐变、终点改半透明） */
+html.has-app-bg .agent-card {
+  background-color: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .agent-card {
+  background-color: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .agent-card.is-builtin {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.05), rgba(255, 255, 255, 0.5)) !important;
+}
+html.has-app-bg[data-theme="dark"] .agent-card.is-builtin {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.05), rgba(26, 29, 34, 0.5)) !important;
+}
+html.has-app-bg .agent-card.is-default {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(255, 255, 255, 0.5)) !important;
+}
+html.has-app-bg[data-theme="dark"] .agent-card.is-default {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.06), rgba(26, 29, 34, 0.5)) !important;
+}
+html.has-app-bg .state-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .state-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 设备互联页：顶栏毛玻璃、聊天头部条与输入区透明（修复「设备互联背景图不显示」） */
+html.has-app-bg .p2p-app .top-bar {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .top-bar {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .chat-header,
+html.has-app-bg .p2p-app .chat-footer {
+  background: transparent !important;
+}
+
+/* MCP 服务器 / 数据库连接页：页面级表格毛玻璃化（antd 表体 / 表头 / 占位均实色） */
+html.has-app-bg .mcp-config-view .ant-table,
+html.has-app-bg .mcp-config-view .ant-table-container,
+html.has-app-bg .mcp-config-view .ant-table-thead > tr > th,
+html.has-app-bg .mcp-config-view .ant-table-tbody > tr > td,
+html.has-app-bg .mcp-config-view .ant-table-placeholder,
+html.has-app-bg .db-connection-view .ant-table,
+html.has-app-bg .db-connection-view .ant-table-container,
+html.has-app-bg .db-connection-view .ant-table-thead > tr > th,
+html.has-app-bg .db-connection-view .ant-table-tbody > tr > td,
+html.has-app-bg .db-connection-view .ant-table-placeholder {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .mcp-config-view .ant-table,
+html.has-app-bg[data-theme="dark"] .mcp-config-view .ant-table-container,
+html.has-app-bg[data-theme="dark"] .mcp-config-view .ant-table-thead > tr > th,
+html.has-app-bg[data-theme="dark"] .mcp-config-view .ant-table-tbody > tr > td,
+html.has-app-bg[data-theme="dark"] .mcp-config-view .ant-table-placeholder,
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table,
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table-container,
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table-thead > tr > th,
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table-tbody > tr > td,
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table-placeholder {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 内容卡片内暗色表格单元格透明（清除全局块给暗色 td 打的实色底污染，如定时任务页） */
+html.has-app-bg[data-theme="dark"] .content-card .ant-table-tbody > tr > td {
+  background: transparent !important;
+}
+
+/* 表格行 hover 高亮（压过上述 td 半透明底，保留悬停反馈） */
+html.has-app-bg .mcp-config-view .ant-table-tbody > tr:hover > td,
+html.has-app-bg .db-connection-view .ant-table-tbody > tr:hover > td,
+html.has-app-bg .content-card .ant-table-tbody > tr:hover > td {
+  background: rgba(245, 247, 255, 0.85) !important;
+}
+html.has-app-bg[data-theme="dark"] .mcp-config-view .ant-table-tbody > tr:hover > td,
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table-tbody > tr:hover > td,
+html.has-app-bg[data-theme="dark"] .content-card .ant-table-tbody > tr:hover > td {
+  background: rgba(56, 61, 80, 0.7) !important;
+}
+
+/* 运行日志页：工具栏 / 搜索条毛玻璃；日志主体保持深色半透明（0.85，保障可读性与滚动性能）；状态条透明 */
+html.has-app-bg .log-toolbar,
+html.has-app-bg .search-bar {
+  background: rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.has-app-bg[data-theme="dark"] .log-toolbar,
+html.has-app-bg[data-theme="dark"] .search-bar {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .log-viewer {
+  background: rgba(27, 30, 43, 0.85) !important;
+}
+html.has-app-bg .log-statusbar {
+  background: transparent !important;
+}
+
+/* ---------- 组件级穿透适配（第三轮：AI 助手页细化） ---------- */
+
+/* 1) 会话列表：未选中会话项半透明（选中项保留品牌浅紫渐变；hover 提亮保持反馈） */
+html.has-app-bg .chat-container .conversation-item:not(.active) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg .chat-container .conversation-item:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.65) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .conversation-item:not(.active) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .conversation-item:hover:not(.active) {
+  background: rgba(26, 29, 34, 0.65) !important;
+}
+
+/* 2) 消息气泡：LLM 回复半透明白；用户气泡半透明品牌紫渐变（文字对比度仍充足） */
+html.has-app-bg .chat-container .message-item.assistant .message-content {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .message-item.assistant .message-content {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .message-item.user .message-content {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.85), rgba(124, 58, 237, 0.85)) !important;
+}
+
+/* 3) 标签页：激活标签半透明（非激活标签与标签栏本已透明；hover 保留原浅紫反馈） */
+html.has-app-bg .chat-container .tab-item.active {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .tab-item.active {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 4) 编译 / 运行 / 停止按钮：默认与危险按钮半透明白，主按钮半透明品牌紫，禁用态浅灰半透明 */
+html.has-app-bg .chat-container .tab-actions .tb-btn:not(.ant-btn-primary) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .tab-actions .tb-btn:not(.ant-btn-primary) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .tab-actions .tb-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+html.has-app-bg .chat-container .tab-actions .tb-btn:disabled {
+  background: rgba(245, 245, 245, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .tab-actions .tb-btn:disabled {
+  background: rgba(42, 40, 56, 0.5) !important;
+}
+
+/* 5) 聊天输入区：输入框 / 附件按钮 / 设置按钮半透明，发送按钮半透明渐变，更多设置弹层毛玻璃 */
+html.has-app-bg .chat-container .input-wrapper .ant-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .input-wrapper .ant-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .input-wrapper .attach-btn:not(:disabled) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .input-wrapper .attach-btn:not(:disabled) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .input-wrapper .send-btn:not(:disabled) {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.85), rgba(124, 58, 237, 0.85)) !important;
+}
+html.has-app-bg .chat-container .input-wrapper .send-btn:disabled {
+  background: rgba(220, 216, 234, 0.5) !important;
+}
+html.has-app-bg .chat-container .mode-selector {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .mode-selector {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .more-settings-popover {
+  background: rgba(255, 255, 255, 0.6) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+html.has-app-bg[data-theme="dark"] .chat-container .more-settings-popover {
+  background: rgba(26, 29, 34, 0.6) !important;
+}
+
+/* 6) 右侧抽屉（文件 / Git / 技能）：面板输入框与按钮半透明，技能列表卡片半透明 */
+html.has-app-bg .right-drawer .project-root-bar .ant-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .right-drawer .project-root-bar .ant-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .right-drawer .project-root-bar .ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+html.has-app-bg .right-drawer .sync-btn,
+html.has-app-bg .right-drawer .toolbar-btn,
+html.has-app-bg .right-drawer .mini-btn {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .right-drawer .sync-btn,
+html.has-app-bg[data-theme="dark"] .right-drawer .toolbar-btn,
+html.has-app-bg[data-theme="dark"] .right-drawer .mini-btn {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .right-drawer .commit-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .right-drawer .commit-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .right-drawer .commit-btn {
+  background: rgba(22, 119, 255, 0.85) !important;
+}
+html.has-app-bg .right-drawer .commit-btn:hover:not(:disabled) {
+  background: rgba(64, 150, 255, 0.9) !important;
+}
+html.has-app-bg .right-drawer .skill-item {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .right-drawer .skill-item {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第四轮：技能管理页） ---------- */
+
+/* 工具栏：搜索输入框 / Agent 筛选下拉框半透明（聚焦态保留描边与光晕反馈） */
+html.has-app-bg .skill-manage .search-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .skill-manage .search-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .skill-manage .toolbar-card .ant-select-selector {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .skill-manage .toolbar-card .ant-select-selector {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 新建技能按钮：半透明品牌紫 */
+html.has-app-bg .skill-manage .create-btn {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 技能卡片列表：卡片与卡内操作按钮半透明；删除按钮 hover 保留红色警示反馈 */
+html.has-app-bg .skill-manage .skill-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .skill-manage .skill-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .skill-manage .action-btn {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .skill-manage .action-btn {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .skill-manage .action-btn.action-delete:hover {
+  background: rgba(239, 68, 68, 0.12) !important;
+}
+
+/* ---------- 组件级穿透适配（第五轮：MCP 服务器页） ---------- */
+
+/* 头部操作按钮：刷新（默认型）半透明白；新增服务器（主按钮）半透明品牌紫。
+   表格数据列已在「第二轮·补充批次」完成半透明覆盖（容器 / 表头 / 单元格 / 空态 / 行悬停），此处无需处理 */
+html.has-app-bg .mcp-config-view .page-header .ant-btn:not(.ant-btn-primary) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .mcp-config-view .page-header .ant-btn:not(.ant-btn-primary) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .mcp-config-view .page-header .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* ---------- 组件级穿透适配（第六轮：定时任务页） ---------- */
+
+/* 卡片头部：Agent 筛选下拉框半透明；新增任务（主按钮）半透明品牌紫 */
+html.has-app-bg .schedule-container .filter-select .ant-select-selector {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .schedule-container .filter-select .ant-select-selector {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .schedule-container .card-header-right .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 列表分页器：页码 / 上一页 / 下一页半透明；当前页深色下保留半透明强调蓝。
+   表格主体（容器 / 表头 / 数据行 / 悬停 / 空态）由既有 content-card 规则覆盖，此处不重复 */
+html.has-app-bg .schedule-container .ant-pagination-item,
+html.has-app-bg .schedule-container .ant-pagination-prev .ant-pagination-item-link,
+html.has-app-bg .schedule-container .ant-pagination-next .ant-pagination-item-link {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .schedule-container .ant-pagination-item,
+html.has-app-bg[data-theme="dark"] .schedule-container .ant-pagination-prev .ant-pagination-item-link,
+html.has-app-bg[data-theme="dark"] .schedule-container .ant-pagination-next .ant-pagination-item-link {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .schedule-container .ant-pagination-item-active {
+  background: rgba(79, 125, 243, 0.85) !important;
+}
+
+/* ---------- 组件级穿透适配（第七轮：踩坑经验页） ---------- */
+
+/* 工具栏：输入框（含 allow-clear 的包装层）/ 状态下拉 / 类型下拉半透明 */
+html.has-app-bg .lesson-manage .toolbar-card .ant-input,
+html.has-app-bg .lesson-manage .toolbar-card .ant-input-affix-wrapper {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .lesson-manage .toolbar-card .ant-input,
+html.has-app-bg[data-theme="dark"] .lesson-manage .toolbar-card .ant-input-affix-wrapper {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .lesson-manage .toolbar-card .ant-input-affix-wrapper > .ant-input {
+  background: transparent !important;
+}
+html.has-app-bg .lesson-manage .toolbar-card .ant-select-selector {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .lesson-manage .toolbar-card .ant-select-selector {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 工具栏按钮：查询（主按钮）半透明品牌紫；重置 / 归并重复 / 刷新（默认按钮）半透明白 */
+html.has-app-bg .lesson-manage .toolbar-card .ant-btn:not(.ant-btn-primary) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .lesson-manage .toolbar-card .ant-btn:not(.ant-btn-primary) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .lesson-manage .toolbar-card .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 列表分页器（防御性适配，与定时任务页一致）：页码 / 上一页 / 下一页半透明；当前页深色下保留半透明强调蓝 */
+html.has-app-bg .lesson-manage .ant-pagination-item,
+html.has-app-bg .lesson-manage .ant-pagination-prev .ant-pagination-item-link,
+html.has-app-bg .lesson-manage .ant-pagination-next .ant-pagination-item-link {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .lesson-manage .ant-pagination-item,
+html.has-app-bg[data-theme="dark"] .lesson-manage .ant-pagination-prev .ant-pagination-item-link,
+html.has-app-bg[data-theme="dark"] .lesson-manage .ant-pagination-next .ant-pagination-item-link {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .lesson-manage .ant-pagination-item-active {
+  background: rgba(79, 125, 243, 0.85) !important;
+}
+
+/* ---------- 组件级穿透适配（第八轮：数据库连接页） ---------- */
+
+/* 头部：新增连接（主按钮）半透明品牌紫（头部容器本身早已透明，无需处理） */
+html.has-app-bg .db-connection-view .page-header .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .db-connection-view .page-header .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .db-connection-view .page-header .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 表格操作列：执行 SQL / 测试连接（默认按钮）半透明白；编辑 / 删除为 link 型无需处理 */
+html.has-app-bg .db-connection-view .ant-table .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .db-connection-view .ant-table .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第九轮：文件管理页） ---------- */
+
+/* 工具栏：搜索框（自定义容器，fallback 为实色浅灰）/ 状态下拉 / 存储下拉半透明 */
+html.has-app-bg .file-manage .toolbar-card .search-box {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .toolbar-card .search-box {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .file-manage .toolbar-card .ant-select-selector {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .toolbar-card .ant-select-selector {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 工具栏按钮：刷新 / 云端文件（默认按钮）半透明白；上传文件（主按钮）半透明品牌紫 */
+html.has-app-bg .file-manage .toolbar-card .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .toolbar-card .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .file-manage .toolbar-card .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 空态按钮：上传第一个文件（主按钮）半透明品牌紫；清除筛选（默认按钮）半透明白 */
+html.has-app-bg .file-manage .content-card .empty-cta:not(.ant-btn-primary) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .content-card .empty-cta:not(.ant-btn-primary) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .file-manage .content-card .empty-cta.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 文件列表：缩略图占位底（实色浅灰）半透明 */
+html.has-app-bg .file-manage .file-row .row-thumb {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .file-row .row-thumb {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 分页器（页码 / 上一页 / 下一页 / 每页条数下拉 / 快速跳转输入框）半透明；当前页深色下保留半透明强调蓝；
+   分页器底条深色下半透明深色（亮色原本即 rgba(255,255,255,0.6) 半透明，无需处理） */
+html.has-app-bg .file-manage .ant-pagination-item,
+html.has-app-bg .file-manage .ant-pagination-prev .ant-pagination-item-link,
+html.has-app-bg .file-manage .ant-pagination-next .ant-pagination-item-link,
+html.has-app-bg .file-manage .ant-pagination-options .ant-select-selector,
+html.has-app-bg .file-manage .ant-pagination-options-quick-jumper input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .ant-pagination-item,
+html.has-app-bg[data-theme="dark"] .file-manage .ant-pagination-prev .ant-pagination-item-link,
+html.has-app-bg[data-theme="dark"] .file-manage .ant-pagination-next .ant-pagination-item-link,
+html.has-app-bg[data-theme="dark"] .file-manage .ant-pagination-options .ant-select-selector,
+html.has-app-bg[data-theme="dark"] .file-manage .ant-pagination-options-quick-jumper input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .ant-pagination-item-active {
+  background: rgba(79, 125, 243, 0.85) !important;
+}
+html.has-app-bg[data-theme="dark"] .file-manage .list-footer {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第十轮：设备互联页） ---------- */
+
+/* 顶部栏：设备名称输入框半透明 */
+html.has-app-bg .p2p-app .name-input-top {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .name-input-top {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 左侧面板：工具卡片 / 连接串输入框半透明；生成、复制（默认按钮）半透明白，连接（主按钮）半透明品牌紫 */
+html.has-app-bg .p2p-app .tool-card {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .tool-card {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .side-panel .ant-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .side-panel .ant-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .side-panel .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .side-panel .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .side-panel .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* Hero 功能项半透明 */
+html.has-app-bg .p2p-app .hero-feat-item {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .hero-feat-item {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 聊天头部按钮组：默认 / 危险按钮半透明白；重连（主按钮）半透明品牌紫 */
+html.has-app-bg .p2p-app .chat-header .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .chat-header .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .chat-header .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 消息气泡：我方（紫）/ Agent 调用（橙）半透明品牌渐变；对方气泡半透明白 */
+html.has-app-bg .p2p-app .bubble-me {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.85), rgba(124, 58, 237, 0.85)) !important;
+}
+html.has-app-bg .p2p-app .bubble-agent-invoke {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.85), rgba(217, 119, 6, 0.85)) !important;
+}
+html.has-app-bg .p2p-app .bubble-peer {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .bubble-peer {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 对方文件气泡的「打开」按钮半透明（我方气泡内的按钮原本即半透明白，保持不动） */
+html.has-app-bg .p2p-app .msg-row.peer .btn-open-dir {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .msg-row.peer .btn-open-dir {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 聊天底部：模式切换 Tab / Agent 选择 Chip 半透明（激活态保留半透明品牌渐变）；
+   输入框 / 附件按钮半透明白；发送按钮半透明品牌紫（禁用态浅灰半透明） */
+html.has-app-bg .p2p-app .mode-tab:not(.active) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .mode-tab:not(.active) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .mode-tab.active {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.85), rgba(124, 58, 237, 0.85)) !important;
+}
+html.has-app-bg .p2p-app .agent-chip:not(.active) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .agent-chip:not(.active) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .agent-chip.active {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.85), rgba(217, 119, 6, 0.85)) !important;
+}
+html.has-app-bg .p2p-app .chat-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .chat-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .btn-attach {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .btn-attach {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .p2p-app .btn-send:not(:disabled) {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.85), rgba(124, 58, 237, 0.85)) !important;
+}
+html.has-app-bg .p2p-app .btn-send:disabled {
+  background: rgba(220, 216, 234, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .p2p-app .btn-send:disabled {
+  background: rgba(42, 40, 56, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第十一轮：模型配置 / 运行日志 / 数据管理） ---------- */
+
+/* —— 模型配置页（ConfigView / ProviderConfigView 共用根类）——
+   新增 Provider（主按钮）与空态新建按钮半透明品牌紫（卡片、空态卡已有通用规则覆盖） */
+html.has-app-bg .provider-config-root .btn-create,
+html.has-app-bg .provider-config-root .state-card .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* —— 运行日志页（LogView）—— */
+/* 搜索框 / 级别筛选 chips 半透明；选中 chip 保留淡蓝半透明（深色沿用页面原有半透明蓝） */
+html.has-app-bg .log-container .search-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .log-container .search-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .log-container .filter-chip:not(.active) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .log-container .filter-chip:not(.active) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .log-container .filter-chip.active {
+  background: rgba(230, 244, 255, 0.7) !important;
+}
+/* 日期下拉半透明 */
+html.has-app-bg .log-container .date-select .ant-select-selector {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .log-container .date-select .ant-select-selector {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+/* 工具栏按钮：导出（默认按钮）半透明白；刷新 / 搜索（主按钮）半透明品牌紫 */
+html.has-app-bg .log-container .log-toolbar .ant-btn:not(.ant-btn-primary) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .log-container .log-toolbar .ant-btn:not(.ant-btn-primary) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .log-container .log-toolbar .ant-btn.ant-btn-primary,
+html.has-app-bg .log-container .search-bar .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* —— 数据管理页（SystemSettingView）—— */
+/* 卡片内按钮：默认按钮半透明白；主按钮半透明品牌紫；「重置所有数据」（危险主按钮）半透明红 */
+html.has-app-bg .system-setting-page .setting-card .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .system-setting-page .setting-card .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .system-setting-page .setting-card .ant-btn.ant-btn-primary:not(.ant-btn-dangerous) {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+html.has-app-bg .system-setting-page .setting-card .ant-btn.ant-btn-primary.ant-btn-dangerous {
+  background: rgba(255, 77, 79, 0.85) !important;
+}
+/* 提示条（浅蓝信息 / 浅黄警示）保留色相降低不透明度；导入预览块半透明白 */
+html.has-app-bg .system-setting-page .data-desc-tip,
+html.has-app-bg .system-setting-page .backup-tip {
+  background: rgba(240, 249, 255, 0.6) !important;
+}
+html.has-app-bg .system-setting-page .backup-tip.warn-tip {
+  background: rgba(255, 251, 235, 0.6) !important;
+}
+html.has-app-bg[data-theme="dark"] .system-setting-page .data-desc-tip,
+html.has-app-bg[data-theme="dark"] .system-setting-page .backup-tip {
+  background: rgba(15, 36, 56, 0.6) !important;
+}
+html.has-app-bg[data-theme="dark"] .system-setting-page .backup-tip.warn-tip {
+  background: rgba(42, 33, 19, 0.6) !important;
+}
+html.has-app-bg .system-setting-page .import-preview {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .system-setting-page .import-preview {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第十二轮：AI 助手页 · 补漏） ---------- */
+
+/* 补充需求面板：收起态「💡 补充需求」胶囊按钮半透明（hover 虚线变实线 + 上浮反馈保留） */
+html.has-app-bg .chat-container .supplement-trigger {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .supplement-trigger {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* 补充需求面板：展开态容器 / 输入框半透明；发送（主按钮）半透明品牌紫，取消（默认按钮）半透明白 */
+html.has-app-bg .chat-container .supplement-input-row {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .supplement-input-row {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .supplement-input-row .ant-input {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .supplement-input-row .ant-input {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .supplement-input-row .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .supplement-input-row .ant-btn:not(.ant-btn-primary):not(.ant-btn-link) {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .supplement-input-row .ant-btn.ant-btn-primary {
+  background: rgba(139, 92, 246, 0.85) !important;
+}
+
+/* 底部运行日志面板（点「编译 / 运行」时显示）：面板与 Tab 栏半透明、激活 Tab 半透明白；
+   xterm 终端画布保留其原深色背景（内容可读性） */
+html.has-app-bg .chat-container .run-log-panel {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .run-log-panel {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .run-log-panel .log-tab-bar {
+  background: transparent !important;
+}
+html.has-app-bg .chat-container .run-log-panel .log-tab {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .run-log-panel .log-tab {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+
+/* ---------- 组件级穿透适配（第十三轮：AI 助手页「应用内查看」标签：文件 / 图片 / 网页） ---------- */
+
+/* 文件编辑器（VS Code 风格深色编辑器）：深色底整体降压为半透明 + 毛玻璃
+   （固定半透明深色而非主题色：保留深色底以保证代码彩字对比度与可读性）；
+   头部 / 行号区 / 高亮层去底，统一由外层容器承担 —— 避免多层实色叠加把背景图完全盖住 */
+html.has-app-bg .file-editor {
+  background: rgba(30, 30, 30, 0.82) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+html.has-app-bg .file-editor .fe-header {
+  background: rgba(37, 37, 38, 0.6) !important;
+}
+html.has-app-bg .file-editor .fe-gutter,
+html.has-app-bg .file-editor .fe-highlight-layer {
+  background: transparent !important;
+}
+html.has-app-bg .file-editor .fe-footer {
+  background: rgba(0, 122, 204, 0.85) !important;
+}
+
+/* 图片 / 网页标签：工具栏半透明（正文分别为图片与 webview 自身内容，无需处理）；
+   容器与提示区透明，让页面遮罩 / 背景图透出 */
+html.has-app-bg .chat-container .web-tab-toolbar,
+html.has-app-bg .chat-container .image-tab-toolbar {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.has-app-bg[data-theme="dark"] .chat-container .web-tab-toolbar,
+html.has-app-bg[data-theme="dark"] .chat-container .image-tab-toolbar {
+  background: rgba(26, 29, 34, 0.5) !important;
+}
+html.has-app-bg .chat-container .file-tab-layout,
+html.has-app-bg .chat-container .file-tab-editor,
+html.has-app-bg .chat-container .web-tab-layout,
+html.has-app-bg .chat-container .web-tab-body,
+html.has-app-bg .chat-container .image-tab-layout,
+html.has-app-bg .chat-container .image-tab-body {
+  background: transparent !important;
+}
+
+/* ============================================================
+   Electron 桌面端：透明自定义标题栏（electron/main.js titleBarStyle: 'hidden' + 透明 WCO）
+   —— 系统标题栏隐藏后页面从窗口顶部（y=0）渲染，为「窗口控制按钮 + 拖拽区」预留顶部 32px：
+   该区域显示 .layout-container 背景（普通模式=主题底色 --bg-root；
+   背景图模式=透明 + 顶部遮罩色带（见下），透出压暗后的背景图 —— 标题栏随应用背景变化）。
+   拖拽区元素由 App.vue 提供（.electron-titlebar-drag）。
+   ============================================================ */
+html.is-electron .layout-container {
+  box-sizing: border-box;
+  padding-top: 32px;
+}
+
+/* 标题栏预留区遮罩（背景图模式）：内容区靠半透明遮罩压暗背景图，而标题栏区域此前是
+   「无遮罩的原始背景图」—— 暗色模式下背景图浅色部分会明显过亮（发白），与下方内容割裂。
+   此处用与内容区一致的遮罩色（亮色 白 72% / 暗色 深灰黑 72%）为顶部 32px 补上遮罩色带
+   （色带宽度与下方 padding-top / WCO 高度 32px 保持同步）。 */
+html.is-electron.has-app-bg .layout-container {
+  background-image: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.72) 0,
+    rgba(255, 255, 255, 0.72) 32px,
+    transparent 32px
+  );
+}
+html.is-electron.has-app-bg[data-theme="dark"] .layout-container {
+  background-image: linear-gradient(
+    to bottom,
+    rgba(26, 29, 34, 0.72) 0,
+    rgba(26, 29, 34, 0.72) 32px,
+    transparent 32px
+  );
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -542,3 +1526,58 @@ pre::selection, code::selection, textarea::selection { background: rgba(38, 79, 
 [data-theme="light"] pre::selection,
 [data-theme="light"] code::selection,
 [data-theme="light"] textarea::selection { background: rgba(173, 214, 255, 0.35); color: #1e1e1e; }
+
+/* ===== 聊天消息中「本地文件/图片链接」样式（v-html 内容须全局生效，不能用 scoped） ===== */
+.cc-file-link {
+  color: #4f7df3;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  word-break: break-all;
+}
+.cc-file-link:hover {
+  color: #7aa2ff;
+}
+/* 图片/文件「芯片」（markdown 图片语法的本地路径） */
+.cc-media-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  margin: 0 2px;
+  border: 1px solid #d9d9e0;
+  border-radius: 10px;
+  background: #f2f3f7;
+  color: #4f7df3;
+  font-size: 0.92em;
+  cursor: pointer;
+  text-decoration: none;
+  vertical-align: baseline;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cc-media-chip:hover {
+  background: rgba(79, 125, 243, 0.12);
+  border-color: #4f7df3;
+}
+.cc-media-chip .cc-chip-icon {
+  font-size: 0.95em;
+  line-height: 1;
+}
+.cc-media-chip .cc-chip-name {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[data-theme="dark"] .cc-media-chip {
+  background: #23262c;
+  border-color: #33373e;
+  color: #7aa2ff;
+}
+[data-theme="dark"] .cc-media-chip:hover {
+  background: rgba(122, 162, 255, 0.15);
+  border-color: #7aa2ff;
+}
+[data-theme="dark"] .cc-file-link {
+  color: #7aa2ff;
+}

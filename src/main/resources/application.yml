@@ -139,11 +139,54 @@ edit-file:
 
 # 网络工具统一配置（web_search / web_fetch / http_request / check_network）
 network-tool:
-  search-max-results: 8                       # 搜索结果最大条数（Bing RSS 搜索）
+  search-max-results: 8                       # 搜索结果最大条数
+  search-engines:                             # 有代理时的搜索源优先级（bing-global=全球版Bing / bing-cn=中国版Bing / baidu=百度）
+    - bing-global
+    - bing-cn
+    - baidu
+  search-engines-no-proxy:                    # 无代理（国内直连兜底）时的搜索源优先级，只保留国内可达源
+    - bing-cn
+    - baidu
+  search-cache-ttl-seconds: 300               # 搜索结果缓存 TTL（秒），<=0 禁用缓存
+  search-cache-max-entries: 100               # 搜索结果缓存最大条目数
+  search-low-quality-domains:                 # 低质量域名（排序降权），留空则关闭
+    - baijiahao.baidu.com
   fetch-connect-timeout: 5000                 # 网页抓取连接超时（ms）
   fetch-read-timeout: 15000                   # 网页抓取读取超时（ms）
   fetch-max-content-length: 100000            # 网页内容最大长度（字符）
-  fetch-user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  fetch-user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"   # 兜底 UA（出网验证、UA 池为空时使用）
+  fetch-user-agents:                          # 抓取 UA 池：按域名稳定选择、失败换 UA 重试；sec-ch-ua 等客户端提示头自动配套
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  fetch-retry-count: 2                        # 本地抓取失败重试次数（403/429/503/5xx/超时/拦截页等换 UA 重试），0=不重试
+  fetch-retry-delay-ms: 500                   # 重试间隔（ms）；HTTP 429 时优先遵循响应头 Retry-After
+  fetch-block-detection-enabled: true         # 反爬拦截页识别（命中关键词且正文极短 → 判为拦截页并换 UA 重试）
+  fetch-block-min-text-length: 1500           # 拦截页判定：正文长度阈值（低于该值且命中关键词才判定，避免误伤）
+  fetch-block-keywords:                       # 拦截页关键词（大小写不敏感）
+    - "just a moment"
+    - "cf-browser-verification"
+    - "cf_chl_"
+    - "checking your browser"
+    - "attention required"
+    - "enable javascript and cookies to continue"
+    - "verify you are human"
+    - "security check"
+    - "zse-ck"
+    - "安全验证"
+    - "访问验证"
+    - "滑动验证"
+  # web_fetch 抓取策略（Jina 优先）：本机有可用代理时优先走 Jina Reader 渲染抓取（反爬/JS 页面友好）；
+  # Jina 不可用（配额受限 429 / 请求失败）或本机无代理时，自动降级为本地抓取（多 UA 重试 + 反爬识别）。
+  fetch-jina-enabled: true                    # 是否启用「有代理时 Jina 优先」策略
+  fetch-jina-reader-url: "https://r.jina.ai/" # Jina Reader 服务前缀（拼接目标 URL）
+  fetch-jina-timeout-ms: 20000                # Jina 请求读取超时（ms）；渲染型页面较慢，单独放宽
+  fetch-jina-cooldown-seconds: 120            # Jina 配额受限（HTTP 429）后的冷却时长（秒）；冷却期内直接走本地抓取
+  fetch-jina-api-key: ""                      # Jina API Key（可选；留空匿名调用，免费约 20 次/分钟）
+  fetch-jina-user-agent: "CodeCraft-WebFetch/2.0"   # Jina 请求 UA（⚠️ 实测不能用浏览器 UA，会被 Jina 以 403 拒绝）
   http-request-connect-timeout: 10000         # HTTP 请求连接超时（ms）
   http-request-read-timeout: 30000            # HTTP 请求读取超时（ms）
   http-request-max-response-bytes: 51200      # HTTP 请求响应体上限（字节）
@@ -158,18 +201,33 @@ network-tool:
     - https://huggingface.co
     - https://api.deepseek.com
   connectivity-check-timeout: 5000            # 连通性检测超时（ms）
+  # 代理策略：默认 auto —— 自动探测本机代理，探测到就走代理；探测不到或代理不通则自动直连（国内网络兜底）
   proxy:
-    enabled: false                            # 是否启用代理
+    mode: auto                                # auto=自动探测（推荐）/ always=强制使用下方 host:port / never=始终直连
+    enabled: false                            # 兼容旧配置：true 等价于 mode=always（mode 显式配置时以 mode 为准）
     host: 127.0.0.1                           # 代理主机地址
-    port: 7890                                # 代理端口（Clash 默认 7890）
+    port: 7890                                # 代理端口（AUTO 模式下作为首个探测目标，Clash 默认 7890）
+    candidate-ports:                          # AUTO 模式候选探测端口（依次探测，命中即用）
+      - 7890                                  # Clash / Clash for Windows 默认
+      - 7897                                  # Clash Verge (Rev) 默认 mixed-port
+      - 7891                                  # Clash socks 端口
+      - 10809                                 # v2rayN HTTP 代理
+    detect-timeout-ms: 250                    # 单端口探测超时（ms）；本地回环探测通常瞬间返回
+    detect-cache-seconds: 300                 # 「已走代理」时的探测缓存（秒），代理状态稳定，可缓存久一些
+    direct-cache-seconds: 30                  # 「判定直连」时的探测缓存（秒），短缓存便于中途启动代理后快速自适应
+    verify-egress: true                       # 端口探测通过后，是否再验证代理真能出网（识别"端口在监听但代理已失效"）
+    egress-check-url: "https://www.google.com/generate_204"   # 出网验证目标（应为必须经代理才能访问的轻量地址）
+    egress-timeout-ms: 6000                   # 出网验证超时（ms）；需覆盖经代理建隧道+TLS 握手首次开销（实测冷启动约 2~3s）
 
 # 网页读取工具配置
+# ⚠️ 已废弃：web-fetch.proxy 不生效（WebFetchConfig 未被任何组件使用）。
+#    所有网络工具（web_search / web_fetch / http_request / check_network）的代理统一由上方 network-tool.proxy 管理。
+#    保留此段仅为兼容历史配置文件，修改此处不会影响行为。
 web-fetch:
-  # HTTP代理配置（用于访问国内无法直连的网站，如 huggingface.co）
   proxy:
-    enabled: false # 是否启用代理
-    host: 127.0.0.1 # 代理主机地址
-    port: 7890 # 代理端口（Clash 默认 7890）
+    enabled: false # 已废弃，不生效；请改用 network-tool.proxy
+    host: 127.0.0.1
+    port: 7890
 
 # 桌面自动化配置（screen_capture 桌面截图 / desktop_control 键盘鼠标模拟）
 desktop:

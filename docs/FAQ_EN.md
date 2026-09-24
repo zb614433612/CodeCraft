@@ -41,11 +41,11 @@
 
 ## Q4: Wrong LLM API Key, what to do?
 
-**Answer**: Providers and API Keys are managed in the「Provider Config」page (stored in the `llm_provider` table).
+**Answer**: Providers and API Keys are managed in the「Model Config」page (stored in the `llm_provider` table).
 
 **Steps**:
 1. Open `http://localhost:8084`
-2. Go to 「Config」→「Provider Config」in the left menu
+2. Go to 「Model Config」in the left menu
 3. Add or edit the Provider and enter the correct API Key
 4. Click Save — changes take effect immediately (hot refresh)
 

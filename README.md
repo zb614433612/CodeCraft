@@ -54,7 +54,7 @@ Agent 之间可**任务委托**：智能体 A 在执行中通过 `agent_invoke` 
 AI 修改文件前自动创建快照备份，支持按消息、按文件、按会话三种粒度回滚，500MB 配额自动清理。类似 Aider 的 undo 机制，但更细粒度。
 
 ### 🧩 智能技能系统（Agent Skills / Plugin System）
-将常用操作流程封装为可复用技能（名称 + 触发词 + 执行步骤），AI 通过 BM25 + 触发词双路匹配自动调用，贝叶斯置信度动态调整确保越用越精准。技能信息采用「动态注入」不占上下文窗口，长对话开销恒定——类似 Claude Code 的 custom commands / Codex 的 skills 机制。
+将常用操作流程封装为可复用技能（名称 + 触发词 + 执行步骤），以「渐进式披露」两级结构供 AI 使用：全量技能的轻量目录（名称 / 置信度 / 触发词 / 一句话描述）动态注入 System Prompt 保持全局视野，完整执行说明由 AI 按需加载——不占上下文窗口、长对话开销恒定，贝叶斯置信度动态调整确保越用越精准。类似 Claude Code 的 custom commands / Codex 的 skills 机制。
 
 ### 📚 成长体系（踩坑经验库 / Lesson Knowledge Base）
 AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按需检索、零上下文开销）：工具失败自动捕获草稿、对话级异步复盘提炼解法；再次遇到相同错误时自动向 AI 注入「解法提示 + 补全引导」；**反馈验证闭环**驱动经验转正/隐藏（有效复用 2 次转正、连续失败 5 次隐藏），越用越聪明。前端提供「踩坑经验」管理页（/lesson-manage）与成长看板统计。
@@ -65,8 +65,11 @@ AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按�
 ### 🖥️ 内置代码编辑器（Built-in Code Editor）
 基于 highlight.js 的自研编辑器，支持 30+ 语言语法高亮、行号、暗色主题、光标定位、dirty 标记和快捷键保存。
 
-### 🎨 智能 Markdown 渲染
-支持 KaTeX 数学公式、命令终端卡片、文件清单卡片、彩色提示容器、XSS 安全防护。
+### 🎨 智能 Markdown 渲染与「应用内查看」
+支持 KaTeX 数学公式、命令终端卡片、文件清单卡片、彩色提示容器、XSS 安全防护；AI 回复中的项目文件路径、图片与外链可直接点击，在应用内以标签页打开（文件 / 图片 / 内嵌网页，支持系统浏览器打开，可随时关闭）——无需复制路径、无需离开应用。
+
+### 🖌️ 个性化外观（背景图 / 窗口透明度）
+侧边栏「外观设置」支持上传全局背景图（≤10MB），配合背景不透明度 / 背景模糊 / 窗口整体透明度三个滑块调出专属氛围；桌面端标题栏与整个窗口同步半透明，深浅主题皆宜。
 
 ### 👥 用户管理与权限（Multi-User / RBAC）
 完整的账户体系：注册登录、Token 鉴权（JWT）、角色权限控制（RBAC）、菜单可见性管理、初始管理员自动创建。
@@ -80,8 +83,8 @@ AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按�
 ### 🪟 桌面自动化（Computer Use）
 AI 可"看到"并"操控"电脑：`screen_capture` 一键截屏（分辨率标准化 + 自动上传 + 注入上下文，叠加网格与刻度辅助坐标读数）→ `desktop_control` 键鼠模拟（点击/拖拽/滚轮/按键/输入，单次支持 1~20 个批量动作）——"截图 → 定坐标 → 操作 → 再截图验证"闭环。DESKTOP 高危权限管控 + 坐标准星预检（先验证后执行），支持 Windows / macOS / Linux。
 
-### 🗄️ 数据管理（外部数据库连接）
-在「数据库连接」管理页配置 MySQL / PostgreSQL / H2 外部业务库（密码 AES-256-GCM 加密存储、支持测试连接），AI 即可通过 `execute_sql` 的 `connection` 参数直接查询外部业务库——不传 `connection` 时仍连 CodeCraft 系统库，向后兼容。
+### 🗄️ 数据管理（外部数据库连接 / 备份恢复）
+在「数据库连接」管理页配置 MySQL / PostgreSQL / H2 外部业务库（密码 AES-256-GCM 加密存储、支持测试连接、内置「执行 SQL」工具可直接查改数据），AI 即可通过 `execute_sql` 的 `connection` 参数直接查询外部业务库——不传 `connection` 时仍连 CodeCraft 系统库，向后兼容。「数据管理」页支持配置数据一键导出备份 / 导入恢复（LLM 配置、智能体、技能、聊天记录、踩坑经验等 7 类数据），重装或跨设备迁移不再从头配置。
 
 ### 🛰️ MCP 生态接入（Model Context Protocol）
 **双向 MCP 支持**：作为 Client 连接外部 MCP Server（GitHub、数据库、浏览器自动化等），外部工具动态注册进工具池供 AI 调用（支持 http/stdio 双传输、工具名前缀防冲突、权限档位映射）；作为 Server 对外暴露内置工具，供 Claude Desktop / Cursor 等客户端连接。前端提供「MCP 服务器」管理页（连接/断开/刷新/状态监控）。详见 `docs/MCP_SYSTEM.md`。
@@ -122,8 +125,8 @@ Electron 桌面应用，内置 JRE + Node.js + H2 嵌入式数据库，下载安
 - Linux 用户下载 `CodeCraft-x.x.x.AppImage`
 - 双击安装即可使用，**无需安装 Java**（JRE 已内置在安装包中）
 
-> 安装后启动，后端服务自动运行（等待约 10~30 秒），然后自动打开主界面。
-> 首次使用请先到「配置」页面添加 **LLM Provider**（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）。
+> 安装后启动，后端服务自动运行（等待约 10~30 秒，启动画面实时展示进度），然后自动打开主界面。
+> 首次使用请先到「模型配置」页面添加 **LLM Provider**（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）。
 
 ---
 
@@ -203,7 +206,8 @@ codecraft/
 │   │   └── utils/                # 工具函数
 │   └── public/                   # 静态资源
 ├── electron/                     # Electron 桌面壳
-│   ├── main.js                   # Electron 主进程
+│   ├── main.js                   # Electron 主进程（启动画面 / 透明标题栏 / 窗口透明度）
+│   ├── loading.html              # 启动画面（进度条 + 启动日志锚点）
 │   ├── package.json              # Electron 配置
 │   └── start.sh / start.bat     # 启动脚本
 ├── pom.xml                       # Maven 构建配置

@@ -189,7 +189,15 @@ public class DeepSeekController {
             }
             return result;
         }
-        return Map.of("active", false);
+        // 无活跃任务：附带「最近一次失败任务」摘要——前端据此恢复「任务中断」提示与「一键继续」入口
+        // （仅异常停止的 failed 任务返回；用户手动停止 cancelled / 正常完成 completed 不返回）
+        Map<String, Object> result = new HashMap<>();
+        result.put("active", false);
+        Map<String, Object> lastTask = deepSeekService.getLastTaskSummary(conversationId);
+        if (lastTask != null) {
+            result.put("lastTask", lastTask);
+        }
+        return result;
     }
 
     /**

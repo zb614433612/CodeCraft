@@ -16,15 +16,17 @@
 **Core features:**
 - 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
-- 🧰 **24-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons, desktop automation — covering the full development workflow
+- 🧰 **27-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons, desktop automation — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
 - 🤝 **Agent-to-Agent Invocation**: Agents can delegate tasks to other agent instances in independent sessions (create/continue); delegation = authorization, max depth 3
 - 🔄 **Auto Error Correction**: Auto-retries on failure, automatically switches alternatives
-- 🎯 **Skill System**: Create reusable skills, learned patterns accumulate confidence
+- 🎯 **Skill System**: Create reusable skills; a lightweight catalog of all skills is injected into the system prompt (progressive disclosure) with full instructions loaded on demand, confidence evolves over use
 - 📚 **Growth System (Lesson Knowledge Base)**: Failed tool calls are auto-captured as lessons (per-project, on-demand retrieval); solution hints are injected on recurring errors; a feedback loop promotes/hides experiences automatically
-- 🗄️ **Data Management**: Connect external MySQL / PostgreSQL / H2 databases on the "DB Connections" page; AI queries them via the `execute_sql` connection parameter
+- 🗄️ **Data Management**: Connect external MySQL / PostgreSQL / H2 databases on the "DB Connections" page (with a built-in "Run SQL" tool); AI queries them via the `execute_sql` connection parameter; one-click config backup export/import (7 data categories) on the "Data Management" page
 - 🖼️ **Vision & File Management**: Paste (Ctrl+V) or upload images (≤64MB) in chat for LLM understanding via the cloud Files API (file_id references; DeepSeek / Anthropic adapter); standalone File Manager page with full CRUD, session reference and permanent retention; documents (PDF/Word/Excel) stored locally in the same asset system
 - 🪟 **Desktop Automation (Computer Use)**: `screen_capture` (grid-overlay screenshots, auto-upload + context injection) and `desktop_control` (mouse/keyboard simulation, 1-20 batch actions) — the "capture → locate → act → verify" loop, guarded by the DESKTOP high-risk permission and crosshair preflight
+- 📎 **In-App Viewer**: File paths, images and links in AI replies are clickable — opened as in-app tabs (file / image / embedded web page) without leaving the app
+- 🖌️ **Appearance**: Global background image (≤10MB) with background opacity / blur / window overall opacity sliders; the title bar and whole window become translucent in sync
 - 🖥️ **Desktop App**: Electron + built-in JRE, zero-installation ready to use
 - 🌐 **P2P Remote Collaboration**: Peer-to-peer encrypted channels for remote agent invocation between devices
 - 💾 **Snapshot System**: Auto-backup before code changes, support multi-granularity rollback
@@ -60,7 +62,7 @@ mvn clean package -DskipTests && mvn spring-boot:run
 
 ### First Launch Configuration
 
-After the first launch, go to **Settings → System Config**, add an **LLM Provider** (supports DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.) to start using AI features.
+After the first launch, go to the **Model Config** page, add an **LLM Provider** (supports DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.) to start using AI features.
 
 Default admin account: `admin` / `123456`
 
@@ -104,7 +106,7 @@ CodeCraft
 │   │   │   └── ...
 │   │   └── api/                    # API Call Modules (23, incl. llm-provider / file-asset API)
 │   └── ...
-├── electron/                       # Electron Desktop Shell
+├── electron/                       # Electron Desktop Shell (splash screen / transparent title bar / window opacity)
 ├── docs/                           # Project Documentation
 │   ├── ARCHITECTURE.md             # Architecture Panorama
 │   ├── LLM_PROVIDER_SYSTEM.md     # ★ Multi-LLM Provider System
@@ -120,7 +122,7 @@ CodeCraft
     └── build.sh                    # macOS/Linux One-Click Build
 ```
 
-## 🧰 Tool Ecosystem (24 Tools)
+## 🧰 Tool Ecosystem (27 Tools)
 
 | Category | Tool | Typical Usage |
 |----------|------|--------------|
@@ -143,9 +145,9 @@ CodeCraft
 | **MCP** | `mcp_server_manager` | Manage MCP servers (create/delete/connect/disconnect/refresh) |
 | **Desktop** | `screen_capture` / `desktop_control` | Screen capture (grid overlay) and mouse/keyboard automation (Computer Use, batch actions) |
 
-## 🗄️ Data Management (External DB Connections)
+## 🗄️ Data Management (External DB Connections / Backup & Restore)
 
-Configure external MySQL / PostgreSQL / H2 business databases on the "DB Connections" page (passwords AES-256-GCM encrypted; test-connection supported). AI then targets them via the `execute_sql` `connection` parameter — omit it to use the built-in CodeCraft system DB (backward compatible).
+Configure external MySQL / PostgreSQL / H2 business databases on the "DB Connections" page (passwords AES-256-GCM encrypted; test-connection and a built-in "Run SQL" tool supported). AI then targets them via the `execute_sql` `connection` parameter — omit it to use the built-in CodeCraft system DB (backward compatible). The "Data Management" page also offers one-click config backup export / import (7 data categories), so re-install and cross-device migration need no reconfiguration.
 
 ## 🖼️ Vision & File Management
 
@@ -157,9 +159,9 @@ Paste (Ctrl+V) or upload images directly in chat — images go to the cloud File
 
 ## 🎯 Skill System
 
-Skills are reusable instruction templates. Each skill includes:
-- **Trigger Words**: Auto-match via BM25 + trigger word algorithm
-- **Execution Instructions**: Detailed step-by-step procedures
+Skills are reusable instruction templates. A lightweight catalog of all active skills (name / ID / confidence / trigger words / one-line description) is injected into the system prompt — the LLM keeps a global view of every skill (progressive disclosure) — while full execution instructions are loaded on demand via `skill action=load`. Each skill includes:
+- **Trigger Words**: Guide the LLM to pick the right skill from the catalog
+- **Execution Instructions**: Detailed step-by-step procedures, loaded only when needed
 - **Confidence Score**: Bayesian smoothing formula, auto-adjusts based on usage feedback
 
 The system ships with 12+ built-in skills covering code submission, bug fixing, documentation, testing, and more.

@@ -55,6 +55,20 @@ export const useSettingsStore = defineStore('settings', () => {
   // 主题模式（持久化，刷新不丢失）
   const theme = ref<ThemeMode>('auto')
 
+  // ==================== 外观（背景图 / 透明度）持久化 ====================
+
+  // 背景图 URL（'' 表示无背景图），形如 /api/appearance/file/xxx.png
+  const bgImageUrl = ref('')
+
+  // 背景图不透明度（0~1）
+  const bgOpacity = ref(0.5)
+
+  // 背景图模糊程度（px）
+  const bgBlur = ref(0)
+
+  // 窗口整体不透明度（0.2~1，Electron 窗口级；浏览器环境无效）
+  const windowOpacity = ref(1)
+
   // 项目工作目录（持久化，刷新不丢失）
   const projectRoot = ref('')
 
@@ -122,6 +136,14 @@ export const useSettingsStore = defineStore('settings', () => {
     theme.value = mode
   }
 
+  // 恢复外观默认（背景图 / 背景不透明度 / 模糊 / 窗口整体透明度）
+  function resetAppearance() {
+    bgImageUrl.value = ''
+    bgOpacity.value = 0.5
+    bgBlur.value = 0
+    windowOpacity.value = 1
+  }
+
   return {
     executionModes,
     models,
@@ -129,6 +151,11 @@ export const useSettingsStore = defineStore('settings', () => {
     theme,
     projectRoot,
     contextMode,
+    // 外观
+    bgImageUrl,
+    bgOpacity,
+    bgBlur,
+    windowOpacity,
     getMode,
     setMode,
     toggleMode,
@@ -137,7 +164,8 @@ export const useSettingsStore = defineStore('settings', () => {
     getThinkingMode,
     setThinkingMode,
     getTheme,
-    setTheme
+    setTheme,
+    resetAppearance
   }
 }, {
   persist: true

@@ -41,14 +41,14 @@
         </div>
 
         <div class="panel-body">
-          <!-- LINK 分组 -->
-          <div class="menu-group">
+          <!-- 菜单分组（对话 / AI 能力 / 数据与工具 / 系统 / 管理页面） -->
+          <div v-for="group in menuGroups" :key="group.type" class="menu-group">
             <div class="group-header">
-              <span class="group-badge link">LINK</span>
-              <span class="group-title">左侧菜单栏</span>
-              <span class="group-count">{{ linkMenus.length }} 项</span>
+              <span class="group-badge" :class="group.badge">{{ group.type }}</span>
+              <span class="group-title">{{ group.title }}</span>
+              <span class="group-count">{{ group.items.length }} 项</span>
             </div>
-            <div v-for="item in linkMenus" :key="item.id" class="menu-item-row">
+            <div v-for="item in group.items" :key="item.id" class="menu-item-row">
               <div class="menu-item-info">
                 <span class="menu-name">{{ item.name }}</span>
                 <span class="menu-path">{{ item.path }}</span>
@@ -60,51 +60,7 @@
                 </a-popconfirm>
               </span>
             </div>
-            <div v-if="linkMenus.length === 0" class="empty-hint">暂无左侧菜单项</div>
-          </div>
-
-          <!-- MANAGE 分组 -->
-          <div class="menu-group">
-            <div class="group-header">
-              <span class="group-badge manage">MANAGE</span>
-              <span class="group-title">管理页面</span>
-              <span class="group-count">{{ manageMenus.length }} 项</span>
-            </div>
-            <div v-for="item in manageMenus" :key="item.id" class="menu-item-row">
-              <div class="menu-item-info">
-                <span class="menu-name">{{ item.name }}</span>
-                <span class="menu-path">{{ item.path }}</span>
-              </div>
-              <span class="menu-actions">
-                <a-button type="link" size="small" @click="openEditModal(item)">编辑</a-button>
-                <a-popconfirm title="确定删除该菜单项？" @confirm="handleDelete(item.id)">
-                  <a-button type="link" danger size="small">删除</a-button>
-                </a-popconfirm>
-              </span>
-            </div>
-            <div v-if="manageMenus.length === 0" class="empty-hint">暂无管理页面</div>
-          </div>
-
-          <!-- SETTING 分组 -->
-          <div class="menu-group">
-            <div class="group-header">
-              <span class="group-badge setting">SETTING</span>
-              <span class="group-title">设置</span>
-              <span class="group-count">{{ settingMenus.length }} 项</span>
-            </div>
-            <div v-for="item in settingMenus" :key="item.id" class="menu-item-row">
-              <div class="menu-item-info">
-                <span class="menu-name">{{ item.name }}</span>
-                <span class="menu-path">{{ item.path }}</span>
-              </div>
-              <span class="menu-actions">
-                <a-button type="link" size="small" @click="openEditModal(item)">编辑</a-button>
-                <a-popconfirm title="确定删除该菜单项？" @confirm="handleDelete(item.id)">
-                  <a-button type="link" danger size="small">删除</a-button>
-                </a-popconfirm>
-              </span>
-            </div>
-            <div v-if="settingMenus.length === 0" class="empty-hint">暂无设置菜单</div>
+            <div v-if="group.items.length === 0" class="empty-hint">暂无「{{ group.title }}」菜单项</div>
           </div>
         </div>
       </div>
@@ -139,49 +95,19 @@
 
           <div v-if="selectedRoleId" class="menu-checkbox-area">
             <a-checkbox-group v-model:value="checkedMenuIds" class="checkbox-list">
-              <!-- LINK -->
-              <div class="checkbox-section">
+              <!-- 菜单分组（与左侧分组一致） -->
+              <div v-for="group in menuGroups" :key="group.type" class="checkbox-section">
                 <div class="checkbox-section-title">
-                  <span class="section-badge link">LINK</span>
-                  左侧菜单栏
+                  <span class="section-badge" :class="group.badge">{{ group.type }}</span>
+                  {{ group.title }}
                 </div>
-                <div v-for="item in linkMenus" :key="item.id" class="checkbox-row">
+                <div v-for="item in group.items" :key="item.id" class="checkbox-row">
                   <a-checkbox :value="item.id">
                     <span class="checkbox-label">{{ item.name }}</span>
                     <span class="checkbox-path">{{ item.path }}</span>
                   </a-checkbox>
                 </div>
-                <div v-if="linkMenus.length === 0" class="empty-mini">暂无</div>
-              </div>
-
-              <!-- MANAGE -->
-              <div class="checkbox-section">
-                <div class="checkbox-section-title">
-                  <span class="section-badge manage">MANAGE</span>
-                  管理页面
-                </div>
-                <div v-for="item in manageMenus" :key="item.id" class="checkbox-row">
-                  <a-checkbox :value="item.id">
-                    <span class="checkbox-label">{{ item.name }}</span>
-                    <span class="checkbox-path">{{ item.path }}</span>
-                  </a-checkbox>
-                </div>
-                <div v-if="manageMenus.length === 0" class="empty-mini">暂无</div>
-              </div>
-
-              <!-- SETTING -->
-              <div class="checkbox-section">
-                <div class="checkbox-section-title">
-                  <span class="section-badge setting">SETTING</span>
-                  设置
-                </div>
-                <div v-for="item in settingMenus" :key="item.id" class="checkbox-row">
-                  <a-checkbox :value="item.id">
-                    <span class="checkbox-label">{{ item.name }}</span>
-                    <span class="checkbox-path">{{ item.path }}</span>
-                  </a-checkbox>
-                </div>
-                <div v-if="settingMenus.length === 0" class="empty-mini">暂无</div>
+                <div v-if="group.items.length === 0" class="empty-mini">暂无</div>
               </div>
             </a-checkbox-group>
 
@@ -244,9 +170,11 @@
           </a-form-item>
           <a-form-item label="菜单类型">
             <a-select v-model:value="formData.menuType">
-              <a-select-option value="LINK">左侧菜单栏</a-select-option>
-              <a-select-option value="MANAGE">管理页面</a-select-option>
-              <a-select-option value="SETTING">设置菜单</a-select-option>
+              <a-select-option value="LINK">对话（左侧菜单栏）</a-select-option>
+              <a-select-option value="AI">AI 能力</a-select-option>
+              <a-select-option value="TOOL">数据与工具</a-select-option>
+              <a-select-option value="SYSTEM">系统</a-select-option>
+              <a-select-option value="MANAGE">管理页面（底部菜单）</a-select-option>
             </a-select>
           </a-form-item>
           <a-form-item label="排序号">
@@ -368,9 +296,23 @@ import {
 const allMenus = ref<MenuItem[]>([])
 const loading = ref(false)
 
-const linkMenus = computed(() => allMenus.value.filter(m => m.menuType === 'LINK'))
-const manageMenus = computed(() => allMenus.value.filter(m => m.menuType === 'MANAGE'))
-const settingMenus = computed(() => allMenus.value.filter(m => m.menuType === 'SETTING'))
+// 菜单组配置（顺序即展示顺序；badge 为角标样式类名）
+const MENU_TYPE_GROUPS = [
+  { type: 'LINK', badge: 'link', title: '对话' },
+  { type: 'AI', badge: 'ai', title: 'AI 能力' },
+  { type: 'TOOL', badge: 'tool', title: '数据与工具' },
+  { type: 'SYSTEM', badge: 'system', title: '系统' },
+  { type: 'MANAGE', badge: 'manage', title: '管理页面' }
+] as const
+
+const menuGroups = computed(() =>
+  MENU_TYPE_GROUPS.map(g => ({
+    type: g.type,
+    badge: g.badge,
+    title: g.title,
+    items: allMenus.value.filter(m => m.menuType === g.type)
+  }))
+)
 
 const loadAllMenus = async () => {
   loading.value = true
@@ -801,6 +743,21 @@ onMounted(() => {
   color: #6366f1;
 }
 
+.group-badge.ai {
+  background: #f5f3ff;
+  color: #8b5cf6;
+}
+
+.group-badge.tool {
+  background: #ecfeff;
+  color: #0891b2;
+}
+
+.group-badge.system {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
 .group-badge.manage {
   background: #fef3c7;
   color: #d97706;
@@ -941,6 +898,21 @@ onMounted(() => {
 .section-badge.link {
   background: #eef2ff;
   color: #6366f1;
+}
+
+.section-badge.ai {
+  background: #f5f3ff;
+  color: #8b5cf6;
+}
+
+.section-badge.tool {
+  background: #ecfeff;
+  color: #0891b2;
+}
+
+.section-badge.system {
+  background: #f1f5f9;
+  color: #64748b;
 }
 
 .section-badge.manage {

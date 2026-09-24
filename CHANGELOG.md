@@ -5,6 +5,98 @@
 
 ---
 
+## [2.0.2] - 2026-09-24
+
+### 🎨 新增：外观设置（全局背景图 / 窗口透明度）
+
+- **侧边栏底部新增「外观设置」抽屉**（AppearanceSettingsDrawer）：上传全局背景图（≤10MB）后整个应用（侧边栏 / 内容区 / 标题栏）透出背景图；提供「背景不透明度 / 背景模糊 / 窗口整体透明度」三滑块与「恢复默认」
+- **后端**：新增 BackgroundStore（文件存至 `data/backgrounds/`）与 AppearanceController——`POST /api/appearance/background`（需登录）上传并返回 URL；`GET /api/appearance/file/{name}` 免鉴权供 CSS/img 引用
+- **前端**：App.vue 新增全局背景层（fixed 铺满），style.css 新增 `html.has-app-bg` 半透明规则链（根容器透明 + 业务页半透明面板）；外观设置持久化（bgImageUrl / bgOpacity / bgBlur / windowOpacity）
+- **Electron**：preload 暴露 `setWindowOpacity` → 主进程 `mainWindow.setOpacity()`（clamp 0.2~1，异常静默）——「窗口整体透明度」对含标题栏的整个窗口生效
+
+### 🖥️ 桌面端：透明自定义标题栏 + 启动画面（Splash）
+
+- **透明标题栏**：标题栏覆盖色改为全透明——标题栏区域直接露出网页内容（开启背景图时随应用背景变化）；窗口控制按钮符号色随深浅主题切换
+- **启动画面**：新增 `electron/loading.html` 与 Splash 窗口（居中悬浮、无边框透明、鼠标穿透、不抢焦点、最短展示 600ms）：
+  - 进度双通道：Spring Boot 启动日志锚点（Starting / Tomcat initialized / Tomcat started / Started）跳跃推进 + 时间维度平滑兜底
+  - 就绪后进度补满 + 页面淡出动画衔接主窗口；后端进程提前退出 → 立即失败（展示错误原因 + 原生弹窗，不再空等轮询超时）
+- **preload 新增 `openExternal`**：应用内网页标签页的「在浏览器打开」按钮调起系统默认浏览器
+
+### 🧩 重构：技能系统改为「渐进式披露」（Progressive Disclosure）
+
+- **新增 SkillCatalogBuilder（L1 目录层）**：把全部活跃技能压缩为「技能目录」（名称 / ID / 置信度 / 触发词 / 一句话描述）动态注入 system prompt，LLM 始终拥有全量技能全局视野；目录受 3500 字符预算约束，超出按置信度降序截断
+- **技能说明按需加载（L2 层）**：LLM 通过 `skill action=load` 读取完整使用说明——从「BM25 自动匹配注入」改为「目录常驻 + LLM 主动加载」，不再有隐形匹配过程
+- **移除 SkillIndexer / SkillMatcher**（BM25 + 触发词匹配）与 SSE 事件 `skill_match`；前端「思考过程」改为展示「命中技能」标签（LLM 实际执行 skill load 时动态追加）
+
+### 🌐 优化：网络工具（搜索源 / 缓存 / 反爬 / Jina / 代理自适应）
+
+- **web_search 搜索源升级**：多搜索源优先级——有代理时 Bing 全球 → Bing 中国 → 百度；无代理（国内直连兜底）仅保留国内可达源；新增搜索结果缓存（TTL 300s / 最多 100 条）；低质量域名（如百家号）排序降权
+- **web_fetch 升级为「Jina 优先 + 本地降级」**：本机有可用代理时优先走 Jina Reader 渲染抓取（反爬 / JS 渲染页友好）；Jina 不可用（429 配额受限进入冷却）或本机无代理时自动降级本地抓取
+- **本地抓取加固**：UA 池按域名稳定选择 + 失败换 UA 重试（403/429/503/5xx/超时/反爬拦截页识别，429 优先遵循 Retry-After）
+- **代理策略重构为「自动探测」**：`network-tool.proxy.mode` = auto（默认）/ always / never；AUTO 模式依次探测候选端口（Clash 7890 / Clash Verge 7897 / socks 7891 / v2rayN 10809）+ 出网验证（识别「端口在监听但代理已失效」）+ 分向缓存（走代理 300s / 直连 30s，中途启动代理可快速自适应）
+- **废弃 `web-fetch.proxy`**（WebFetchConfig 删除）：所有网络工具代理统一由 `network-tool.proxy` 管理；新增 ProxyResolver 组件与单元测试
+
+### 💾 新增：数据管理（备份导出 / 导入）
+
+- **「数据管理」页新增「导出备份 / 导入备份」**：以「表级快照」JSON 导出 7 个类别（LLM 配置 / 智能体 / 技能 / 聊天记录 / 踩坑经验 / MCP 服务器 / 数据库连接，共 10 张表）；导入按主键 UPSERT 合并（同 id 覆盖、新 id 追加，不清空现有数据），并自动修复自增序列
+- **后端**：新增 DataTransferService；SystemController 新增 `/data-stats`、`/export-data`、`/import-data` 端点（管理员）；导入完成后自动刷新 LLM Provider 缓存（新导入配置立即生效）；单行失败不中断（返回新增/更新/失败统计）
+- **安全提示**：备份文件含 API Key、数据库密码密文等敏感信息（用于重装 / 跨设备迁移后免重新配置），前端已提示妥善保管
+
+### 🗄️ 增强：数据库连接（管理页「执行 SQL」）
+
+- **「数据库连接」页新增「执行 SQL」抽屉**（SqlExecutorDrawer）：选连接 → 输入 SQL（Ctrl+Enter 执行）→ 结果表格化展示——多条语句按顺序执行、单条错误独立定位、最大行数可选（100~1000）、展示执行语句数 / 总耗时 / 影响行数 / 截断提示
+- **新增 SqlExecutor 核心组件**（管理页与 AI 工具 `execute_sql` 共用）：双档检查策略——严格模式（AI 工具：单语句 + 白名单 + 5000 字符）与宽松模式（管理页：多语句 + 20000 字符）；单条 SELECT 无 LIMIT 自动追加；语句级 30s 超时
+- **API**：新增 `POST /api/db-connections/{id}/execute`；前端通用请求支持自定义超时（长耗时 SQL 场景）
+
+### 🖼️ 新增：头像上传（用户 / 智能体）
+
+- **支持上传本地头像图片**（≤5MB，png/jpg/jpeg/gif/webp/bmp）：新增 AvatarController + AvatarStore（文件存至 `data/avatars/`）；`GET /api/avatar/file/{name}` 免鉴权供 img 标签直接引用
+- **前端**：新增 AvatarUploader 组件；个人资料页、智能体配置页、聊天头像展示接入（图片头像 / 默认 emoji 双形态）
+- **数据库**：`agent_config.avatar` 列扩容 VARCHAR(20) → VARCHAR(255)（存储本地 URL；老库启动时自动迁移）
+
+### 📎 新增：应用内查看（文件 / 图片 / 链接标签页）
+
+- **AI 回复中的项目文件路径、图片、外链可直接点击**，在应用内以标签页打开（可随时关闭）：
+  - Markdown 渲染管线扩展：图片语法 / 链接语法 / 行内代码 / 纯文本中的本地路径自动转为可点击链接（文件芯片 / 图片芯片）
+  - 本地文件 → 文件标签页；本地图片 → 图片标签页（blob 加载）；http(s) 外链 → 内嵌 `<webview>` 网页标签页（支持刷新与「在浏览器打开」）
+- **后端**：ProjectService 新增 `resolveFilePath`（不完整路径 → 项目内候选解析，精确匹配在前、最多 50 个、排除 node_modules 等黑名单）与 `readFileBytes`；ProjectController 新增 `GET /api/project/resolve`、`GET /api/project/raw`（按扩展名推断 Content-Type）
+- **提示词**：核心 Agent 提示词新增「内容引用规范」与「应用内查看」说明（相对路径写法 / 图片语法 / 外链格式）
+
+### ⚠️ 增强：LLM 接口错误友好提示（task_error）
+
+- **新增 LLMErrorFormatter**：将 LLM API 底层异常按 DeepSeek 官方错误码表（400 / 401 / 402 / 422 / 429 / 500 / 503 + 上下文超长特判 + 网络类异常）转为「标题 + 原因 + 解决建议」中文提示
+- **统一任务级错误出口**（工具循环异常 / 无工具直连）下发 `task_error` SSE 事件；错误信息同步写入 `agent_task.error_message`
+- **任务中断恢复**：任务状态接口附带「最近一次失败任务」摘要 → 页面刷新后恢复聊天区错误详情 + 输入区「任务中断」横幅与「一键继续」入口；AgentEventBus 新增身份校验发射（错误事件只发本任务通道，避免误发新任务流）
+- **P2P Agent** 同步处理 `task_error` 事件（远程任务携带友好失败原因）
+
+### 🗂️ 优化：侧边栏菜单结构（4 组重排）
+
+- **菜单收敛为 4 组 + 底部管理**：「对话」/「AI 能力」（智能体、技能、MCP 服务器、定时任务、踩坑经验）/「数据与工具」（数据库连接、文件管理、设备互联）/「系统」（模型配置、运行日志、数据管理）+ 底部（个人信息、用户管理、菜单权限管理）
+- **命名优化**：「协作」→「设备互联」、「配置」→「模型配置」
+- **前端**：Layout.vue 改为 MENU_GROUPS 配置化渲染（空组自动隐藏）+ 组间并行加载；MenuPermissionView 与 api/menu.ts 同步 5 类菜单枚举
+- **数据库**：schema.sql 追加幂等迁移（分组 / 排序 / 命名条件式 UPDATE + 普通用户「AI 助手」断链修复）；新增 SchemaMenuMigrationTest 回归测试
+
+### 🛠️ 修复与调整
+
+- **全新库初始化修复**：`agent_config` 表内联索引改为 H2 兼容的 `CREATE INDEX IF NOT EXISTS` 写法（原索引名与 conversation 表重名导致全新库 agent_config 建表失败）
+- **提示词**：核心 Agent 提示词精简（移除冗余语言强制段）；聊天流式状态条背景透明化（与背景图融为一体）
+- **应用内查看修复**（点击 LLM 输出的文件 / 图片链接）：
+  - 修复「标签已打开但内容空白 / 图片一直加载中」：tab 对象改用 `reactive` 包装——原实现入列后对原始对象直接异步赋值，不触发 Vue 响应式更新
+  - 路径拼接统一为正斜杠：原 `workDir + '/' + path` 会拼出 `C:\dir/sub/file` 混合形式（显示观感差、跨入口去重不可靠）；文件树双击 / Git 操作 / 授权面板的同类拼接一并统一，tab 去重做规范化比较
+  - 修复纯文件名（如 `README.md` / `main.py`）被 linkify 误识别为 http 链接（`.md` / `.py` 恰为有效 TLD）——现还原为本地文件链接（走「点击打开文件」逻辑；真域名 `example.com` 不受影响）
+  - 文件编辑器 / 图片 / 网页标签适配背景图透明化：深色编辑器降为半透明 + 毛玻璃（头部 / 行号区 / 高亮层去底），图片 / 网页标签工具栏半透明
+
+### 🏷️ 版本号
+
+- 后端：`2.0.1` → `2.0.2`（pom.xml）
+- 前端：`2.0.1` → `2.0.2`（package.json + package-lock.json）
+- Electron：`2.0.1` → `2.0.2`（打包 jar 路径同步 `code-craft-2.0.2.jar`）
+- MCP Server 握手版本：`2.0.1` → `2.0.2`
+- 打包产物：`code-craft-2.0.1.jar` → `code-craft-2.0.2.jar`
+- 说明文档：README(_EN) / BUILD_AND_RUN(_EN) / docs（ARCHITECTURE、DEEPSEEK_SERVICE_IMPL、TOOL_SYSTEM、LLM_PROVIDER_SYSTEM、DEV_QUICKREF、RELEASE_CHECKLIST 等）同步至 v2.0.2
+
+---
+
 ## [2.0.1] - 2026-09-22
 
 ### 🔧 增强：Git 工具家族功能补齐（AI 工具 / REST / 前端 UI 三层同步）

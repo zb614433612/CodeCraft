@@ -4,7 +4,16 @@ import { resolve } from 'path'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue({
+      template: {
+        compilerOptions: {
+          // 允许使用 Electron 的 <webview> 标签（「网页标签页」内嵌外部网页用）
+          isCustomElement: (tag) => tag === 'webview'
+        }
+      }
+    })
+  ],
   base: '',
   resolve: {
     alias: {

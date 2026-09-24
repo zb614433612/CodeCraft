@@ -79,16 +79,18 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
   return response
 }
 
-// 请求超时时间（毫秒）
+// 请求超时时间（毫秒，默认值；可通过 request 第三参数覆盖，如执行 SQL 等长耗时操作）
 const REQUEST_TIMEOUT = 15000
 
 /**
  * 通用请求函数 — 带超时、token注入、401自动跳转登录
  * 自动拼接 /api 前缀
+ *
+ * @param timeout 可选超时时间（毫秒），默认 15000；长耗时接口（如执行 SQL）可传更大值
  */
-export async function request<T>(url: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+export async function request<T>(url: string, options: RequestInit = {}, timeout: number = REQUEST_TIMEOUT): Promise<ApiResponse<T>> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
 
   const authHeader = await getAuthHeaders()
 

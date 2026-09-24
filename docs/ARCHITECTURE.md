@@ -1,14 +1,14 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v2.0.1 | 更新：2026-09-22 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.2 | 更新：2026-09-24 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
 
 ## 一、一句话定义
 
-**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 24 种内置工具（读写文件、执行命令、操作 Git、搜索网络、桌面自动化等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）动态切换，并可通过 MCP 双向接入外部工具生态。
+**CodeCraft** 是一个基于 AI Agent 的桌面端智能编程助手。用户通过聊天界面向 AI 下达编程任务，AI 自动调用 27 种内置工具（读写文件、执行命令、操作 Git、搜索网络、桌面自动化等）完成任务，支持子 Agent 并行协作（最多 20 并发），支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）动态切换，并可通过 MCP 双向接入外部工具生态。
 
 ---
 
@@ -31,7 +31,7 @@
 │ │          Spring Boot 3.4 后端 (src/main/java/)                      │ │
 │ │                       │                                             │ │
 │ │ ┌─────────────────────┴──────────────────────┐                      │ │
-│ │ │        Controller 层（23 个）               │                      │ │
+│ │ │        Controller 层（25 个）               │                      │ │
 │ │ │ DeepSeekController / GitController /       │                      │ │
 │ │ │ P2pController / SnapshotController / ...   │                      │ │
 │ │ └─────────────────────┬──────────────────────┘                      │ │
@@ -74,7 +74,7 @@
 │    ├─ 压缩后的历史摘要（CompactionService）                             │
 │    ├─ 最近 N 轮完整对话                                                 │
 │    ├─ 当前用户消息 + 附件/文件内容                                      │
-│    └─ 匹配到的技能注入（SkillMatcher）                                  │
+│    └─ 技能目录注入（SkillCatalogBuilder）                                  │
 │                                                                         │
 │  发送 HTTP 请求到 DeepSeek API（WebFlux + SSE 流式读取）                │
 │                                                                         │
@@ -152,10 +152,10 @@ src/main/java/com/example/agentdeepseek/
 │   └── response/              # ApiResponse<T>、PageResult
 ├── config/                    # Spring 配置
 │   ├── DeepSeekConfig         # API Key、模型、URL 等配置
-│   ├── NetworkToolConfig      # 代理/网络配置
+│   ├── NetworkToolConfig      # 网络工具配置（代理自动探测 / 搜索源 / UA 池）
 │   ├── OpenApiConfig          # Swagger/OpenAPI 文档
 │   └── SpaConfig              # 单页应用路由回退
-├── controller/                # REST API 控制器（23 个）+ GlobalExceptionHandler（全局异常处理）
+├── controller/                # REST API 控制器（25 个）+ GlobalExceptionHandler（全局异常处理）
 │   ├── DeepSeekController     # ★核心：聊天、Agent 任务状态
 │   ├── ConversationController # 会话 CRUD
 │   ├── GitController          # Git 操作（status/diff/commit...）
@@ -179,6 +179,8 @@ src/main/java/com/example/agentdeepseek/
 │   ├── DbConnectionController # 外部数据库连接（Phase 20）
 │   ├── FileAssetController    # 文件资产（上传/列表/引用，vision-files-api）
 │   ├── ProviderBalanceController # Provider 余额查询
+│   ├── AppearanceController    # 外观设置（背景图上传/读取）
+│   ├── AvatarController        # 头像上传/读取
 │   └── ScheduleTaskController # 定时任务
 ├── filter/                    # TokenAuthenticationFilter（Token 鉴权拦截器）
 ├── initializer/               # UserInitializer（首次启动初始化管理员）
@@ -235,8 +237,7 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── MessagePersister       # 消息异步持久化
 │   │   ├── SnapshotService        # 代码快照备份/回滚（32.2KB）
 │   │   ├── ProjectBuildService    # 项目编译构建
-│   │   ├── SkillMatcher           # BM25 + 触发词匹配
-│   │   ├── SkillIndexer           # 技能索引构建
+│   │   ├── SkillCatalogBuilder    # 技能目录构建（渐进式披露 L1 层）
 │   │   ├── CharacterPromptUtil    # 角色设定提示词工具
 │   │   ├── AttachmentReaderService # 附件文件读取服务
 │   │   └── ... (User/Config/Menu/Role 等 CRUD 服务)
@@ -253,8 +254,8 @@ src/main/java/com/example/agentdeepseek/
 │   ├── agentinvoke/            # ★智能体互调：委托执行/信任链/环检测（Phase 19）
 │   ├── dbconnection/           # ★外部数据库连接：配置/加密/连接管理（Phase 20）
 │   ├── files/                  # ★文件资产与 Files API 适配（上传/图像理解/引用管理，vision-files-api）
-│   ├── llm/                    # LLM 客户端层：LLMClient 抽象 + 6 个 Provider 实现 + ProviderBalanceService
-│   └── SkillService / UserService / ConfigService / ...
+│   ├── llm/                    # LLM 客户端层：LLMClient 抽象 + 6 个 Provider 实现 + ProviderBalanceService + LLMErrorFormatter（错误友好格式化）
+│   └── SkillService / UserService / ConfigService / DataTransferService（备份导出/导入）/ AvatarStore / BackgroundStore / ...
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
 │   ├── ToolRegistry           # 工具注册中心（单例）
@@ -463,7 +464,7 @@ src/main/java/com/example/agentdeepseek/
 | **子Agent管理** | fork/collect/inspect 生命周期 | AgentForkManager | ~1600 |
 | **Shell 发现** | 智能检测最佳 Shell（Win/Mac/Linux） | ShellDiscoveryService | ~260 |
 | **上下文压缩** | LLM 摘要压缩 + 异步预压缩 | CompactionService | ~640 |
-| **消息组装** | Token 估算 + 技能注入 + 语言指令 | ContextBuilder | ~900 |
+| **消息组装** | Token 估算 + 技能目录注入 + 语言指令 | ContextBuilder | ~900 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~800 |
 | **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~5000 (整个p2p包) |
 | **工具系统** | 27 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
@@ -472,8 +473,11 @@ src/main/java/com/example/agentdeepseek/
 | **成长体系** | 经验检索/自动捕获/复盘/归一化/弯路提炼 | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |
-| **技能系统** | BM25 匹配、贝叶斯置信度 | SkillMatcher + SkillIndexer | ~250 |
-| **多LLM Provider** | Provider CRUD、客户端路由、热刷新 | LLMClientManager + LLMClient + 6个实现 | ~1600 |
+| **技能系统** | 技能目录注入（渐进式披露）、贝叶斯置信度 | SkillCatalogBuilder + SkillService | ~300 |
+| **多LLM Provider** | Provider CRUD、客户端路由、热刷新、错误友好格式化 | LLMClientManager + LLMClient + 6个实现 + LLMErrorFormatter | ~1900 |
+| **外部数据库连接** | 连接管理/凭据加密/执行 SQL | DbConnectionService + SqlExecutor | ~600 |
+| **数据管理（备份）** | 配置数据导出/导入（UPSERT 合并） | DataTransferService | ~400 |
+| **外观与头像** | 背景图与头像的本地存储/读取 | BackgroundStore + AvatarStore | ~300 |
 
 ---
 
@@ -484,7 +488,7 @@ src/main/java/com/example/agentdeepseek/
 3. **默认管理员**: 首次启动由 `UserInitializer` 自动创建
 4. **密码加密**: MD5（32位），非 bcrypt——安全敏感场景需升级
 5. **工具返回格式**: 统一使用 `ApiResponse<T>`，code 参考 `ResponseEnum`
-6. **SSE 事件**: OpenAI 兼容流式格式（`choices[].delta.content` / `reasoning_content`）+ 自定义事件 `tool_call_start` / `ask_user` / `skill_match`
+6. **SSE 事件**: OpenAI 兼容流式格式（`choices[].delta.content` / `reasoning_content`）+ 自定义事件 `tool_call_start` / `ask_user` / `delegate_progress` / `task_error`
 7. **子Agent 并发上限**: 20 个（AgentForkManager.MAX_CONCURRENT_AGENTS）
 8. **工具循环最大迭代**: 主循环 50 轮（评委可扩展，累计上限 +100 次）；子Agent 默认 30 轮
 9. **快照配额**: 500MB 上限，超限自动清理至 300MB

@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 BUILD_AND_RUN](./BUILD_AND_RUN.md)
 # Build & Run Guide (Lazy Channel)
 
-> Applicable version: v2.0.1+
+> Applicable version: v2.0.2+
 
 ## TL;DR
 
@@ -9,10 +9,10 @@
 
 ```bash
 # Windows
-scripts\build.bat v2.0.1
+scripts\build.bat v2.0.2
 
 # Mac / Linux
-./scripts/build.sh v2.0.1
+./scripts/build.sh v2.0.2
 ```
 
 ### One-click Run
@@ -46,7 +46,7 @@ CodeCraft supports multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollam
 
 After starting the backend, open `http://localhost:8084`:
 1. Login with default account
-2. Navigate to **「Config」** or **「Provider Config」**
+2. Navigate to **「Model Config」** (formerly 「Config」)
 3. Click **「Add Provider」**, fill in Provider info (code, name, Base URL, API Key, model list, etc.)
 4. Click **「Create Provider」**
 
@@ -61,7 +61,7 @@ cp application-local.yml.example application-local.yml
 
 This file is in `.gitignore` and will not be committed.
 
-> ⚠️ Note: API Key is **NOT** configured in this file. Add LLM Providers via the Web UI「Provider Config」page (stored in `llm_provider` table).
+> ⚠️ Note: API Key is **NOT** configured in this file. Add LLM Providers via the **「Model Config」** page (stored in `llm_provider` table).
 
 ### 2.2 Start Backend
 
@@ -148,7 +148,7 @@ project root
 │   ├── tool/impl/           → 27 AI tool implementations
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/impl/        → Core business logic
-│   └── service/llm/         → ★ LLM Client Layer (LLMClient + 5 Provider impls)
+│   └── service/llm/         → ★ LLM Client Layer (LLMClient + 6 Provider impls)
 ├── src/main/resources/
 │   ├── application.yml      → Base configuration
 │   ├── application-local.yml.example → Local config template

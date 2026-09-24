@@ -2,9 +2,12 @@ package com.example.agentdeepseek.service.dbconnection;
 
 import com.example.agentdeepseek.mapper.DbConnectionMapper;
 import com.example.agentdeepseek.model.entity.DbConnection;
+import com.example.agentdeepseek.model.vo.SqlExecuteResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,7 +15,7 @@ import java.util.List;
 /**
  * 外部数据库连接配置服务（Phase 20）
  * <p>
- * CRUD + 测试连接 + 工具解析。安全约定：密码密文存储（CredentialCipher AES-GCM），
+ * CRUD + 测试连接 + 工具解析 + 管理页执行 SQL。安全约定：密码密文存储（CredentialCipher AES-GCM），
  * 所有出参脱敏（passwordEncrypted/passwordPlain 置空，仅 hasPassword 布尔标记）。
  * </p>
  */
@@ -23,13 +26,16 @@ public class DbConnectionService {
     private final DbConnectionMapper dbConnectionMapper;
     private final CredentialCipher credentialCipher;
     private final DbConnectionManager dbConnectionManager;
+    private final SqlExecutor sqlExecutor;
 
     public DbConnectionService(DbConnectionMapper dbConnectionMapper,
                                CredentialCipher credentialCipher,
-                               DbConnectionManager dbConnectionManager) {
+                               DbConnectionManager dbConnectionManager,
+                               SqlExecutor sqlExecutor) {
         this.dbConnectionMapper = dbConnectionMapper;
         this.credentialCipher = credentialCipher;
         this.dbConnectionManager = dbConnectionManager;
+        this.sqlExecutor = sqlExecutor;
     }
 
     /** 可见连接列表（系统级 + 本人），出参脱敏 */
@@ -112,6 +118,59 @@ public class DbConnectionService {
             return null;
         }
         return c;
+    }
+
+    /**
+     * 执行 SQL（管理页「执行 SQL」）：校验连接可见性与启用状态后执行，返回结构化多结果。
+     * 宽松模式：允许任意语句与多条语句（分号分隔按顺序执行）；MySQL 多语句依赖
+     * allowMultiQueries=true（DbConnectionManager 构建 URL 时默认开启）。
+     *
+     * @param userId  当前用户（连接可见性校验：系统级或本人）
+     * @param id      连接 id
+     * @param sql     SQL 语句（支持多条，按顺序执行）
+     * @param maxRows 每个查询结果集的最大返回行数（可选，默认 200，上限 1000）
+     */
+    public SqlExecuteResult executeSql(Long userId, Long id, String sql, Integer maxRows) {
+        // 宽松检查（管理页：允许任意语句与多条语句）
+        SqlExecutor.CheckResult check = sqlExecutor.checkUi(sql);
+        if (!check.ok()) {
+            throw new IllegalArgumentException(uiCheckErrorMessage(check));
+        }
+        DbConnection conn = dbConnectionMapper.selectById(id)
+                .orElseThrow(() -> new IllegalArgumentException("连接不存在: id=" + id));
+        if (conn.getUserId() != null && !conn.getUserId().equals(userId)) {
+            throw new IllegalArgumentException("无权访问该数据库连接");
+        }
+        if (conn.getEnabled() == null || conn.getEnabled() != 1) {
+            throw new IllegalArgumentException("连接已停用，请先启用后再执行 SQL");
+        }
+        conn.setPasswordPlain(credentialCipher.decrypt(conn.getPasswordEncrypted()));
+        String dbLabel = buildDbLabel(conn);
+        log.info("管理页执行 SQL: id={}, name={}, sqlLength={}", id, conn.getName(), sql.length());
+        try (Connection physical = dbConnectionManager.open(conn)) {
+            return sqlExecutor.execute(physical, sql, dbLabel, maxRows);
+        } catch (SQLException e) {
+            // try-with-resources 关闭连接异常（执行异常为 RuntimeException，由 Controller 统一处理）
+            log.warn("执行 SQL 关闭连接异常: id={}, err={}", id, e.getMessage());
+            throw new RuntimeException("执行失败: " + e.getMessage(), e);
+        }
+    }
+
+    /** 构建目标库描述（结果标注用，避免与系统库混淆） */
+    private String buildDbLabel(DbConnection conn) {
+        String hostLabel = "h2".equals(conn.getDbType())
+                ? conn.getDatabaseName()
+                : conn.getHost() + ":" + (conn.getPort() != null ? conn.getPort() : "默认端口") + "/" + conn.getDatabaseName();
+        return "外部库[" + conn.getName() + "] " + conn.getDbType() + "@" + hostLabel;
+    }
+
+    /** 宽松检查失败 → 用户提示消息 */
+    private String uiCheckErrorMessage(SqlExecutor.CheckResult check) {
+        return switch (check.error()) {
+            case EMPTY -> "SQL 不能为空";
+            case TOO_LONG -> "SQL 语句 " + check.sqlLength() + " 字符超出 " + SqlExecutor.MAX_SQL_LENGTH_UI + " 字符限制，请精简后重试";
+            default -> "SQL 检查未通过：" + check.error();
+        };
     }
 
     /** 出参脱敏：密文/明文密码一律置空，仅暴露 hasPassword */

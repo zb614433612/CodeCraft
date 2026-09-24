@@ -21,18 +21,9 @@
         @click="handleMenuClick"
         class="app-menu"
       >
-        <!-- 聊天 菜单组 -->
-        <a-menu-item-group key="chat" title="聊天">
-          <a-menu-item v-for="item in menuItems" :key="item.key" :title="item.label">
-            <template #icon>
-              <component :is="item.icon" />
-            </template>
-            {{ item.label }}
-          </a-menu-item>
-        </a-menu-item-group>
-        <!-- 设置 菜单组 -->
-        <a-menu-item-group v-if="settingMenuItems.length > 0" key="settings" title="设置">
-          <a-menu-item v-for="item in settingMenuItems" :key="item.key" :title="item.label">
+        <!-- 菜单组（对话 / AI 能力 / 数据与工具 / 系统；由后端 sys_menu.menu_type 驱动） -->
+        <a-menu-item-group v-for="group in visibleMenuGroups" :key="group.type" :title="group.title">
+          <a-menu-item v-for="item in group.items" :key="item.key" :title="item.label">
             <template #icon>
               <component :is="item.icon" />
             </template>
@@ -44,7 +35,13 @@
         <a-dropdown :trigger="['click']" placement="top">
           <div class="user-info" style="cursor: pointer; flex: 1;">
             <div class="user-avatar">
-              {{ userStore.userInfo?.username?.charAt(0).toUpperCase() || 'U' }}
+              <img
+                v-if="isImageAvatar(userStore.userInfo?.avatar)"
+                :src="userStore.userInfo?.avatar"
+                class="user-avatar-img"
+                alt=""
+              />
+              <span v-else>{{ userStore.userInfo?.username?.charAt(0).toUpperCase() || 'U' }}</span>
             </div>
             <div class="user-name">{{ userStore.userInfo?.username || '用户' }}</div>
           </div>
@@ -66,12 +63,19 @@
             </a-menu>
           </template>
         </a-dropdown>
+        <!-- 外观设置 -->
+        <div class="theme-toggle-footer" @click="appearanceOpen = true" title="外观设置">
+          <BgColorsOutlined />
+        </div>
         <!-- 主题切换 -->
         <div class="theme-toggle-footer" @click="toggleTheme" :title="themeTooltip">
           <span class="theme-emoji-footer">{{ resolvedTheme === 'dark' ? '☀️' : '🌙' }}</span>
         </div>
       </div>
     </aside>
+
+    <!-- 外观设置抽屉（背景图 / 窗口整体透明度） -->
+    <AppearanceSettingsDrawer v-model:open="appearanceOpen" />
 
     <!-- 主内容区域 -->
     <main class="main-content">
@@ -88,6 +92,9 @@ import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
 import { logout } from '@/api/user'
 import { getUserMenus } from '@/api/menu'
+import { getProfile } from '@/api/user-admin'
+import { isImageAvatar } from '@/utils/avatar'
+import AppearanceSettingsDrawer from '@/components/AppearanceSettingsDrawer.vue'
 import {
   CodeOutlined,
   LogoutOutlined,
@@ -106,7 +113,10 @@ import {
   ToolOutlined,
   DeleteOutlined,
   ApiOutlined,
-  DatabaseOutlined
+  DatabaseOutlined,
+  BookOutlined,
+  FolderOpenOutlined,
+  BgColorsOutlined
 } from '@ant-design/icons-vue'
 import type { MenuProps } from 'ant-design-vue'
 import appLogo from '@/assets/logo.svg'
@@ -117,6 +127,7 @@ const userStore = useUserStore()
 const settingsStore = useSettingsStore()
 const isLoggingOut = ref(false)
 const collapsed = ref(false)
+const appearanceOpen = ref(false)
 
 // 主题切换
 const resolvedTheme = computed<'light' | 'dark'>(() => {
@@ -145,10 +156,19 @@ const toggleCollapsed = () => {
   collapsed.value = !collapsed.value
 }
 
+// 侧边栏菜单组配置（顺序即渲染顺序；menu_type 由后端 sys_menu 驱动）
+const MENU_GROUPS = [
+  { type: 'LINK', title: '对话' },
+  { type: 'AI', title: 'AI 能力' },
+  { type: 'TOOL', title: '数据与工具' },
+  { type: 'SYSTEM', title: '系统' }
+] as const
+
 // 菜单项定义（动态加载）
-const menuItems = ref<any[]>([])
+const menuGroups = ref<{ type: string; title: string; items: any[] }[]>([])
 const manageMenuItems = ref<any[]>([])
-const settingMenuItems = ref<any[]>([])
+// 仅显示有菜单项的组（按角色过滤后可能为空）
+const visibleMenuGroups = computed(() => menuGroups.value.filter(g => g.items.length > 0))
 
 // 图标名称到组件的映射
 const iconMap: Record<string, any> = {
@@ -156,32 +176,31 @@ const iconMap: Record<string, any> = {
   CodeOutlined, SettingOutlined, UserOutlined,
   SafetyOutlined, FormOutlined, ClockCircleOutlined,
   FileTextOutlined, LinkOutlined, ToolOutlined, DeleteOutlined, ApiOutlined,
-  DatabaseOutlined
+  DatabaseOutlined, BookOutlined, FolderOpenOutlined
 }
 
-// 加载左侧菜单和底部管理菜单
+// 加载左侧菜单组和底部管理菜单（组间并行请求）
 const loadMenus = async () => {
   try {
-    // 加载左侧 LINK 菜单
-    const linkRes = await getUserMenus('LINK')
-    if (linkRes.code === 200 && linkRes.data) {
-      menuItems.value = linkRes.data.map(m => ({
-        key: m.path,
-        icon: iconMap[m.icon as string] || RobotOutlined,
-        label: m.name
-      }))
-    }
-    // 加载左侧 SETTING 菜单
-    const settingRes = await getUserMenus('SETTING')
-    if (settingRes.code === 200 && settingRes.data) {
-      settingMenuItems.value = settingRes.data.map(m => ({
-        key: m.path,
-        icon: iconMap[m.icon as string] || RobotOutlined,
-        label: m.name
-      }))
-    }
+    const [groupResults, manageRes] = await Promise.all([
+      Promise.all(MENU_GROUPS.map(g => getUserMenus(g.type))),
+      getUserMenus('MANAGE')
+    ])
+    menuGroups.value = MENU_GROUPS.map((g, i) => {
+      const res = groupResults[i]
+      return {
+        type: g.type,
+        title: g.title,
+        items: res.code === 200 && res.data
+          ? res.data.map(m => ({
+              key: m.path,
+              icon: iconMap[m.icon as string] || RobotOutlined,
+              label: m.name
+            }))
+          : []
+      }
+    })
     // 加载底部 MANAGE 菜单
-    const manageRes = await getUserMenus('MANAGE')
     if (manageRes.code === 200 && manageRes.data) {
       manageMenuItems.value = manageRes.data.map(m => ({
         key: m.path,
@@ -191,9 +210,8 @@ const loadMenus = async () => {
     }
   } catch (e) {
     console.error('加载菜单失败', e)
-    menuItems.value = []
+    menuGroups.value = MENU_GROUPS.map(g => ({ type: g.type, title: g.title, items: [] }))
     manageMenuItems.value = []
-    settingMenuItems.value = []
   }
 }
 
@@ -237,9 +255,27 @@ const handleLogout = async () => {
   }
 }
 
+/** 拉取个人资料并同步到全局用户 store（头像变更后刷新页面也能生效） */
+const loadProfile = async () => {
+  try {
+    const res = await getProfile()
+    if (res.code === 200 && res.data) {
+      if (!userStore.userInfo) {
+        userStore.userInfo = {} as any
+      }
+      userStore.userInfo.avatar = res.data.avatar || ''
+      if (res.data.nickname) userStore.userInfo.nickname = res.data.nickname
+    }
+  } catch (e) {
+    // 静默失败（不影响布局）
+  }
+}
+
 onMounted(() => {
   // 加载左侧菜单
   loadMenus()
+  // 加载个人资料（补全头像/昵称到全局 store，供侧边栏与聊天页使用）
+  loadProfile()
   // 确保默认选中AI助手
   if (route.path === '/') {
     router.push('/code-assistant')
@@ -589,6 +625,7 @@ onMounted(() => {
   height: 34px;
   background: linear-gradient(135deg, #8b5cf6, #7c3aed);
   border-radius: 10px;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -599,6 +636,13 @@ onMounted(() => {
   flex-shrink: 0;
   box-shadow: 0 2px 8px rgba(139, 92, 246, 0.3);
   transition: all 0.2s ease;
+}
+
+.user-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .user-info:hover .user-avatar {

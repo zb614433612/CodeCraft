@@ -20,10 +20,10 @@ After startup visit: **http://localhost:8084**
 
 ```bash
 # Windows
-scripts\build.bat v2.0.1
+scripts\build.bat v2.0.2
 
 # Mac / Linux
-./scripts/build.sh v2.0.1
+./scripts/build.sh v2.0.2
 ```
 
 ---
@@ -82,7 +82,7 @@ cp application-local.yml.example application-local.yml
 
 This file is in `.gitignore` and will not be committed.
 
-> 💡 **LLM Provider / API Key**: configured via Web UI「Config → Provider Config」(stored in `llm_provider` table), no longer read from env vars or config files.
+> 💡 **LLM Provider / API Key**: configured via Web UI「Model Config」(stored in `llm_provider` table), no longer read from env vars or config files.
 
 ---
 
@@ -112,15 +112,15 @@ SELECT status, COUNT(*) FROM sub_agent_log GROUP BY status;
 
 ```
 project root
-├── src/main/java/...        → Backend source (304 Java files)
-│   ├── tool/impl/           -> 24 AI tool implementations (incl. lesson growth system)
+├── src/main/java/...        → Backend source (323 Java files)
+│   ├── tool/impl/           -> 27 AI tool implementations (incl. lesson growth system)
 │   ├── p2p/                 → P2P remote collaboration
 │   └── service/lesson/      -> Growth system (lesson retrieval/record/review/normalizer)
 │   └── service/impl/        → Core business logic
 ├── frontend/src/            → Vue 3 frontend source
 │   ├── views/               → 16 page views
-│   ├── components/          → 16 common components
-│   └── api/                 → 23 API call modules
+│   ├── components/          → 19 common components
+│   └── api/                 → 25 API call modules
 ├── electron/                → Electron desktop shell
 ├── data/                    → H2 database files (runtime)
 ├── logs/                    → Log files (runtime)

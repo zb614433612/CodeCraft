@@ -34,7 +34,7 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                     "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "name VARCHAR(100) NOT NULL, " +
                     "description VARCHAR(500), " +
-                    "avatar VARCHAR(20) DEFAULT '🤖', " +
+                    "avatar VARCHAR(255) DEFAULT '🤖', " +
                     "system_prompt TEXT, " +
                     "tool_names TEXT, " +
                     "model_name VARCHAR(100) DEFAULT 'deepseek-v4-flash', " +
@@ -85,6 +85,15 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                 log.info("AgentConfigService: character_profile 列已添加（或已存在）");
             } catch (Exception e) {
                 log.debug("AgentConfigService: character_profile 列可能已存在，跳过: {}", e.getMessage());
+            }
+
+            // 兼容旧表：avatar 列扩容 VARCHAR(20) → VARCHAR(255)，支持存储本地头像 URL（/api/avatar/file/...）
+            // （老库原列仅够存 emoji，存 URL 会被截断；新库 CREATE 定义已同步为 VARCHAR(255)）
+            try {
+                jdbcTemplate.execute("ALTER TABLE agent_config ALTER COLUMN avatar SET DATA TYPE VARCHAR(255)");
+                log.info("AgentConfigService: avatar 列已扩容为 VARCHAR(255)");
+            } catch (Exception e) {
+                log.debug("AgentConfigService: avatar 列扩容跳过: {}", e.getMessage());
             }
 
             // ===== 初始化 llm_provider 表（确保在 agent_config 之后创建，因为 agent_config 默认依赖它） =====

@@ -68,3 +68,46 @@ export function testDbConnection(data: DbConnectionConfig) {
 export function testSavedDbConnection(id: number) {
   return request<void>(`/db-connections/${id}/test`, { method: 'POST' })
 }
+
+/** 单条语句的执行结果（SELECT 返回行数据；WRITE 返回影响行数） */
+export interface SqlStatementResult {
+  /** 语句序号（从 0 开始） */
+  index: number
+  /** 结果类型：SELECT=查询结果集 / WRITE=写操作 */
+  sqlType: 'SELECT' | 'WRITE'
+  /** SELECT 列名（按查询顺序） */
+  columns?: string[]
+  /** SELECT 行数据 */
+  rows?: Record<string, any>[]
+  /** SELECT 返回行数 */
+  totalRows?: number
+  /** 是否受最大行数限制（结果可能不完整） */
+  truncated?: boolean
+  /** WRITE 影响行数 */
+  affectedRows?: number
+}
+
+/** 执行 SQL 结果（支持多条语句，按执行顺序每个语句一个结果块） */
+export interface SqlExecuteResult {
+  /** 目标库描述 */
+  dbLabel?: string
+  /** 总耗时（毫秒） */
+  elapsedMs?: number
+  /** 实际执行的语句数 */
+  statementCount?: number
+  /** 各语句结果（按执行顺序） */
+  results?: SqlStatementResult[]
+}
+
+/**
+ * 执行 SQL（管理页「执行 SQL」）
+ * 支持多条语句（分号分隔、按顺序执行）；每个查询结果集按 maxRows 截断（默认 200，上限 1000）。
+ * 执行可能较久，单独放宽超时至 60s。
+ */
+export function executeDbConnectionSql(id: number, sql: string, maxRows?: number) {
+  return request<SqlExecuteResult>(
+    `/db-connections/${id}/execute`,
+    { method: 'POST', body: JSON.stringify({ sql, maxRows }) },
+    60000
+  )
+}

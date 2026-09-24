@@ -323,6 +323,9 @@ onMounted(loadList)
 <style scoped>
 .mcp-config-view {
   padding: 20px;
+  /* 铺满内容区高度：保证「背景图」模式下页面遮罩覆盖整页（避免下半截露出无遮罩原始背景图） */
+  min-height: 100%;
+  box-sizing: border-box;
 }
 
 .page-header {

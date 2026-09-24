@@ -507,6 +507,13 @@ public class P2pAgentService {
                                             log.warn("[P2P-Agent] Failed to auto-approve ask_user: {}", ex.getMessage());
                                         }
                                     }
+                                } else if ("task_error".equals(eventType)) {
+                                    // ★ 任务因 LLM 接口错误停止（后端已按 DeepSeek 官方错误码表转为友好消息）：
+                                    //   语义等同原 error 回调（异常完成），并携带具体原因（标题 + 说明）
+                                    String title = node.has("title") ? node.get("title").asText() : "";
+                                    String detail = node.has("message") ? node.get("message").asText() : "Unknown error";
+                                    resultFuture.completeExceptionally(new RuntimeException(
+                                            title.isEmpty() ? detail : title + "：" + detail));
                                 } else if ("error".equals(eventType)) {
                                     String errMsg = node.has("content") ? node.get("content").asText() : "Unknown error";
                                     resultFuture.completeExceptionally(new RuntimeException(errMsg));

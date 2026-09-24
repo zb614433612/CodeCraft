@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.NetworkToolConfig;
+import com.example.agentdeepseek.config.ProxyResolver;
 import com.example.agentdeepseek.tool.Tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,11 +27,14 @@ public class NetworkCheckTool implements Tool {
     private final ObjectMapper objectMapper;
     private final ConnectivityChecker connectivityChecker;
     private final NetworkToolConfig config;
+    private final ProxyResolver proxyResolver;
 
-    public NetworkCheckTool(ObjectMapper objectMapper, ConnectivityChecker connectivityChecker, NetworkToolConfig config) {
+    public NetworkCheckTool(ObjectMapper objectMapper, ConnectivityChecker connectivityChecker,
+                            NetworkToolConfig config, ProxyResolver proxyResolver) {
         this.objectMapper = objectMapper;
         this.connectivityChecker = connectivityChecker;
         this.config = config;
+        this.proxyResolver = proxyResolver;
     }
 
     @Override
@@ -41,8 +45,8 @@ public class NetworkCheckTool implements Tool {
     @Override
     public String getDescription() {
         return "【适用场景】检测当前网络环境能否访问目标网站，用于排查 web_search / web_fetch / http_request 失败是否是网络不通导致。是其他网络工具的诊断前置工具。"
-                + "【与其他工具的关系】当 web_fetch 或 http_request 报连接失败时，先用本工具检测目标站点可达性。可达再排查工具参数，不可达则需要配置代理。"
-                + "【默认行为】不传 target_url 时，自动检测 google / github / huggingface / deepseek 等一批常用站点，给出综合连通性判定。";
+                + "【与其他工具的关系】当 web_fetch 或 http_request 报连接失败时，先用本工具检测目标站点可达性。可达再排查工具参数；不可达说明当前网络（含自动探测到的本地代理）都到不了该站点。"
+                + "【默认行为】不传 target_url 时，自动检测 google / github / huggingface / deepseek 等一批常用站点，给出综合连通性判定。输出中会标明本次走的是「代理」还是「直连」。";
     }
 
     @Override
@@ -68,6 +72,7 @@ public class NetworkCheckTool implements Tool {
 
         StringBuilder sb = new StringBuilder();
         sb.append("--- 网络连通性检测结果 ---\n\n");
+        sb.append("当前网络模式: ").append(proxyResolver.describe()).append("\n\n");
 
         if (!targetUrl.isEmpty()) {
             sb.append("检测目标: ").append(targetUrl).append("\n");
@@ -80,7 +85,7 @@ public class NetworkCheckTool implements Tool {
             if (result.reachable) {
                 sb.append("\n【判定】当前网络可以访问此网站，web_fetch 和 http_request 工具可以正常使用。");
             } else {
-                sb.append("\n【判定】当前网络无法访问此网站。建议：1) 在应用设置中启用代理 2) 更换目标为同类可替代的国内站点 3) 如果必须访问该网站，请手动配置代理后重试 web_fetch/http_request");
+                sb.append("\n【判定】当前网络无法访问此网站。建议：1) 若目标是境外站点，请确认本机代理软件（Clash 等）已启动——工具会自动探测并使用本地代理，无需手动改配置 2) 更换目标为同类可替代的国内站点 3) 启动代理后重试 web_fetch/http_request");
             }
         } else {
             sb.append("检测一批常用国外站点：\n\n");
@@ -97,9 +102,9 @@ public class NetworkCheckTool implements Tool {
             if (reachableCount == results.size()) {
                 sb.append("当前网络环境通畅，可以访问国外网站。web_search / web_fetch / http_request 工具可正常使用。");
             } else if (reachableCount >= results.size() / 2.0) {
-                sb.append("当前网络环境部分受限，" + reachableCount + "/" + results.size() + " 个站点可达。建议：1) web_search 使用 cn.bing.com 通常不受限 2) web_fetch 优先抓取可达站点 3) 对不可达站点需启用代理");
+                sb.append("当前网络环境部分受限，" + reachableCount + "/" + results.size() + " 个站点可达。建议：1) web_search 会自动优先使用国内可达源（cn.bing.com / 百度），可直接使用 2) web_fetch 优先抓取可达站点 3) 不可达的境外站点需启动本机代理后重试");
             } else {
-                sb.append("当前网络环境严重受限，仅 " + reachableCount + "/" + results.size() + " 个站点可达。建议：1) 在应用设置中启用代理以访问国外网站 2) web_search 可尝试使用（cn.bing.com 通常不受限）3) http_request 和 web_fetch 访问国外地址前先用 check_network 检测单个地址");
+                sb.append("当前网络环境严重受限，仅 " + reachableCount + "/" + results.size() + " 个站点可达。建议：1) 如需访问境外站点，请启动本机代理软件（Clash 等）——工具会自动检测并走代理，无需手动改配置 2) web_search 仍可用（自动切换国内可达源 cn.bing.com / 百度）3) http_request 和 web_fetch 访问境外地址前先用 check_network 检测单个地址");
             }
         }
 

@@ -8,7 +8,7 @@ export interface MenuItem {
   parentId?: number
   sortOrder: number
   permissionCode?: string
-  menuType: string  // LINK 或 MANAGE
+  menuType: string  // LINK=对话 / AI=AI能力 / TOOL=数据与工具 / SYSTEM=系统 / MANAGE=管理页面
   visible: number
   status: number
 }

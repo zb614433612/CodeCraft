@@ -60,10 +60,11 @@
           <div class="card-top">
             <div
               class="card-avatar"
-              :class="{ 'avatar-default': agent.isDefault }"
-              :style="{ background: avatarGradient(agent.id, agent.name) }"
+              :class="{ 'avatar-default': agent.isDefault, 'has-image': isImageAvatar(agent.avatar) }"
+              :style="isImageAvatar(agent.avatar) ? {} : { background: avatarGradient(agent.id, agent.name) }"
             >
-              <span class="avatar-emoji">{{ agent.avatar || '🤖' }}</span>
+              <img v-if="isImageAvatar(agent.avatar)" :src="agent.avatar" class="card-avatar-img" alt="" />
+              <span v-else class="avatar-emoji">{{ agent.avatar || '🤖' }}</span>
             </div>
             <div class="card-info">
               <div class="card-name-row">
@@ -192,9 +193,15 @@
                 <!-- 头像选择 -->
                 <a-form-item label="头像">
                   <div class="avatar-picker">
+                    <AvatarUploader
+                      v-model="formData.avatar"
+                      :name="formData.name"
+                      :size="52"
+                      shape="square"
+                    />
                     <div class="avatar-current" @click="showEmojiPicker = !showEmojiPicker">
-                      <span class="avatar-preview">{{ formData.avatar || '🤖' }}</span>
-                      <span class="avatar-hint">点击选择头像</span>
+                      <span class="avatar-preview">{{ isImageAvatar(formData.avatar) ? '🖼️' : (formData.avatar || '🤖') }}</span>
+                      <span class="avatar-hint">选择 Emoji 头像</span>
                       <span class="avatar-arrow" :class="{ open: showEmojiPicker }">▾</span>
                     </div>
                     <Transition name="picker-drop">
@@ -405,6 +412,8 @@ import {
   type AgentConfig
 } from '@/api/agent-config'
 import { listToolRegistry, type ToolCategory } from '@/api/tools'
+import AvatarUploader from '@/components/AvatarUploader.vue'
+import { isImageAvatar } from '@/utils/avatar'
 
 // ===== 状态 =====
 const agentList = ref<AgentConfig[]>([])
@@ -964,6 +973,7 @@ onMounted(() => {
   width: 52px;
   height: 52px;
   border-radius: 14px;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1288,6 +1298,16 @@ onMounted(() => {
 /* ---------- 头像选择器 ---------- */
 .avatar-picker {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.card-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  display: block;
 }
 .avatar-current {
   display: inline-flex;

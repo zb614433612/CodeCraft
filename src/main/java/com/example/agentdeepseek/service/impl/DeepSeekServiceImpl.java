@@ -4,6 +4,7 @@ import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.service.llm.LLMClient;
+import com.example.agentdeepseek.service.llm.LLMErrorFormatter;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.mapper.AgentConfigMapper;
 import com.example.agentdeepseek.model.dto.ChatRequest;
@@ -20,7 +21,7 @@ import com.example.agentdeepseek.service.agentinvoke.AgentInvokeService;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import com.example.agentdeepseek.service.SupplementStore;
-import com.example.agentdeepseek.service.SkillMatcher;
+import com.example.agentdeepseek.service.SkillCatalogBuilder;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
 import com.example.agentdeepseek.service.ConfigService;
@@ -115,7 +116,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final PendingQuestionStore pendingQuestionStore;
     private final ExecutionTokenManager executionTokenManager;
     private final SkillService skillService;
-    private final SkillMatcher skillMatcher;
+    private final SkillCatalogBuilder skillCatalogBuilder;
     private final DeepSeekAnalyzer deepSeekAnalyzer;
 
     private final SnapshotService snapshotService;
@@ -249,7 +250,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                PendingQuestionStore pendingQuestionStore,
                                ExecutionTokenManager executionTokenManager,
                                SkillService skillService,
-                               SkillMatcher skillMatcher,
+                               SkillCatalogBuilder skillCatalogBuilder,
                                DeepSeekAnalyzer deepSeekAnalyzer,
                                SnapshotService snapshotService,
                                OperationDetailGenerator detailGenerator,
@@ -278,7 +279,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.pendingQuestionStore = pendingQuestionStore;
         this.executionTokenManager = executionTokenManager;
         this.skillService = skillService;
-        this.skillMatcher = skillMatcher;
+        this.skillCatalogBuilder = skillCatalogBuilder;
         this.deepSeekAnalyzer = deepSeekAnalyzer;
         this.snapshotService = snapshotService;
         this.detailGenerator = detailGenerator;
@@ -642,7 +643,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     /**
      * 会话上下文，包含会话ID和API请求
      */
-    private record ConversationContext(Long conversationId, Map<String, Object> apiRequest, List<String> toolNames, Long storageConversationId, String agentType, Long userId, String skillMatchEvent) {}
+    private record ConversationContext(Long conversationId, Map<String, Object> apiRequest, List<String> toolNames, Long storageConversationId, String agentType, Long userId) {}
 
     /**
      * 准备会话上下文和API请求
@@ -873,114 +874,67 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         List<String> filteredToolNames = new ArrayList<>(toolNames);
-        String skillMatchEvent = null; // SSE 事件：技能匹配结果
-        String injectedSkillsSection = null; // 注入到用户消息的技能内容（供工具循环复用）
+        String skillCatalogSection = null;  // 技能目录文本（供工具循环复用）
 
-        // 注入技能：通过 SkillMatcher 自动匹配 + 合并技能工具，注入到用户消息开头
+        // 注入技能目录（L1 渐进式披露）：把【全部活跃技能】压成「简介目录」动态注入 system prompt；
+        // 技能完整「使用说明」由 LLM 通过 skill action=load 按需加载（L2），兼顾「不漏技能」与「不爆 token」
         if (userId != null) {
             try {
                 List<Skill> activeSkills;
                 if (agentConfigId != null) {
                     // 按 Agent 配置过滤技能 + 全局技能
                     activeSkills = skillService.listActiveByAgentConfigId(agentConfigId);
-                    log.info("技能注入(Agent{}): agentConfigId={}, 活跃技能数={}", agentConfigId, agentConfigId, activeSkills.size());
+                    log.info("技能目录注入(Agent{}): agentConfigId={}, 活跃技能数={}", agentConfigId, agentConfigId, activeSkills.size());
                 } else {
                     activeSkills = skillService.listActiveSkills(userId, agentType);
-                    log.info("技能注入: userId={}, agentType={}, 活跃技能数={}, 用户消息前50字=\"{}\"",
-                            userId, agentType, activeSkills.size(),
-                            userMessage.length() > 50 ? userMessage.substring(0, 50) + "..." : userMessage);
+                    log.info("技能目录注入: userId={}, agentType={}, 活跃技能数={}",
+                            userId, agentType, activeSkills.size());
                 }
                 if (!activeSkills.isEmpty()) {
-                    // 使用匹配引擎自动筛选当前问题最相关的 Top-5 技能
-                    List<Skill> matchedSkills = skillMatcher.match(userMessage, activeSkills);
-                    if (!matchedSkills.isEmpty()) {
-                        log.info("技能注入: 已注入 {} 个技能到用户消息", matchedSkills.size());
-                        // 构建前端可见的技能匹配事件
-                        ArrayNode skillArray = objectMapper.createArrayNode();
-                        for (Skill skill : matchedSkills) {
-                            ObjectNode skillObj = objectMapper.createObjectNode();
-                            skillObj.put("id", skill.getId());
-                            skillObj.put("name", skill.getName());
-                            skillObj.put("confidence", skill.getConfidence());
-                            skillObj.put("usageCount", skill.getUsageCount());
-                            String triggerWordsDisplay = "";
-                            if (skill.getTriggerWords() != null && !skill.getTriggerWords().isBlank()
-                                    && !"[]".equals(skill.getTriggerWords())) {
-                                try {
-                                    List<String> tw = objectMapper.readValue(skill.getTriggerWords(), List.class);
-                                    triggerWordsDisplay = String.join("/", tw);
-                                } catch (Exception ignored) {}
-                            }
-                            skillObj.put("triggerWords", triggerWordsDisplay);
-                            skillObj.put("description", skill.getDescription() != null ? skill.getDescription() : "");
-                            skillArray.add(skillObj);
-                        }
-                        ObjectNode skillEvent = objectMapper.createObjectNode();
-                        skillEvent.put("event", "skill_match");
-                        skillEvent.set("skills", skillArray);
-                        skillMatchEvent = objectMapper.writeValueAsString(skillEvent);
-
-                        // 技能列表
-                        StringBuilder skillsList = new StringBuilder();
-                        for (Skill skill : matchedSkills) {
-                            // ★ 修复（P0 工具授权）：合并技能所需工具必须过「授权闸门」——
-                            //   仅追加 Agent 授权列表（toolNames）内的工具；技能引用但未授权的工具跳过注入，
-                            //   防止技能绕过 tool_names 授权、把授权外工具带给 LLM（授权漏洞根因 A）。
-                            try {
-                                List<String> skillTools = objectMapper.readValue(skill.getToolNames(), List.class);
-                                for (String toolName : skillTools) {
-                                    if (!toolNames.contains(toolName)) {
-                                        log.info("技能 {} 需要的工具 [{}] 不在 Agent 授权列表内，跳过注入", skill.getId(), toolName);
-                                        continue;
-                                    }
-                                    if (!filteredToolNames.contains(toolName)) {
-                                        filteredToolNames.add(toolName);
-                                    }
+                    // ★ 合并技能所需工具必须过「授权闸门」——仅追加 Agent 授权列表（toolNames）内的工具；
+                    //   技能引用但未授权的工具跳过注入，防止技能绕过 tool_names 授权把授权外工具带给 LLM。
+                    for (Skill skill : activeSkills) {
+                        try {
+                            List<String> skillTools = objectMapper.readValue(skill.getToolNames(), List.class);
+                            for (String toolName : skillTools) {
+                                if (!toolNames.contains(toolName)) {
+                                    log.info("技能 {} 需要的工具 [{}] 不在 Agent 授权列表内，跳过注入", skill.getId(), toolName);
+                                    continue;
                                 }
-                            } catch (Exception e) {
-                                log.warn("解析技能 {} 的工具列表失败", skill.getId(), e);
+                                if (!filteredToolNames.contains(toolName)) {
+                                    filteredToolNames.add(toolName);
+                                }
                             }
-                            String toolNamesFormatted = contextBuilder.formatSkillToolNames(skill.getToolNames());
-                            String instructions = skill.getInstructions() != null ? skill.getInstructions() : "";
-                            skillsList.append("\n【").append(skill.getName()).append("】(ID:").append(skill.getId()).append(")")
-                                    .append(" | 置信度 ").append(String.format("%.0f%%", skill.getConfidence() * 100))
-                                    .append(" | 使用 ").append(skill.getUsageCount()).append(" 次")
-                                    .append(" | 成功 ").append(skill.getSuccessCount()).append(" / 失败 ").append(skill.getFailCount());
-                            skillsList.append("\n").append(skill.getDescription()).append("\n")
-                                    .append("  关联工具：").append(toolNamesFormatted).append("\n")
-                                    .append("  使用说明：").append(instructions).append("\n");
+                        } catch (Exception e) {
+                            log.warn("解析技能 {} 的工具列表失败", skill.getId(), e);
                         }
-
-                        StringBuilder skillsSection = new StringBuilder("\n\n---\n");
-                        skillsSection.append("## 技能使用规则（必须遵守）\n\n");
-                        skillsSection.append("以下规则优先级高于系统提示词中的其他指令：\n\n");
-                        skillsSection.append("1. 检查下方匹配到的技能列表，如果用户需求与某个技能的描述匹配，严格按照该技能的「使用说明」执行。\n");
-                        skillsSection.append("2. 技能使用完毕后（无论成功或失败），必须调用 skill action=report 反馈：\n");
-                        skillsSection.append("   - skill_id：技能列表中【技能名】后面标注的 ID（数字）\n");
-                        skillsSection.append("   - success：true（操作成功/用户满意）或 false（未达预期/出错）\n");
-                        skillsSection.append("3. 即使用户直接对结果表示满意或不满，也必须调用 skill action=report，遗漏会导致技能置信度无法更新。\n");
-                        skillsSection.append("4. 置信度由系统自动计算（贝叶斯平滑公式），≥80% 优先注入，<10% 自动淘汰。\n");
-                        skillsSection.append("5. 持续反馈能让好技能进化、低效技能自然淘汰，形成正向循环。\n");
-                        skillsSection.append("\n---\n");
-                        skillsSection.append("## 匹配到的技能\n");
-                        skillsSection.append(skillsList);
-                        injectedSkillsSection = skillsSection.toString();
-                        // 注入到最后一条用户消息的内容开头（比 system prompt 注入更有效）
-                        for (int i = historyMessages.size() - 1; i >= 0; i--) {
-                            Map<String, Object> msg = historyMessages.get(i);
-                            if ("user".equals(msg.get("role"))) {
-                                String existing = (String) msg.get("content");
-                                String newContent = skillsSection.toString() + "\n\n" + existing;
-                                msg.put("content", newContent);
-                                log.info("技能注入: 已修改用户消息, 注入后总长度={}, 前300字=\"{}\"",
-                                        newContent.length(),
-                                        newContent.length() > 300 ? newContent.substring(0, 300) + "..." : newContent);
-                                break;
-                            }
-                        }
-                    } else {
-                        log.info("技能注入: 匹配结果为空，未注入技能");
                     }
+
+                    // 构建技能目录文本（含使用规则 + 预算控制）
+                    skillCatalogSection = skillCatalogBuilder.buildCatalogSection(activeSkills);
+
+                    // 动态注入到 system prompt（从 DB 重建的历史 system 消息不含目录，故每次请求都注入）
+                    boolean catalogInjected = false;
+                    for (Map<String, Object> msg : historyMessages) {
+                        if ("system".equals(msg.get("role"))) {
+                            String existing = (String) msg.get("content");
+                            if (existing == null || existing.isEmpty()) {
+                                msg.put("content", skillCatalogSection);
+                            } else if (!existing.contains(SkillCatalogBuilder.CATALOG_HEADER)) {
+                                msg.put("content", existing + skillCatalogSection);
+                            }
+                            catalogInjected = true;
+                            break;
+                        }
+                    }
+                    if (!catalogInjected) {
+                        Map<String, Object> sysMsg = new HashMap<>();
+                        sysMsg.put("role", "system");
+                        sysMsg.put("content", skillCatalogSection);
+                        historyMessages.add(0, sysMsg);
+                    }
+                    log.info("技能目录注入: 已注入 {} 个技能目录到 system prompt, 目录长度={}",
+                            activeSkills.size(), skillCatalogSection.length());
                 } else {
                     log.info("技能注入: 该用户/助手组合无活跃技能");
                 }
@@ -1183,9 +1137,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
         apiRequest.put("_contextMode", contextMode);
 
-        // 将技能注入内容存入隐藏字段，供工具循环路径复用
-        if (injectedSkillsSection != null) {
-            apiRequest.put("_skillsSection", injectedSkillsSection);
+        // 将技能目录（L1 简介段）存入隐藏字段，供工具循环路径复用
+        if (skillCatalogSection != null) {
+            apiRequest.put("_skillsSection", skillCatalogSection);
         }
         // ★ 修复（P0 工具授权）：将「最终允许的工具集」存入隐藏字段，供工具执行前的授权白名单校验使用
         //   （修复后技能工具必须 ⊆ 授权列表，因此该集合等效于 Agent 授权列表 tool_names）
@@ -1195,7 +1149,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 stream ? "流式" : "非流式", llmClient.getProviderCode(),
                 conversationId, effectiveModel, userMessage.length(), userId);
 
-            return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId, agentType, userId, skillMatchEvent);
+            return new ConversationContext(conversationId, apiRequest, toolNames, storageConversationId, agentType, userId);
         } finally {
             // 恢复调用前的项目根目录（无论正常返回还是中间抛异常，都清理 ThreadLocal，避免线程池复用残留）
             if (hadPrevProjectRoot) {
@@ -1263,17 +1217,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String sessionEventStr = "{\"sessionId\":" + conversationId + "}";
         Flux<String> sessionEvent = Flux.just(sessionEventStr);
 
-        // emit skill match event so frontend can show matched skills in thinking panel
-        Flux<String> skillEventFlux = Flux.empty();
-        if (context.skillMatchEvent() != null) {
-            skillEventFlux = Flux.just(context.skillMatchEvent());
-        }
-
         if (hasTools) {
             // 取消同一会话中正在运行的后台任务（避免同一会话并发多个工具循环互相干扰）
             cancelRunningTask(conversationId);
             // 在后台启动工具循环（断开不销毁），返回事件流
-            return Flux.concat(skillEventFlux, sessionEvent, startBackgroundTask(conversationId, storageConversationId, apiRequest));
+            return Flux.concat(sessionEvent, startBackgroundTask(conversationId, storageConversationId, apiRequest));
         } else {
             // 没有工具定义，使用原有流式逻辑
             // 收集响应内容，用于保存助手消息
@@ -1288,7 +1236,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             requestBody.keySet().removeIf(k -> k.startsWith("_"));
             // 使用当前 Provider 的 WebClient（替换原来的 this.webClient）
             WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
-            return Flux.concat(skillEventFlux, sessionEvent, activeWebClient.post()
+            return Flux.concat(sessionEvent, activeWebClient.post()
                     .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(requestBody)
@@ -1333,6 +1281,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);
                         // 异步预压缩：提前压缩最早的历史，降低下次请求延迟
                         compactionService.asyncPrecompress(conversationId, providerCode);
+                    })
+                    .onErrorResume(error -> {
+                        // ★ 用户友好错误反馈（无工具直连路径，与任务级 error 回调用同一转换器）：
+                        //   把 DeepSeek HTTP 错误转换为 task_error SSE 事件 + [DONE] 正常收尾，
+                        //   替代原先「错误信号直接断流」——否则前端只能看到网络层错误，
+                        //   拿不到官方错误码对应的原因与解决建议（余额不足/认证失败等）。
+                        log.error("DeepSeek API流式调用失败（已转换为前端友好错误事件）: {}", error.getMessage());
+                        LLMErrorFormatter.FriendlyError friendlyError = LLMErrorFormatter.format(error);
+                        return Flux.just(LLMErrorFormatter.toTaskErrorEventJson(friendlyError), "[DONE]");
                     }));
         }
     }
@@ -1492,21 +1449,38 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         },
                         error -> {
                             log.error("后台任务失败: {}", error.getMessage());
+                            // ★ 用户友好错误反馈（DeepSeek 官方错误码表适配）：把底层异常（HTTP 4xx/5xx、
+                            //   网络类）转换为「标题 + 原因 + 解决建议」的中文提示，通过 task_error SSE 事件
+                            //   下发前端——前端展示错误详情并在输入区提供「一键继续」入口。
+                            LLMErrorFormatter.FriendlyError friendlyError = LLMErrorFormatter.format(error);
                             // 2026-09-21 双写修复（P0-2 配套）：上下文注销前置到回调入口——
                             // 「ctx 存在 = 工具循环活跃」语义精确化（循环退出瞬间即注销，不含善后阶段），
                             // 使新任务准入等待（waitForPreviousTaskExit）可即时观测旧任务退出。
                             if (task.getId() != null) {
                                 taskContextRegistry.unregister(task.getId());
                             }
-                            sink.tryEmitError(error);
+                            // 任务状态转 failed（H4 补漏：仅 running 可转——取消竞态下循环抛异常
+                            //（如取消检查点主动中断）不得覆盖已置位的 cancelled 状态）。
+                            // error_message 存友好化后的完整提示（供页面刷新后「任务中断」恢复展示）。
+                            int updatedRows = 0;
                             if (task.getId() != null) {
                                 try {
-                                    // H4 补漏：error 回调同样仅 running 可转 failed——取消竞态下循环抛异常
-                                    // （如取消检查点主动中断）不得覆盖已置位的 cancelled 状态
-                                    jdbcTemplate.update("UPDATE agent_task SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ? AND status = 'running'",
-                                            error.getMessage() != null ? error.getMessage().substring(0, Math.min(500, error.getMessage().length())) : "未知错误", task.getId());
+                                    String friendlyMsg = friendlyError.message() != null ? friendlyError.message() : "未知错误";
+                                    updatedRows = jdbcTemplate.update("UPDATE agent_task SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ? AND status = 'running'",
+                                            friendlyMsg.length() > 500 ? friendlyMsg.substring(0, 500) : friendlyMsg, task.getId());
                                 } catch (Exception ignored) {}
                             }
+                            // 仅「真正失败」（非取消竞态）才下发错误事件：取消场景下任务状态已被置为
+                            // cancelled（updatedRows=0），且事件通道已被 toolLoopManager.cancelRunningTask
+                            // 注销（emitIfSame 身份校验兜底）——前端静默收尾，不误报错误。
+                            if (task.getId() == null || updatedRows > 0) {
+                                agentEventBus.emitIfSame(conversationId, sink,
+                                        LLMErrorFormatter.toTaskErrorEventJson(friendlyError));
+                            }
+                            // ★ 不再使用 sink.tryEmitError(error)：Reactor 错误信号会直接掐断 SSE 连接
+                            //   （SseBatchUtil 在 error 时丢弃缓冲），前端只能看到「网络错误」而丢失真实原因。
+                            //   改为发送 task_error 事件后正常 complete，让 SSE 优雅收尾、错误事件可靠送达。
+                            sink.tryEmitComplete();
                             // 2026-09-21 双写修复：条件注销（仅当总线仍为本任务的 sink）——
                             // 旧任务清理迟到时（准入等待超时放行的残余窗口）不得误拆新任务的事件通道
                             agentEventBus.unregisterIfSame(conversationId, sink);
@@ -1605,6 +1579,48 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             log.debug("查询任务状态失败: {}", e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * 查询会话「最近一次任务」的失败摘要（任务异常停止 → 前端展示错误 + 一键继续 的刷新恢复）
+     * <p>
+     * 返回非空需同时满足：
+     * ① 最近一条任务（ORDER BY id DESC LIMIT 1）状态为 failed；
+     * ② 该任务结束之后没有新的用户消息（有则说明用户已自行重发/继续，旧错误不再提示）。
+     * 用户手动停止（cancelled）/正常完成（completed）返回 null——不提供「继续」入口。
+     * </p>
+     *
+     * @return {id, status, errorMessage}；无匹配返回 null
+     */
+    public Map<String, Object> getLastTaskSummary(Long conversationId) {
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                    "SELECT t.id, t.status, t.error_message, t.updated_at, "
+                            + "(SELECT COUNT(*) FROM conversation_message m WHERE m.conversation_id = t.conversation_id "
+                            + "AND m.role = 'user' AND m.created_at > t.updated_at) AS new_user_msg_count "
+                            + "FROM agent_task t WHERE t.conversation_id = ? ORDER BY t.id DESC LIMIT 1",
+                    conversationId);
+            if (rows.isEmpty()) {
+                return null;
+            }
+            Map<String, Object> row = rows.get(0);
+            String status = row.get("status") != null ? String.valueOf(row.get("status")) : null;
+            if (!"failed".equals(status)) {
+                return null;
+            }
+            Object newUserMsgCount = row.get("new_user_msg_count");
+            if (newUserMsgCount instanceof Number n && n.longValue() > 0) {
+                return null;
+            }
+            Map<String, Object> result = new HashMap<>();
+            result.put("id", row.get("id"));
+            result.put("status", status);
+            result.put("errorMessage", row.get("error_message"));
+            return result;
+        } catch (Exception e) {
+            log.warn("查询最近任务失败摘要失败: conversationId={}, err={}", conversationId, e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -1725,20 +1741,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        // 注入技能匹配内容到用户消息（工具循环中同样需要）
+        // 注入技能目录到 system 消息（工具循环的 messages 从 DB 重建，不含动态目录，故需重新注入）
         String skillsSection = (String) initialApiRequest.get("_skillsSection");
         if (skillsSection != null) {
-            for (int i = messages.size() - 1; i >= 0; i--) {
-                Map<String, Object> msg = messages.get(i);
-                if ("user".equals(msg.get("role"))) {
+            boolean catalogInjected = false;
+            for (Map<String, Object> msg : messages) {
+                if ("system".equals(msg.get("role"))) {
                     String existing = (String) msg.get("content");
-                    if (!existing.startsWith(skillsSection)) {
-                        msg.put("content", skillsSection + "\n\n" + existing);
-                        log.info("技能注入: 工具循环中已注入技能到用户消息, 总长度={}", skillsSection.length() + 2 + existing.length());
+                    if (existing == null || existing.isEmpty()) {
+                        msg.put("content", skillsSection);
+                    } else if (!existing.contains(SkillCatalogBuilder.CATALOG_HEADER)) {
+                        msg.put("content", existing + skillsSection);
                     }
+                    catalogInjected = true;
                     break;
                 }
             }
+            if (!catalogInjected) {
+                Map<String, Object> sysMsg = new HashMap<>();
+                sysMsg.put("role", "system");
+                sysMsg.put("content", skillsSection);
+                messages.add(0, sysMsg);
+            }
+            log.info("技能目录注入(toolLoop): 已注入技能目录到 system 消息, 长度={}", skillsSection.length());
         }
 
         // 注入语言强制指令（工具循环中同样需要）
@@ -2744,6 +2769,27 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
+     * 生成「技能命中」操作摘要（skill action=load 专用）。
+     * 技能目录已改为「全量简介注入」，前端不再展示全量「技能匹配」列表；
+     * 本摘要仅在 LLM 真正加载执行某项技能时生成，供前端在「思考过程」横栏动态展示「命中技能」。
+     */
+    private String buildSkillHitSummary(JsonNode args) {
+        if (!"load".equals(args.path("action").asText(""))) return null;
+        long skillId = args.path("skill_id").asLong(0);
+        if (skillId <= 0) return null;
+        String skillName = null;
+        try {
+            String name = skillService.getSkillById(skillId).getName();
+            if (name != null && !name.isBlank()) {
+                skillName = name;
+            }
+        } catch (Exception e) {
+            log.debug("技能命中摘要：获取技能名失败 skillId={}, err={}", skillId, e.getMessage());
+        }
+        return "> **🎯 命中技能:** " + (skillName != null ? skillName : ("#" + skillId)) + "\n\n";
+    }
+
+    /**
      * 从 tool_calls JSON 数组中提取工具名称
      */
     private List<String> extractToolNames(JsonNode toolCalls) {
@@ -2890,6 +2936,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             try {
                                                 JsonNode args = objectMapper.readTree(argsStr);
                                                 String summary = detailGenerator.generate(tcToolName, args);
+                                                // ★ 技能加载（skill action=load）→ 生成「命中技能」摘要：
+                                                //   技能目录已改为「全量简介注入」，前端不再展示全量匹配列表；
+                                                //   仅当 LLM 真正加载执行技能时才动态展示「命中技能」。
+                                                if (summary == null && "skill".equals(tcToolName)) {
+                                                    summary = buildSkillHitSummary(args);
+                                                }
                                                 if (summary != null) {
                                                     operationSummaries.add(summary);
                                                     operationSummaryEvents.add(createReasoningSSEEvent(summary));

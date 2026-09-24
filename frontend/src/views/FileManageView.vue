@@ -906,13 +906,25 @@ onMounted(() => {
 <style scoped>
 .file-manage {
   padding: 20px 24px;
-  max-width: 1200px;
-  margin: 0 auto;
+  /* 背景图遮罩修复：根容器不再限宽。原 max-width:1200px + margin:0 auto 会让
+     「html.has-app-bg .main-content > *」铺在根容器上的页面遮罩只覆盖中间 1200px，
+     窗口全屏/超宽时左右两侧露出无遮罩的原始背景图、显得高亮突兀；
+     限宽职责下移给下方子卡片，视觉观感不变、遮罩随根容器铺满整个内容区 */
   display: flex;
   flex-direction: column;
   gap: 16px;
   height: 100%;
   overflow-y: auto;
+}
+
+/* 子卡片承接原根容器的 1200px 视觉限宽（水平居中）；根容器保持全宽以铺满页面遮罩 */
+.file-manage > .page-header,
+.file-manage > .toolbar-card,
+.file-manage > .content-card {
+  width: 100%;
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* ===== 头部 ===== */

@@ -344,7 +344,8 @@
                   :class="['agent-chip', selectedAgentId === a.id ? 'active' : '']"
                   @click="selectedAgentId = a.id"
                 >
-                  <span class="agent-chip-avatar">{{ a.avatar || '🤖' }}</span>
+                  <img v-if="isImageAvatar(a.avatar)" :src="a.avatar" class="agent-chip-avatar-img" alt="" />
+                  <span v-else class="agent-chip-avatar">{{ a.avatar || '🤖' }}</span>
                   <span>{{ a.name }}</span>
                 </button>
               </div>
@@ -433,7 +434,8 @@
                   <div class="auth-section-title">📤 我授权给对方的 Agent</div>
                   <div v-if="myAgents.length === 0" class="auth-empty">暂无可用 Agent</div>
                   <div v-for="agent in myAgents" :key="agent.id" class="auth-agent-item">
-                    <span class="auth-agent-avatar">{{ agent.avatar || '🤖' }}</span>
+                    <img v-if="isImageAvatar(agent.avatar)" :src="agent.avatar" class="auth-agent-avatar-img" alt="" />
+                    <span v-else class="auth-agent-avatar">{{ agent.avatar || '🤖' }}</span>
                     <div class="auth-agent-info">
                       <span class="auth-agent-name">{{ agent.name }}</span>
                       <span class="auth-agent-desc">{{ agent.description || '' }}</span>
@@ -452,7 +454,8 @@
                   <div class="auth-section-title">📥 对方授权给我的 Agent（可调用）</div>
                   <div v-if="peerAuthToMe.length === 0" class="auth-empty">对方暂未授权任何 Agent</div>
                   <div v-for="agent in peerAuthToMe" :key="agent.id" class="auth-agent-item received">
-                    <span class="auth-agent-avatar">{{ agent.avatar || '🤖' }}</span>
+                    <img v-if="isImageAvatar(agent.avatar)" :src="agent.avatar" class="auth-agent-avatar-img" alt="" />
+                    <span v-else class="auth-agent-avatar">{{ agent.avatar || '🤖' }}</span>
                     <div class="auth-agent-info">
                       <span class="auth-agent-name">{{ agent.name }}</span>
                     </div>
@@ -481,6 +484,7 @@ import {
   type P2pStatus, type P2pAddressInfo, type P2pPeer, type AgentAuthItem
 } from '@/api/p2p'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
+import { isImageAvatar } from '@/utils/avatar'
 
 // ==================== 状态 ====================
 const status = ref<P2pStatus>({ running: false, peerId: '', port: 0, peerCount: 0, certFingerprint: '', myName: '' })
@@ -1651,6 +1655,14 @@ onUnmounted(() => {
   font-weight: 700;
 }
 .agent-chip-avatar { font-size: 15px; }
+.agent-chip-avatar-img {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  object-fit: cover;
+  display: inline-block;
+  vertical-align: middle;
+}
 .agent-empty-hint {
   font-size: 12px; color: var(--text-3); font-style: italic;
 }
@@ -1726,6 +1738,14 @@ onUnmounted(() => {
 .auth-agent-item.received { background: rgba(16,185,129,0.05); }
 .auth-agent-item.received:hover { background: rgba(16,185,129,0.1); }
 .auth-agent-avatar { font-size: 20px; flex-shrink: 0; }
+.auth-agent-avatar-img {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: block;
+}
 .auth-agent-info { flex: 1; min-width: 0; }
 .auth-agent-name { font-weight: 700; font-size: 13px; display: block; color: var(--am-text-1); }
 .auth-agent-desc {

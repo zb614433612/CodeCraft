@@ -28,7 +28,7 @@ kill -9 <PID>
 **原因**：API Key 未配置或无效。
 
 **检查**：
-1. 访问 `http://localhost:8084` → 左侧「配置」→ 检查 API Key
+1. 访问 `http://localhost:8084` → 左侧「模型配置」→ 检查 API Key
 2. 确认该 Provider 已启用且模型列表配置正确
 3. 查看日志 `logs/app.log` 中是否有 `401 Unauthorized` 错误
 

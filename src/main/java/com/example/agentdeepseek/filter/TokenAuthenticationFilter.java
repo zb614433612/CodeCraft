@@ -31,7 +31,9 @@ public class TokenAuthenticationFilter implements Filter {
             "/api-docs",
             "/v3/api-docs",
             "/api/skills",
-            "/api/p2p/file/"   // 文件/图片获取通过 transferId 鉴权，无需 token
+            "/api/p2p/file/",  // 文件/图片获取通过 transferId 鉴权，无需 token
+            "/api/avatar/file/",  // 头像图片读取免鉴权，供 <img> 标签直接引用（上传端点 /api/avatar 仍需 token）
+            "/api/appearance/file/"  // 背景图读取免鉴权，供 CSS/img 引用（上传端点 /api/appearance/background 仍需 token）
     );
 
 

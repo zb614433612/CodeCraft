@@ -59,8 +59,8 @@
                 </div>
                 <div v-else-if="event.type === 'skill_match'" class="event-skill">
                   <span class="event-icon">📋</span>
-                  <span>匹配技能：</span>
-                  <span v-for="(s, si) in event.skills" :key="si" class="skill-tag">
+                  <span>技能目录（{{ event.skills?.length || 0 }}）：</span>
+                  <span v-for="(s, si) in (event.skills || []).slice(0, 10)" :key="si" class="skill-tag">
                     {{ s.name }} ({{ (s.confidence * 100).toFixed(0) }}%)
                   </span>
                 </div>

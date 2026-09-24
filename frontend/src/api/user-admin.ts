@@ -32,6 +32,7 @@ export interface CreateUserParams {
   role?: string
   email?: string
   phone?: string
+  avatar?: string
 }
 
 // 用户管理 - 更新用户参数
@@ -44,6 +45,7 @@ export interface UpdateUserParams {
   email?: string
   phone?: string
   status?: number
+  avatar?: string
 }
 
 // 用户管理 - 修改密码参数

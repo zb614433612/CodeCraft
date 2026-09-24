@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v2.0.1 | 更新：2026-09-22 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.2 | 更新：2026-09-24 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 187KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -59,7 +59,7 @@ DeepSeekServiceImpl (28 个依赖)
 │   └─ SnapshotService                 → 代码快照
 ├─ 技能系统
 │   ├─ SkillService                    → 技能 CRUD
-│   ├─ SkillMatcher                    → 技能匹配
+│   ├─ SkillCatalogBuilder             → 技能目录构建（渐进式披露）
 │   └─ DeepSeekAnalyzer                → AI 分析器
 ├─ 成长体系（★v1.1.5 新增，v1.1.6 进化：P0 归一化 / P1 弯路通道 / P2 环境感知）
 │   ├─ LessonService                   → 经验 CRUD + 按需检索 + 状态机
@@ -91,10 +91,10 @@ DeepSeekServiceImpl (28 个依赖)
 │   ├─ 获取/创建 Conversation
 │   ├─ 获取 AgentConfig（工具列表、模型、思考模式等）
 │   ├─ 解析 LLM Provider + Client（providerCode > providerId > 默认）
-│   ├─ 加载技能 → SkillMatcher.match()
+│   ├─ 加载技能目录 → SkillCatalogBuilder.buildCatalogSection()
 │ │   ├─ 加载经验 → LessonService.retrieveRelevant（被动注入，会话级去重）
 │   ├─ 构建 API 请求体（LLMClient.buildRequestBody）
-│   └─ 返回 ConversationContext（含 apiRequest, toolNames, skillMatchEvent）
+│   └─ 返回 ConversationContext（含 apiRequest, toolNames）
 ├─ ② toolExecutor.buildToolDefinitions(toolNames)
 │   └─ 构建 OpenAI Function Calling tools 数组
 ├─ ③ cancelRunningTask(conversationId)
@@ -112,7 +112,7 @@ DeepSeekServiceImpl (28 个依赖)
 │       │
 │       ├─ 重置 PermissionContext（清除上一轮「本轮全部同意」）
 │       ├─ 加载历史消息（contextBuilder.buildMessagesFromHistory）
-│       ├─ 注入技能匹配内容到用户消息
+│       ├─ 注入技能目录到 system prompt
 │       ├─ 注入语言强制指令
 │       ├─ 调用 handleToolCallIteration(iteration=0, maxIterations=50)
 │       │   │
@@ -146,8 +146,8 @@ DeepSeekServiceImpl (28 个依赖)
 │       │       │   └─ 如果 finish_reason == "stop" → 返回 done 事件
 │       │       │
 │       │       └─ 错误处理：
-│       │           ├─ WebClientResponseException → 错误事件
-│       │           └─ 通用 Exception → 错误事件
+│       │           ├─ WebClientResponseException → 按官方错误码表转友好提示（LLMErrorFormatter）→ task_error 事件
+│       │           └─ 通用 Exception → 友好提示 → task_error 事件（含任务中断恢复）
 │       │
 │ │       ├─ 工具循环结束后 → lessonReviewService.reviewAsync（异步复盘，提炼根因/解法，C2）
 │       └─ concatWith(Flux.defer(子Agent自动收集))
@@ -224,13 +224,14 @@ DeepSeekServiceImpl (28 个依赖)
 | 事件类型 | 触发时机 | JSON 结构 |
 |---------|---------|----------|
 | `sessionId` | 流开始时 | `{"sessionId": 123}` |
-| `skill_match` | 技能匹配完成 | `{"type":"skill_match","skills":[...]}` |
 | `reasoning` | AI 思考过程 | `{"type":"reasoning","content":"..."}` |
 | `text` | AI 文本输出 | `{"type":"text","content":"..."}` |
 | `tool_start` | 工具开始执行 | `{"type":"tool_start","tools":["write_file"]}` |
 | `tool_result` | 工具执行完成 | `{"type":"tool_result","tool":"write_file","result":"..."}` |
 | `ask_user` | 需要用户确认 | `{"type":"ask_user","uuid":"...","question":"...","askType":"..."}` |
 | `resume` | 用户确认后恢复 | `{"type":"resume"}` |
+| `delegate_progress` | 委托进度心跳（A 会话 await 阻塞期间每 ~5s 一次） | `{"type":"delegate_progress","targetSessionId":123,"elapsedSec":5}` |
+| `task_error` | 任务因 LLM 接口错误停止（标题 + 原因 + 解决建议，供「任务中断」恢复） | `{"type":"task_error","title":"...","message":"...","retryable":true}` |
 | `error` | 发生错误 | `{"type":"error","message":"..."}` |
 | `done` | 本轮任务完成 | `{"type":"done"}` |
 
@@ -296,7 +297,7 @@ prepareConversationContext()
     │   ├─ 系统提示词（system prompt）
     │   ├─ 压缩摘要（如有）
     │   ├─ 最近 N 轮完整对话
-    │   ├─ 技能匹配内容注入
+    │   ├─ 技能目录注入（SkillCatalogBuilder）
     │   ├─ 语言强制指令注入
     │   └─ Token 预算检查（trimToTokenBudget）
     ↓

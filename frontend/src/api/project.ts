@@ -1,5 +1,5 @@
 import type { ApiResponse } from '@/store/user'
-import { authFetch as authFetchWithRedirect } from '@/utils/http-client'
+import { authFetch as authFetchWithRedirect, getAuthHeaders } from '@/utils/http-client'
 
 export interface ProjectTreeNode {
   name: string
@@ -44,6 +44,32 @@ export async function readProjectFile(path: string): Promise<ApiResponse<string>
   const params = new URLSearchParams()
   params.set('path', path)
   return request<string>(`/project/read?${params}`)
+}
+
+/**
+ * 解析"不完整文件路径"（LLM 常输出省略前缀的短路径，如 api/appearance.ts）：
+ * 后端在项目内按"路径后缀"匹配真实文件，返回候选的相对路径列表（精确匹配在前，最多 50 个）
+ */
+export async function resolveProjectFilePath(root: string, path: string): Promise<ApiResponse<string[]>> {
+  const params = new URLSearchParams()
+  if (root) params.set('root', root)
+  params.set('path', path)
+  return request<string[]>(`/project/resolve?${params}`)
+}
+
+/**
+ * 读取项目/本地文件原始字节并转为 blob URL（图片、PDF 等二进制预览用）
+ * 说明：<img src> 无法携带鉴权头，故用 fetch 带 Authorization 拉取 blob 再转 objectURL
+ * 调用方需在合适时机对返回的 URL 调用 URL.revokeObjectURL 释放
+ */
+export async function getProjectFileBlobUrl(path: string): Promise<string> {
+  const authHeader = await getAuthHeaders()
+  const res = await fetch(`/api/project/raw?path=${encodeURIComponent(path)}`, { headers: authHeader })
+  if (!res.ok) {
+    throw new Error(res.status === 404 ? '文件不存在或无法访问' : `文件加载失败（${res.status}）`)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
 }
 
 export async function writeProjectFile(path: string, content: string): Promise<ApiResponse<null>> {

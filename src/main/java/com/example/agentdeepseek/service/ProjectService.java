@@ -39,9 +39,26 @@ public interface ProjectService {
     String readFile(String filePath);
 
     /**
+     * 读取文件原始字节（用于图片等二进制文件的预览）
+     * @param filePath 文件路径（相对于项目根目录或绝对路径）
+     * @return 文件字节内容
+     */
+    byte[] readFileBytes(String filePath);
+
+    /**
      * 写入文件内容
      * @param filePath 文件路径（相对于项目根目录或绝对路径）
      * @param content 文件内容
      */
     void writeFile(String filePath, String content);
+
+    /**
+     * 将"不完整路径"（如 LLM 输出时省略前缀的短路径 api/appearance.ts）解析为项目内真实文件的相对路径候选。
+     * 匹配规则：文件相对路径与 partialPath 全等，或以 "/partialPath" 结尾；自动跳过 .git、node_modules、target 等排除目录。
+     *
+     * @param rootPath    项目根目录（绝对路径；为空时回退 ProjectRootContext / user.dir）
+     * @param partialPath 待解析的不完整路径（相对路径形式）
+     * @return 候选文件的相对路径列表（/ 分隔；精确匹配在前，最多 50 个）
+     */
+    List<String> resolveFilePath(String rootPath, String partialPath);
 }

@@ -11,6 +11,9 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -72,6 +75,45 @@ public class ProjectController {
         log.debug("读取文件: {}", path);
         String content = projectService.readFile(path);
         return ApiResponse.success(content);
+    }
+
+    @GetMapping("/resolve")
+    @Operation(summary = "解析不完整文件路径", description = "将省略前缀的短路径（如 api/x.ts）在项目内按路径后缀匹配，返回候选文件的相对路径列表（精确匹配在前，最多50个）")
+    public ApiResponse<List<String>> resolveFilePath(
+            @Parameter(description = "项目根目录路径，为空则使用当前项目目录")
+            @RequestParam(defaultValue = "") String root,
+            @Parameter(description = "待解析的不完整路径（相对路径）")
+            @RequestParam String path) {
+        log.debug("解析文件路径: root={}, path={}", root.isEmpty() ? "当前项目" : root, path);
+        return ApiResponse.success(projectService.resolveFilePath(root, path));
+    }
+
+    @GetMapping("/raw")
+    @Operation(summary = "读取文件原始字节", description = "返回文件原始字节流（图片/PDF 等二进制预览用），Content-Type 按扩展名推断")
+    public ResponseEntity<byte[]> rawFile(
+            @Parameter(description = "文件路径（相对或绝对路径）")
+            @RequestParam String path) {
+        log.debug("读取文件原始字节: {}", path);
+        byte[] bytes = projectService.readFileBytes(path);
+        MediaType mediaType = parseMediaType(path);
+        return ResponseEntity.ok()
+                .contentType(mediaType)
+                .header(HttpHeaders.CACHE_CONTROL, "private, max-age=60")
+                .body(bytes);
+    }
+
+    /** 按文件扩展名推断 Content-Type（图片优先，其余按常见文档类型，未知回退 octet-stream） */
+    private MediaType parseMediaType(String name) {
+        String lower = name.toLowerCase();
+        if (lower.endsWith(".png")) return MediaType.IMAGE_PNG;
+        if (lower.endsWith(".gif")) return MediaType.IMAGE_GIF;
+        if (lower.endsWith(".webp")) return MediaType.parseMediaType("image/webp");
+        if (lower.endsWith(".bmp")) return MediaType.parseMediaType("image/bmp");
+        if (lower.endsWith(".svg")) return MediaType.parseMediaType("image/svg+xml");
+        if (lower.endsWith(".ico")) return MediaType.parseMediaType("image/x-icon");
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return MediaType.IMAGE_JPEG;
+        if (lower.endsWith(".pdf")) return MediaType.APPLICATION_PDF;
+        return MediaType.APPLICATION_OCTET_STREAM;
     }
 
     @PostMapping("/write")
