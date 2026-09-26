@@ -23,6 +23,7 @@
     "directories": {
       "output": "release"
     },
+    "afterPack": "afterPack.js",
     "files": [
       "main.js",
       "preload.js",
@@ -48,15 +49,8 @@
       "icon": "icon.ico"
     },
     "mac": {
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ],
+      "target": "dmg",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "icon": "icon.icns",
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
