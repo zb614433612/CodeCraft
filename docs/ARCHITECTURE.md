@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v2.0.2 | 更新：2026-09-24 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.3 | 更新：2026-10-17 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -97,6 +97,12 @@
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+#### 3.1.1 关键补充（v2.0.3）
+
+- **工具调用序列净化（防 400 卡死）**：`ContextBuilder.buildMessages()` 在消息转换完成后、以及上下文压缩/裁剪之后，都会调用 `ToolCallSequenceSanitizer.sanitize()`（幂等）。净化器保证 `assistant.tool_calls` 与 `role=tool` 严格一一配对：丢弃孤立 tool 消息、剔除无结果的 tool_call（全无结果则清空 tool_calls）、丢弃空 assistant 消息、剔除非法/重复 id。同一净化器也接在 `AbstractLLMClient` / `AnthropicClient` / `OllamaClient` 的请求体构造出口。
+- **写入侧占位**：`DeepSeekServiceImpl.appendToolResultMessages()` 为本批次「已声明但没拿到结果」的 tool_call 补一条「【工具未执行】」占位 tool 消息，从源头消除序列缺口。
+- **评委机制（v2.0.3 语义）**：评委否决（reject）/ 响应解析失败 / 评委调用异常且本地判定无进展 / 累计扩容达 `MAX_JUDGE_GRANTED_ITERATIONS=100` 上限时，不再直接终止任务，而是发送 `ask_user`（`askType=iteration_confirm`）由用户选择「结束任务」或「继续执行 +10 / +20 / +50 次」；等待超时 5 分钟按结束处理。
+
 ### 3.2 子 Agent 协作
 
 ```
@@ -123,6 +129,23 @@
     (可选) inspect_agent("sub-1", "full_log")
         获取子 Agent 的完整思考过程、工具调用历史
 ```
+
+### 3.3 聊天记录分页懒加载（v2.0.3）
+
+超长会话不再全量拉取。链路如下：
+
+```
+前端 CodeAssistantView
+  ├─ 打开会话 → GET /conversation/{id}/messages/page?rounds=5      （最近 5 轮）
+  ├─ scrollTop ≤ 80 → 同接口 + beforeId=nextBeforeId&rounds=5      （更早 5 轮）
+  ├─ 响应：messages（id 升序）/ hasMore / nextBeforeId
+  └─ 渲染：DynamicScroller（:key=conversationId 强制重建）
+       ├─ 消息 id 全局唯一（role-时间戳-自增序号）
+       ├─ v-track-msg-size + ResizeObserver → 节流 forceUpdate 高度自愈
+       └─ 插入历史后按高度差双向补偿（用户主动滚动则放弃补偿）
+```
+
+后端按「轮」分页：`role=USER`（排除 `desktop_inject` 注入消息）为轮边界，先用 `selectNthUserMessageIdFromTail` 定位末尾第 N 个用户消息 id，再按 id 区间取数——边界永远落在用户提问上，AI 消息聚合（`processMessageGroups`）不会跨页。游标用 `beforeId` 而非 offset，避免新消息写入导致分页漂移。
 
 ---
 
@@ -157,7 +180,7 @@ src/main/java/com/example/agentdeepseek/
 │   └── SpaConfig              # 单页应用路由回退
 ├── controller/                # REST API 控制器（25 个）+ GlobalExceptionHandler（全局异常处理）
 │   ├── DeepSeekController     # ★核心：聊天、Agent 任务状态
-│   ├── ConversationController # 会话 CRUD
+│   ├── ConversationController # 会话 CRUD + 按轮分页（messages/page）
 │   ├── GitController          # Git 操作（status/diff/commit...）
 │   ├── P2pController          # P2P 远程协作（39.7KB，最大控制器）
 │   ├── SnapshotController     # 快照管理
@@ -209,7 +232,7 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── LoginRequest / LoginResponse / PendingQuestion
 │   │   └── GetRandomCodeRequest
 │   ├── vo/                    # 视图对象
-│   │   ├── DirectoryEntry / ProjectTreeNode
+│   │   ├── DirectoryEntry / ProjectTreeNode / ConversationMessagePageVO（按轮分页响应）
 │   └── SubAgentResult         # 子Agent结构化执行结果
 ├── p2p/                       # ⚡P2P 远程协作子系统
 │   ├── controller/P2pController   # REST API（39.7KB，最大控制器）
@@ -254,7 +277,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── agentinvoke/            # ★智能体互调：委托执行/信任链/环检测（Phase 19）
 │   ├── dbconnection/           # ★外部数据库连接：配置/加密/连接管理（Phase 20）
 │   ├── files/                  # ★文件资产与 Files API 适配（上传/图像理解/引用管理，vision-files-api）
-│   ├── llm/                    # LLM 客户端层：LLMClient 抽象 + 6 个 Provider 实现 + ProviderBalanceService + LLMErrorFormatter（错误友好格式化）
+│   ├── llm/                    # LLM 客户端层：LLMClient 抽象 + 6 个 Provider 实现 + ProviderBalanceService + LLMErrorFormatter（错误友好格式化）+ ToolCallSequenceSanitizer（工具调用序列净化）+ DeepSeekToolsApiClient（DeepSeek 官方搜索/抓取）
 │   └── SkillService / UserService / ConfigService / DataTransferService（备份导出/导入）/ AvatarStore / BackgroundStore / ...
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
@@ -478,6 +501,10 @@ src/main/java/com/example/agentdeepseek/
 | **外部数据库连接** | 连接管理/凭据加密/执行 SQL | DbConnectionService + SqlExecutor | ~600 |
 | **数据管理（备份）** | 配置数据导出/导入（UPSERT 合并） | DataTransferService | ~400 |
 | **外观与头像** | 背景图与头像的本地存储/读取 | BackgroundStore + AvatarStore | ~300 |
+| **聊天记录分页** | 按「轮」游标分页（默认 5 轮 / 上限 50）+ 前端懒加载 | ConversationController + ConversationServiceImpl + ConversationMessageMapper | ~250 |
+| **工具调用序列净化** | 幂等修复 tool_calls / tool 消息配对，防接口 400 | ToolCallSequenceSanitizer | ~300 |
+| **自动更新（桌面端）** | Releases 检测 / 下载 / 安装 / 升级前备份 | electron/update-manager.js + update-utils.js | ~700 |
+| **DeepSeek 官方工具 API** | 官方搜索/抓取接口优先，失败回退原链路 | DeepSeekToolsApiClient + SearchTool + WebFetchTool | ~500 |
 
 ---
 
@@ -493,6 +520,9 @@ src/main/java/com/example/agentdeepseek/
 8. **工具循环最大迭代**: 主循环 50 轮（评委可扩展，累计上限 +100 次）；子Agent 默认 30 轮
 9. **快照配额**: 500MB 上限，超限自动清理至 300MB
 10. **Token 估算系数**: 中文 ~1.5、英文 ~1.0、数字 ~0.5、emoji ~0.5（见 tokenCalculator.ts + TokenEstimator.java）
+11. **工具调用序列配对（硬约束）**: `assistant.tool_calls` 与 `role=tool` 必须严格一一配对，缺一即 400 且会永久污染会话。所有 LLM 请求出口必须经过 `ToolCallSequenceSanitizer`（幂等、copy-on-write），任何"只删一侧"的局部修复都是错的。
+12. **聊天消息接口**: 一律走 `GET /conversation/{id}/messages/page`（按轮游标），不要再用全量 `GET /conversation/{id}/messages` 渲染长会话。
+13. **自动更新**: 版本号以 `pom.xml` 为唯一源（`scripts/sync-version.*` 同步到 electron），发布时 GitHub Releases 的资产名需匹配 `CodeCraft-Setup-{version}.exe` / `CodeCraft-{version}.dmg` / `CodeCraft-{version}.AppImage`。
 
 ---
 
@@ -521,6 +551,7 @@ CodeCraft 支持多种 LLM 平台，核心组件：
 - **Agent 绑定**：agent_config 表新增 provider_id/provider_code 字段，每个 Agent 可绑定特定 Provider
 - **前端动态切换**：CodeAssistantView 支持运行时切换 Provider，自动刷新模型列表
 - **Provider 路由优先级**：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
+- **DeepSeek 官方工具 API（v2.0.3）**：`DeepSeekToolsApiClient` 在 Provider 的 `baseUrl` 主机为 `api.deepseek.com` 且配置了 API Key 时自动启用，`web_search` / `web_fetch` 优先调用官方 `/v1/tools/search` 与 `/v1/tools/fetch`，异常时自动回退原链路（Bing/百度、Jina/本地）。判定依据是 baseUrl 域名而非 providerCode，第三方中转/自建服务不会启用
 
 ---
 

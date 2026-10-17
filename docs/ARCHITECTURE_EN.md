@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
+> Version: v2.0.3 | Updated: 2026-10-17 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -100,6 +100,12 @@ User Input Message
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+#### 3.1.1 Key Additions (v2.0.3)
+
+- **Tool-call sequence sanitization (anti-400)**: `ContextBuilder.buildMessages()` calls `ToolCallSequenceSanitizer.sanitize()` (idempotent) right after message conversion and again after context compaction/trimming. The sanitizer guarantees strict one-to-one pairing between `assistant.tool_calls` and `role=tool` messages: it drops orphan tool messages, removes tool_calls without results (clears `tool_calls` when none has a result), drops empty assistant messages, and removes illegal/duplicate ids. The same sanitizer is wired into the request-body exits of `AbstractLLMClient` / `AnthropicClient` / `OllamaClient`.
+- **Write-side placeholders**: `DeepSeekServiceImpl.appendToolResultMessages()` appends a "[tool not executed]" placeholder tool message for every tool_call declared in the batch that produced no result, eliminating sequence gaps at the source.
+- **Judge semantics (v2.0.3)**: on judge rejection / unparsable judge response / judge failure with no local progress / reaching the cumulative `MAX_JUDGE_GRANTED_ITERATIONS=100` cap, the task is no longer terminated directly. Instead an `ask_user` event (`askType=iteration_confirm`) lets the user choose "end task" or "continue +10 / +20 / +50 iterations"; a 5-minute wait timeout ends the task.
+
 ### 3.2 Sub-Agent Collaboration
 
 ```
@@ -127,6 +133,23 @@ Main Agent (running in user session)
     (optional) inspect_agent("sub-1", "full_log")
         Get sub-agent's complete thinking process, tool call history
 ```
+
+### 3.3 Lazy-Loaded Chat History Pagination (v2.0.3)
+
+Long conversations are no longer fetched in full:
+
+```
+Frontend CodeAssistantView
+  ├─ Open conversation → GET /conversation/{id}/messages/page?rounds=5   (latest 5 rounds)
+  ├─ scrollTop ≤ 80 → same endpoint + beforeId=nextBeforeId&rounds=5     (5 older rounds)
+  ├─ Response: messages (id ascending) / hasMore / nextBeforeId
+  └─ Rendering: DynamicScroller (:key=conversationId forces rebuild)
+       ├─ Globally unique message ids (role-timestamp-autoIncrement)
+       ├─ v-track-msg-size + ResizeObserver → throttled forceUpdate self-heal
+       └─ Bidirectional scroll compensation after prepending history
+```
+
+Backend paginates "by round": `role=USER` (excluding `desktop_inject`) marks round boundaries — `selectNthUserMessageIdFromTail` locates the N-th user message id from the tail, then the range is fetched by id. Boundaries therefore always fall on user questions and AI message grouping (`processMessageGroups`) never spans pages. The cursor is `beforeId` rather than offset, so newly written messages cannot shift pages.
 
 ---
 
@@ -161,7 +184,7 @@ src/main/java/com/example/agentdeepseek/
 │   └── SpaConfig              # SPA routing fallback
 ├── controller/                # REST API Controllers (25) + GlobalExceptionHandler
 │   ├── DeepSeekController     # ★Core: Chat, Agent task status
-│   ├── ConversationController # Conversation CRUD
+│   ├── ConversationController # Conversation CRUD + by-round pagination (messages/page)
 │   ├── GitController          # Git operations
 │   ├── P2pController          # P2P remote collaboration
 │   ├── SnapshotController     # Snapshot management
@@ -227,7 +250,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── files/                 # ★File assets & Files API adapter (upload/vision/reference)
 │   ├── DataTransferService    # Backup export/import (data management)
 │   ├── AvatarStore / BackgroundStore # Avatar & background image local storage
-│   ├── llm/                   # LLM client layer (LLMClient + 6 providers + ProviderBalanceService + LLMErrorFormatter)
+│   ├── llm/                   # LLM client layer (LLMClient + 6 providers + ProviderBalanceService + LLMErrorFormatter + ToolCallSequenceSanitizer + DeepSeekToolsApiClient)
 │   └── impl/
 │       ├── DeepSeekServiceImpl    # ★★★Core Engine (187KB)
 │       ├── ToolLoopManager        # Tool loop (dead loop / judge / cancel)
@@ -457,6 +480,10 @@ src/main/java/com/example/agentdeepseek/
 | **External DB Connections** | Connection mgmt / credential encryption / run SQL | DbConnectionService + SqlExecutor | ~600 |
 | **Data Management (Backup)** | Config data export/import (UPSERT merge) | DataTransferService | ~400 |
 | **Appearance & Avatars** | Background image & avatar local storage/serving | BackgroundStore + AvatarStore | ~300 |
+| **Chat History Pagination** | By-round cursor pagination (5 rounds default / 50 max) + frontend lazy loading | ConversationController + ConversationServiceImpl + ConversationMessageMapper | ~250 |
+| **Tool-Call Sequence Sanitizer** | Idempotently repairs tool_calls / tool message pairing to avoid HTTP 400 | ToolCallSequenceSanitizer | ~300 |
+| **Auto Update (Desktop)** | Releases check / download / install / pre-upgrade backup | electron/update-manager.js + update-utils.js | ~700 |
+| **DeepSeek Official Tool APIs** | Official search/fetch first, fallback to legacy pipeline | DeepSeekToolsApiClient + SearchTool + WebFetchTool | ~500 |
 
 ---
 
@@ -469,9 +496,12 @@ src/main/java/com/example/agentdeepseek/
 5. **Tool Return Format**: Unified `ApiResponse<T>`, code referenced from `ResponseEnum`
 6. **SSE Events**: OpenAI-compatible streaming format (`choices[].delta.content` / `reasoning_content`) + custom events `tool_call_start` / `ask_user` / `delegate_progress` / `task_error`
 7. **Sub-Agent Concurrency Limit**: 20 (hardcoded in AgentForkManager)
-8. **Tool Loop Max Iterations**: 50
+8. **Tool Loop Max Iterations**: 50 (the judge may extend; cumulative extension capped at +100, and hitting the cap asks the user instead of terminating)
 9. **Snapshot Quota**: 500MB limit, auto-clean to 300MB when exceeded
 10. **Token Estimation Coefficients**: Chinese ~1.5, English ~1.0, Digits ~0.5, Emoji ~0.5
+11. **Tool-Call Sequence Pairing (hard constraint)**: `assistant.tool_calls` and `role=tool` messages must be strictly one-to-one; a single mismatch returns 400 and permanently poisons the conversation. Every LLM request exit must pass through `ToolCallSequenceSanitizer` (idempotent, copy-on-write) — any "remove one side only" patch is wrong.
+12. **Chat Message API**: always use `GET /conversation/{id}/messages/page` (by-round cursor) instead of the full `GET /conversation/{id}/messages` for long conversations.
+13. **Auto Update**: `pom.xml` is the single source of truth for the version (`scripts/sync-version.*` syncs to electron); GitHub Releases asset names must match `CodeCraft-Setup-{version}.exe` / `CodeCraft-{version}.dmg` / `CodeCraft-{version}.AppImage`.
 
 ---
 
@@ -500,6 +530,7 @@ CodeCraft supports multiple LLM platforms. Core components:
 - **Agent Binding**: agent_config table gains provider_id/provider_code fields; each Agent can be bound to a specific Provider
 - **Frontend Dynamic Switching**: CodeAssistantView supports runtime Provider switching with automatic model list refresh
 - **Provider Routing Priority**: Frontend dynamic providerCode > Agent config providerId > First available Provider
+- **DeepSeek Official Tool APIs (v2.0.3)**: `DeepSeekToolsApiClient` is enabled automatically when the Provider `baseUrl` host is `api.deepseek.com` and an API key is configured. `web_search` / `web_fetch` then prefer the official `/v1/tools/search` and `/v1/tools/fetch` endpoints and fall back to the legacy pipeline (Bing/Baidu, Jina/local) on failure. Detection uses the baseUrl host rather than providerCode, so third-party proxies / self-hosted services are never enabled
 
 ---
 

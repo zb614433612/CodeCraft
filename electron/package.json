@@ -1,6 +1,6 @@
 {
   "name": "codecraft-desktop",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "CodeCraft 桌面应用（Electron）",
   "homepage": "https://github.com/zb614433612/CodeCraft",
   "author": {
@@ -27,13 +27,15 @@
     "files": [
       "main.js",
       "preload.js",
+      "update-manager.js",
+      "update-utils.js",
       "package.json",
       "icon.png",
       "loading.html"
     ],
     "extraResources": [
       {
-        "from": "../target/code-craft-2.0.2.jar",
+        "from": "../target/code-craft-2.0.3.jar",
         "to": "backend/codecraft.jar"
       },
       {
@@ -77,7 +79,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "installer.nsh"
     }
   },
   "dependencies": {

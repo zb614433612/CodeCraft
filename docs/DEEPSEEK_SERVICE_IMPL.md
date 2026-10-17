@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v2.0.2 | 更新：2026-09-24 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.3 | 更新：2026-10-17 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 187KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -258,9 +258,35 @@ DeepSeekServiceImpl (28 个依赖)
   2. 发送给子Agent评委（独立的小模型调用）
   3. 解析评委结果：
      - extend + additionalIterations → 增加迭代次数
-     - reject → 终止任务
+     - reject → 询问用户（v2.0.3 起不再直接终止任务）
   4. 累计上限：评委最多累计增加 100 次迭代（MAX_JUDGE_GRANTED_ITERATIONS）
+     - 达到上限后同样询问用户（v2.0.3 起不再直接终止）
+  5. 用户决策（v2.0.3 新增 askUserForIterationDecision）：
+     - 触发场景：评委 reject / 响应解析失败 / 评委调用异常且本地判定无进展 / 累计扩容达上限
+     - 交互链路：ask_user 事件（askType=iteration_confirm）→ 前端「任务迭代确认」面板 → 用户回答唤醒 Flux
+     - 提供给用户的选择：结束任务 / 继续执行并扩容 +10、+20、+50 次
+     - 等待超时：5 分钟按「结束任务」处理，并清理 pendingQuestion，避免悬挂
+     - 重连还原：前端按问题文本前缀「【任务迭代确认】」还原面板类型，不会退化成普通追问
 ```
+
+### 6.2.1 工具调用序列净化（v2.0.3，ToolCallSequenceSanitizer）
+
+**为什么需要**：OpenAI / DeepSeek 兼容接口对 `assistant.tool_calls` 与 `role=tool` 的配对有硬约束——每个 tool_call 必须有 id 相同的 tool 消息、每条 tool 消息必须有前置声明该 id 的 assistant 消息、tool_call id 必须非空且不重复。任一不满足直接返回 400，且该会话从此无法继续对话。
+
+**脏数据从哪来**：工具调用已落库但结果未落库时任务被中断 / SSE 断开 / 应用被强杀 → 只剩 tool_calls；历史"只删 tool_calls"的修复逻辑把 assistant 侧删掉但 tool 消息仍在 → 孤立 tool 消息；上下文压缩/裁剪把配对切到不同分支。
+
+**净化策略（宁可丢信息，绝不阻断聊天）**：
+
+1. 丢弃孤立 tool 消息（同轮内找不到 id 匹配、尚未被消费的 tool_call）；
+2. 剔除无结果的 tool_call；全部无结果时清空 `tool_calls`（assistant 退化为普通文本，content 保留）；
+3. 丢弃清洗后既无 `content` 又无 `tool_calls` 的空 assistant 消息；
+4. 剔除非法 tool_call（无 id / id 为 `"null"` / 重复 id）。
+
+**接入点**：`ContextBuilder`（消息转换后 + 压缩/裁剪后各一次）、`AbstractLLMClient` / `AnthropicClient` / `OllamaClient` 的请求体构造出口；写入侧 `appendToolResultMessages` 为本批次无结果的 tool_call 补「【工具未执行】」占位 tool 消息。
+
+**实现约束**：幂等（合法序列零变更）、纯内存、copy-on-write（不修改入参 Map/List）、不写数据库。
+
+**回归测试**：`ToolCallSequenceSanitizerTest`（36 断言：孤立 tool / 缺失结果 / 非法 id / 重复 id / 幂等性）。
 
 ### 6.3 用户取消（cancelRunningTask）
 
@@ -386,7 +412,7 @@ DeepSeekServiceImpl (编排层，~200行)
 | 常量 | 值 | 说明 |
 |------|----|------|
 | `MAX_TOOL_CALL_ITERATIONS` | 50 | 工具循环最大迭代次数 |
-| `MAX_JUDGE_GRANTED_ITERATIONS` | 100 | 评委累计最大扩展迭代 |
+| `MAX_JUDGE_GRANTED_ITERATIONS` | 100 | 评委累计最大扩展迭代（达上限后改为询问用户，不再直接终止） |
 | `DEFAULT_TEMPERATURE` | 0.3 | 默认温度参数（三级优先级：前端 > Agent配置 > 默认） |
 | `SESSION_NAME_TRUNCATE_LENGTH` | 6 | 会话名截断长度 |
 | `taskExecutor.corePoolSize` | 2 | 后台任务核心线程 |

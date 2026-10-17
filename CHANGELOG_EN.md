@@ -5,6 +5,77 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [2.0.3] - 2026-10-17
+
+### 💬 Fixed: Chat Rendering Overlap / Misplacement / Slow Long Conversations
+
+- **New backend "by round" cursor pagination endpoint** `GET /conversation/{conversationId}/messages/page?beforeId=&rounds=`:
+  - Uses `role=USER` (excluding `desktop_inject` messages) as round boundaries, so boundaries always fall on user questions and `processMessageGroups` never aggregates across pages;
+  - Returns the latest 5 rounds by default (`rounds` max 50); response carries `messages` (id ascending) + `hasMore` + `nextBeforeId`;
+  - Cursor is `beforeId` (earliest message id of the previous page), avoiding offset drift when new messages are written.
+- **Frontend switched to lazy loading**: first screen loads only the latest 5 rounds → scrolling to the top (`scrollTop ≤ 80`) loads 5 older rounds via `nextBeforeId`; pagination state is migrated when a local (`local-*`) conversation receives its real id.
+- **Reading position no longer drifts after loading history**: `preserveScrollAfterPrepend` now compensates in both directions (`delta !== 0`) and skips compensation when the user is actively scrolling (offset > 48px).
+- **Overlap / misplacement fixes**:
+  - Virtual list is force-rebuilt per conversation (`:key="currentConversationId"`); message ids are globally unique (`user-` / `assistant-` / `reconnect-` + `localMsgSeq`) with a duplicate-id fallback;
+  - Removed message enter animations and `transition: all` (animations during measurement cause wrong dynamic-list estimates); `min-item-size` 80 → 120;
+  - New `v-track-msg-size` directive + `ResizeObserver`: real height changes (code block rendering / image loading / collapse) trigger a throttled (120ms, >1.5px delta) `forceUpdate()` self-heal, fixing scrollbar jitter and item misplacement;
+  - Forced scroll-to-bottom after switching conversation / restoring an Agent snapshot (`scrollToBottomForce`: token cancellation + frame-by-frame stick-to-bottom + 3-frame height-stable check).
+- **History loading no longer yanks the view to the bottom**: new `lastHistoryPrependAt` (500ms window) marker prevents "load history → message count changes → watcher treats it as a new message → force scroll".
+- **`loadingMoreMessages` is now per-conversation** (`loadingMoreConvIds`): loading history in parallel conversations no longer blocks each other and the top hint no longer leaks across conversations.
+- **Multi-agent parallel state fixes**:
+  - `hasRunningTask` / `hasActiveStream` now cover four runtime sources (foreground stream `sendingStates` / background streams `backgroundStreams` / reconnecting `reconnectingConvIds` / active tasks `activeTaskMap`) — after switching Agents away and back, the "supplement request" and "stop task" buttons and the input loading state are restored;
+  - `onStreamComplete` removes background-stream entries precisely by `abortController` (one conversation may host several background streams; the old removal by `convId` killed still-running streams and broke the stop button);
+  - Background-task completion notifications now resolve the Agent name/avatar from the owning `agentConfigId` of that stream (previously the currently selected Agent, which showed wrong name/avatar under multi-agent parallelism).
+
+### 🧠 Fixed: Isolated Tool-Call Sequences Causing HTTP 400 (Permanently Stuck Conversations)
+
+- **New `ToolCallSequenceSanitizer` (idempotent / in-memory / copy-on-write / no DB writes)** sanitizes at the single request exit, replacing the historical "remove `assistant.tool_calls` only" patch (which turned persisted tool messages into orphan tool messages and still returned 400):
+  - Drops orphan `tool` messages (no id-matching, unconsumed tool_call in the same round);
+  - Removes `tool_call` entries without results one by one; clears `tool_calls` entirely if none has a result (the assistant degrades to plain text, content kept);
+  - Drops assistant messages left with neither `content` nor `tool_calls`;
+  - Removes illegal call entries (missing id / id `"null"` / duplicate id).
+- **Wired into every request exit**: `ContextBuilder` (after conversion and again after compression/trimming), plus request-body building in `AbstractLLMClient` / `AnthropicClient` / `OllamaClient`; the old orphan-tool_calls patch in `ContextBuilder` was removed.
+- **Write-side hardening**: `DeepSeekServiceImpl.appendToolResultMessages` appends a "[tool not executed]" placeholder tool message for every tool_call declared in the batch but missing a result (task cancelled / null result / result build failure), eliminating gaps at the source.
+- **Regression tests**: new `ToolCallSequenceSanitizerTest` (36 assertions covering orphan tools, missing results, illegal ids, duplicate ids and idempotency).
+
+### 🤖 Improved: Judge No Longer Hard-Terminates — The User Decides
+
+- **Judge rejection / unparsable judge response / judge failure with no local progress / reaching the cumulative `MAX_JUDGE_GRANTED_ITERATIONS=100` cap** → all now ask the user through `ask_user` (`askType=iteration_confirm`) instead of terminating the task.
+- **New "task iteration confirmation" panel**: shows the trigger, judge reason, current progress, current iteration (`n / max`) and cumulative extension (`x / 100`), with "continue +10 / +20 / +50 iterations" and "end task"; a 5-minute wait timeout ends the task and clears the pending question to avoid dangling state.
+- After page refresh / task reconnect, the panel type is restored from the `【任务迭代确认】` question prefix instead of degrading into a normal follow-up question.
+
+### 🔄 New: Desktop Auto Update (GitHub Releases)
+
+- **New `electron/update-manager.js`**: checks GitHub Releases (`/releases/latest`, 6-hour cache + 30-second minimum manual interval to respect the unauthenticated 60 req/h limit) → in-app download with progress (mirror prefix acceleration with automatic direct fallback) → per-platform installation (Windows launches the installer and quits; macOS opens the dmg for drag-and-drop; Linux reveals the AppImage in the file manager).
+- **New `electron/update-utils.js`**: semantic version comparison (supports `v` prefix / prereleases) and release-asset matching by platform + architecture (independently testable).
+- **No data loss on upgrade (three layers)**:
+  - Backend working directory (cwd) moved from the install directory to `userData/runtime`, with automatic legacy data migration, `legacy-backup` restore and fallback on failure;
+  - Backend process is stopped before upgrading and `userData/runtime/data` is backed up to `userData/backups`;
+  - New `electron/installer.nsh` (NSIS `customInit`): backs up the legacy data directory before the first upgrade so an over-install cannot wipe the database.
+- **Frontend**: new `frontend/src/utils/update.ts` (IPC wrapper + per-platform guidance); `SystemSettingView` gained a "Version & Updates" card (current version / latest version / check / download progress / one-click install / auto-check on startup switch / open release page, with a graceful degradation hint in browsers); `Layout.vue` auto-checks 15 seconds after startup and shows a notification that navigates to the card.
+- **Local data reset integration**: `clearLocalData` also clears `backups` / `legacy-backup` / installers / update cache.
+- **preload additions**: `update.*` (getState / check / download / cancelDownload / install / openReleasePage / getSettings / setSettings / onAvailable / onDownloadProgress) and `clearLocalData`.
+
+### 🌐 New: DeepSeek Official web_search / web_fetch APIs
+
+- **New `DeepSeekToolsApiClient`**: enabled automatically when the Provider `baseUrl` host is `api.deepseek.com` and an API key is configured (third-party proxies / self-hosted compatible services are excluded to avoid leaking requests); reuses `LLMWebClientManager` auth headers, connection pool and retries:
+  - `POST /v1/tools/search`: query / count / need_content, parsing `results[]` (title / url / snippet / summary / content / site_name / date / authority / rerank_score);
+  - `POST /v1/tools/fetch`: url → title + Markdown content.
+- **`SearchTool` / `WebFetchTool` now "official first, fallback on failure"**: on official API errors / timeouts / non-official Providers they fall back to the original pipeline (Bing/Baidu multi-source scraping, Jina/local fetching) so the tools always work; the official `WebFetchTool` path is only used for public addresses.
+- **`AgentForkManager`**: child agents now set `ToolContext.setProviderCode(...)` so provider detection also works inside sub-agents.
+- **Regression tests**: new `DeepSeekToolsApiClientTest` (26 assertions, main-method style).
+
+### 🏷️ Version Numbers
+
+- Backend: `2.0.2` → `2.0.3` (pom.xml)
+- Frontend: `2.0.2` → `2.0.3` (package.json + package-lock.json)
+- Electron: `2.0.2` → `2.0.3` (package.json + package-lock.json, packaged jar path synced to `code-craft-2.0.3.jar`)
+- MCP Server handshake version: `2.0.2` → `2.0.3`
+- Build artifacts: `code-craft-2.0.2.jar` → `code-craft-2.0.3.jar`
+- Docs: README(_EN) / BUILD_AND_RUN(_EN) / CHANGELOG(_EN) / docs (ARCHITECTURE, DEEPSEEK_SERVICE_IMPL, TOOL_SYSTEM, LLM_PROVIDER_SYSTEM, DEV_QUICKREF, RELEASE_CHECKLIST, etc.) synced to v2.0.3
+
+---
+
 ## [2.0.2] - 2026-09-24
 
 ### 🎨 New: Appearance Settings (Global Background Image / Window Opacity)

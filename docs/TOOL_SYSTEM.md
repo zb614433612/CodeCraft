@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v2.0.2 | 更新：2026-09-24 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.3 | 更新：2026-10-17 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -358,6 +358,23 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 > 📌 速查表按当前 27 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
 
 ---
+
+### 8.1 网络类工具双链路（v2.0.3）
+
+`web_search` / `web_fetch` 均为「主链路 + 回退链路」结构，对 AI 完全透明（工具描述由实现动态生成）：
+
+| 工具 | 主链路 | 启用条件 | 回退链路 |
+|------|--------|----------|----------|
+| `web_search` | DeepSeek 官方 `POST /v1/tools/search` | Provider `baseUrl` 主机为 `api.deepseek.com` 且已配置 API Key | Bing 全球 → Bing 中国 → 百度（按代理可用性选择）+ 结果缓存（TTL 300s）+ 低质量域名降权 |
+| `web_fetch` | DeepSeek 官方 `POST /v1/tools/fetch` | 同上，且目标为公网地址（非私网 / 本机） | Jina Reader（有可用代理时优先）→ 本地抓取（UA 池 + 反爬重试） |
+
+实现要点：
+
+- 官方通道统一由 `DeepSeekToolsApiClient` 调用，复用 `LLMWebClientManager` 的认证头、连接池与重试策略；
+- 官方通道异常 / 超时绝不暴露给 AI，直接回退原链路并记录日志，保证工具始终可用；
+- 判定依据是 `baseUrl` 域名而非 `providerCode`，第三方中转 / 自建兼容服务不会启用（避免把请求发到非官方服务）；
+- 子 Agent 通过 `ToolContext.setProviderCode(...)` 传递 Provider，保证子 Agent 内判定一致；
+- 回归测试：`DeepSeekToolsApiClientTest`（26 断言）、`SearchToolLogicTest` / `WebFetchToolLogicTest` 已适配。
 
 ## 八·五、成长体系：Lesson 踩坑经验库
 

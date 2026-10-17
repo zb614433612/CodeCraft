@@ -58,6 +58,44 @@ export async function getConversationMessages(conversationId: number): Promise<A
   return response
 }
 
+/**
+ * 会话消息分页结果（按「轮次」游标，从最新往前翻）
+ * 一轮 = 一次用户提问 + 其后该轮的全部回复（assistant/tool）
+ */
+export interface MessagePageResponse {
+  /** 本页消息（按 id 升序，与 processMessageGroups 的时间正序要求一致） */
+  messages: MessageResponse[]
+  /** 是否还有更早的历史消息（true 时前端可在滚动到顶部继续加载） */
+  hasMore: boolean
+  /** 下一页游标：本页最早一条消息 id；继续往前翻时作为 beforeId 传入 */
+  nextBeforeId?: number | null
+  /** 实际返回的轮数 */
+  rounds?: number
+}
+
+/**
+ * 分页获取会话消息（聊天记录懒加载）
+ *
+ * <p>改造背景：超长会话全量查询会让 DB 扫描、网络传输、前端 markdown 分组渲染全部变重，打开会话明显卡顿。
+ * 现改为默认只取最近 5 轮，用户向上滚动到顶部时用 nextBeforeId 继续加载更早的 5 轮。</p>
+ *
+ * @param conversationId 会话ID
+ * @param beforeId       分页游标（上一页返回的 nextBeforeId；首页传 null/undefined）
+ * @param rounds         本次加载的轮数（默认 5，后端上限 50）
+ */
+export async function getConversationMessagesPage(
+  conversationId: number,
+  beforeId?: number | null,
+  rounds = 5
+): Promise<ApiResponse<MessagePageResponse>> {
+  const params = new URLSearchParams()
+  if (beforeId !== undefined && beforeId !== null) params.set('beforeId', String(beforeId))
+  params.set('rounds', String(rounds))
+  return request<MessagePageResponse>(`/conversation/${conversationId}/messages/page?${params.toString()}`, {
+    method: 'GET'
+  })
+}
+
 // 将后端响应数据映射到前端格式
 export function mapConversationResponseToConversation(resp: ConversationResponse): Conversation {
   let updatedAt: number

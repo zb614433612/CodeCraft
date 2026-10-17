@@ -211,11 +211,13 @@ public class AnthropicClient extends AbstractLLMClient {
 
     @Override
     public Flux<String> streamChat(Map<String, Object> requestBody) {
+        // ★ 请求出口统一净化（见 ToolCallSequenceSanitizer）：安全副本，不改调用方对象
+        Map<String, Object> safeBody = ToolCallSequenceSanitizer.sanitizeRequestBodyCopy(requestBody);
         return webClient.post()
                 .uri(CHAT_ENDPOINT)
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("anthropic-version", API_VERSION)
-                .bodyValue(requestBody)
+                .bodyValue(safeBody)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .retrieve()
                 .bodyToFlux(String.class)
@@ -230,13 +232,15 @@ public class AnthropicClient extends AbstractLLMClient {
 
     @Override
     public String blockingChat(Map<String, Object> requestBody, Duration timeout) {
+        // ★ 非流式出口同样净化（幂等）
+        Map<String, Object> safeBody = ToolCallSequenceSanitizer.sanitizeRequestBodyCopy(requestBody);
         try {
             Duration effectiveTimeout = timeout != null ? timeout : DEFAULT_BLOCKING_TIMEOUT;
             return webClient.post()
                     .uri(CHAT_ENDPOINT)
                     .contentType(MediaType.APPLICATION_JSON)
                     .header("anthropic-version", API_VERSION)
-                    .bodyValue(requestBody)
+                    .bodyValue(safeBody)
                     .retrieve()
                     .bodyToMono(String.class)
                     .block(effectiveTimeout);

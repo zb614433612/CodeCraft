@@ -2,6 +2,7 @@ package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.NetworkToolConfig;
 import com.example.agentdeepseek.config.ProxyResolver;
+import com.example.agentdeepseek.service.llm.DeepSeekToolsApiClient;
 import com.example.agentdeepseek.tool.Tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,6 +61,8 @@ public class WebFetchTool implements Tool {
     private final ConnectivityChecker connectivityChecker;
     private final NetworkToolConfig config;
     private final ProxyResolver proxyResolver;
+    /** DeepSeek 官方网页抓取 API（当前 Provider 为 DeepSeek 官网时优先使用） */
+    private final DeepSeekToolsApiClient deepSeekToolsApi;
 
     /** 本地抓取模板（与代理状态绑定，代理启停时自动重建） */
     private volatile RestTemplate fetchTemplate;
@@ -73,11 +76,13 @@ public class WebFetchTool implements Tool {
     private volatile long jinaCooldownUntilMs = 0L;
 
     public WebFetchTool(ObjectMapper objectMapper, ConnectivityChecker connectivityChecker,
-                        NetworkToolConfig config, ProxyResolver proxyResolver) {
+                        NetworkToolConfig config, ProxyResolver proxyResolver,
+                        DeepSeekToolsApiClient deepSeekToolsApi) {
         this.objectMapper = objectMapper;
         this.connectivityChecker = connectivityChecker;
         this.config = config;
         this.proxyResolver = proxyResolver;
+        this.deepSeekToolsApi = deepSeekToolsApi;
         this.fetchTemplate = buildRestTemplate(config.getFetchReadTimeout());
         this.fetchTemplateProxyKey = proxyResolver.signature();
     }
@@ -166,7 +171,8 @@ public class WebFetchTool implements Tool {
         return "【适用场景】获取单个 URL 的完整网页文本内容，用于阅读完整文章、技术文档、API 返回正文等需要深入了解的场景。"
                 + "【与 web_search 的区别】web_search 返回搜索结果的标题+摘要列表（概览），本工具读取某一个具体 URL 的完整内容（深入）。两个工具配合使用：先搜后读。"
                 + "【与 http_request 的区别】http_request 用于调用 API 获取 JSON 数据，本工具用于抓取网页 HTML 并提取纯文本。"
-                + "【抓取策略】自动选择最优通道：本机有可用代理时优先经 Jina Reader 渲染抓取（反爬验证页、JS 渲染页同样有效）；"
+                + "【抓取策略】当前会话使用 DeepSeek 官方 API 时，优先调用 DeepSeek 官方网页抓取接口（返回 Markdown 正文，反爬/JS 页更稳），失败自动回退；"
+                + "否则本机有可用代理时优先经 Jina Reader 渲染抓取（反爬验证页、JS 渲染页同样有效）；"
                 + "无代理或 Jina 配额受限时自动降级为本地抓取（多 UA 重试 + 反爬识别），失败时会说明具体原因。"
                 + "【限制】内容上限 " + (config.getFetchMaxContentLength() / 1024) + "KB，超出部分截断。";
     }
@@ -210,6 +216,24 @@ public class WebFetchTool implements Tool {
         }
 
         boolean privateTarget = isPrivateHost(uri.getHost());
+
+        // ★ 阶段零：DeepSeek 官方抓取优先——当前会话使用的 Provider 是 DeepSeek 官网 API 且目标为公网地址时，
+        //   直接调用官方 /v1/tools/fetch（返回 Markdown 正文，对反爬 / JS 页面处理更好）；
+        //   失败或返回空内容时自动回退原有 Jina / 本地抓取链路，保证工具始终可用。
+        if (!privateTarget && deepSeekToolsApi != null && deepSeekToolsApi.isOfficialProvider()) {
+            try {
+                DeepSeekToolsApiClient.FetchResult official = deepSeekToolsApi.fetch(url);
+                if (official != null && official.content() != null && !official.content().isBlank()) {
+                    String content = (official.title() == null || official.title().isBlank())
+                            ? official.content()
+                            : "# " + official.title().trim() + "\n\n" + official.content();
+                    return formatResult(url, "DeepSeek 官方网页抓取 API", content);
+                }
+                log.info("DeepSeek 官方抓取返回空内容，回退原有抓取: {}", url);
+            } catch (Exception e) {
+                log.warn("DeepSeek 官方抓取失败，回退原有抓取: url={}, error={}", url, e.getMessage());
+            }
+        }
 
         // 阶段一：本机有可用代理时，优先走 Jina Reader（渲染抓取，更擅长反爬 / JS 页面）
         if (shouldTryJina(privateTarget)) {

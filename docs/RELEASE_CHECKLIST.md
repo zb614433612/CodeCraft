@@ -8,8 +8,8 @@
 ## 发布前检查
 
 > 🚀 **推荐方式**：使用一键构建脚本，自动完成下面 Step 1~3：
-> - Windows：`scripts\build.bat v2.0.2`
-> - Mac/Linux：`./scripts/build.sh v2.0.2`
+> - Windows：`scripts\build.bat v2.0.3`
+> - Mac/Linux：`./scripts/build.sh v2.0.3`
 >
 > 以下为手动步骤，供需要精细控制的场景参考。
 
@@ -116,7 +116,13 @@ git push origin v{版本号}
    - `CodeCraft-Setup-{版本号}.exe`
    - `CodeCraft-{版本号}.dmg`（如有）
    - `CodeCraft-{版本号}.AppImage`（如有）
-6. 点击 Publish Release
+6. **自动更新要求（v2.0.3+，务必满足）**：
+   - Release 必须是**正式发布**（不能是 draft / pre-release）——客户端只读 `/releases/latest`；
+   - 资产必须上传到该 Release（客户端按 `assets[].browser_download_url` 下载，仅放仓库文件不生效）；
+   - 资产文件名需能被 `electron/update-utils.js` 匹配：Windows 含 `Setup` 的 `.exe`、macOS `.dmg`、Linux `.AppImage` / `.deb`，并带版本号；
+   - `tag_name` 用 `vX.Y.Z` 形式（客户端会自动归一化 `v` 前缀，支持预发布版本比较）；
+   - 旧版本客户端需手动升级一次到 v2.0.3+，之后才能享受自动更新。
+7. 点击 Publish Release
 
 ---
 
@@ -126,6 +132,8 @@ git push origin v{版本号}
 - [ ] 各平台产物可正常下载
 - [ ] 下载的 EXE 可安装运行
 - [ ] `README.md` 中的下载链接指向最新 Release
+- [ ] 「数据管理 → 版本与更新 → 检查更新」能识别到新版本（v2.0.3+ 客户端）
+- [ ] 下载进度与安装流程可走通（Windows 启动安装器；macOS 打开 dmg 引导拖拽）
 
 ---
 

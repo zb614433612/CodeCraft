@@ -6,6 +6,7 @@ import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
+import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -118,8 +119,7 @@ public class ContextBuilder {
 
         // 3. 将消息转换为 API 格式
         List<Map<String, Object>> result = new ArrayList<>();
-        Map<Integer, List<String>> assistantToolCallIdsMap = new HashMap<>();
-        Set<String> consumedToolCallIds = new HashSet<>();
+        // 仅用于按顺序给 role=tool 消息分配 tool_call_id（配对合法性最终由末尾的净化器统一保证）
         Queue<String> pendingToolCallIdQueue = new LinkedList<>();
 
         for (ConversationMessage msg : dbMessages) {
@@ -145,16 +145,15 @@ public class ContextBuilder {
                         messageMap.put("tool_calls", toolCallsNode);
 
                         if (toolCallsNode.isArray()) {
-                            List<String> idList = new ArrayList<>();
                             for (JsonNode toolCall : toolCallsNode) {
                                 JsonNode idNode = toolCall.path("id");
                                 if (!idNode.isMissingNode() && !idNode.isNull()) {
                                     String id = idNode.asText();
-                                    pendingToolCallIdQueue.add(id);
-                                    idList.add(id);
+                                    if (id != null && !id.isEmpty() && !"null".equals(id)) {
+                                        pendingToolCallIdQueue.add(id);
+                                    }
                                 }
                             }
-                            assistantToolCallIdsMap.put(result.size(), idList);
                         }
                     } catch (Exception e) {
                         log.warn("解析tool_calls JSON失败: {}", e.getMessage());
@@ -175,7 +174,6 @@ public class ContextBuilder {
             } else if (role == MessageRole.TOOL) {
                 if (!pendingToolCallIdQueue.isEmpty()) {
                     String toolCallId = pendingToolCallIdQueue.poll();
-                    consumedToolCallIds.add(toolCallId);
                     messageMap.put("role", "tool");
                     messageMap.put("tool_call_id", toolCallId);
 
@@ -190,34 +188,12 @@ public class ContextBuilder {
             }
         }
 
-        // 精确修复：只移除缺少对应 TOOL 消息的 assistant 消息的 tool_calls
-        boolean hasOrphanToolCalls = false;
-        for (Map.Entry<Integer, List<String>> entry : assistantToolCallIdsMap.entrySet()) {
-            int msgIndex = entry.getKey();
-            List<String> expectedIds = entry.getValue();
-            boolean allConsumed = true;
-            for (String id : expectedIds) {
-                if (!consumedToolCallIds.contains(id)) {
-                    allConsumed = false;
-                    break;
-                }
-            }
-            if (!allConsumed) {
-                Map<String, Object> msg = result.get(msgIndex);
-                if (msg.containsKey("tool_calls")) {
-                    msg.remove("tool_calls");
-                    log.info("精确修复：从assistant消息[{}]中移除了孤立的tool_calls（缺少对应的TOOL消息）", msgIndex);
-                    hasOrphanToolCalls = true;
-                }
-            }
-        }
-        if (hasOrphanToolCalls) {
-            log.warn("上下文孤立修复完成：移除了 {} 条缺少TOOL消息的assistant消息的tool_calls",
-                     assistantToolCallIdsMap.size() -
-                     (int) assistantToolCallIdsMap.values().stream()
-                         .filter(ids -> ids.stream().allMatch(consumedToolCallIds::contains))
-                         .count());
-        }
+        // ===== 工具调用序列净化（关键兜底，取代历史上"只删 assistant.tool_calls"的局部修复）=====
+        // 旧实现只移除「缺少 TOOL 消息的 assistant.tool_calls」，但已经落库的 tool 消息会因此变成
+        // "无前置 tool_calls 的孤立 tool 消息"，接口依旧 400 —— 这正是上下文孤立问题反复出现的原因。
+        // 现统一交给 ToolCallSequenceSanitizer：孤立 tool 消息直接丢弃、无结果的 tool_call 逐个剔除、
+        // 空 assistant 消息整条丢弃，保证序列一定合法（宁可丢信息，也绝不让会话卡死）。
+        ToolCallSequenceSanitizer.sanitize(result);
 
         // 4. 三级阈值上下文管理：先尝试压缩，兜底丢弃
         int maxTokens = deepSeekConfig.getMaxContextTokens();
@@ -238,6 +214,9 @@ public class ContextBuilder {
                     estimatedTokens, maxTokens);
             trimToTokenBudget(result, maxTokens);
         }
+
+        // 压缩/裁剪都可能切断 assistant(tool_calls) 与 tool 消息的配对关系，返回前再净化一次（幂等）
+        ToolCallSequenceSanitizer.sanitize(result);
 
         return result;
     }
@@ -265,6 +244,8 @@ public class ContextBuilder {
                         afterTokens, maxTokens);
                 trimToTokenBudget(result, maxTokens);
             }
+            // 精简/裁剪后再次净化（幂等）：compact 改动 content、trim 会删消息，都可能切断 tool 配对
+            ToolCallSequenceSanitizer.sanitize(result);
         }
         return result;
     }

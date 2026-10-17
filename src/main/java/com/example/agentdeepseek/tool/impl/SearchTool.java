@@ -2,6 +2,7 @@ package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.NetworkToolConfig;
 import com.example.agentdeepseek.config.ProxyResolver;
+import com.example.agentdeepseek.service.llm.DeepSeekToolsApiClient;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
@@ -76,15 +77,19 @@ public class SearchTool implements Tool {
     private final NetworkToolConfig config;
     private final ProxyResolver proxyResolver;
     private final String userAgent;
+    /** DeepSeek 官方网页搜索 API（当前 Provider 为 DeepSeek 官网时优先使用） */
+    private final DeepSeekToolsApiClient deepSeekToolsApi;
 
     /** 搜索结果短时缓存（key = 规范化 query + "|" + 期望条数） */
     private final Map<String, CacheEntry> searchCache = new ConcurrentHashMap<>();
 
-    public SearchTool(ObjectMapper objectMapper, NetworkToolConfig config, ProxyResolver proxyResolver) {
+    public SearchTool(ObjectMapper objectMapper, NetworkToolConfig config, ProxyResolver proxyResolver,
+                      DeepSeekToolsApiClient deepSeekToolsApi) {
         this.objectMapper = objectMapper;
         this.config = config;
         this.proxyResolver = proxyResolver;
         this.userAgent = config.getFetchUserAgent();
+        this.deepSeekToolsApi = deepSeekToolsApi;
     }
 
     @Override
@@ -104,7 +109,9 @@ public class SearchTool implements Tool {
                 + "4) 支持基本算符：site:domain.com、\"精确短语\"。"
                 + "5) 中文内容自动优先中国版 Bing，英文/技术内容自动优先全球版 Bing，无需手动指定。"
                 + "6) 网络自适应：检测到本机代理则走代理，否则直连国内源兜底，无需手动配置。"
-                + "搜索源为 Bing 全球版 / Bing 中国版 / 百度（自动切换聚合），无需 API Key。";
+                + "7) 当前会话使用 DeepSeek 官方 API 时，自动改用 DeepSeek 官方网页搜索接口（结构化结果、含权威性与时效性打分），"
+                + "失败会自动回退站点抓取，无需手动指定。"
+                + "搜索源为 DeepSeek 官方搜索 / Bing 全球版 / Bing 中国版 / 百度（自动切换聚合），无需额外配置。";
     }
 
     @Override
@@ -146,6 +153,30 @@ public class SearchTool implements Tool {
         if (cached != null) {
             log.info("网络搜索命中缓存: {}", query);
             return cached;
+        }
+
+        // ★ DeepSeek 官方搜索优先：当前会话使用的 Provider 是 DeepSeek 官网 API 时，直接调用官方 /v1/tools/search
+        //   （结构化结果 + 权威性/时效性打分，质量高于站点抓取）；失败或无结果时自动回退原有 Bing/百度链路
+        if (deepSeekToolsApi != null && deepSeekToolsApi.isOfficialProvider()) {
+            try {
+                List<DeepSeekToolsApiClient.SearchHit> hits = deepSeekToolsApi.search(query, maxResults);
+                if (hits != null && !hits.isEmpty()) {
+                    List<SearchResult> official = new ArrayList<>(hits.size());
+                    for (DeepSeekToolsApiClient.SearchHit hit : hits) {
+                        official.add(new SearchResult(hit.title(), hit.url(), hit.bestDescription()));
+                    }
+                    // 复用现有去重/重排/单域限量逻辑，保持输出格式与站点抓取完全一致
+                    List<SearchResult> rankedOfficial = dedupRankAndLimit(official, maxResults);
+                    if (!rankedOfficial.isEmpty()) {
+                        String text = formatResults(rankedOfficial, List.of("DeepSeek 官方网页搜索 API"));
+                        putCache(cacheKey, text);
+                        return text;
+                    }
+                }
+                log.info("DeepSeek 官方搜索无结果，回退站点抓取: {}", query);
+            } catch (Exception e) {
+                log.warn("DeepSeek 官方搜索失败，回退站点抓取: query={}, error={}", query, e.getMessage());
+            }
         }
 
         List<String> engineOrder = resolveEngineOrder(query);

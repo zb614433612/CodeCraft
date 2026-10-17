@@ -8,8 +8,8 @@
 ## Pre-Release Checks
 
 > 🚀 **Recommended**: Use one-click build scripts to automatically complete Steps 1-3:
-> - Windows: `scripts\build.bat v2.0.2`
-> - Mac/Linux: `./scripts/build.sh v2.0.2`
+> - Windows: `scripts\build.bat v2.0.3`
+> - Mac/Linux: `./scripts/build.sh v2.0.3`
 >
 > Below are manual steps for scenarios requiring fine-grained control.
 
@@ -113,7 +113,13 @@ git push origin v{version}
    - `CodeCraft-Setup-{version}.exe`
    - `CodeCraft-{version}.dmg` (if available)
    - `CodeCraft-{version}.AppImage` (if available)
-6. Click Publish Release
+6. **Auto-update requirements (v2.0.3+, mandatory)**:
+   - The Release must be a **published release** (not a draft and not a pre-release) — clients only read `/releases/latest`;
+   - Assets must be attached to that Release (clients download via `assets[].browser_download_url`; files merely committed to the repo do not work);
+   - Asset names must be matched by `electron/update-utils.js`: a `Setup` `.exe` on Windows, `.dmg` on macOS, `.AppImage` / `.deb` on Linux, all containing the version;
+   - `tag_name` should be `vX.Y.Z` (the client normalizes the `v` prefix and supports prerelease comparison);
+   - Clients older than v2.0.3 must upgrade manually once before auto-update takes effect.
+7. Click Publish Release
 
 ---
 
@@ -123,6 +129,8 @@ git push origin v{version}
 - [ ] Platform artifacts downloadable
 - [ ] Downloaded EXE installs and runs
 - [ ] Download links in `README.md` point to latest Release
+- [ ] "Data Management → Version & Updates → Check for updates" detects the new version (v2.0.3+ clients)
+- [ ] Download progress and installation flow work (Windows launches the installer; macOS opens the dmg for drag-and-drop)
 
 ---
 

@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
+> Version: v2.0.3 | Updated: 2026-10-17 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---
@@ -285,6 +285,22 @@ public class LLMClientManager {
 | MiMo | `MiMoClient` | `mimo` | Xiaomi MiMo model |
 | MiniMax | `MiniMaxClient` | `minimax` | MiniMax API (OpenAI-compatible, thinking adaptive + reasoning_split) |
 | Custom | `OpenAIClient` | `custom` | Minimal OpenAI-compatible mode |
+
+### 4.4 DeepSeek Official Tool API Integration (v2.0.3)
+
+`DeepSeekToolsApiClient` makes `web_search` / `web_fetch` automatically use the official endpoints when the DeepSeek official API is in use — no extra user configuration required:
+
+| Item | Description |
+|------|-------------|
+| Enabled when | Provider `baseUrl` host is `api.deepseek.com` and apiKey is non-empty (the placeholder `__MUST_CONFIGURE_API_KEY__` counts as unconfigured) |
+| Endpoints | `POST /v1/tools/search` (query / count / need_content, etc.), `POST /v1/tools/fetch` (url) |
+| Auth | Shares `Authorization: Bearer <apiKey>` with Chat Completions, injected by `LLMWebClientManager` |
+| Path resolution | `resolveApiPath()` tolerates baseUrl with or without `/v1` |
+| Failure policy | Exceptions are caught by the tools, which fall back to the legacy pipeline (Bing/Baidu, Jina/local); tool availability is never affected |
+| Detection basis | The `baseUrl` host (not providerCode) — third-party proxies / self-hosted compatible services are never enabled |
+| Sub-agents | `AgentForkManager` forwards it via `ToolContext.setProviderCode(...)` so child agents detect consistently |
+
+> Why not providerCode: users may define arbitrary codes (e.g. `deepseek-proxy`), while the host is the objective fact of "official or not".
 
 ---
 

@@ -128,10 +128,13 @@ public abstract class AbstractLLMClient implements LLMClient {
 
     @Override
     public Flux<String> streamChat(Map<String, Object> requestBody) {
+        // ★ 请求出口统一净化：会把「工具已下发但结果缺失」的脏序列修复成合法序列（幂等、纯内存）。
+        //   这里是所有 Provider 流式请求的必经之路，任何历史脏数据都无法阻断对话。
+        Map<String, Object> safeBody = ToolCallSequenceSanitizer.sanitizeRequestBodyCopy(requestBody);
         return webClient.post()
                 .uri(getChatEndpoint())
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(requestBody)
+                .bodyValue(safeBody)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .retrieve()
                 .bodyToFlux(String.class)
@@ -146,12 +149,14 @@ public abstract class AbstractLLMClient implements LLMClient {
 
     @Override
     public String blockingChat(Map<String, Object> requestBody, Duration timeout) {
+        // ★ 同流式：非流式请求出口同样净化（评委/子Agent/复盘等路径统一兜底）
+        Map<String, Object> safeBody = ToolCallSequenceSanitizer.sanitizeRequestBodyCopy(requestBody);
         try {
             Duration effectiveTimeout = timeout != null ? timeout : DEFAULT_BLOCKING_TIMEOUT;
             return webClient.post()
                     .uri(getChatEndpoint())
                     .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(requestBody)
+                    .bodyValue(safeBody)
                     .retrieve()
                     .bodyToMono(String.class)
                     .block(effectiveTimeout);

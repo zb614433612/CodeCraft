@@ -85,15 +85,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, notification } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
 import { logout } from '@/api/user'
 import { getUserMenus } from '@/api/menu'
 import { getProfile } from '@/api/user-admin'
 import { isImageAvatar } from '@/utils/avatar'
+import { getUpdateApi } from '@/utils/update'
 import AppearanceSettingsDrawer from '@/components/AppearanceSettingsDrawer.vue'
 import {
   CodeOutlined,
@@ -271,6 +272,12 @@ const loadProfile = async () => {
   }
 }
 
+/**
+ * 自动更新发现新版本时的通知（主进程在启动 15s 后自动检查，命中则推送 update:available）
+ * 点击通知跳转「数据管理 → 版本与更新」卡片进行下载与升级。
+ */
+let offUpdateAvailable: (() => void) | null = null
+
 onMounted(() => {
   // 加载左侧菜单
   loadMenus()
@@ -280,6 +287,26 @@ onMounted(() => {
   if (route.path === '/') {
     router.push('/code-assistant')
   }
+  // 监听「发现新版本」事件（仅 Electron 桌面端）
+  const updateApi = getUpdateApi()
+  if (updateApi?.onAvailable) {
+    offUpdateAvailable = updateApi.onAvailable((info: any) => {
+      const version = info?.latestVersion ? ` v${info.latestVersion}` : ''
+      notification.info({
+        message: `发现新版本${version}`,
+        description: '可在「数据管理 → 版本与更新」中下载并一键升级；升级不会影响你的数据。',
+        duration: 8,
+        placement: 'bottomRight',
+        onClick: () => {
+          router.push('/system-setting')
+        }
+      })
+    })
+  }
+})
+
+onUnmounted(() => {
+  offUpdateAvailable?.()
 })
 </script>
 

@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
+> Version: v2.0.3 | Updated: 2026-10-17 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -319,6 +319,23 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 > 📌 This table tracks the current 27 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
 
 ---
+
+### 8.1 Dual-Path Network Tools (v2.0.3)
+
+Both `web_search` and `web_fetch` use a "primary path + fallback path" structure, fully transparent to the AI (tool descriptions are generated dynamically):
+
+| Tool | Primary path | Enabled when | Fallback path |
+|------|--------------|--------------|---------------|
+| `web_search` | DeepSeek official `POST /v1/tools/search` | Provider `baseUrl` host is `api.deepseek.com` and an API key is configured | Bing Global → Bing China → Baidu (depending on proxy availability) + result cache (TTL 300s) + low-quality domain demotion |
+| `web_fetch` | DeepSeek official `POST /v1/tools/fetch` | Same as above, and the target is a public address (not private/loopback) | Jina Reader (preferred when a usable proxy exists) → local fetch (UA pool + anti-bot retries) |
+
+Implementation notes:
+
+- The official path is invoked by `DeepSeekToolsApiClient`, reusing `LLMWebClientManager` auth headers, connection pool and retries;
+- Official-path errors/timeouts are never exposed to the AI — the tool falls back to the legacy pipeline and logs the failure, so the tool always works;
+- Detection uses the `baseUrl` host rather than `providerCode`, so third-party proxies / self-hosted compatible services never enable it (no requests leak to non-official services);
+- Sub-agents pass the Provider via `ToolContext.setProviderCode(...)` so detection stays consistent inside child agents;
+- Regression tests: `DeepSeekToolsApiClientTest` (26 assertions); `SearchToolLogicTest` / `WebFetchToolLogicTest` were adapted.
 
 ## 8.5. Growth System: Lesson Knowledge Base
 

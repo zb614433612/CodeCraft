@@ -45,7 +45,7 @@
 Agent 之间可**任务委托**：智能体 A 在执行中通过 `agent_invoke` 工具调用智能体 B，B 以自身身份（自己的角色/模型/工作目录/工具集）在**独立会话**中执行——支持 `create_session`（为 B 新建会话）与 `continue_session`（按会话 ID 让 B 带着历史继续干）。**委托即授权**：用户批准一次委托后，B 执行期间免弹窗（信任沿调用链传递，环检测 + 深度 ≤3 防死循环）；A 停止任务会级联取消 B 的委托任务。B 的委托会话会出现在其会话列表（名称带「[A 委托]」前缀），透明可审计。详见 `docs/AGENT_INVOKE_DESIGN.md`。
 
 ### 🌐 多 LLM Provider 支持（Multi-LLM Platform）
-支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax 等主流 LLM 平台。通过统一的 LLMClient 抽象层屏蔽不同平台的 API 差异，前端运行时可随时切换 Provider，无需重启服务。每个 Agent 可以绑定特定的 Provider 和模型，Provider 配置变更后自动热刷新客户端缓存。详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
+支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax 等主流 LLM 平台。通过统一的 LLMClient 抽象层屏蔽不同平台的 API 差异，前端运行时可随时切换 Provider，无需重启服务。每个 Agent 可以绑定特定的 Provider 和模型，Provider 配置变更后自动热刷新客户端缓存。使用 **DeepSeek 官方 API**（`api.deepseek.com`）时，`web_search` / `web_fetch` 会自动改走官方 `/v1/tools/search` 与 `/v1/tools/fetch` 接口，失败自动回退 Bing/百度与 Jina/本地抓取。详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
 
 ### 🛡️ 三层安全防护（Human-in-the-Loop）
 工具执行采用渐进式安全策略：Manual 模式下数据操作和路径敏感操作弹窗授权，Auto 模式下高危工具（file_writer action=delete / execute_sql 等）仍需人工确认。支持"本轮对话全部同意"一键放行，在 Autonomous Agent 自动化和 Human-in-the-Loop 人工管控之间取得最佳平衡。
@@ -68,6 +68,9 @@ AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按�
 ### 🎨 智能 Markdown 渲染与「应用内查看」
 支持 KaTeX 数学公式、命令终端卡片、文件清单卡片、彩色提示容器、XSS 安全防护；AI 回复中的项目文件路径、图片与外链可直接点击，在应用内以标签页打开（文件 / 图片 / 内嵌网页，支持系统浏览器打开，可随时关闭）——无需复制路径、无需离开应用。
 
+### 💬 长会话渲染（分页懒加载 / 虚拟列表）
+聊天记录按「轮」游标分页懒加载（首屏最近 5 轮，上滑到顶自动加载更早 5 轮），配合虚拟列表与高度自愈机制（`ResizeObserver` + 节流 `forceUpdate`）：即便上千条消息、含代码块 / 图片 / 折叠卡片的超长会话，也不会出现气泡重叠、位置错乱或滚动条乱跳，打开会话秒开。
+
 ### 🖌️ 个性化外观（背景图 / 窗口透明度）
 侧边栏「外观设置」支持上传全局背景图（≤10MB），配合背景不透明度 / 背景模糊 / 窗口整体透明度三个滑块调出专属氛围；桌面端标题栏与整个窗口同步半透明，深浅主题皆宜。
 
@@ -75,7 +78,7 @@ AI 执行任务踩过的坑自动沉淀为**经验库**（按项目隔离、按�
 完整的账户体系：注册登录、Token 鉴权（JWT）、角色权限控制（RBAC）、菜单可见性管理、初始管理员自动创建。
 
 ### 🧰 27 个工具生态（Tool Use / Function Calling）
-文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理、桌面自动化（Computer Use）等 9 大类 27 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。
+文件操作、命令执行、网络请求、数据库查询、Git 版本控制、Agent 协作、技能与经验管理、桌面自动化（Computer Use）等 9 大类 27 个工具全部对 AI 开放——覆盖 Software Engineering 日常开发全流程。网络类工具具备多搜索源优先级、结果缓存、反爬重试与代理自适应（自动探测 Clash / v2rayN 等本机代理），DeepSeek 官方 Provider 下自动使用官方搜索/抓取接口。
 
 ### 🖼️ 图像理解与文件管理（Vision / Files API）
 支持在聊天中粘贴（Ctrl+V）或上传图片（≤64MB），经云端 **Files API**（file_id 引用）供 LLM 图像理解，适配器架构兼容 DeepSeek / Anthropic 双风格；内置独立**文件管理页**（上传/列表/重命名/删除/引用到会话，文件永久保存）；文档附件（PDF/Word/Excel/文本）本地统一纳管（storage_type 区分 cloud/local）。
@@ -94,6 +97,9 @@ AI 可"看到"并"操控"电脑：`screen_capture` 一键截屏（分辨率标�
 
 ### 🔗 P2P 远程协作（Peer-to-Peer Remote）
 基于 Netty + TLS 的点对点安全通道，可将 Agent 授权给远程伙伴调用。支持二维码配对、IPv6 直连、端到端加密、图片/文件传输。
+
+### 🔄 应用内自动更新（Auto Update）
+桌面端启动 15 秒后自动检查 GitHub Releases（6 小时缓存，规避 API 限流），发现新版本弹出通知；在「数据管理 → 版本与更新」卡片内可查看版本、带进度下载、一键安装（Windows 启动安装器并自动重启；macOS 打开 dmg 引导拖拽），下载支持镜像加速、失败自动回退直连。**升级不丢数据**：后端工作目录已迁至 `userData/runtime`，升级前自动备份数据库，安装包首次升级也会备份旧数据目录。
 
 ### 💾 开箱即用（Zero Config / Portable）
 Electron 桌面应用，内置 JRE + Node.js + H2 嵌入式数据库，下载安装即用，零配置。支持 Windows / macOS / Linux 三平台。
@@ -124,6 +130,7 @@ Electron 桌面应用，内置 JRE + Node.js + H2 嵌入式数据库，下载安
 - macOS 用户下载 `CodeCraft-x.x.x.dmg`
 - Linux 用户下载 `CodeCraft-x.x.x.AppImage`
 - 双击安装即可使用，**无需安装 Java**（JRE 已内置在安装包中）
+- 已安装用户无需手动重装：应用启动后会自动检查更新，也可在「数据管理 → 版本与更新」中手动检查并**一键升级**（升级会自动备份并保留全部本地数据）
 
 > 安装后启动，后端服务自动运行（等待约 10~30 秒，启动画面实时展示进度），然后自动打开主界面。
 > 首次使用请先到「模型配置」页面添加 **LLM Provider**（支持 DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）。
@@ -208,6 +215,9 @@ codecraft/
 ├── electron/                     # Electron 桌面壳
 │   ├── main.js                   # Electron 主进程（启动画面 / 透明标题栏 / 窗口透明度）
 │   ├── loading.html              # 启动画面（进度条 + 启动日志锚点）
+│   ├── update-manager.js         # 自动更新（GitHub Releases 检测 / 下载 / 安装 / 升级前备份）
+│   ├── update-utils.js           # 版本比较与发布资产匹配（可单测）
+│   ├── installer.nsh             # NSIS 安装脚本扩展（首次升级备份旧数据目录）
 │   ├── package.json              # Electron 配置
 │   └── start.sh / start.bat     # 启动脚本
 ├── pom.xml                       # Maven 构建配置

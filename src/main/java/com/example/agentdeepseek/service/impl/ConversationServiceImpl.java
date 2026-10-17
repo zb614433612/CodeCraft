@@ -6,6 +6,7 @@ import com.example.agentdeepseek.mapper.FileReferenceMapper;
 import com.example.agentdeepseek.mapper.SubAgentLogMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
+import com.example.agentdeepseek.model.vo.ConversationMessagePageVO;
 import com.example.agentdeepseek.service.ConversationService;
 import com.example.agentdeepseek.service.files.FileAssetService;
 import lombok.extern.slf4j.Slf4j;
@@ -72,6 +73,38 @@ public class ConversationServiceImpl implements ConversationService {
     @Override
     public List<ConversationMessage> getMessagesByConversationId(Long conversationId) {
         return conversationMessageMapper.selectByConversationId(conversationId);
+    }
+
+    /** 分页默认轮数（一轮 = 一次用户提问 + 其后全部回复） */
+    private static final int DEFAULT_PAGE_ROUNDS = 5;
+    /** 分页轮数上限，防止前端传入异常值导致一次拉取过多 */
+    private static final int MAX_PAGE_ROUNDS = 50;
+
+    @Override
+    public ConversationMessagePageVO getMessagesPage(Long conversationId, Long beforeId, int rounds) {
+        int safeRounds = rounds <= 0 ? DEFAULT_PAGE_ROUNDS : Math.min(rounds, MAX_PAGE_ROUNDS);
+
+        // 1) 找本页起点：从尾部往前数第 safeRounds 个「正常用户消息」。
+        //    startId=null 表示用户消息不足 safeRounds 轮（已到最早），退化为查 beforeId 之前的全部消息。
+        Long startId = conversationMessageMapper.selectNthUserMessageIdFromTail(
+                conversationId, beforeId, safeRounds - 1);
+
+        // 2) 取该起点到游标之间的全部消息（含 assistant/tool，保证一轮完整）
+        List<ConversationMessage> messages = conversationMessageMapper.selectRange(conversationId, startId, beforeId);
+        if (messages == null) {
+            messages = Collections.emptyList();
+        }
+
+        // 3) 是否还有更早的消息（决定前端是否还能继续上滑加载）
+        boolean hasMore = startId != null && conversationMessageMapper.countBefore(conversationId, startId) > 0;
+
+        // 4) 下一页游标 = 本页最早一条消息 id；空页返回 null，避免前端无意义地重复请求
+        Long nextBeforeId = messages.isEmpty() ? null : messages.get(0).getId();
+
+        log.debug("分页查询会话消息: conversationId={}, beforeId={}, rounds={}, startId={}, 返回={}, hasMore={}",
+                conversationId, beforeId, safeRounds, startId, messages.size(), hasMore);
+
+        return new ConversationMessagePageVO(messages, hasMore, nextBeforeId, safeRounds);
     }
 
     @Override

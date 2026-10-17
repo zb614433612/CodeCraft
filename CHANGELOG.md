@@ -5,6 +5,77 @@
 
 ---
 
+## [2.0.3] - 2026-10-17
+
+### 💬 修复：聊天记录渲染重叠 / 位置错乱 / 超长会话卡顿
+
+- **后端新增「按轮」游标分页接口** `GET /conversation/{conversationId}/messages/page?beforeId=&rounds=`：
+  - 以 `role=USER`（排除 `desktop_inject` 注入消息）为「轮」边界，边界只落在用户提问上，`processMessageGroups` 不会跨页聚合；
+  - 默认返回最近 5 轮，`rounds` 上限 50；响应含 `messages`（id 升序）+ `hasMore` + `nextBeforeId`；
+  - 游标为 `beforeId`（上一页最早消息 id），避免 offset 分页在新消息写入后错位。
+- **前端改为懒加载**：首屏只取最近 5 轮 → 上滑到顶部（`scrollTop ≤ 80`）自动加载更早 5 轮 → `nextBeforeId` 持续向前翻；本地新建会话（`local-*`）迁移真实 ID 时同步迁移分页状态。
+- **加载历史后阅读位置不漂移**：`preserveScrollAfterPrepend` 改为双向补偿（`delta !== 0` 即补偿），并加入用户滚动检测（偏差 > 48px 视为用户主动滚动，放弃补偿）。
+- **渲染重叠 / 位置错误修复**：
+  - 虚拟列表按会话强制重建（`:key="currentConversationId"`）；消息 id 全局唯一（`user-` / `assistant-` / `reconnect-` + `localMsgSeq`），并保留重复 id 兜底；
+  - 移除消息入场动画与 `transition: all`（高度测量期动画会让动态列表估算错位）；`min-item-size` 80 → 120；
+  - 新增 `v-track-msg-size` 指令 + `ResizeObserver`：内容真实高度变化（代码块渲染 / 图片加载 / 折叠展开）后 120ms 节流、差异超过 1.5px 才触发 `forceUpdate()` 自愈，修正滚动条抖动与条目错位；
+  - 切换会话 / 切换 Agent 恢复快照后强制贴底（`scrollToBottomForce`：token 取消 + 逐帧贴底 + 高度稳定 3 帧判定），修复切回 Agent 后列表停在顶部。
+- **历史加载不再被「拽到底部」**：新增 `lastHistoryPrependAt`（500ms 窗口）标记，避免「加载历史 → 消息数变化 → watcher 误判为新消息 → 强制贴底」。
+- **`loadingMoreMessages` 按会话隔离**（`loadingMoreConvIds`）：并行加载多个会话历史不再互相阻塞，顶部「加载中」提示不再串台。
+- **多智能体并行状态修复**：
+  - `hasRunningTask` / `hasActiveStream` 统一覆盖四类运行态（前台流 `sendingStates` / 后台流 `backgroundStreams` / 重连中 `reconnectingConvIds` / 活跃任务 `activeTaskMap`）——切走智能体再切回，「补充需求」「结束当前任务」按钮与输入框 loading 均能恢复；
+  - `onStreamComplete` 按「本流」`abortController` 精确移除后台流条目（同一会话可并存多条后台流，原按 `convId` 全量移除会摘掉仍在运行的流，导致停止按钮失效）；
+  - 后台任务完成通知的 Agent 名称/头像改为按「本流归属 agentConfigId」精确取（原取当前选中 Agent，多智能体并行时头像/名字货不对板）。
+
+### 🧠 修复：工具调用序列孤立导致的接口 400（会话永久卡死）
+
+- **新增 `ToolCallSequenceSanitizer`（幂等 / 纯内存 / copy-on-write / 不改数据库）**，在「唯一请求出口」统一净化，取代历史上「只删 `assistant.tool_calls`」的局部修复（那样会让已落库的 tool 消息变成孤立 tool 消息，接口同样 400，反复修不好）：
+  - 丢弃孤立 `tool` 消息（同轮内找不到 id 匹配、尚未被消费的 tool_call）；
+  - 逐个剔除「无结果」的 `tool_call`；全部无结果时清空 `tool_calls`（assistant 退化为普通文本，内容保留）；
+  - 丢弃清洗后既无 `content` 又无 `tool_calls` 的空 assistant 消息；
+  - 剔除无 id / id 为 `"null"` / 重复 id 的非法调用项。
+- **接入全部请求出口**：`ContextBuilder`（消息转换后 + 压缩/裁剪后各净化一次）、`AbstractLLMClient` / `AnthropicClient` / `OllamaClient` 的请求体构造；`ContextBuilder` 同时移除旧的孤立 tool_calls 局部修复逻辑。
+- **写入侧加固**：`DeepSeekServiceImpl.appendToolResultMessages` 为本批次「已声明但没有拿到结果」的 tool_call 补一条「【工具未执行】」占位 tool 消息（任务被取消 / 工具返回 null / 结果构建异常场景），从源头避免序列缺口。
+- **回归测试**：新增 `ToolCallSequenceSanitizerTest`（36 断言，覆盖孤立 tool、缺失结果、非法 id、重复 id、幂等性）。
+
+### 🤖 优化：评委机制不再硬终止，改由用户决策
+
+- **评委否决（reject）/ 响应解析失败 / 评委调用异常且本地判定无进展 / 累计扩容达 `MAX_JUDGE_GRANTED_ITERATIONS=100` 上限** → 全部改为通过 `ask_user` 询问用户（`askType=iteration_confirm`），不再直接终止任务。
+- **新增「任务迭代确认」面板**：展示触发原因、评委理由、当前进度、当前迭代（`n / max`）与累计扩容（`x / 100`），提供「继续执行 +10 / +20 / +50 次」与「结束任务」；等待超时 5 分钟按「结束任务」处理并清理待处理问题，避免悬挂。
+- 页面刷新 / 任务重连后，按问题文本前缀 `【任务迭代确认】` 还原面板类型，不会退化成普通追问。
+
+### 🔄 新增：桌面端自动更新（基于 GitHub Releases）
+
+- **新增 `electron/update-manager.js`**：检测 GitHub Releases（`/releases/latest`，6 小时结果缓存 + 手动检查最小间隔 30 秒，规避未认证 API 60 次/小时限流）→ 页面内带进度下载（镜像前缀加速，失败自动回退直连）→ 分平台安装（Windows 启动安装器并退出；macOS 打开 dmg 引导拖拽；Linux 在文件管理器中定位 AppImage）。
+- **新增 `electron/update-utils.js`**：语义化版本比较（支持 `v` 前缀 / 预发布）与发布资产按「平台 + 架构」匹配，可单独单测。
+- **升级不丢数据（三层保护）**：
+  - 后端工作目录（cwd）由安装目录迁至 `userData/runtime`，含老数据自动迁移、`legacy-backup` 恢复、迁移失败回退；
+  - 升级前停止后端进程，并把 `userData/runtime/data` 备份到 `userData/backups`；
+  - 新增 `electron/installer.nsh`（NSIS `customInit`）：首次升级前备份旧数据目录，避免覆盖安装清库。
+- **前端**：新增 `frontend/src/utils/update.ts`（IPC 封装 + 分平台引导文案）；`SystemSettingView` 新增「版本与更新」卡片（当前版本 / 最新版本 / 检查更新 / 下载进度 / 一键安装 / 启动时自动检查开关 / 打开发布页，浏览器环境展示降级提示）；`Layout.vue` 启动 15 秒后自动检查，发现新版本弹出通知并可跳转。
+- **本地数据重置联动**：`clearLocalData` 一并清理 `backups` / `legacy-backup` / 安装包 / 更新缓存。
+- **preload 新增**：`update.*`（getState / check / download / cancelDownload / install / openReleasePage / getSettings / setSettings / onAvailable / onDownloadProgress）与 `clearLocalData`。
+
+### 🌐 新增：DeepSeek 官方 web_search / web_fetch 接口
+
+- **新增 `DeepSeekToolsApiClient`**：当 Provider 的 `baseUrl` 主机为 `api.deepseek.com` 且已配置 API Key 时自动启用（第三方中转 / 自建兼容服务不启用，避免误发请求），复用 `LLMWebClientManager` 的认证头、连接池与重试策略：
+  - `POST /v1/tools/search`：query / count / need_content 等参数，解析 `results[]`（title / url / snippet / summary / content / site_name / date / authority / rerank_score）；
+  - `POST /v1/tools/fetch`：url → title + Markdown 正文。
+- **`SearchTool` / `WebFetchTool` 改为「官方优先 + 失败回退」**：官方接口异常 / 超时 / 非官方 Provider 时自动回退原链路（Bing/百度多源抓取、Jina/本地抓取），保证工具始终可用；`WebFetchTool` 官方通道仅对公网地址启用。
+- **`AgentForkManager`**：子 Agent 补 `ToolContext.setProviderCode(...)`，保证子 Agent 内同样按 Provider 正确判定。
+- **回归测试**：新增 `DeepSeekToolsApiClientTest`（26 断言，main 方法风格）。
+
+### 🏷️ 版本号
+
+- 后端：`2.0.2` → `2.0.3`（pom.xml）
+- 前端：`2.0.2` → `2.0.3`（package.json + package-lock.json）
+- Electron：`2.0.2` → `2.0.3`（package.json + package-lock.json，打包 jar 路径同步 `code-craft-2.0.3.jar`）
+- MCP Server 握手版本：`2.0.2` → `2.0.3`
+- 打包产物：`code-craft-2.0.2.jar` → `code-craft-2.0.3.jar`
+- 说明文档：README(_EN) / BUILD_AND_RUN(_EN) / CHANGELOG(_EN) / docs（ARCHITECTURE、DEEPSEEK_SERVICE_IMPL、TOOL_SYSTEM、LLM_PROVIDER_SYSTEM、DEV_QUICKREF、RELEASE_CHECKLIST 等）同步至 v2.0.3
+
+---
+
 ## [2.0.2] - 2026-09-24
 
 ### 🎨 新增：外观设置（全局背景图 / 窗口透明度）

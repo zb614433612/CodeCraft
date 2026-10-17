@@ -2,6 +2,7 @@ package com.example.agentdeepseek.service;
 
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
+import com.example.agentdeepseek.model.vo.ConversationMessagePageVO;
 
 import java.util.List;
 
@@ -29,6 +30,19 @@ public interface ConversationService {
      * @return 消息列表
      */
     List<ConversationMessage> getMessagesByConversationId(Long conversationId);
+
+    /**
+     * 按「轮次」游标分页查询会话消息（从最新往前翻，用于聊天记录懒加载）。
+     *
+     * <p>一轮 = 一条用户提问（非 desktop_inject）+ 其后全部回复；首页不传 beforeId，
+     * 返回最近 rounds 轮；继续往前翻时把上一页的 nextBeforeId 作为 beforeId 传入。</p>
+     *
+     * @param conversationId 会话ID
+     * @param beforeId       分页游标（上一页最早消息的 id；首页传 null）
+     * @param rounds         本次加载的轮数（&lt;=0 按默认 5 处理，上限 50）
+     * @return 分页结果（messages 按 id 升序 + hasMore + nextBeforeId）
+     */
+    ConversationMessagePageVO getMessagesPage(Long conversationId, Long beforeId, int rounds);
 
     /**
      * 删除会话及其关联消息

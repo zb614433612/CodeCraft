@@ -216,6 +216,9 @@ public class AgentForkManager {
                 ToolContext.set(mode != null ? mode : "auto", parentConversationId,
                         ToolContext.getAgentType(), userId);
                 ToolContext.setTurnId(parentTurnId);
+                // 子 Agent 跟随主 Agent 的 Provider：
+                // 供 web_search / web_fetch 判断是否使用 DeepSeek 官方工具 API（官方 Provider 才启用）
+                ToolContext.setProviderCode(context.getProviderCode());
                 PermissionContext.set(pendingQuestionStore, objectMapper);
                 // 继承父Agent的项目工作目录
                 ProjectRootContext.set(parentProjectRoot);

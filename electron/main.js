@@ -3,6 +3,8 @@ const { spawn, exec } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
+// 自动更新管理器（检测 GitHub Releases / 下载 / 安装 / 升级前备份）
+const { initUpdateManager } = require('./update-manager')
 
 const DEV_MODE = process.env.DEV_MODE === 'true'
 
@@ -343,6 +345,83 @@ function getJarPath() {
 }
 
 /**
+ * 解析打包环境下的后端工作目录（数据目录），确保「升级安装不会丢用户数据」。
+ *
+ * 背景：后端 H2 数据库、快照、日志都使用相对路径（./data、./snapshots、./logs），
+ * 由 java 进程的 cwd 决定。历史实现把 cwd 设为 jar 所在目录（<安装目录>/resources/backend），
+ * 一旦覆盖安装（NSIS 会替换 resources 目录），用户数据库/快照就会丢失。
+ *
+ * 现策略：
+ * 1) cwd 固定为 <userData>/runtime（Windows: %APPDATA%/CodeCraft/runtime），安装器不会触碰；
+ * 2) 首次运行且旧位置存在历史数据时，先完整复制到临时目录、再原子改名为正式目录（避免半拷贝）；
+ * 3) 任一步失败都回退用旧目录启动 —— 宁可暂时不迁移，也绝不丢数据。
+ *
+ * @param {string} jarDir 后端 jar 所在目录（历史数据目录）
+ * @returns {string} 后端 cwd
+ */
+function resolveBackendWorkDir (jarDir) {
+  // 开发环境：保持原有行为（数据留在 target 目录旁，方便调试）
+  if (!app.isPackaged) return jarDir
+
+  const runtimeDir = path.join(app.getPath('userData'), 'runtime')
+  const runtimeDb = path.join(runtimeDir, 'data', 'codecraft.mv.db')
+  const legacyDb = path.join(jarDir, 'data', 'codecraft.mv.db')
+
+  try {
+    // 1) 新位置已有数据（或此前已迁移过）→ 直接使用
+    if (fs.existsSync(runtimeDb)) return runtimeDir
+
+    // 2) 首次从「数据在安装目录」的旧版本升级：安装包 customInit 已把旧数据备份到 legacy-backup，
+    //    这里恢复到 runtime（保留 legacy-backup 作为额外副本，不删除）
+    const legacyBackupDir = path.join(app.getPath('userData'), 'legacy-backup')
+    const legacyBackupDb = path.join(legacyBackupDir, 'data', 'codecraft.mv.db')
+    if (fs.existsSync(legacyBackupDb)) {
+      const restoreTmp = runtimeDir + '.restoring'
+      fs.rmSync(restoreTmp, { recursive: true, force: true })
+      fs.mkdirSync(restoreTmp, { recursive: true })
+      for (const name of ['data', 'snapshots', 'logs']) {
+        const src = path.join(legacyBackupDir, name)
+        if (fs.existsSync(src)) {
+          fs.cpSync(src, path.join(restoreTmp, name), { recursive: true })
+          console.log(`[migrate] 已从安装包备份恢复 ${name}`)
+        }
+      }
+      fs.rmSync(runtimeDir, { recursive: true, force: true })
+      fs.renameSync(restoreTmp, runtimeDir)
+      console.log(`[migrate] 旧版本数据已恢复到: ${runtimeDir}`)
+      return runtimeDir
+    }
+
+    // 3) 旧位置（安装目录内）仍有历史数据 → 一次性迁移（数据库 + 快照 + 日志）
+    if (fs.existsSync(legacyDb)) {
+      const tmpDir = runtimeDir + '.migrating'
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+      fs.mkdirSync(tmpDir, { recursive: true })
+      const copyNames = ['data', 'snapshots', 'logs']
+      for (const name of copyNames) {
+        const src = path.join(jarDir, name)
+        if (fs.existsSync(src)) {
+          fs.cpSync(src, path.join(tmpDir, name), { recursive: true })
+          console.log(`[migrate] 已复制 ${name} → ${path.join(tmpDir, name)}`)
+        }
+      }
+      // 原子替换：避免出现「目录已建但数据不全」的中间态
+      fs.rmSync(runtimeDir, { recursive: true, force: true })
+      fs.renameSync(tmpDir, runtimeDir)
+      console.log(`[migrate] 历史数据迁移完成: ${jarDir} → ${runtimeDir}`)
+      return runtimeDir
+    }
+
+    // 全新安装：直接创建数据目录
+    fs.mkdirSync(runtimeDir, { recursive: true })
+    return runtimeDir
+  } catch (e) {
+    console.error('[migrate] 数据目录迁移失败，回退使用安装目录（数据不丢失，仅位置不理想）:', e)
+    return jarDir
+  }
+}
+
+/**
  * 启动 Spring Boot 后端 JAR
  */
 function startBackend() {
@@ -357,9 +436,9 @@ function startBackend() {
   console.log(`启动后端服务: ${jarPath}`)
   console.log(`Java 路径: ${javaCmd}`)
 
-  // cwd 设置为 jar 包所在目录，保证 Java 中 user.dir 指向正确位置
-  // 这样 H2 数据库 ./data、snapshots、logs 等都放在 jar 包旁边
-  const workDir = path.dirname(jarPath)
+  // cwd 决定 Java 的 user.dir → H2 数据库 ./data、快照 ./snapshots、日志 ./logs 的落点。
+  // 打包后必须指向 <userData>/runtime（与安装目录解耦），否则覆盖安装会丢失用户数据。
+  const workDir = resolveBackendWorkDir(path.dirname(jarPath))
   // 确保工作目录存在
   if (!fs.existsSync(workDir)) {
     fs.mkdirSync(workDir, { recursive: true })
@@ -682,7 +761,34 @@ async function start() {
   createWindow()
 }
 
-app.whenReady().then(start)
+/**
+ * 安装更新前停止后端进程：释放数据库/日志文件句柄。
+ * 目的：① 升级前备份能拿到完整一致的文件；② 安装器替换文件时不会被占用。
+ * 最多等待 3 秒，超时也继续（安装器自身也会关闭旧实例）。
+ */
+async function stopBackendForUpdate () {
+  if (!javaProcess) return
+  try {
+    javaProcess.kill()
+  } catch (e) {
+    console.warn('停止后端进程失败:', e.message)
+  }
+  const deadline = Date.now() + 3000
+  while (javaProcess && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  console.log('后端进程已停止（准备安装更新）')
+}
+
+app.whenReady().then(() => {
+  // 自动更新管理器不依赖后端，尽早初始化（自动检查在 15s 后触发，不阻塞启动）
+  initUpdateManager({
+    getMainWindow: () => mainWindow,
+    // 安装前先停后端：释放数据库文件句柄，保证备份一致且安装不被占用
+    beforeInstall: stopBackendForUpdate
+  })
+  start()
+})
 
 app.on('window-all-closed', () => {
   // 关闭 Java 进程

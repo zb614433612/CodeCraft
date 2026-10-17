@@ -14,7 +14,7 @@
 **CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **27 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
-- 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching
+- 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching. With the official DeepSeek API (`api.deepseek.com`), `web_search` / `web_fetch` automatically use the official `/v1/tools/search` and `/v1/tools/fetch` endpoints, falling back to Bing/Baidu and Jina/local fetching on failure
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
 - 🧰 **27-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons, desktop automation — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel
@@ -26,8 +26,10 @@
 - 🖼️ **Vision & File Management**: Paste (Ctrl+V) or upload images (≤64MB) in chat for LLM understanding via the cloud Files API (file_id references; DeepSeek / Anthropic adapter); standalone File Manager page with full CRUD, session reference and permanent retention; documents (PDF/Word/Excel) stored locally in the same asset system
 - 🪟 **Desktop Automation (Computer Use)**: `screen_capture` (grid-overlay screenshots, auto-upload + context injection) and `desktop_control` (mouse/keyboard simulation, 1-20 batch actions) — the "capture → locate → act → verify" loop, guarded by the DESKTOP high-risk permission and crosshair preflight
 - 📎 **In-App Viewer**: File paths, images and links in AI replies are clickable — opened as in-app tabs (file / image / embedded web page) without leaving the app
+- 💬 **Long-Conversation Rendering**: Chat history is lazy-loaded by round (latest 5 rounds first, 5 more when scrolling to the top) with a virtual list and ResizeObserver-based height self-heal — no overlapping bubbles, misplacement or scrollbar jumps even in thousand-message sessions
 - 🖌️ **Appearance**: Global background image (≤10MB) with background opacity / blur / window overall opacity sliders; the title bar and whole window become translucent in sync
 - 🖥️ **Desktop App**: Electron + built-in JRE, zero-installation ready to use
+- 🔄 **Auto Update**: The desktop app checks GitHub Releases 15 seconds after startup (6-hour cache); download with progress and one-click install from the "Data Management → Version & Updates" card (mirror acceleration with automatic direct fallback). Upgrades keep all local data — the backend cwd lives in `userData/runtime`, the database is backed up before upgrading, and the installer backs up legacy data on the first upgrade
 - 🌐 **P2P Remote Collaboration**: Peer-to-peer encrypted channels for remote agent invocation between devices
 - 💾 **Snapshot System**: Auto-backup before code changes, support multi-granularity rollback
 - 🔐 **Security**: Three-layer permission pipeline + path traversal check + audit logging
@@ -43,6 +45,8 @@ Go to [Releases](https://github.com/zb614433612/CodeCraft/releases) page to down
 | Windows | `CodeCraft-Setup-{version}.exe` |
 | macOS | `CodeCraft-{version}.dmg` |
 | Linux | `CodeCraft-{version}.AppImage` / `.deb` |
+
+> Already installed? No need to reinstall — the app checks for updates automatically after startup, or use "Data Management → Version & Updates" for a one-click upgrade that backs up and keeps all local data.
 
 ### Method 2: Run from Source
 
@@ -106,7 +110,12 @@ CodeCraft
 │   │   │   └── ...
 │   │   └── api/                    # API Call Modules (23, incl. llm-provider / file-asset API)
 │   └── ...
-├── electron/                       # Electron Desktop Shell (splash screen / transparent title bar / window opacity)
+├── electron/                       # Electron Desktop Shell (splash screen / transparent title bar / window opacity / auto update)
+│   ├── main.js                     # Main process (splash / window opacity / backend lifecycle)
+│   ├── update-manager.js           # Auto update (GitHub Releases check / download / install / pre-upgrade backup)
+│   ├── update-utils.js             # Version comparison & release asset matching
+│   ├── installer.nsh               # NSIS hook (back up legacy data before first upgrade)
+│   └── loading.html                # Splash screen
 ├── docs/                           # Project Documentation
 │   ├── ARCHITECTURE.md             # Architecture Panorama
 │   ├── LLM_PROVIDER_SYSTEM.md     # ★ Multi-LLM Provider System

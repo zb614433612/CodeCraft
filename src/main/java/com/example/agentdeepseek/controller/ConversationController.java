@@ -4,6 +4,7 @@ import com.example.agentdeepseek.common.response.ApiResponse;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
+import com.example.agentdeepseek.model.vo.ConversationMessagePageVO;
 import com.example.agentdeepseek.service.ConversationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -74,6 +75,35 @@ public class ConversationController {
         }
         List<ConversationMessage> messages = conversationService.getMessagesByConversationId(conversationId);
         return ApiResponse.success(messages);
+    }
+
+    /**
+     * 分页查询会话消息（按「轮次」游标，从最新往前翻）——聊天记录懒加载入口。
+     *
+     * <p>改造背景：超长会话全量查询会导致 DB 扫描、网络传输与前端分组渲染全部变重，表现为「打开会话很慢」。
+     * 现改为默认只取最近 5 轮，用户向上滑动到顶部时再用返回的 nextBeforeId 继续加载更早的 5 轮。</p>
+     */
+    @Operation(summary = "分页查询会话消息", description = "按轮次游标分页（默认最近 5 轮），用于聊天记录懒加载："
+            + "向上滚动到顶部时用返回的 nextBeforeId 继续加载更早历史，需要Authorization头")
+    @GetMapping("/{conversationId}/messages/page")
+    public ApiResponse<ConversationMessagePageVO> getConversationMessagesPage(
+            @Parameter(description = "会话ID", required = true)
+            @PathVariable Long conversationId,
+            @Parameter(description = "分页游标：上一页返回的 nextBeforeId（首页不传）")
+            @RequestParam(value = "beforeId", required = false) Long beforeId,
+            @Parameter(description = "本次加载的轮数，默认 5（一轮=一次用户提问+其后全部回复）")
+            @RequestParam(value = "rounds", required = false, defaultValue = "5") Integer rounds,
+            @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
+            @RequestAttribute("userId") Long userId) {
+        log.info("分页查询会话消息请求: conversationId={}, beforeId={}, rounds={}, userId={}",
+                conversationId, beforeId, rounds, userId);
+        // 验证会话是否存在且属于当前用户（与全量接口同一权限口径）
+        Conversation conversation = conversationMapper.selectById(conversationId).orElse(null);
+        if (conversation == null || conversation.getUserId() == null || !conversation.getUserId().equals(userId)) {
+            return ApiResponse.error(404, "会话不存在或无权访问");
+        }
+        ConversationMessagePageVO page = conversationService.getMessagesPage(conversationId, beforeId, rounds == null ? 5 : rounds);
+        return ApiResponse.success(page);
     }
 
     /**

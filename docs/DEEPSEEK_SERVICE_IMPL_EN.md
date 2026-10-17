@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v2.0.2 | Updated: 2026-09-24 | Audience: Developers / AI Collaborators
+> Version: v2.0.3 | Updated: 2026-10-17 | Audience: Developers / AI Collaborators
 > This document dissects the 187KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -253,9 +253,35 @@ Flow:
   2. Send to sub-agent judge (independent small model call)
   3. Parse judge result:
      - extend + additionalIterations → increase iteration count
-     - reject → terminate task
+     - reject → ask the user (v2.0.3: no longer terminates directly)
   4. Cumulative limit: judge max grants 100 additional iterations (MAX_JUDGE_GRANTED_ITERATIONS)
+     - Reaching the cap also asks the user (v2.0.3: no longer terminates directly)
+  5. User decision (v2.0.3: askUserForIterationDecision):
+     - Triggers: judge reject / unparsable judge response / judge call failure with no local progress / reaching the cumulative extension cap
+     - Flow: `ask_user` event (`askType=iteration_confirm`) → frontend "task iteration confirmation" panel → the answer wakes the waiting Flux
+     - Options: end task / continue with +10, +20 or +50 iterations
+     - Timeout: 5 minutes is treated as "end task", and the pending question is cleared to avoid dangling state
+     - Reconnect: the frontend restores the panel type from the `【任务迭代确认】` question prefix instead of degrading into a normal follow-up
 ```
+
+### 6.2.1 Tool-Call Sequence Sanitization (v2.0.3, ToolCallSequenceSanitizer)
+
+**Why it exists**: OpenAI / DeepSeek compatible APIs enforce strict pairing between `assistant.tool_calls` and `role=tool` messages — every tool_call must have a tool message with the same id, every tool message must follow an assistant message declaring that id, and ids must be non-empty and unique. Any violation returns HTTP 400 and the conversation becomes permanently unusable.
+
+**Where dirty data comes from**: the tool call is persisted but its result is not when a task is interrupted / the SSE connection drops / the app is killed; historical "remove tool_calls only" patches delete the assistant side while tool messages remain (orphan tools); context compaction or trimming splits a pair across branches.
+
+**Strategy (prefer losing information over blocking chat)**:
+
+1. Drop orphan tool messages (no matching, unconsumed tool_call in the same round);
+2. Remove tool_calls without results; clear `tool_calls` entirely when none has a result (the assistant degrades to plain text and keeps its content);
+3. Drop assistant messages left with neither `content` nor `tool_calls`;
+4. Remove illegal tool_calls (missing id / id `"null"` / duplicate id).
+
+**Wiring**: `ContextBuilder` (after conversion and again after compaction/trimming) plus the request-body exits of `AbstractLLMClient` / `AnthropicClient` / `OllamaClient`; on the write side, `appendToolResultMessages` appends a "[tool not executed]" placeholder tool message for tool_calls that produced no result.
+
+**Constraints**: idempotent (legal sequences are untouched), in-memory, copy-on-write (never mutates input Maps/Lists), no database writes.
+
+**Regression tests**: `ToolCallSequenceSanitizerTest` (36 assertions: orphan tools / missing results / illegal ids / duplicate ids / idempotency).
 
 ### 6.3 User Cancel (cancelRunningTask)
 
@@ -381,7 +407,7 @@ DeepSeekServiceImpl (orchestration layer, ~200 lines)
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `MAX_TOOL_CALL_ITERATIONS` | 50 | Max tool loop iterations |
-| `MAX_JUDGE_GRANTED_ITERATIONS` | 100 | Max judge-granted additional iterations |
+| `MAX_JUDGE_GRANTED_ITERATIONS` | 100 | Max judge-granted additional iterations (hitting the cap asks the user instead of terminating) |
 | `DEFAULT_TEMPERATURE` | 0.3 | Default temperature (3-tier priority: frontend > Agent config > default) |
 | `taskExecutor.corePoolSize` | 2 | Core background task threads |
 | `taskExecutor.maximumPoolSize` | 10 | Max background task threads |

@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v2.0.2 | 更新：2026-09-24 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.3 | 更新：2026-10-17 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -285,6 +285,22 @@ public class LLMClientManager {
 | MiMo | `MiMoClient` | `mimo` | 小米 MiMo 模型 |
 | MiniMax | `MiniMaxClient` | `minimax` | MiniMax API（OpenAI 兼容，thinking adaptive + reasoning_split） |
 | 自定义 | `OpenAIClient` | `custom` | 最小 OpenAI 兼容模式 |
+
+### 4.4 DeepSeek 官方工具 API 联动（v2.0.3）
+
+`DeepSeekToolsApiClient` 让 `web_search` / `web_fetch` 在「使用 DeepSeek 官方 API」时自动改走官方端点，无需用户额外配置：
+
+| 项 | 说明 |
+|----|------|
+| 启用条件 | Provider `baseUrl` 主机为 `api.deepseek.com` 且 apiKey 非空（占位符 `__MUST_CONFIGURE_API_KEY__` 视为未配置） |
+| 端点 | `POST /v1/tools/search`（query / count / need_content 等）、`POST /v1/tools/fetch`（url） |
+| 认证 | 与 Chat Completions 共用 `Authorization: Bearer <apiKey>`，由 `LLMWebClientManager` 统一注入 |
+| 路径解析 | `resolveApiPath()` 兼容 baseUrl 带 / 不带 `/v1` |
+| 失败策略 | 抛异常由工具捕获后回退原链路（Bing/百度、Jina/本地），不影响工具可用性 |
+| 判定依据 | `baseUrl` 域名（不是 providerCode）——第三方中转 / 自建兼容服务不会误启用 |
+| 子 Agent | `AgentForkManager` 通过 `ToolContext.setProviderCode(...)` 传递，保证子 Agent 内判定一致 |
+
+> 为什么不用 providerCode：用户可自定义 code（如 `deepseek-proxy`），而域名是「是否官方」的客观事实。
 
 ---
 

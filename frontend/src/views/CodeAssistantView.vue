@@ -170,19 +170,23 @@
         </div>
       </div>
 
-      <!-- 虚拟滚动消息列表 -->
+      <!-- 虚拟滚动消息列表
+           :key=会话ID：切换会话时强制重建，避免旧会话的视图池/尺寸表被复用导致首屏位置错乱
+           min-item-size：聊天消息普遍 150~2000px，占位过小（原 80）会让初始累计位置严重低估 -->
       <DynamicScroller
         v-if="currentMessages.length > 0"
+        :key="currentConversationId"
         class="message-list"
         ref="scrollerRef"
         :items="currentMessages"
-        :min-item-size="80"
+        :min-item-size="120"
         key-field="id"
         v-slot="{ item: msg, active }"
         @scroll.passive="handleMessageListScroll"
       >
         <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [streamingUpdateTick] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '', msg.taskError?.message?.length || 0]">
-        <div :class="['message-item', msg.role]">
+        <!-- v-track-msg-size：实测高度兜底（内容异步变化/展开折叠后尺寸表未同步 → 触发重测，防消息重叠） -->
+        <div :class="['message-item', msg.role]" v-track-msg-size="msg.id">
           <div class="message-avatar">
             <div v-if="msg.role === 'user'" class="avatar user-avatar">
               <img
@@ -272,7 +276,7 @@
                   :title="fileAssetDisplayName(asset)"
                   @click="openBigPreview(asset.previewUrl)"
                 >
-                  <img v-if="asset.previewUrl" :src="asset.previewUrl" :alt="asset.filename" />
+                  <img v-if="asset.previewUrl" :src="asset.previewUrl" :alt="asset.filename" @load="scheduleScrollerSelfHeal" />
                   <span v-else class="thumb-loading">🖼️</span>
                 </div>
               </template>
@@ -289,6 +293,11 @@
         </div>
         </DynamicScrollerItem>
       </DynamicScroller>
+
+      <!-- 顶部懒加载提示：向上滚动到顶自动加载更早的历史记录（每次 5 轮） -->
+      <transition name="scroll-btn-fade">
+        <div v-if="loadingMoreMessages" class="loading-more-tip">正在加载更早的聊天记录…</div>
+      </transition>
 
       <!-- 回到底部浮动按钮：流式输出时用户手动上滚后显示 -->
       <transition name="scroll-btn-fade">
@@ -368,8 +377,9 @@
         <span class="stream-elapsed" v-if="elapsedTime > 0">{{ formatElapsed(elapsedTime) }}</span>
       </div>
 
-      <!-- 补充需求面板（仅在流式输出中且无待审批问题时显示） -->
-      <div v-if="isSending &amp;&amp; !pendingQuestion" class="supplement-panel">
+      <!-- 补充需求面板：只要该会话「有任务在执行」就显示（前台流式 / 切走后的后台流 / 切回后的重连恢复）。
+           原条件 isSending 只覆盖前台流式，导致切回智能体后流仍在输出、但补充需求入口消失 -->
+      <div v-if="hasRunningTask &amp;&amp; !pendingQuestion" class="supplement-panel">
         <!-- 收起状态：显示「补充需求」按钮 -->
         <div v-if="!showSupplementInput" class="supplement-trigger" @click="showSupplementInput = true">
           <span class="supplement-icon">💡</span>
@@ -397,8 +407,28 @@
 
       <!-- ask_user 问答面板 -->
       <div v-if="pendingQuestion" class="ask-user-panel">
+        <!-- 任务迭代确认面板（askType=iteration_confirm）：
+             评委判定不通过 / 评委无法评估 / 累计扩容达上限时，由用户决定「结束」还是「继续并扩容」 -->
+        <div v-if="pendingQuestion.askType === 'iteration_confirm'" class="iteration-confirm-panel">
+          <div class="ask-user-header">
+            <span class="ask-user-header-icon">🤖</span>
+            任务迭代确认
+            <!-- 归属 Agent 标识 -->
+            <span v-if="pendingQuestion.agentName" class="ask-user-agent-tag">来自 {{ pendingQuestion.agentName }}</span>
+          </div>
+          <div class="ask-user-question" v-html="formatQuestion(pendingQuestion.question)"></div>
+          <div class="iteration-confirm-actions">
+            <a-button danger class="iteration-confirm-btn" :loading="iterationConfirmSending" @click="handleIterationDecision('stop')">结束任务</a-button>
+            <a-button type="primary" class="iteration-confirm-btn" :loading="iterationConfirmSending" @click="handleIterationDecision('continue', 10)">继续 +10 次</a-button>
+            <a-button type="primary" class="iteration-confirm-btn" :loading="iterationConfirmSending" @click="handleIterationDecision('continue', 20)">继续 +20 次</a-button>
+            <a-button type="primary" class="iteration-confirm-btn" :loading="iterationConfirmSending" @click="handleIterationDecision('continue', 50)">继续 +50 次</a-button>
+          </div>
+          <div class="iteration-confirm-hint">
+            选择「继续」后任务将从当前进度接着执行；5 分钟内未选择将按「结束任务」处理。
+          </div>
+        </div>
         <!-- 权限授权面板（askType=permission） -->
-        <div v-if="pendingQuestion.askType === 'permission'" class="permission-panel">
+        <div v-else-if="pendingQuestion.askType === 'permission'" class="permission-panel">
           <div class="ask-user-header">
             <span class="ask-user-header-icon">🔒</span>
             需要授权
@@ -717,10 +747,10 @@
                 >{{ agentRuntime.model }}</a-select-option>
               </a-select>
             </div>
-            <!-- 高频：任务进度触发器 -->
-            <div class="mode-selector task-trigger" @click="toggleTaskDropdown" :class="{ active: showTaskDropdown, loading: isSending }">
+            <!-- 高频：任务进度触发器（loading 用 hasRunningTask：切走/切回的任务同样显示执行中） -->
+            <div class="mode-selector task-trigger" @click="toggleTaskDropdown" :class="{ active: showTaskDropdown, loading: hasRunningTask }">
               <span class="mode-icon task-trigger-icon">
-                <LoadingOutlined v-if="isSending" spin />
+                <LoadingOutlined v-if="hasRunningTask" spin />
                 <span v-else>📋</span>
               </span>
               <span class="task-trigger-text" v-if="taskItems.length === 0">任务</span>
@@ -983,7 +1013,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch, h } f
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
-import { getConversationList, mapConversationResponseToConversation, getConversationMessages, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
+import { getConversationList, mapConversationResponseToConversation, getConversationMessages, getConversationMessagesPage, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
 import { streamChat, checkActiveTask, taskStream, cancelTask, supplementRequest, optimizePrompt } from '@/api/chat'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 import { setConfig } from '@/api/config'
@@ -1307,10 +1337,26 @@ const fetchAgentList = async () => {
     console.warn('加载 Agent 列表失败:', e)
   }
 }
-/** 按 agentConfigId 查询 Agent 元信息（名称/工作目录），查不到时降级为占位 */
-const getAgentMeta = (agentConfigId: number | null | undefined): { name: string; workDir: string } => {
+/** 按 agentConfigId 查询 Agent 元信息（名称/工作目录/头像），查不到时降级为占位 */
+const getAgentMeta = (agentConfigId: number | null | undefined): { name: string; workDir: string; avatar: string } => {
   const a = agentOptions.value.find(x => x.id === agentConfigId)
-  return { name: a?.name || `Agent#${agentConfigId ?? '?'}`, workDir: a?.workDir || '' }
+  return { name: a?.name || `Agent#${agentConfigId ?? '?'}`, workDir: a?.workDir || '', avatar: a?.avatar || '' }
+}
+/**
+ * 构建「后台任务通知」的内容节点：头像取该 Agent 自己的 avatar（图片渲染 img、emoji/文字原样显示），
+ * 不再写死 🤖 —— 多智能体并行时各 Agent 头像不同，写死会导致通知头像「货不对板」。
+ * 注意：message 弹层挂在 body 上，组件 scoped 样式不生效，故用内联样式控制尺寸/对齐。
+ */
+const buildAgentNotice = (meta: { name: string; avatar?: string }, text: string) => {
+  const avatar = (meta.avatar || '').trim()
+  const boxStyle = 'display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;border-radius:4px;flex:none'
+  const avatarNode = isImageAvatar(avatar)
+    ? h('img', { src: avatar, alt: '', style: `${boxStyle};object-fit:cover` })
+    : h('span', { style: `${boxStyle};font-size:13px` }, avatar || '🤖')
+  return h('span', { style: 'display:inline-flex;align-items:center;gap:6px;vertical-align:middle' }, [
+    avatarNode,
+    h('span', null, text)
+  ])
 }
 /** 当前智能体头像（对话消息 AI 头像用：本地图片 URL 或默认 emoji） */
 const currentAgentAvatar = computed(() => {
@@ -1492,6 +1538,15 @@ const loadAgentSnapshot = (agentId: number): AgentSnapshotData | null => {
   return agentSnapshots.value[agentId] || null
 }
 const onStreamComplete = (convId: string, agentId: number | null, completed = false, abortCtrl?: AbortController | null) => {
+  // ★ 归属修复（头像/名称货不对板）：入参 agentId 是「当前选中的 Agent」（调用方传 currentAgentConfigId），
+  // 多智能体并行时用户很可能已切到别的 Agent（如小熊任务在跑、人切到了 AI 助手），此时用它弹通知
+  // 会显示错误的名字与头像。切走转后台时已把归属 agentConfigId 记进 backgroundStreams，
+  // 这里在移除条目之前按「本流」精确取回归属 ID，取不到（纯前台流）才回退入参。
+  const ownerAgentId = (
+    abortCtrl
+      ? backgroundStreams.value.find(s => s.convId === convId && s.abortController === abortCtrl)
+      : backgroundStreams.value.find(s => s.convId === convId)
+  )?.agentConfigId ?? agentId
   // 三轮审查深修：按「本流」精确移除——同一会话可能并存多个后台流条目（P2 双流：
   // 前台流切走转后台 → 切回再派新任务再切走），按 convId 全量移除会把仍在运行的
   // 其他后台流一并摘除 → hasActiveStream 查不到 → 停止按钮失效、状态残留。
@@ -1518,8 +1573,8 @@ const onStreamComplete = (convId: string, agentId: number | null, completed = fa
   // P3：后台任务完成通知——仅正常完成（completed=true，sendMessage try 正常走完）且非当前会话才提示；
   // 用户中止（__USER_ABORT__）/发送失败路径 completed=false，不误报「已完成」
   if (completed && convId !== currentConversationId.value) {
-    const meta = getAgentMeta(agentId)
-    message.success(`🤖 ${meta.name} 的后台任务已完成`)
+    const meta = getAgentMeta(ownerAgentId)
+    message.open({ type: 'success', content: buildAgentNotice(meta, `${meta.name} 的后台任务已完成`) })
   }
 }
 
@@ -1551,6 +1606,9 @@ const onAgentChange = (agentId: number | null | undefined, agent: any) => {
   setSending(oldConvId, false)
   setStreamStatus(oldConvId, '')
   stopAbortController.value = null
+  // 前台流已转后台：清空全局「流真实会话 ID」，避免切到新 Agent 后补充需求/停止任务误用它指向旧会话
+  // （后台流自己的 realSessionId 已记录在 backgroundStreams 条目里，取消能力不受影响）
+  currentStreamSessionId.value = null
 
   // 第四步：更新当前 Agent
   currentAgentConfigId.value = agentId ?? null
@@ -1574,6 +1632,16 @@ const onAgentChange = (agentId: number | null | undefined, agent: any) => {
     conversations.value = []
     fetchConversations()
   }
+  // ★ 切回 Agent 的滚动位置修复：
+  //   1) 消息列表带 :key=会话ID，currentConversationId 变化会重建 DynamicScroller → scrollTop 归零；
+  //   2) 上一个 Agent 可能停留在「上滑浏览历史」状态（autoScrollToBottom=false）。
+  //   两者叠加会让切回后的聊天记录停在最顶部（表现为位置错乱 / 看不到最新记录）。
+  //   这里统一恢复「跟随底部」并强制贴底。
+  autoScrollToBottom.value = true
+  showScrollToBottomBtn.value = false
+  nextTick(() => {
+    scrollToBottomForce(currentConversationId.value || undefined)
+  })
   // M4 优化：仅真实切换 Agent 时清「上次查看会话」记忆——首次加载保留，供 fetchConversations 恢复；
   // 原实现在 fetchConversations 异步完成（await）前就无条件清除，导致「恢复上次会话」分支永远落到第一个会话。
   if (oldAgentId) {
@@ -2932,12 +3000,25 @@ const setSending = (convId: string | null | undefined, val: boolean) => {
 }
 /** 当前会话是否正在前台流式（模板 261/268/434/443/457/514/516 直接读；补充需求面板等 UI 仍以「前台流式」为准） */
 const isSending = computed(() => sendingStates.get(currentConversationId.value) ?? false)
-/** 当前会话是否有活跃流（前台流式 或 该会话后台运行中）——停止按钮显示依据 */
+/**
+ * 当前会话是否有活跃流 —— 停止按钮（结束当前任务）显示依据。
+ *
+ * 覆盖四类运行态（与 hasRunningTask 同源，避免「任务在跑但按钮消失」）：
+ * 1) 前台流式（sendingStates）；
+ * 2) 切走智能体后转入后台继续跑的流（backgroundStreams）；
+ * 3) 切回智能体 / 页面刷新后正在重连恢复的事件流（reconnectingConvIds）；
+ * 4) 重连已确认存在、但事件流尚未建立完成的活跃任务（activeTaskMap）。
+ *
+ * 原实现只判断前两者，导致「切回智能体 → 重连恢复」期间停止按钮不显示，用户无法结束任务。
+ */
 const hasActiveStream = computed(() => {
   const convId = currentConversationId.value
   if (!convId) return false
   if (sendingStates.get(convId)) return true
-  return backgroundStreams.value.some(s => s.convId === convId)
+  if (backgroundStreams.value.some(s => s.convId === convId)) return true
+  if (reconnectingConvIds.has(convId)) return true
+  if (activeTaskMap.get(convId)) return true
+  return false
 })
 /**
  * 当前会话是否有任务在执行——输入框锁定依据（2026-08-14 需求修复）
@@ -2986,8 +3067,73 @@ const isOptimizing = ref(false)
 const isLoadingConversations = ref(false)
 const isLoadingMessages = ref(false)
 const scrollerRef = ref<any>(null)
+// 本地消息 id 自增序号：保证同一毫秒内创建的多条消息 id 也绝不重复
+// （虚拟列表以 id 为 key-field，重复 key 会让两条消息复用同一个视图 → 位置完全重叠）
+let localMsgSeq = 0
 const collapsed = ref(false)
 const sidebarTab = ref<'conversation' | 'agents'>('conversation')
+
+// ===== 虚拟列表高度自愈（修复消息重叠 / 位置错乱）=====
+// 背景：DynamicScroller 的 item 高度依赖内部 ResizeObserver 上报；当出现下列情况时，
+//   尺寸表会与实际渲染高度不一致，后续消息按旧高度定位 → 内容互相压盖（重叠）/ 位置错乱：
+//   1) 内容异步变化：图片/文档缩略图加载、代码高亮、字体就绪；
+//   2) 交互改变高度：思考过程展开/收起、工具结果卡片折叠/展开；
+//   3) 流式内容在测量时机之间快速增高；
+//   4) 列表重建（切换会话）时旧尺寸残留。
+// 兜底：直接观测每个 .message-item 的实测高度，与 scroller 记录的尺寸比对，
+//   不一致就节流触发一次 forceUpdate（让 DynamicScroller 重新测量并重排位置）。
+let sizeSelfHealTimer: number | null = null
+const scheduleScrollerSelfHeal = () => {
+  if (sizeSelfHealTimer !== null) return
+  sizeSelfHealTimer = window.setTimeout(() => {
+    sizeSelfHealTimer = null
+    scrollerRef.value?.forceUpdate?.()
+  }, 120)
+}
+
+const scrollerSizeObserver: ResizeObserver | null = typeof ResizeObserver !== 'undefined'
+  ? new ResizeObserver((entries) => {
+      const scroller = scrollerRef.value
+      if (!scroller?.getItemSize) return
+      for (const entry of entries) {
+        const el = entry.target as HTMLElement & { __ccMsgId?: string }
+        const id = el.__ccMsgId
+        if (!id) continue
+        // borderBoxSize 可能因尺寸过大被拆分为多段，逐段累加得到真实高度
+        let measured = 0
+        const raw: any = entry.borderBoxSize as any
+        if (Array.isArray(raw) && raw.length > 0) {
+          for (const seg of raw) measured += (seg?.blockSize as number) || 0
+        } else if (raw && typeof raw === 'object' && 'blockSize' in raw) {
+          measured = (raw.blockSize as number) || 0
+        }
+        if (!measured) measured = el.offsetHeight
+        if (!measured) continue
+        const recorded = scroller.getItemSize({ id })
+        // 差异超过 1.5px 才认为尺寸表失真（避免亚像素抖动反复重测）
+        if (Math.abs((recorded || 0) - measured) > 1.5) {
+          scheduleScrollerSelfHeal()
+          break
+        }
+      }
+    })
+  : null
+
+/** 指令：把消息 id 绑到 DOM，并纳入高度观测（虚拟列表尺寸兜底） */
+const vTrackMsgSize = {
+  mounted(el: HTMLElement & { __ccMsgId?: string }, binding: { value?: string | number }) {
+    el.__ccMsgId = binding.value === undefined || binding.value === null ? '' : String(binding.value)
+    scrollerSizeObserver?.observe(el)
+  },
+  updated(el: HTMLElement & { __ccMsgId?: string }, binding: { value?: string | number }) {
+    el.__ccMsgId = binding.value === undefined || binding.value === null ? '' : String(binding.value)
+  },
+  unmounted(el: HTMLElement & { __ccMsgId?: string }) {
+    scrollerSizeObserver?.unobserve(el)
+    el.__ccMsgId = undefined
+  },
+}
+
 
 // ===== 多Agent后台流式 =====
 interface BackgroundStream {
@@ -3094,6 +3240,8 @@ const pendingQuestionCount = computed(() => {
 })
 const pendingQuestionAnswer = ref('')
 const pendingShowCustomInput = ref(false)
+/** 任务迭代确认面板提交中（防连点；与权限面板的 permissionLock 独立） */
+const iterationConfirmSending = ref(false)
 // P3：切换会话时清空答案输入与自定义输入展开态（避免把上个会话的答案带到新会话）
 watch(currentConversationId, () => {
   pendingQuestionAnswer.value = ''
@@ -3309,7 +3457,36 @@ const onFileSelect = (_path: string, _isDirectory: boolean) => {
 }
 
 // 会话相关
-const currentMessages = computed(() => messages.value[currentConversationId.value] || [])
+// 注意：虚拟列表以消息 id 作为唯一 key（key-field="id"）。一旦出现重复 id，
+// vue-virtual-scroller 会把两条消息复用同一个视图/尺寸槽位 → 两条消息位置完全重叠。
+// 这里做渲染层兜底：发现重复 id 时仅在本次返回值中重命名（不改动源数据），确保 key 唯一。
+const currentMessages = computed<ChatMessage[]>(() => {
+  const arr = messages.value[currentConversationId.value] || []
+  if (arr.length < 2) return arr
+  let duplicated = false
+  const seenIds = new Set<string>()
+  for (const m of arr) {
+    if (!m || !m.id) continue
+    if (seenIds.has(m.id)) {
+      duplicated = true
+      break
+    }
+    seenIds.add(m.id)
+  }
+  if (!duplicated) return arr
+  const used = new Set<string>()
+  return arr.map((m) => {
+    if (!m || !m.id) return m
+    let id = m.id
+    if (used.has(id)) {
+      let n = 1
+      while (used.has(`${id}#${n}`)) n++
+      id = `${id}#${n}`
+    }
+    used.add(id)
+    return id === m.id ? m : { ...m, id }
+  })
+})
 
 const totalContextTokens = computed(() => {
   const msgs = currentMessages.value
@@ -3397,27 +3574,176 @@ const fetchConversations = async () => {
   }
 }
 
+// ===== 聊天记录懒加载（按轮次分页）=====
+// 一轮 = 一次用户提问 + 其后该轮的全部回复。
+// 改造原因：超长会话一次性全量查询会让 DB 扫描、网络传输、前端 markdown 分组渲染全部变重，打开会话明显卡顿。
+// 现策略：首屏只取最近 MESSAGE_PAGE_ROUNDS 轮，用户向上滚动到顶部时用 beforeId 游标继续加载更早的同样轮数。
+const MESSAGE_PAGE_ROUNDS = 5
+
+/** 各会话是否还有更早的历史消息（false / undefined 时不再触发上滑加载） */
+const hasMoreMessages = ref<Record<string, boolean>>({})
+/** 各会话的分页游标：本页最早一条 DB 消息 id（继续往前翻时作为 beforeId） */
+const messageCursors = ref<Record<string, number | null>>({})
+/**
+ * 正在加载更早历史的会话集合（按会话隔离）。
+ * 原来用全局 boolean：会话 A 的请求未完成时切到会话 B，B 的顶部加载会被 A 的 loading 直接拦掉，
+ * 表现为「某些会话上滑一直不加载历史」；顶部提示也会串到 B 会话上。
+ */
+const loadingMoreConvIds = reactive(new Set<string>())
+/** 当前会话是否正在加载更早历史（顶部提示显示依据） */
+const loadingMoreMessages = computed(() => loadingMoreConvIds.has(currentConversationId.value))
+/** 最近一次「头部插入历史消息」的时间戳：用于让自动贴底跳过这一次 length 变化（见下方 watch） */
+let lastHistoryPrependAt = 0
+
+/**
+ * 头部插入新内容后维持视口位置：虚拟列表的高度是异步测量的，需要多次校正 scrollTop。
+ *
+ * 要点（修复位置漂移）：
+ * 1) 必须双向补偿。虚拟列表对尚未测量的新项先按 min-item-size 估算，随后真实测量可能更小 →
+ *    总高度「先增后减」。原实现只补偿升高（delta > 0），高度回落的差值不会补回，
+ *    于是一屏历史加载完成后用户正在看的内容会整体上移/下移一段（表现为「位置错乱」）。
+ * 2) 若用户在此期间自己滚动了列表，则立即停止补偿，避免与用户操作打架。
+ * 3) 多次校正（rAF×2 + 120ms + 320ms）吸收虚拟列表分批测量的高度变化。
+ */
+const preserveScrollAfterPrepend = (el: HTMLElement, prevHeight: number) => {
+  let lastHeight = prevHeight
+  let expectedScrollTop = el.scrollTop
+  const adjust = () => {
+    // 用户已手动滚动（与上次补偿后的位置偏差过大）→ 放弃补偿
+    if (Math.abs(el.scrollTop - expectedScrollTop) > 48) return
+    const h = el.scrollHeight
+    const delta = h - lastHeight
+    if (delta !== 0) {
+      el.scrollTop = Math.max(0, el.scrollTop + delta)
+      lastHeight = h
+      expectedScrollTop = el.scrollTop
+    }
+  }
+  requestAnimationFrame(() => {
+    adjust()
+    requestAnimationFrame(adjust)
+  })
+  window.setTimeout(adjust, 120)
+  window.setTimeout(adjust, 320)
+}
+
 const fetchMessages = async (conversationId: string, force = false) => {
   if (!conversationId) return
   if (!force && messages.value[conversationId]) return // 已缓存（首次加载免重复请求）
   isLoadingMessages.value = true
   try {
-    const response = await getConversationMessages(parseInt(conversationId))
+    // 分页接口：只取最近 MESSAGE_PAGE_ROUNDS 轮（从最新往前翻）
+    const response = await getConversationMessagesPage(parseInt(conversationId), null, MESSAGE_PAGE_ROUNDS)
     if (response.code === 200 && response.data) {
-      const groups = processMessageGroups(response.data)
+      const groups = processMessageGroups(response.data.messages || [])
       messages.value[conversationId] = groups as ChatMessage[]
+      // 记录分页状态（是否还有更早历史 + 下一页游标）
+      hasMoreMessages.value[conversationId] = !!response.data.hasMore
+      messageCursors.value[conversationId] = response.data.nextBeforeId ?? null
       // 历史消息加载后，匹配回滚快照
       matchSnapshotsForMessages(conversationId)
       // M4：历史图片回显（按 messageId 映射 file_reference）
       loadMessageFileRefs(conversationId)
       // 加载会话改动统计
       loadSessionChanges(conversationId)
+      // 首屏内容若不足一屏（无法通过滚动触顶），自动补加载更早历史
+      maybeAutoFillHistory(conversationId)
     }
   } catch (error) {
     console.error('获取消息失败:', error)
   } finally {
     isLoadingMessages.value = false
   }
+}
+
+/**
+ * 加载更早的历史消息（滚动到顶部时触发）
+ *
+ * 设计要点：
+ * 1) 用 beforeId 游标而非 offset：新消息持续写入时不会出现分页错位/漏消息；
+ * 2) 合并时按消息 id 去重：重复触发或并发请求都安全；
+ * 3) 插入到数组头部后补偿 scrollTop：让用户当前阅读位置保持不动（虚拟列表高度异步测量，多次校正）。
+ */
+const loadMoreMessages = async (conversationId: string) => {
+  // 防重入按会话判定：别的会话正在加载不应阻塞本会话的顶部加载
+  if (!conversationId || loadingMoreConvIds.has(conversationId)) return
+  if (!hasMoreMessages.value[conversationId]) return
+  const cursor = messageCursors.value[conversationId]
+  if (cursor === undefined || cursor === null) return
+  const existing = messages.value[conversationId]
+  if (!existing || existing.length === 0) return
+
+  const el = scrollerRef.value?.$el as HTMLElement | undefined
+  const prevHeight = el ? el.scrollHeight : 0
+
+  loadingMoreConvIds.add(conversationId)
+  try {
+    const res = await getConversationMessagesPage(parseInt(conversationId), cursor, MESSAGE_PAGE_ROUNDS)
+    if (res.code !== 200 || !res.data) return
+    // 请求期间会话可能被切换/清空，重新取一次当前数组
+    const current = messages.value[conversationId]
+    if (!current) return
+
+    const olderGroups = processMessageGroups(res.data.messages || []) as ChatMessage[]
+    const existingIds = new Set(current.map(m => m.id))
+    const toAdd = olderGroups.filter(m => !existingIds.has(m.id))
+
+    // 分页状态始终更新：即使是空页也要落 hasMore=false，避免反复空请求
+    hasMoreMessages.value[conversationId] = !!res.data.hasMore
+    messageCursors.value[conversationId] = res.data.nextBeforeId ?? null
+    if (toAdd.length === 0) {
+      // 本页没有可合并的新消息 → 视为到底，避免与「内容不足一屏自动补加载」互相触发形成死循环
+      hasMoreMessages.value[conversationId] = false
+      return
+    }
+
+    // 标记「本次 length 变化来自头部插入」，让自动贴底 watch 跳过本次
+    lastHistoryPrependAt = Date.now()
+    messages.value[conversationId] = [...toAdd, ...current]
+    // 新加载消息的附件/快照回显补齐（内部按 messageId 匹配，重复调用幂等）
+    matchSnapshotsForMessages(conversationId)
+    loadMessageFileRefs(conversationId)
+    // 维持视口：把「新增内容撑高的高度」补进 scrollTop（双向补偿，见函数注释）
+    if (el && prevHeight > 0) preserveScrollAfterPrepend(el, prevHeight)
+    // 若 5 轮内容仍不足一屏（超短对话），继续补加载，否则用户永远无法通过滚动触顶
+    maybeAutoFillHistory(conversationId)
+  } catch (e) {
+    console.warn('加载更早聊天记录失败:', e)
+  } finally {
+    loadingMoreConvIds.delete(conversationId)
+  }
+}
+
+/**
+ * 内容不足一屏时自动补加载更早历史。
+ * 原因：懒加载靠 scroll 事件触发，若首屏内容未撑满视口（scrollTop 恒为 0，不会产生滚动事件），
+ *      用户即使想翻更早记录也无法触发加载。
+ */
+const maybeAutoFillHistory = (conversationId: string) => {
+  nextTick(() => {
+    // 等一帧再等 120ms：避开虚拟列表刚重建/正在测量的时机，避免把「尚未撑开」误判成「不足一屏」
+    window.setTimeout(() => {
+      if (currentConversationId.value !== conversationId) return
+      if (!hasMoreMessages.value[conversationId]) return
+      if (loadingMoreConvIds.has(conversationId)) return
+      const el = scrollerRef.value?.$el as HTMLElement | undefined
+      if (!el) return
+      if (el.scrollHeight > el.clientHeight + 40) return // 已撑满一屏：交给滚动到顶触发
+      void loadMoreMessages(conversationId)
+    }, 120)
+  })
+}
+
+/**
+ * 会话 id 迁移（本地临时会话 local-xxx → 后端真实会话 id）时同步分页状态。
+ * 不做这一步的话，迁移后新 id 下没有 hasMore/cursor，上滑将不再加载更早历史。
+ */
+const migratePaginationState = (fromConvId: string, toConvId: string) => {
+  if (!fromConvId || !toConvId || fromConvId === toConvId) return
+  hasMoreMessages.value[toConvId] = hasMoreMessages.value[fromConvId] ?? false
+  messageCursors.value[toConvId] = messageCursors.value[fromConvId] ?? null
+  delete hasMoreMessages.value[fromConvId]
+  delete messageCursors.value[fromConvId]
 }
 
 const matchSnapshotsForMessages = async (convId: string) => {
@@ -3779,19 +4105,30 @@ const handleRollbackAll = async () => {
 
 // 监听消息加载完成后滚动到底部
 // 使用 nextTick 确保 Vue 完成 DOM 更新（DynamicScroller 的 v-if 条件已生效）后再滚动
+// ★ 改用 scrollToBottomForce：切换历史会话必须定位到「最新一条记录」，
+//   不能被 autoScrollToBottom（上一个会话浏览历史留下的 false）拦截
 watch(isLoadingMessages, (loading) => {
   if (!loading) {
     nextTick(() => {
-      scrollToBottom()
+      scrollToBottomForce()
     })
   }
 })
 
 const selectConversation = (id: string) => {
   currentConversationId.value = id
+  // ★ 切会话：重置滚动状态为「跟随底部」。否则上一个会话向上翻历史后 autoScrollToBottom=false，
+  //   本次进入 scrollToBottom 会直接 return → 界面停在第一条消息（表现为「没定位到最新记录」）
+  autoScrollToBottom.value = true
+  showScrollToBottomBtn.value = false
   fetchMessages(id)
   // 检查是否有正在运行的后台任务
   checkAndReconnect(id)
+  // 命中缓存时 fetchMessages 会直接 return（不触发 isLoadingMessages 变化），这里补一次强制到底。
+  // DynamicScroller 带 :key=会话ID 会重建，需等重建后的 DOM 就绪再滚。
+  nextTick(() => {
+    scrollToBottomForce(id)
+  })
 }
 
 const startNewChat = () => {
@@ -3806,6 +4143,9 @@ const startNewChat = () => {
   conversations.value.unshift(conv)
   currentConversationId.value = id
   messages.value[id] = []
+  // 新会话没有历史：显式关闭分页，避免上滑时用空游标发起无意义请求
+  hasMoreMessages.value[id] = false
+  messageCursors.value[id] = null
 }
 
 /**
@@ -3972,11 +4312,12 @@ const stopStreaming = () => {
     })
   }
 
-  // 从 currentStreamSessionId 获取（最直接的路径）
-  if (currentStreamSessionId.value) {
+  // 从 currentStreamSessionId 获取（★ 仅当该流确属当前会话时才采用）
+  // 切智能体/切会话后这个全局值可能仍指向上一个会话，无条件使用会误取消其他会话的后台任务
+  if (currentStreamSessionId.value && activeStreamInfo.value?.convId === currentConvId) {
     cancelIds.push(currentStreamSessionId.value)
-    currentStreamSessionId.value = null
   }
+  currentStreamSessionId.value = null
 
   // 从 currentConversationId 获取（如果不是 local-xxx）
   if (currentConvId && !currentConvId.startsWith('local-')) {
@@ -4051,13 +4392,21 @@ const sendSupplement = async () => {
   const msg = supplementMessage.value.trim()
   if (!msg || supplementSending.value) return
 
-  // ★ 始终优先使用 SSE 流返回的真实 sessionId（currentStreamSessionId）
-  // currentConversationId 在流式过程中可能不是最新的真实 ID：
-  //   - new session: currentConversationId = "local-xxx", 真实 ID 在 currentStreamSessionId
-  //   - existing session: currentConversationId 可能是旧 ID，后端可能创建了新会话返回新 ID
-  const convId = currentStreamSessionId.value
-    ? String(currentStreamSessionId.value)
-    : currentConversationId.value
+  // ★ 目标会话判定（多智能体并行场景必须精确，否则补充需求会串台到别的会话）：
+  //   - 当前是本地临时会话（local-xxx）：真实 ID 只能来自「本会话正在跑的前台流」（currentStreamSessionId），
+  //     且必须校验 activeStreamInfo.convId 就是当前会话，避免用到其他会话残留的 sessionId；
+  //   - 当前已是真实会话 ID：直接用它（后端会话 ID 即接口入参，无需依赖全局流会话变量）。
+  //   原实现无条件优先 currentStreamSessionId，切智能体后该变量可能仍指向另一个会话 →
+  //   补充需求被发到错误的会话（多智能体并行时尤其危险）。
+  const currentConv = currentConversationId.value
+  let convId = currentConv
+  if (currentConv && currentConv.startsWith('local-')) {
+    const streamConv = activeStreamInfo.value?.convId
+    const realSession = currentStreamSessionId.value
+    if (streamConv === currentConv && realSession) {
+      convId = String(realSession)
+    }
+  }
   if (!convId || convId.startsWith('local-')) {
     message.warning('请等待会话建立后再补充需求')
     return
@@ -4178,6 +4527,39 @@ const handlePermissionAction = async (action: string) => {
   }
   // ★ 清理：关闭文件 tab + 取消分屏
   cleanupPermissionPanel()
+}
+
+/**
+ * 处理「任务迭代确认」面板（askType=iteration_confirm）：
+ * - stop     → 结束任务（按拒绝语义提交，后端终止工具循环）
+ * - continue → 继续执行，并指定本次扩容的迭代次数（10 / 20 / 50）
+ *
+ * 回答由后端 Controller 组装为 __ACTION__:action:message：
+ * 继续时 message 为扩容次数，结束时不带 message。
+ */
+const handleIterationDecision = async (type: 'stop' | 'continue', additional = 20) => {
+  const q = pendingQuestion.value
+  if (!q || iterationConfirmSending.value) return
+  iterationConfirmSending.value = true
+  try {
+    const action = type === 'continue' ? 'approve' : 'reject'
+    const answer = type === 'continue' ? String(additional) : ''
+    await submitAnswer(q.uuid, answer, action)
+    // 提交成功：关闭面板，避免重复提交（后端同时会清掉 agent_task 的待处理字段）
+    setPendingQuestion(currentConversationId.value, null)
+    pendingQuestionAnswer.value = ''
+    pendingShowCustomInput.value = false
+    cleanupPermissionPanel()
+    if (type === 'continue') {
+      message.success(`已选择继续执行（扩容 ${additional} 次）`)
+    } else {
+      message.success('已结束任务')
+    }
+  } catch (e: any) {
+    message.error('提交失败: ' + (e.message || '未知错误'))
+  } finally {
+    iterationConfirmSending.value = false
+  }
 }
 
 // ★ 授权面板文件操作：对 file_writer 自动打开差异对比
@@ -4369,8 +4751,8 @@ const scheduleMessageUpdate = (convId: string, thinkingMsgId?: string | number) 
       refreshScrollerData(convId)
       scrollToBottom()
     }
-    // autoScrollToBottom = false 时：完全冻结，不递增 tick、不替换数组、不滚动
-    // tick 不变 → size-dependencies 不变 → DynamicScroller 不重新测量 → 零跳动
+    // autoScrollToBottom = false 时：不主动替换数组、不滚动，避免用户浏览历史时视口被拽走
+    // 注意：若 item 内容变化导致高度改变，ResizeObserver 仍会修正尺寸表（属正确行为）
     if (thinkingMsgId !== undefined && thinkAutoScroll.value) {
       nextTick(() => {
         const el = document.querySelector(`[data-think-scroll="${thinkingMsgId}"]`)
@@ -4507,7 +4889,7 @@ const sendMessage = async (textOverride?: string) => {
 
   // 添加用户消息
   const userMsg: ChatMessage = {
-    id: `user-${Date.now()}`,
+    id: `user-${Date.now()}-${++localMsgSeq}`,
     role: 'user',
     content: finalMessage,
     timestamp: Date.now(),
@@ -4522,6 +4904,9 @@ const sendMessage = async (textOverride?: string) => {
 
   if (!messages.value[convId]) {
     messages.value[convId] = []
+    // 新开的本地会话：显式关闭分页（无历史可加载），避免上滑用空游标发起无意义请求
+    hasMoreMessages.value[convId] = false
+    messageCursors.value[convId] = null
   }
   messages.value[convId].push(userMsg)
   inputMessage.value = ''
@@ -4538,7 +4923,7 @@ const sendMessage = async (textOverride?: string) => {
 
   // 添加占位的助手消息
   const assistantMsg: ChatMessage = {
-    id: `assistant-${Date.now()}`,
+    id: `assistant-${Date.now()}-${++localMsgSeq}`,
     role: 'assistant',
     content: '',
     thinking: '',
@@ -4762,7 +5147,8 @@ const sendMessage = async (textOverride?: string) => {
           pendingQuestionAnswer.value = ''
           // 后台任务等待授权时提示用户（不弹窗到当前界面，防误授权）
           if (!isCurrentConv) {
-            message.info(`🤖 ${meta.name} 的后台任务正在等待授权，切换过去即可处理`)
+            // 头像同样取归属 Agent 的真实 avatar（原写死 🤖，多智能体并行时会货不对板）
+            message.open({ type: 'info', content: buildAgentNotice(meta, `${meta.name} 的后台任务正在等待授权，切换过去即可处理`) })
           }
         } catch (e) {
           console.warn('解析 ask_user 事件失败:', e)
@@ -4805,6 +5191,7 @@ const sendMessage = async (textOverride?: string) => {
       // 如果已经获取到真实会话ID，提前迁移 convId，避免 finally 中迁移触发 checkAndReconnect 重连
       if (realSessionId) {
         messages.value[realSessionId] = messages.value[convId]
+        migratePaginationState(convId, realSessionId)
         delete messages.value[convId]
         currentConversationId.value = realSessionId
         convId = realSessionId
@@ -4839,6 +5226,7 @@ const sendMessage = async (textOverride?: string) => {
     // 流式结束后统一迁移 convId（避免流式过程中数组引用变动导致内容重复）
     if (convId.startsWith('local-') && realSessionId) {
       messages.value[realSessionId] = messages.value[convId]
+      migratePaginationState(convId, realSessionId)
       delete messages.value[convId]
       // 只有当前还在看这个会话，才迁移 currentConversationId
       if (currentConversationId.value === convId) {
@@ -4885,10 +5273,15 @@ const handleShiftEnter = () => {
 // ===== 后台任务重连 =====
 
 const reconnectToTaskStream = async (convId: number, cursor = 0) => {
-  setStreamStatus(String(convId), '任务恢复中...')
-  // P2：重连是「该会话后台任务恢复前台查看」，不锁输入框（后台任务不阻塞派新任务；用户发新消息会走正常取消/排队流程）
-  startElapsedTimer()
   const stringConvId = String(convId)
+  setStreamStatus(stringConvId, '任务恢复中...')
+  // ★ 重连 = 该会话任务「恢复前台查看」：必须补记「前台流式」标记（sendingStates）。
+  //   补充需求面板（hasRunningTask）、停止按钮（hasActiveStream）、输入框 loading 等运行态 UI 都依赖它；
+  //   原实现只设了 streamStatus / activeTask，缺少 sendingStates →
+  //   表现为「切回智能体后流能继续输出，但『补充需求』和『结束当前任务』按钮都不见了」。
+  setSending(stringConvId, true)
+  // P2：重连是「该会话后台任务恢复前台查看」，不再额外锁输入框判据——hasRunningTask 已统一覆盖
+  startElapsedTimer()
 
   // 游标续传模式下历史事件（seq <= cursor）不再重放，先强制刷新 DB 完整内容作为续接基线，
   // 后续增量 content/thinking 追加到该基线上（根治重放历史内容导致的一句话重复两次）
@@ -4912,7 +5305,7 @@ const reconnectToTaskStream = async (convId: number, cursor = 0) => {
   // 没有 assistant 消息则新建一个
   if (!targetMsg) {
     targetMsg = {
-      id: `reconnect-${Date.now()}`,
+      id: `reconnect-${Date.now()}-${++localMsgSeq}`,
       role: 'assistant',
       content: '',
       thinking: '',
@@ -5035,6 +5428,8 @@ const reconnectToTaskStream = async (convId: number, cursor = 0) => {
       console.warn('重连任务流失败:', error)
     }
   } finally {
+    // ★ 重连流结束：清掉「前台流式」标记（停止按钮 / 补充需求面板随之隐藏）
+    setSending(stringConvId, false)
     setStreamStatus(stringConvId, '')
     stopElapsedTimer()
     setActiveTask(stringConvId, null)
@@ -5067,10 +5462,14 @@ const checkAndReconnect = async (convId: string) => {
       // 如果有待审批问题，立即展示审批对话框（页面刷新后重连；P3：按会话写入 + 带归属标识）
       if (task.pendingQuestionUuid) {
         const meta = getAgentMeta(currentAgentConfigId.value)
+        // 页面刷新 / 切回智能体后恢复待处理问题：agent_task 只持久化 uuid+文本，
+        // 按文本前缀识别「任务迭代确认」（评委否决 / 扩容达上限）面板，其余按权限审批展示
+        const pendingText = task.pendingQuestionText || '请确认是否执行以上操作'
+        const restoredAskType = pendingText.startsWith('【任务迭代确认】') ? 'iteration_confirm' : 'permission'
         setPendingQuestion(convId, {
           uuid: task.pendingQuestionUuid,
-          question: task.pendingQuestionText || '请确认是否执行以上操作',
-          askType: 'permission',
+          question: pendingText,
+          askType: restoredAskType,
           agentName: meta.name,
           workDir: meta.workDir || agentRuntime.value.workDir
         })
@@ -5994,7 +6393,9 @@ const handleToolCardClick = (e: MouseEvent, msg: ChatMessage) => {
 const autoScrollToBottom = ref(true)
 const showScrollToBottomBtn = ref(false)
 // DynamicScroller 大小更新节拍器：每个 scheduleMessageUpdate 周期递增
-// 用于 size-dependencies，让 DynamicScroller 感知 streaming 消息的大小变化
+// 说明：vue-virtual-scroller 2.x 在浏览器支持 ResizeObserver 时会忽略 size-dependencies，
+//   高度由内部 ResizeObserver 上报；此 tick 仅作为「无 ResizeObserver 环境」的兼容依赖保留。
+//   实际的重测兜底见 v-track-msg-size / scheduleScrollerSelfHeal。
 const streamingUpdateTick = ref(0)
 
 // ===== 思考过程（thinking-content）自动滚动控制 =====
@@ -6047,6 +6448,73 @@ const scrollToBottom = () => {
   })
 }
 
+// ===== 强制滚动到底部（切换会话 / 一键到底专用）=====
+// 与 scrollToBottom 的区别：
+// 1) 不受 autoScrollToBottom 限制——切会话、点「一键到底」必须生效；
+// 2) 逐帧贴底，直到「scrollHeight 稳定 + 已在底部」连续 3 帧才停：虚拟列表 item 高度是异步测量的，
+//    只设一次 scrollTop 会在后续测量把内容撑高后又离开底部（消息越多越明显，这是一键到底失效的主因）；
+// 3) token 取消上一次未完成的滚动，避免连续点击/频繁切会话互相打架；
+// 4) forceScrolling 期间屏蔽「是否离开底部」的状态切换，避免按钮闪烁。
+let forceScrolling = false
+let forceScrollToken = 0
+const scrollToBottomForce = (convId?: string) => {
+  const targetConv = convId || currentConversationId.value
+  autoScrollToBottom.value = true
+  showScrollToBottomBtn.value = false
+  forceScrolling = true
+  const token = ++forceScrollToken
+  const getEl = () => (scrollerRef.value?.$el as HTMLElement | undefined)
+  let prevHeight = -1
+  let stableFrames = 0
+  let frames = 0
+  const finish = () => {
+    if (token === forceScrollToken) forceScrolling = false
+  }
+  const step = () => {
+    if (token !== forceScrollToken) return
+    // 已切到别的会话 → 放弃，避免把新会话拽到底部
+    if (targetConv && currentConversationId.value !== targetConv) {
+      finish()
+      return
+    }
+    const el = getEl()
+    if (!el) {
+      finish()
+      return
+    }
+    el.scrollTop = el.scrollHeight
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 2
+    if (atBottom && el.scrollHeight === prevHeight) stableFrames++
+    else stableFrames = 0
+    prevHeight = el.scrollHeight
+    frames++
+    // 连续 3 帧稳定到底 = 完成；最多追 120 帧（约 2s）防极端场景空转
+    if (stableFrames < 3 && frames < 120) {
+      requestAnimationFrame(step)
+    } else {
+      finish()
+    }
+  }
+  nextTick(() => {
+    if (token !== forceScrollToken) return
+    // 触发一次重测：让尚未测量的长消息尽快拿到真实高度，避免「滚到估算底部后又变高」
+    scrollerRef.value?.forceUpdate?.()
+    requestAnimationFrame(step)
+  })
+  // 兜底：极慢渲染（大量超长消息）时补两次贴底
+  window.setTimeout(() => {
+    if (token !== forceScrollToken) return
+    const el = getEl()
+    if (el) el.scrollTop = el.scrollHeight
+  }, 300)
+  window.setTimeout(() => {
+    if (token !== forceScrollToken) return
+    const el = getEl()
+    if (el) el.scrollTop = el.scrollHeight
+    finish()
+  }, 900)
+}
+
 // ★ M2 统一刷新入口（2026-09-15 性能改造）：递增节拍器 + 替换数组引用，触发 DynamicScroller 重测。
 //   50ms 去重窗：同一瞬间的多路调用（tick 刷新与滚动兜底刷新）只执行一次，消除重复的强制布局。
 let lastScrollerRefreshAt = 0
@@ -6067,16 +6535,27 @@ const forceRefreshScroller = () => {
   refreshScrollerData(convId)
 }
 
-// 监听 DynamicScroller 的 scroll 事件，检测用户是否手动滚动离开底部
+// 监听 DynamicScroller 的 scroll 事件：
+// 1) 滚动到顶部 → 懒加载更早的历史（不受下方 80ms 防抖影响，避免快速滚到顶时事件被丢弃）；
+// 2) 检测用户是否手动滚动离开底部（控制流式自动滚动与「一键到底」按钮）。
 let lastScrollHandleTime = 0
 const handleMessageListScroll = () => {
+  const el = scrollerRef.value?.$el as HTMLElement | undefined
+  if (!el) return
+
+  // ★ 顶部懒加载：loadMoreMessages 内部有 hasMore / loading / cursor 三重防重入
+  if (el.scrollTop <= 80) {
+    void loadMoreMessages(currentConversationId.value)
+  }
+
+  // 强制到底的逐帧贴底期间不做底部状态切换，否则按钮会在贴底过程中反复闪烁
+  if (forceScrolling) return
+
   // 80ms 防抖：持续滚动时减少状态切换频率，降低跳动
   const now = Date.now()
   if (now - lastScrollHandleTime < 80) return
   lastScrollHandleTime = now
-  
-  const el = scrollerRef.value?.$el as HTMLElement | undefined
-  if (!el) return
+
   const threshold = 50 // 距离底部小于 50px 视为在底部
   const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
   if (distanceToBottom < threshold) {
@@ -6095,22 +6574,9 @@ const handleMessageListScroll = () => {
 
 // 用户点击"回到底部"按钮
 const scrollToBottomManually = () => {
-  autoScrollToBottom.value = true
-  showScrollToBottomBtn.value = false
-  // 先刷新让最新内容渲染出来，再滚动到底部
-  forceRefreshScroller()
-  nextTick(() => {
-    const doScroll = () => {
-      if (scrollerRef.value) {
-        const el = scrollerRef.value.$el as HTMLElement
-        if (el) el.scrollTop = el.scrollHeight
-      }
-    }
-    requestAnimationFrame(() => {
-      doScroll()
-      requestAnimationFrame(() => doScroll())
-    })
-  })
+  // 一键到底：不依赖流式自动滚动状态；逐帧贴底以吸收虚拟列表的异步高度测量
+  // （消息越多，异步测量把内容撑高的幅度越大，只设一次 scrollTop 就会"看起来没到底"）
+  scrollToBottomForce()
 }
 
 // 思考过程回到底部
@@ -6152,11 +6618,16 @@ const handleThinkScroll = (e: Event) => {
 
 // 监听消息数量变化自动滚动（替代 deep:true 深度监听，避免每次渲染触发全量比较）
 watch(() => currentMessages.value.length + '|' + (currentMessages.value[currentMessages.value.length - 1]?.content?.length || 0), () => {
+  // 上滑加载更早历史同样会改变 length：此时不能把用户从历史位置拽回底部。
+  // 注意：loadMoreMessages 的 finally 会先于 watcher 回调（同一 microtask）清掉 loading 标记，
+  // 只用 loadingMoreConvIds 判断会漏判，故再叠加「最近一次头部插入」的时间窗。
+  if (loadingMoreConvIds.has(currentConversationId.value)) return
+  if (Date.now() - lastHistoryPrependAt < 500) return
   scrollToBottom()
 })
 
 onMounted(() => {
-  scrollToBottom()
+  scrollToBottomForce()
   // 仅当当前 Agent 配置了工作目录时才自动加载文件树
   // 不自动使用 settingsStore.projectRoot（需要用户主动点击「选择目录」）
   if (agentRuntime.value.workDir) {
@@ -6182,6 +6653,12 @@ onUnmounted(() => {
   // 清理拖拽事件
   document.removeEventListener('mousemove', onGlobalDragMove)
   document.removeEventListener('mouseup', onGlobalDragUp)
+  // 清理虚拟列表高度自愈资源
+  if (sizeSelfHealTimer !== null) {
+    clearTimeout(sizeSelfHealTimer)
+    sizeSelfHealTimer = null
+  }
+  scrollerSizeObserver?.disconnect()
 })
 
 // 当首次加载完会话列表且选中了会话后，检查活跃任务
@@ -7120,6 +7597,30 @@ watch(currentConversationId, (newId) => {
 .message-list::-webkit-scrollbar-thumb { background: #dcd8ea; border-radius: 3px; }
 .message-list::-webkit-scrollbar-track { background: transparent; }
 
+/* ===== 顶部懒加载提示（上滑到顶加载更早历史）===== */
+.loading-more-tip {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--text-2);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  z-index: 6;
+  pointer-events: none;
+  white-space: nowrap;
+}
+[data-theme="dark"] .loading-more-tip {
+  background: #1e1d2c;
+  border-color: #2a2838;
+  color: var(--text-2);
+}
+
 /* ===== 回到底部浮动按钮 ===== */
 .scroll-to-bottom-btn {
   position: absolute;
@@ -7235,7 +7736,8 @@ watch(currentConversationId, (newId) => {
   display: flex;
   padding-bottom: 24px;
   gap: 14px;
-  animation: msgSlideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  /* 注意：虚拟滚动下每条消息是会复用的绝对定位视图，入场动画（translateY+scale）
+     会随视图复用反复重播，视觉上表现为消息「错位/滑入」，故此处不再使用入场动画 */
 }
 @keyframes msgSlideIn {
   from { opacity: 0; transform: translateY(12px) scale(0.98); }
@@ -7364,7 +7866,9 @@ watch(currentConversationId, (newId) => {
   max-width: 72%;
   border-radius: var(--radius);
   padding: 14px 18px;
-  transition: all 0.2s ease;
+  /* 只过渡视觉属性：禁止 transition: all（宽度/高度过渡会与虚拟列表的高度测量打架，
+     测量到过渡中的中间高度 → 后续消息位置偏移/重叠） */
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .message-header {
@@ -8613,6 +9117,34 @@ watch(currentConversationId, (newId) => {
   flex-shrink: 0; /* 滚动链（2026-09-21）：回答输入框始终可见 */
 }
 .ask-user-input-row .a-input { flex: 1; }
+
+/* ===== 任务迭代确认面板（评委否决 / 累计扩容达上限 → 用户决定是否继续） ===== */
+.iteration-confirm-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.iteration-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0; /* 滚动链：按钮区始终可见 */
+}
+.iteration-confirm-btn {
+  height: 40px !important;
+  font-size: 13px !important;
+  border-radius: var(--radius-sm) !important;
+  font-weight: 600 !important;
+  flex: 0 0 auto;
+}
+.iteration-confirm-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
 
 /* ===== 权限面板 ===== */
 .permission-panel {

@@ -4,6 +4,7 @@ import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.service.llm.LLMClient;
+import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
 import com.example.agentdeepseek.service.llm.LLMErrorFormatter;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.mapper.AgentConfigMapper;
@@ -1234,6 +1235,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // 创建主Flux处理API响应（移除内部字段后发送）
             Map<String, Object> requestBody = new HashMap<>(apiRequest);
             requestBody.keySet().removeIf(k -> k.startsWith("_"));
+            // ★ 请求出口统一净化：把「工具已下发但结果缺失」的历史脏序列修复为合法序列，
+            //   避免一次中断导致该会话之后的所有请求都 400（详见 ToolCallSequenceSanitizer）
+            ToolCallSequenceSanitizer.sanitizeRequestBody(requestBody);
             // 使用当前 Provider 的 WebClient（替换原来的 this.webClient）
             WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
             return Flux.concat(sessionEvent, activeWebClient.post()
@@ -1597,7 +1601,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(
                     "SELECT t.id, t.status, t.error_message, t.updated_at, "
                             + "(SELECT COUNT(*) FROM conversation_message m WHERE m.conversation_id = t.conversation_id "
-                            + "AND m.role = 'user' AND m.created_at > t.updated_at) AS new_user_msg_count "
+                            + "AND m.role = 'USER' AND m.created_at > t.updated_at) AS new_user_msg_count "
                             + "FROM agent_task t WHERE t.conversation_id = ? ORDER BY t.id DESC LIMIT 1",
                     conversationId);
             if (rows.isEmpty()) {
@@ -1921,9 +1925,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             if (iteration >= maxIterations) {
                 int totalGranted = judgeGrantedIterations.getOrDefault(conversationId, 0);
                 if (totalGranted >= MAX_JUDGE_GRANTED_ITERATIONS) {
-                    log.warn("评委已累计增加 {} 次迭代，达到上限，强制结束", totalGranted);
-                    return Flux.just(createReasoningSSEEvent(
-                            "任务迭代次数已超出评委允许的最大扩展额度（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次），自动终止。"));
+                    // ★ 需求变更（2026-10-17）：累计扩容已达上限时不再强制终止，
+                    //   改为询问用户「结束任务」或「继续执行并扩容 N 次」
+                    log.warn("评委已累计增加 {} 次迭代，达到上限，转为询问用户是否继续", totalGranted);
+                    return askUserForIterationDecision(conversationId, storageConversationId, initialApiRequest,
+                            messages, iteration, maxIterations,
+                            "累计扩容已达上限（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次）", null, null);
                 }
                 log.warn("达到最大工具调用迭代次数 {}，调用评委评估", maxIterations);
                 return evaluateWithJudge(conversationId, storageConversationId, initialApiRequest,
@@ -2566,13 +2573,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // 4. 解析 JSON 响应
                     ToolLoopManager.JudgeResult result = parseJudgeResult(response);
                     if (result == null) {
-                        log.warn("评委响应解析失败，使用默认拒绝策略: {}", response);
+                        log.warn("评委响应解析失败，转为询问用户是否继续: {}", response);
                         // 透传失败原因（如 HTTP 401、重试失败等），避免"评估失败无原因"
                         String failReason = (response != null && response.startsWith("错误："))
                                 ? response.substring("错误：".length())
                                 : "评委响应格式不正确（未返回有效 JSON）";
-                        return Flux.just(createReasoningSSEEvent(
-                                "评委评估失败：" + failReason + "，任务自动终止。"));
+                        // ★ 需求变更（2026-10-17）：无法判定时不再自动终止，交由用户决定「结束」或「继续并扩容」
+                        return askUserForIterationDecision(conversationId, storageConversationId, initialApiRequest,
+                                messages, iteration, maxIterations,
+                                "评委评估失败（无法判定任务进展）", failReason, null);
                     }
 
                     if ("extend".equals(result.judgment)) {
@@ -2595,14 +2604,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         conversationId, storageConversationId, initialApiRequest,
                                         messages, iteration, newMaxIterations));
                     } else {
-                        log.info("评委评估：reject，任务终止");
-
-                        String rejectEvent = createReasoningSSEEvent(
-                                "**🤖 评委评估：任务已终止**\n\n" +
-                                        "**原因：** " + result.reason + "\n\n" +
-                                        "**经验总结：** " + result.summary);
-
-                        return Flux.just(rejectEvent);
+                        // ★ 需求变更（2026-10-17）：评委否决不再直接终止任务，改为询问用户：
+                        //   「结束任务」或「继续执行并扩容 N 次」（用户选择后按其意愿继续/终止）
+                        log.info("评委评估：reject，转为询问用户是否继续执行");
+                        return askUserForIterationDecision(conversationId, storageConversationId, initialApiRequest,
+                                messages, iteration, maxIterations,
+                                "评委评估未通过", result.reason, result.summary);
                     }
                 })
                 .onErrorResume(e -> {
@@ -2611,15 +2618,18 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // 参考子 Agent 评委逻辑：检查最近是否有实质进展（成功的工具调用）
                     boolean hasProgress = judgeFallbackHasProgress(messages);
                     if (hasProgress) {
+                        // 先看当前累计扩容是否已达上限：达到则交给用户决定（不再自动终止）
+                        int totalNow = judgeGrantedIterations.getOrDefault(conversationId, 0);
+                        if (totalNow >= MAX_JUDGE_GRANTED_ITERATIONS) {
+                            log.warn("评委降级扩展累计 {} 次，已达上限，转为询问用户", totalNow);
+                            return askUserForIterationDecision(conversationId, storageConversationId, initialApiRequest,
+                                    messages, iteration, maxIterations,
+                                    "评委调用失败，且累计扩容已达上限", e.getMessage(), null);
+                        }
                         // 检测到进展 → 宽松策略：少量扩展迭代继续执行，避免网络抖动误杀任务
                         int additional = 5;
                         int newMaxIterations = maxIterations + additional;
                         int newTotalGranted = judgeGrantedIterations.merge(conversationId, additional, Integer::sum);
-                        if (newTotalGranted >= MAX_JUDGE_GRANTED_ITERATIONS) {
-                            log.warn("评委降级扩展累计 {} 次，达到上限，强制结束", newTotalGranted);
-                            return Flux.just(createReasoningSSEEvent(
-                                    "任务迭代次数已超出评委允许的最大扩展额度（" + MAX_JUDGE_GRANTED_ITERATIONS + " 次），自动终止。"));
-                        }
                         log.warn("评委降级判定：检测到实质进展，继续执行 +{}，累计扩展 {}", additional, newTotalGranted);
                         String extendEvent = createReasoningSSEEvent(
                                 "**🤖 评委评估：调用失败，已降级为本地判定（检测到任务进展，继续执行）**\n\n" +
@@ -2631,14 +2641,132 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         conversationId, storageConversationId, initialApiRequest,
                                         messages, iteration, newMaxIterations));
                     } else {
-                        log.warn("评委降级判定：最近无成功工具调用，终止任务");
-                        String rejectEvent = createReasoningSSEEvent(
-                                "**🤖 评委评估：调用失败，已降级为本地判定（任务终止）**\n\n" +
-                                        "**失败原因：** " + e.getMessage() + "\n\n" +
-                                        "**判定依据：** 最近无成功的工具调用，判定任务无进展");
-                        return Flux.just(rejectEvent);
+                        // ★ 需求变更（2026-10-17）：无法判定进展时也不直接终止，交由用户决定
+                        log.warn("评委降级判定：最近无成功工具调用，转为询问用户是否继续");
+                        return askUserForIterationDecision(conversationId, storageConversationId, initialApiRequest,
+                                messages, iteration, maxIterations,
+                                "评委调用失败，且本地判定无进展", e.getMessage(), null);
                     }
                 });
+    }
+
+    /**
+     * 迭代上限 / 评委否决时，询问用户「是否继续执行」以及「本次扩容多少次」。
+     *
+     * <p><b>业务背景（2026-10-17 需求）</b>：评委机制原先是「不通过就直接终止任务」、
+     * 「累计扩容达上限也直接终止」。现改为把决定权交给用户：</p>
+     * <ul>
+     *   <li>评委判定不通过（reject）→ 询问用户：结束任务 / 继续并扩容；</li>
+     *   <li>评委评估失败或调用异常（无法判定）→ 同样询问用户，不再自动终止；</li>
+     *   <li>累计扩容达到 {@link #MAX_JUDGE_GRANTED_ITERATIONS} → 询问用户，用户同意则继续扩容。</li>
+     * </ul>
+     *
+     * <p><b>交互链路</b>：复用 ask_user 的 pendingQuestion 机制——发送 {@code iteration_confirm}
+     * 事件 → 前端渲染「结束任务 / 继续并扩容」面板 → 用户选择后回答 → 唤醒等待的 Flux →
+     * 按选择终止或扩容后继续工具循环。等待超时（{@link #AUTH_WAIT_TIMEOUT_MINUTES} 分钟）按「结束任务」处理，
+     * 并清理待处理问题，避免悬挂。</p>
+     *
+     * @param title        面板标题（如「评委评估未通过」「累计扩容已达上限」）
+     * @param judgeReason  评委给的理由（可为空）
+     * @param judgeSummary 评委给的进度摘要（可为空）
+     */
+    private Flux<String> askUserForIterationDecision(Long conversationId, Long storageConversationId,
+                                                      Map<String, Object> initialApiRequest,
+                                                      List<Map<String, Object>> messages,
+                                                      int iteration, int maxIterations,
+                                                      String title, String judgeReason, String judgeSummary) {
+        int totalGranted = judgeGrantedIterations.getOrDefault(conversationId, 0);
+        StringBuilder sb = new StringBuilder();
+        // 前缀标记供「页面刷新/切回重连」时识别面板类型（agent_task 只持久化 uuid+文本，不存 askType）
+        sb.append("【任务迭代确认】\n");
+        sb.append("**").append(title).append("**\n\n");
+        if (judgeReason != null && !judgeReason.isBlank()) {
+            sb.append("**理由：** ").append(judgeReason).append("\n\n");
+        }
+        if (judgeSummary != null && !judgeSummary.isBlank()) {
+            sb.append("**当前进度：** ").append(judgeSummary).append("\n\n");
+        }
+        sb.append("**当前迭代：** ").append(iteration).append(" / ").append(maxIterations)
+                .append("；**累计扩容：** ").append(totalGranted).append(" / ").append(MAX_JUDGE_GRANTED_ITERATIONS).append(" 次\n\n");
+        sb.append("请选择「结束任务」，或「继续执行」并指定本次扩容的迭代次数。");
+        String question = sb.toString();
+
+        String uuid = java.util.UUID.randomUUID().toString();
+        com.example.agentdeepseek.model.dto.PendingQuestion pq =
+                new com.example.agentdeepseek.model.dto.PendingQuestion(uuid, question, conversationId);
+        pendingQuestionStore.put(uuid, pq);
+        // 持久化到 agent_task：页面刷新/切回智能体后仍能弹出该确认框
+        updatePendingQuestion(conversationId, uuid, question);
+
+        log.info("等待用户确认是否继续任务: conversationId={}, title={}, iteration={}/{}, granted={}",
+                conversationId, title, iteration, maxIterations, totalGranted);
+
+        return Flux.just(createReasoningSSEEvent("⏸️ " + title + "，等待你确认是否继续…"))
+                .concatWith(Flux.just(createAskUserEvent(uuid, question, "iteration_confirm")))
+                .concatWith(Mono.fromFuture(pq.getFuture())
+                        // 超时只覆盖「等待用户确认」阶段，回答后的扩容执行不计入
+                        .timeout(java.time.Duration.ofMinutes(AUTH_WAIT_TIMEOUT_MINUTES))
+                        .onErrorResume(e -> {
+                            log.warn("等待用户迭代确认超时/异常: conversationId={}, title={}, err={}",
+                                    conversationId, title, e.getMessage());
+                            pendingQuestionStore.remove(uuid);
+                            updatePendingQuestion(conversationId, null, null);
+                            return Mono.just("__ITERATION_TIMEOUT__");
+                        })
+                        .flatMapMany(rawAnswer -> {
+                            pendingQuestionStore.remove(uuid);
+                            updatePendingQuestion(conversationId, null, null);
+
+                            boolean keepGoing = false;
+                            int additional = 0;
+                            // 回答格式由 Controller 统一组合：__ACTION__:actionType:userMessage
+                            if (rawAnswer != null && rawAnswer.startsWith("__ACTION__:")) {
+                                String[] parts = rawAnswer.split(":", 3);
+                                String action = parts.length > 1 ? parts[1] : "";
+                                String payload = parts.length > 2 ? parts[2] : "";
+                                if ("approve".equalsIgnoreCase(action)) {
+                                    keepGoing = true;
+                                    additional = parseIterationExtendCount(payload);
+                                }
+                            }
+
+                            if (!keepGoing) {
+                                log.info("用户选择结束任务: conversationId={}, title={}", conversationId, title);
+                                return Flux.just(createReasoningSSEEvent(
+                                        "**🛑 任务已结束（按你的选择）**\n\n"
+                                                + (judgeReason != null && !judgeReason.isBlank()
+                                                    ? "**评委意见：** " + judgeReason + "\n\n" : "")
+                                                + (judgeSummary != null && !judgeSummary.isBlank()
+                                                    ? "**进度摘要：** " + judgeSummary : "")));
+                            }
+
+                            int safeAdditional = Math.max(1, Math.min(additional, 200));
+                            int newMaxIterations = maxIterations + safeAdditional;
+                            int newTotalGranted = judgeGrantedIterations.merge(conversationId, safeAdditional, Integer::sum);
+                            log.info("用户选择继续任务: conversationId={}, +{} 次, 新上限={}, 累计扩容={}",
+                                    conversationId, safeAdditional, newMaxIterations, newTotalGranted);
+
+                            return Flux.just(createReasoningSSEEvent(
+                                            "**▶️ 已按你的选择继续执行**\n\n"
+                                                    + "**增加 " + safeAdditional + " 次迭代**（累计扩容 "
+                                                    + newTotalGranted + " / " + MAX_JUDGE_GRANTED_ITERATIONS + " 次）"))
+                                    .concatWith(handleToolCallIteration(conversationId, storageConversationId,
+                                            initialApiRequest, messages, iteration, newMaxIterations));
+                        }));
+    }
+
+    /**
+     * 解析用户选择的扩容次数；非法/缺省时给默认值 20（前端按钮传 10/20/50）。
+     */
+    private int parseIterationExtendCount(String payload) {
+        try {
+            if (payload != null && !payload.isBlank()) {
+                return Integer.parseInt(payload.trim());
+            }
+        } catch (Exception e) {
+            log.debug("扩容次数解析失败，使用默认值 20: {}", payload);
+        }
+        return 20;
     }
 
     /**
@@ -2840,6 +2968,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);
         requestBody.keySet().removeIf(k -> k.startsWith("_"));
+        // ★ 每次工具循环迭代的请求出口同样净化（trim/压缩/中断都可能破坏 tool_call 配对，幂等无副作用）
+        ToolCallSequenceSanitizer.sanitizeRequestBody(requestBody);
         // 性能诊断：记录请求体大小
         int requestBodySize = requestBody.toString().length();
         log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
@@ -3236,7 +3366,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             messages.add(tcMsg);
 
                                                             // 构建工具结果消息并保存（M5：统一封装，含截图等工具的 user 消息注入）
-                                                            appendToolResultMessages(messages, innerResults,
+                                                            appendToolResultMessages(messages, completeToolCalls, innerResults,
                                                                     storageConversationId, apiRequest);
 
                                                             // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
@@ -3349,7 +3479,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         }
 
                                         // 将工具结果消息添加到消息列表并保存（M5：统一封装，含截图等工具的 user 消息注入）
-                                        appendToolResultMessages(messages, toolResults,
+                                        appendToolResultMessages(messages, completeToolCalls, toolResults,
                                                 storageConversationId, apiRequest);
 
                                         // 📝 成长体系 F3：每轮先检查注入追踪（P1 修复：先检查后注入，
@@ -3641,7 +3771,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             messages.add(toolCallMessage);
 
                             // 将包含回答的工具结果添加到消息列表并保存（M5：统一封装，含截图等工具的 user 消息注入）
-                            appendToolResultMessages(messages, modifiedResults,
+                            appendToolResultMessages(messages, completeToolCalls, modifiedResults,
                                     storageConversationId, apiRequest);
 
                             // 发送恢复事件，然后继续工具循环
@@ -3663,16 +3793,47 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * </ol>
      */
     private void appendToolResultMessages(List<Map<String, Object>> messages,
+                                          JsonNode toolCalls,
                                           List<ToolExecutor.ToolCallResult> results,
                                           Long storageConversationId,
                                           Map<String, Object> apiRequest) {
         // 1. 工具结果消息（role=tool）+ 存库（保持原有行为）
         List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(results);
+        Set<String> answeredIds = new HashSet<>();
         for (ObjectNode toolMessage : toolMessages) {
             messages.add(objectMapper.convertValue(toolMessage, Map.class));
             String toolContent = toolMessage.path("content").asText("");
             String toolName = toolMessage.path("tool_name").asText("");
+            String tcId = toolMessage.path("tool_call_id").asText("");
+            if (tcId != null && !tcId.isEmpty()) {
+                answeredIds.add(tcId);
+            }
             saveToolMessage(storageConversationId, formatToolResult(toolContent, toolName));
+        }
+
+        // 1.1 ★ 结构性保证：为「本批次声明了、但没有拿到结果」的 tool_call 补一条占位 tool 消息。
+        //     原因：assistant.tool_calls 与 tool 消息必须严格一一配对，缺一条接口就 400，且会永久污染
+        //           该会话上下文（表现为"中断后继续聊，整个会话再也发不出消息"）。
+        //     典型触发：工具执行途中任务被取消 / 工具返回 null / 结果构建抛异常 / SSE 断开导致部分结果丢失。
+        //     这里宁可写入"未执行"占位，也不让序列出现缺口。
+        if (toolCalls != null && toolCalls.isArray()) {
+            for (JsonNode tc : toolCalls) {
+                String tcId = tc.path("id").asText("");
+                if (tcId.isEmpty() || "null".equalsIgnoreCase(tcId) || answeredIds.contains(tcId)) {
+                    continue;
+                }
+                String toolName = tc.path("function").path("name").asText("unknown");
+                String placeholder = "【工具未执行】任务在该工具返回前被中断，或本次调用没有产生结果，请勿依赖该输出。";
+                Map<String, Object> fallback = new HashMap<>();
+                fallback.put("role", "tool");
+                fallback.put("tool_call_id", tcId);
+                fallback.put("content", placeholder);
+                messages.add(fallback);
+                answeredIds.add(tcId);
+                saveToolMessage(storageConversationId, formatToolResult(placeholder, toolName));
+                log.warn("工具结果缺失，已补占位以保持 tool_call 配对: conversationId={}, tool={}, toolCallId={}",
+                        storageConversationId, toolName, tcId);
+            }
         }
 
         // 2. M5：桌面截图等工具的 user 消息注入（图片只能进 user 消息）

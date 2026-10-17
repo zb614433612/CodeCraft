@@ -195,7 +195,8 @@ public class WebFetchToolLogicTest {
             NetworkToolConfig cfg = new NetworkToolConfig();   // 默认 AUTO 自动探测
             ProxyResolver resolver = new ProxyResolver(cfg);
             System.out.println("  [LIVE] 本机代理探测: " + resolver.describe());
-            WebFetchTool tool = new WebFetchTool(MAPPER, new ConnectivityChecker(cfg, resolver), cfg, resolver);
+            // 传 null：本测试只验证 Jina/本地抓取链路；官方 API 为 null 时 WebFetchTool 自动跳过该分支
+            WebFetchTool tool = new WebFetchTool(MAPPER, new ConnectivityChecker(cfg, resolver), cfg, resolver, null);
             String out = tool.execute(MAPPER.readTree("{\"url\":\"https://example.com\"}"));
             boolean viaJina = out.contains("Jina Reader");
             System.out.println("  [LIVE] 自动模式 example.com → 通道: "
@@ -210,7 +211,7 @@ public class WebFetchToolLogicTest {
             NetworkToolConfig cfg = new NetworkToolConfig();   // AUTO：应探测到本机代理
             cfg.setFetchJinaReaderUrl("https://127.0.0.1:9/"); // 故意指向不可达端口
             ProxyResolver resolver = new ProxyResolver(cfg);
-            WebFetchTool tool = new WebFetchTool(MAPPER, new ConnectivityChecker(cfg, resolver), cfg, resolver);
+            WebFetchTool tool = new WebFetchTool(MAPPER, new ConnectivityChecker(cfg, resolver), cfg, resolver, null);
             String out = tool.execute(MAPPER.readTree("{\"url\":\"https://example.com\"}"));
             boolean degraded = out.contains("本地抓取");
             System.out.println("  [LIVE] 降级场景（Jina 地址不可达）example.com → "
@@ -224,7 +225,7 @@ public class WebFetchToolLogicTest {
     static WebFetchTool newNeverTool(NetworkToolConfig cfg) {
         cfg.getProxy().setMode("NEVER");
         ProxyResolver resolver = new ProxyResolver(cfg);
-        return new WebFetchTool(MAPPER, new ConnectivityChecker(cfg, resolver), cfg, resolver);
+        return new WebFetchTool(MAPPER, new ConnectivityChecker(cfg, resolver), cfg, resolver, null);
     }
 
     static String headline(String text) {
