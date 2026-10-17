@@ -370,6 +370,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           OLD_NAME="CodeCraft-${{ steps.version.outputs.version }}.dmg"
-          gh release delete-asset "v${{ steps.version.outputs.version }}" "$OLD_NAME" --yes \
+          # 注意：create-release job 中未 checkout 代码，gh 无法从 git remote 推断仓库，
+          # 必须显式指定 --repo，否则会因缺少仓库上下文而失败（历史重发时旧包未被清理的原因）
+          gh release delete-asset "v${{ steps.version.outputs.version }}" "$OLD_NAME" --yes --repo "${{ github.repository }}" \
             && echo "✅ 已清理旧命名产物: $OLD_NAME" \
             || echo "ℹ️ 旧命名产物不存在或未清理: $OLD_NAME（请人工确认 Release 资产列表）"
