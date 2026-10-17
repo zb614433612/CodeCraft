@@ -6,15 +6,15 @@
   <img src="https://img.shields.io/badge/Spring_Boot-3.4-blue" alt="Spring Boot 3.4">
   <img src="https://img.shields.io/badge/Vue-3.4-42b883" alt="Vue 3.4">
   <img src="https://img.shields.io/badge/Electron-34.5-47848f" alt="Electron 34.5">
-  <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Ollama%20%7C%20MiMo%20%7C%20MiniMax-4f46e5" alt="Multi-LLM">
+  <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20GPT%20%7C%20Claude%20%7C%20Qwen%20%7C%20Ark%20%7C%20Ollama%20%7C%20MiMo%20%7C%20MiniMax-4f46e5" alt="Multi-LLM">
 </p>
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **27 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / GPT / OpenAI-compatible / Anthropic / Qwen / Volcengine Ark / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **27 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
-- 🌐 **Multi-LLM Provider Support**: Supports DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax with unified LLMClient interface, runtime dynamic switching. With the official DeepSeek API (`api.deepseek.com`), `web_search` / `web_fetch` automatically use the official `/v1/tools/search` and `/v1/tools/fetch` endpoints, falling back to Bing/Baidu and Jina/local fetching on failure
+- 🌐 **Multi-LLM Provider Support**: 10 provider templates — DeepSeek, GPT (OpenAI official), OpenAI (protocol contract), Anthropic (protocol contract), Qwen (Alibaba Model Studio), Volcengine Ark (Doubao), Ollama, MiMo, MiniMax, and Custom — with a unified LLMClient interface and runtime dynamic switching. **OpenAI / Anthropic are protocol-contract templates**: any service that follows the spec (Azure, OpenRouter, proxies, vLLM / LM Studio / One-API gateways, GLM / DeepSeek / MiniMax `/anthropic` layers) plugs in directly, with automatic protocol conversion (Anthropic `image_url → image/source`, tool schema translation). Dedicated templates (GPT / DeepSeek / Ark / Qwen) enable vendor-specific parameters (`reasoning_effort` / `thinking.type` / `enable_thinking`, `max_completion_tokens`, vision, web search). Enhanced capabilities are opt-in, skipped when credentials are missing, and always fall back: search (DeepSeek official, Ark, MiniMax) and balance/quota (DeepSeek, Volcengine AK/SK, Alibaba Cloud AK/SK, MiniMax quota, MiMo console cookie)
 - 🗣️ **Natural Language Programming**: Just describe what you need, AI plans and executes automatically
 - 🧰 **27-Tool Ecosystem**: File operations, commands, network, database, Git, agents, skills & lessons, desktop automation — covering the full development workflow
 - 🧩 **Task Decomposition & Parallel Sub-Agents**: Complex tasks are automatically decomposed, sub-agents work in parallel

@@ -3,6 +3,8 @@ package com.example.agentdeepseek.tool.impl;
 import com.example.agentdeepseek.config.NetworkToolConfig;
 import com.example.agentdeepseek.config.ProxyResolver;
 import com.example.agentdeepseek.service.llm.DeepSeekToolsApiClient;
+import com.example.agentdeepseek.service.llm.MiniMaxCodingPlanClient;
+import com.example.agentdeepseek.service.llm.VolcengineSearchApiClient;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
@@ -80,16 +82,26 @@ public class SearchTool implements Tool {
     /** DeepSeek 官方网页搜索 API（当前 Provider 为 DeepSeek 官网时优先使用） */
     private final DeepSeekToolsApiClient deepSeekToolsApi;
 
+    /** 火山引擎联网搜索 API（当前 Provider 为火山方舟且配置了联网搜索 Key 时优先使用） */
+    private final VolcengineSearchApiClient volcengineSearchApi;
+
+    /** MiniMax Coding Plan 搜索 API（当前 Provider 为 MiniMax 且有可用 Key 时优先使用） */
+    private final MiniMaxCodingPlanClient miniMaxSearchApi;
+
     /** 搜索结果短时缓存（key = 规范化 query + "|" + 期望条数） */
     private final Map<String, CacheEntry> searchCache = new ConcurrentHashMap<>();
 
     public SearchTool(ObjectMapper objectMapper, NetworkToolConfig config, ProxyResolver proxyResolver,
-                      DeepSeekToolsApiClient deepSeekToolsApi) {
+                      DeepSeekToolsApiClient deepSeekToolsApi,
+                      VolcengineSearchApiClient volcengineSearchApi,
+                      MiniMaxCodingPlanClient miniMaxSearchApi) {
         this.objectMapper = objectMapper;
         this.config = config;
         this.proxyResolver = proxyResolver;
         this.userAgent = config.getFetchUserAgent();
         this.deepSeekToolsApi = deepSeekToolsApi;
+        this.volcengineSearchApi = volcengineSearchApi;
+        this.miniMaxSearchApi = miniMaxSearchApi;
     }
 
     @Override
@@ -109,9 +121,9 @@ public class SearchTool implements Tool {
                 + "4) 支持基本算符：site:domain.com、\"精确短语\"。"
                 + "5) 中文内容自动优先中国版 Bing，英文/技术内容自动优先全球版 Bing，无需手动指定。"
                 + "6) 网络自适应：检测到本机代理则走代理，否则直连国内源兜底，无需手动配置。"
-                + "7) 当前会话使用 DeepSeek 官方 API 时，自动改用 DeepSeek 官方网页搜索接口（结构化结果、含权威性与时效性打分），"
-                + "失败会自动回退站点抓取，无需手动指定。"
-                + "搜索源为 DeepSeek 官方搜索 / Bing 全球版 / Bing 中国版 / 百度（自动切换聚合），无需额外配置。";
+                + "7) 当前会话使用 DeepSeek 官方 API 时自动改用 DeepSeek 官方网页搜索接口；使用火山方舟并配置了联网搜索 Key 时改用火山联网搜索；"
+                + "使用 MiniMax 并配置了 Coding Plan Key 时改用 MiniMax 官方搜索（均为结构化结果），失败会自动回退站点抓取，无需手动指定。"
+                + "搜索源为 DeepSeek 官方搜索 / 火山联网搜索 / MiniMax 搜索 / Bing 全球版 / Bing 中国版 / 百度（自动切换聚合），无需额外配置。";
     }
 
     @Override
@@ -153,6 +165,52 @@ public class SearchTool implements Tool {
         if (cached != null) {
             log.info("网络搜索命中缓存: {}", query);
             return cached;
+        }
+
+        // ★ 火山引擎联网搜索优先：当前会话 Provider 为火山方舟且配置了联网搜索 Key 时，调用豆包搜索 Custom API
+        //   （结构化结果 + 正文/摘要，质量高于站点抓取）；失败或无结果时自动回退原有 Bing/百度链路
+        if (volcengineSearchApi != null && volcengineSearchApi.isAvailable()) {
+            try {
+                List<VolcengineSearchApiClient.WebHit> hits = volcengineSearchApi.search(query, maxResults);
+                if (hits != null && !hits.isEmpty()) {
+                    List<SearchResult> official = new ArrayList<>(hits.size());
+                    for (VolcengineSearchApiClient.WebHit hit : hits) {
+                        official.add(new SearchResult(hit.title(), hit.url(), hit.bestDescription()));
+                    }
+                    List<SearchResult> rankedOfficial = dedupRankAndLimit(official, maxResults);
+                    if (!rankedOfficial.isEmpty()) {
+                        String text = formatResults(rankedOfficial, List.of("火山引擎联网搜索 API"));
+                        putCache(cacheKey, text);
+                        return text;
+                    }
+                }
+                log.info("火山引擎联网搜索无结果，回退站点抓取: {}", query);
+            } catch (Exception e) {
+                log.warn("火山引擎联网搜索失败，回退站点抓取: query={}, error={}", query, e.getMessage());
+            }
+        }
+
+        // ★ MiniMax Coding Plan 搜索优先：当前 Provider 为 MiniMax 且有可用 Key 时，调用官方 /v1/coding_plan/search
+        //   （结构化结果 organic[title/link/snippet/date]）；失败或无结果时自动回退原有 Bing/百度链路
+        if (miniMaxSearchApi != null && miniMaxSearchApi.isAvailable()) {
+            try {
+                List<MiniMaxCodingPlanClient.WebHit> hits = miniMaxSearchApi.search(query, maxResults);
+                if (hits != null && !hits.isEmpty()) {
+                    List<SearchResult> official = new ArrayList<>(hits.size());
+                    for (MiniMaxCodingPlanClient.WebHit hit : hits) {
+                        official.add(new SearchResult(hit.title(), hit.url(), hit.bestDescription()));
+                    }
+                    List<SearchResult> rankedOfficial = dedupRankAndLimit(official, maxResults);
+                    if (!rankedOfficial.isEmpty()) {
+                        String text = formatResults(rankedOfficial, List.of("MiniMax 联网搜索 API"));
+                        putCache(cacheKey, text);
+                        return text;
+                    }
+                }
+                log.info("MiniMax 联网搜索无结果，回退站点抓取: {}", query);
+            } catch (Exception e) {
+                log.warn("MiniMax 联网搜索失败，回退站点抓取: query={}, error={}", query, e.getMessage());
+            }
         }
 
         // ★ DeepSeek 官方搜索优先：当前会话使用的 Provider 是 DeepSeek 官网 API 时，直接调用官方 /v1/tools/search

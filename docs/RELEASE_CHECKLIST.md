@@ -8,8 +8,8 @@
 ## 发布前检查
 
 > 🚀 **推荐方式**：使用一键构建脚本，自动完成下面 Step 1~3：
-> - Windows：`scripts\build.bat v2.0.3`
-> - Mac/Linux：`./scripts/build.sh v2.0.3`
+> - Windows：`scripts\build.bat v2.0.4`
+> - Mac/Linux：`./scripts/build.sh v2.0.4`
 >
 > 以下为手动步骤，供需要精细控制的场景参考。
 

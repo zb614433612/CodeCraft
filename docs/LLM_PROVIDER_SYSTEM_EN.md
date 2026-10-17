@@ -1,18 +1,18 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v2.0.3 | Updated: 2026-10-17 | Audience: Developers / AI Collaborators
+> Version: v2.0.4 | Updated: 2026-10-18 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---
 
 ## 1. System Overview
 
-CodeCraft supports multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.). Users can dynamically switch between different LLM Providers at runtime, and each Agent can be bound to a specific Provider.
+CodeCraft supports multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax / Volcengine Ark, etc.). Users can dynamically switch between different LLM Providers at runtime, and each Agent can be bound to a specific Provider.
 
 ### 1.1 Core Features
 
-- **Multi-Provider Support**: Supports mainstream LLM platforms including DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax
+- **Multi-Provider Support**: Supports mainstream LLM platforms including DeepSeek, OpenAI, Anthropic, Ollama, MiMo, MiniMax, Volcengine Ark
 - **Dynamic Switching**: Frontend can switch Providers at runtime without restarting the service
 - **Agent Binding**: Each Agent can be bound to a specific Provider and model
 - **Unified Interface**: All Providers are called through a unified `LLMClient` interface, shielding platform differences
@@ -284,7 +284,145 @@ public class LLMClientManager {
 | Ollama | `OllamaClient` | `ollama` | Local Ollama service |
 | MiMo | `MiMoClient` | `mimo` | Xiaomi MiMo model |
 | MiniMax | `MiniMaxClient` | `minimax` | MiniMax API (OpenAI-compatible, thinking adaptive + reasoning_split) |
+| Volcengine Ark | `VolcengineArkClient` | `volcengine` (aliases `ark` / `doubao`) | Ark (Doubao and third-party models hosted on Ark), OpenAI-compatible; thinking.type = enabled/disabled/auto |
 | Custom | `OpenAIClient` | `custom` | Minimal OpenAI-compatible mode |
+
+### 4.5 Volcengine Ark Enhanced Capabilities
+
+Beyond chat, Volcengine Ark exposes several platform APIs. They are integrated with the same principle: **enable per capability, silently skip when credentials are missing, always fall back on failure**.
+
+| Capability | Implementation | Required config | Notes |
+|------------|----------------|-----------------|-------|
+| Chat / tool calling | `VolcengineArkClient` | template `volcengine` + `apiKey` (Ark API Key) | Endpoint resolution appends `/api/v3/chat/completions` (works with or without `/api/v3` in baseUrl); `thinking.type` maps to `enabled/disabled/auto`; `reasoning_effort` is only sent for `deepseek-v4` models to avoid 400s |
+| Image understanding | `FileVisionService` + `image_url` blocks | A vision-capable model | Ark only accepts `detail = low/high/xhigh`; the adapter normalizes OpenAI-style `auto` to `high`. `doubao-seed` models accept images, while `deepseek-*` text models on Ark do not (blocked up-front with a clear message) |
+| Balance query | `VolcengineBillingClient` + `ProviderBalanceService` | `accessKey` / `secretKey` in `extraConfig` | Billing Center OpenAPI `QueryBalanceAcct` (V4 signature, POST to `billing.volcengineapi.com`); returns available/cash balance, credit limit, frozen and arrears amounts; only this capability is disabled when AK/SK is absent |
+| Web search | `VolcengineSearchApiClient` | `searchApiKey` in `extraConfig`, or env `VOLCENGINE_SEARCH_API_KEY` / `WEB_SEARCH_API_KEY` | Doubao Search Custom edition (`POST https://open.feedcoopapi.com/search_api/web_search`) returning structured results (Title/Url/Summary/Content/AuthInfoLevel); `web_search` prefers it and falls back to Bing/Baidu on failure |
+| Web fetch | `VolcengineSearchApiClient#fetchByUrl` | Same as above | Best-effort fetch: queries by URL host + path keywords and returns the matching URL's body; falls back to Jina Reader / local fetch when there is no hit |
+
+Configuration example (the Provider management page supports the same fields):
+
+```sql
+UPDATE llm_provider SET
+  request_template = 'volcengine',
+  base_url         = 'https://ark.cn-beijing.volces.com/api/v3',
+  api_key          = '<ARK_API_KEY>',
+  default_model    = 'doubao-seed-2-1-pro-260628',
+  extra_config     = '{"accessKey":"AK...","secretKey":"SK...","searchApiKey":"..."}'
+WHERE code = 'volcengine';
+```
+
+> `extra_config` is an optional column added for platform-specific credentials (auto-created via `ALTER TABLE` at startup — no manual migration needed).
+> The list API masks `accessKey` / `secretKey` / `searchApiKey`; submitting a masked value means "unchanged".
+> The web-search key is **not** the Ark API key (create it in the Search console); when absent, the capability is skipped silently and chat is unaffected.
+> All capability checks rely on "request template + actual host + credential validity" rather than the user-defined providerCode.
+
+### 4.6 MiniMax / Xiaomi MiMo Enhanced Capabilities
+
+> Short version: **MiniMax supports all three (search / image understanding / quota); MiMo supports image understanding and (cookie-based) balance only; neither exposes a public web-fetch API.**
+
+| Platform | Capability | Support | Implementation / config |
+|----------|------------|---------|-------------------------|
+| MiniMax | Web search | ✅ Yes | `MiniMaxCodingPlanClient` → `POST {host}/v1/coding_plan/search` (body `{"q":"..."}`), returns `organic[title/link/snippet/date]`; `web_search` prefers it and falls back to Bing/Baidu |
+| MiniMax | Image understanding | ✅ Yes (two paths) | ① Model side: `MiniMax-M3` / VL models use chat multimodal `image_url` blocks; ② Dedicated API: `POST {host}/v1/coding_plan/vlm` (prompt + image_url, URL or base64; JPEG/PNG/WebP) |
+| MiniMax | Balance / quota | ⚠️ Quota only | `GET {host}/v1/token_plan/remains` (Coding Plan / Token Plan key) returning remaining percent, counts and reset time (`balanceType=quota`). MiniMax has no public cash-balance OpenAPI, so the UI shows "quota xx%" |
+| MiniMax | Web fetch | ❌ No official API | Keeps the Jina Reader / local fetch pipeline |
+| Xiaomi MiMo | Image understanding | ✅ Yes | `mimo-v2.5` / `mimo-v2.5-pro` are natively multimodal (image/audio/video); uses chat `image_url` blocks and strips the undocumented `detail` field. Early text-only models are blocked up-front |
+| Xiaomi MiMo | Balance | ⚠️ Console cookie required | MiMo has no balance OpenAPI (an `sk-` inference key cannot read it): `GET https://platform.xiaomimimo.com/api/v1/balance` with `{"mimoCookie":"..."}` in `extraConfig`. The cookie lasts about 24 hours and the UI tells you to re-paste it |
+| Xiaomi MiMo | Web search / fetch | ❌ No official API | Keeps Bing/Baidu + Jina/local pipeline |
+
+Configuration examples (Provider page → "Extended config"):
+
+```json
+// MiniMax (search + quota; apiHost is optional and defaults to the baseUrl host:
+// api.minimaxi.com for China, api.minimax.io for global)
+{"codingPlanKey":"sk-cp-...","apiHost":"https://api.minimaxi.com"}
+
+// Xiaomi MiMo (balance; copy the Cookie header of the balance request from DevTools)
+{"mimoCookie":"api-platform_serviceToken=...; userId=..."}
+```
+
+> - MiniMax search/quota endpoints expect a **Coding Plan / Token Plan key**; ordinary model keys may be rejected (`base_resp.status_code` != 0, e.g. `2062 no active token plan`). On failure the search falls back and the quota chip is simply hidden — chat is unaffected.
+> - `current_interval_usage_count` actually means **remaining** (not consumed); the parser prefers `current_interval_remaining_percent` and uses counts as a fallback.
+> - The MiMo cookie only lives ~24 hours (platform limitation); when it expires the UI asks you to re-paste instead of failing silently.
+
+### 4.7 Qwen (Alibaba Cloud Model Studio / DashScope)
+
+| Capability | Support | Implementation / config |
+|------------|---------|-------------------------|
+| Chat / tool calling | ✅ Yes | `QwenClient` on the OpenAI-compatible endpoint `{baseUrl}/compatible-mode/v1/chat/completions` (smart endpoint resolution: bare host gets `/compatible-mode/v1` appended, full URLs are used as-is) |
+| Thinking mode | ✅ Yes | Qwen extension params: `enable_thinking` (`non-thinking→false`, `thinking / thinking_max→true`) + `thinking_budget` (defaults to 8192 for `thinking_max`; override with `extraConfig.thinkingBudget`; omitted when unset so the model default applies) |
+| Image understanding | ✅ Yes | Qwen-VL / Qwen3-VL / Omni models use chat multimodal `image_url` blocks; text-only models (`qwen-plus`, `qwen-max`) are blocked up-front with a clear message |
+| Chat-level web search | ✅ Optional | `{"enableSearch": true}` in `extraConfig` sends `enable_search: true` + `search_options` (DashScope does not support OpenAI's `web_search_options`) |
+| Balance query | ✅ Yes | Alibaba Cloud Billing `QueryAccountBalance` (BssOpenApi 2017-12-14, RPC-style HMAC-SHA1 signature); requires account-level `accessKey` / `secretKey` in `extraConfig` |
+| Structured web search | ❌ No | `enable_search` is a chat-level capability (the model decides to search and answers directly), not a "query → result list" API; the `web_search` tool keeps using Bing/Baidu |
+
+Configuration example (Provider page → "Extended config"):
+
+```json
+{
+  "enableSearch": true,          // optional: chat-level web search
+  "thinkingBudget": 4096,        // optional: thinking budget cap
+  "accessKey": "LTAI...",        // balance query: Alibaba Cloud AK
+  "secretKey": "..."             // balance query: Alibaba Cloud SK
+}
+```
+
+> DashScope API keys are region-bound: a Beijing key against the Singapore endpoint returns 401 `invalid_api_key`.
+> Prefer the workspace-specific base URL `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` (the legacy `https://dashscope.aliyuncs.com` still works).
+
+### 4.8 OpenAI / Anthropic as Protocol Contracts
+
+The OpenAI and Anthropic templates are positioned as **protocol contracts**: any service that follows the spec can be plugged in
+(official APIs, Azure, OpenRouter and proxies, self-hosted gateways such as vLLM / LM Studio / One-API, and the `/anthropic`
+compatibility layers from GLM / DeepSeek / MiniMax).
+
+| Dimension | OpenAI (`openai` / `custom`) | Anthropic (`anthropic`) |
+|-----------|------------------------------|-------------------------|
+| Endpoint resolution | Bare host → `/v1/chat/completions`; existing `/v1` is not duplicated; a full `/chat/completions` URL is used as-is (absolute URL, so baseUrl paths are never dropped) | Bare host → `/v1/messages`; `/anthropic` compatibility prefix → `/anthropic/v1/messages`; a full `/messages` URL is used as-is |
+| Parameter tiering | **Only official** (`api.openai.com`) receives `max_tokens` (8192) and `reasoning_effort`; third-party compatible services get neither (limits and support vary — let the server decide, avoiding 400s) | `thinking` is sent **only when enabled** (many compatibility layers reject the field); `max_tokens` defaults to 8192, overridable via `extraConfig.maxTokens`, and is widened to `budget + 8192` in thinking mode to satisfy `max_tokens > budget_tokens` |
+| Model key normalization | Prefixed names like `openai/gpt-4o` or `azure/o3-mini` are matched on the **last segment**, so proxy naming never misclassifies a reasoning model | — |
+| Images | `image_url` blocks are passed through | **Automatic protocol conversion**: `image_url` → `image/source` (`data:` URLs become `base64` + `media_type`; http(s) becomes `url`) |
+| Tools | `tools` passed through (OpenAI function-calling format) | `tools` converted to `{name, description, input_schema}`; `tool_choice` removed for compatibility |
+| Reasoning models | `o1 / o3 / o4 / gpt-5` families switch to `max_completion_tokens` and drop `temperature` | — |
+
+> Both adapters decide parameters by "protocol + actual baseUrl" instead of vendor names, so any compatible service can be attached safely.
+> Vendor-specific capabilities (dedicated vision APIs, balance, structured search, etc.) belong to their dedicated templates.
+
+### 4.9 GPT (official-specialized) vs OpenAI (protocol contract)
+
+Both templates speak OpenAI Chat Completions, but their responsibilities are **strictly separated** — do not mix them up:
+
+| Dimension | `gpt` (official, `GptClient`) | `openai` (contract, `OpenAIClient`) |
+|-----------|-------------------------------|--------------------------------------|
+| Target | OpenAI official GPT / o-series (`api.openai.com` or an official proxy) | Azure / OpenRouter / proxies / vLLM / LM Studio / One-API — **any compatible service** |
+| Endpoint | Defaults to `https://api.openai.com/v1/chat/completions` | Any baseUrl (custom proxy paths are used as-is when complete) |
+| Output cap | **Always sends** `max_completion_tokens` (8192 normal / 16384 reasoning; injected `max_tokens` is converted) | **Never sends** it (limits vary — let the server decide, avoiding 400s) |
+| `reasoning_effort` | **Model-aware**: GPT-5 supports `none`/`minimal`; o-series rejects `none` (so nothing is sent for non-thinking); `thinking→medium`, `thinking_max→high`; explicit `low`/`high`/`xhigh` pass through | Never sent (third-party support varies) |
+| `temperature` | Removed for reasoning models or when reasoning is active (non-`none`) | Removed for reasoning models only |
+| `stream_options` | Streaming requests automatically include `{"include_usage": true}` | Not added |
+| Model key | `openai/gpt-5`, `azure/gpt-5` matched on the last segment | Same |
+| Typical misuse | Pointing a **third-party proxy** at `gpt` → may 400 due to `max_completion_tokens` / `reasoning_effort` / `stream_options` | Pointing **official GPT** at `openai` → loses reasoning-level control and stream usage stats |
+
+> Two official gotchas: ① `max_tokens` is deprecated for the new endpoints and GPT-5 / o-series reject it with 400 — use `max_completion_tokens`;
+> ② reasoning models (and requests with `reasoning_effort` other than `none`) do **not** accept `temperature`.
+
+### 4.10 Adapter Selection Matrix (maintenance reference)
+
+| requestTemplate | Adapter | Use for | Do not use for |
+|-----------------|---------|---------|----------------|
+| `deepseek` | `DeepSeekClient` | DeepSeek official API (native `thinking.type` / `reasoning_effort`) | DeepSeek on Ark (use `volcengine`), proxies (use `openai`) |
+| `volcengine` / `ark` / `doubao` | `VolcengineArkClient` | Volcengine Ark (Doubao + hosted models), `thinking.type=auto/enabled/disabled` | DeepSeek official, third-party proxies |
+| `qwen` / `dashscope` / `tongyi` | `QwenClient` | Alibaba Model Studio Qwen (incl. Qwen-VL), `enable_thinking` / `enable_search` | Official GPT/o-series (use `gpt`), other compatible services (use `openai`) |
+| `gpt` / `gpt-official` / `chatgpt` | `GptClient` | OpenAI official GPT / o-series: `max_completion_tokens` + full `reasoning_effort` range + `stream_options` | Any third-party compatible service |
+| `openai` | `OpenAIClient` | **Protocol contract**: any OpenAI-compatible service | Official GPT when reasoning-level control is needed (use `gpt`) |
+| `anthropic` | `AnthropicClient` | **Protocol contract**: Anthropic official / Claude proxies / GLM, DeepSeek, MiniMax `/anthropic` layers | OpenAI-protocol services |
+| `ollama` | `OllamaClient` | Local / intranet Ollama (`/api/chat`), offline scenarios | Cloud OpenAI-compatible APIs (vLLM / LM Studio `/v1` → use `openai`) |
+| `mimo` / `xiaomi-mimo` | `MiMoClient` | Xiaomi MiMo platform v2.5 series (multimodal) | Other compatible services |
+| `minimax` / `minimax-cn` / `minimax-intl` | `MiniMaxClient` | MiniMax OpenAI-compatible endpoints (M3 / M2.x) | MiniMax `/anthropic` endpoint (use `anthropic`) |
+| `custom` | `OpenAIClient` (minimal mode) | Unknown gateways (fallback) | Prefer a specific template when one matches (more accurate parameters) |
+
+> Every adapter class carries an "适用范围（选型指引）" block in its Javadoc (applicable / not applicable / exclusive capabilities);
+> this matrix is kept in sync with the `LLMClientManager` class comment.
 
 ### 4.4 DeepSeek Official Tool API Integration (v2.0.3)
 

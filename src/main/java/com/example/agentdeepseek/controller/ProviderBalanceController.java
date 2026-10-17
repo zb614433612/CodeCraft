@@ -17,13 +17,13 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>
  * 供聊天页面展示余额使用（登录用户即可访问，无需管理员权限——
  * 与 {@link LLMProviderController} 的管理员 CRUD 接口不同）。
- * 目前仅 DeepSeek 平台支持余额查询。
+ * 目前支持 DeepSeek（GET /user/balance）与火山引擎（费用中心 QueryBalanceAcct，需 AK/SK）。
  * </p>
  */
 @Slf4j
 @RestController
 @RequestMapping("/api/llm-providers")
-@Tag(name = "LLM Provider 余额", description = "查询 Provider 账户余额（目前仅 DeepSeek 支持）")
+@Tag(name = "LLM Provider 余额", description = "查询 Provider 账户余额（DeepSeek / 火山引擎）")
 public class ProviderBalanceController {
 
     private final ProviderBalanceService providerBalanceService;

@@ -126,6 +126,7 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                     "api_key VARCHAR(200), " +
                     "default_model VARCHAR(100), " +
                     "model_list TEXT, " +
+                    "extra_config TEXT, " +
                     "request_template VARCHAR(30) DEFAULT 'deepseek', " +
                     "is_default TINYINT DEFAULT 0, " +
                     "enabled TINYINT DEFAULT 1, " +
@@ -134,6 +135,14 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                     "updated_at DATETIME NOT NULL" +
                     ")");
             log.info("AgentConfigService: llm_provider 表初始化完成");
+
+            // 兼容旧表：扩展配置列（火山引擎 AK/SK、联网搜索 API Key 等平台增强凭证）
+            try {
+                jdbcTemplate.execute("ALTER TABLE llm_provider ADD COLUMN extra_config TEXT");
+                log.info("AgentConfigService: llm_provider.extra_config 列已添加（或已存在）");
+            } catch (Exception e) {
+                log.debug("AgentConfigService: extra_config 列可能已存在，跳过: {}", e.getMessage());
+            }
         } catch (Exception e) {
             log.warn("AgentConfigService: 初始化 llm_provider 表失败: {}", e.getMessage());
         }

@@ -3,6 +3,7 @@ package com.example.agentdeepseek.tool.impl;
 import com.example.agentdeepseek.config.NetworkToolConfig;
 import com.example.agentdeepseek.config.ProxyResolver;
 import com.example.agentdeepseek.service.llm.DeepSeekToolsApiClient;
+import com.example.agentdeepseek.service.llm.VolcengineSearchApiClient;
 import com.example.agentdeepseek.tool.Tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,6 +65,9 @@ public class WebFetchTool implements Tool {
     /** DeepSeek 官方网页抓取 API（当前 Provider 为 DeepSeek 官网时优先使用） */
     private final DeepSeekToolsApiClient deepSeekToolsApi;
 
+    /** 火山引擎联网搜索正文能力（当前 Provider 为火山方舟且配置了联网搜索 Key 时优先使用） */
+    private final VolcengineSearchApiClient volcengineSearchApi;
+
     /** 本地抓取模板（与代理状态绑定，代理启停时自动重建） */
     private volatile RestTemplate fetchTemplate;
     private volatile String fetchTemplateProxyKey;
@@ -77,12 +81,14 @@ public class WebFetchTool implements Tool {
 
     public WebFetchTool(ObjectMapper objectMapper, ConnectivityChecker connectivityChecker,
                         NetworkToolConfig config, ProxyResolver proxyResolver,
-                        DeepSeekToolsApiClient deepSeekToolsApi) {
+                        DeepSeekToolsApiClient deepSeekToolsApi,
+                        VolcengineSearchApiClient volcengineSearchApi) {
         this.objectMapper = objectMapper;
         this.connectivityChecker = connectivityChecker;
         this.config = config;
         this.proxyResolver = proxyResolver;
         this.deepSeekToolsApi = deepSeekToolsApi;
+        this.volcengineSearchApi = volcengineSearchApi;
         this.fetchTemplate = buildRestTemplate(config.getFetchReadTimeout());
         this.fetchTemplateProxyKey = proxyResolver.signature();
     }
@@ -216,6 +222,22 @@ public class WebFetchTool implements Tool {
         }
 
         boolean privateTarget = isPrivateHost(uri.getHost());
+
+        // ★ 阶段零之一：火山引擎联网搜索正文优先——当前会话 Provider 为火山方舟且配置了联网搜索 Key 时，
+        //   以页面 URL 关键词检索并命中同 URL 的正文（best-effort）；未命中或失败时自动回退后续抓取链路。
+        if (!privateTarget && volcengineSearchApi != null && volcengineSearchApi.isAvailable()) {
+            try {
+                VolcengineSearchApiClient.FetchResult enhanced = volcengineSearchApi.fetchByUrl(url);
+                if (enhanced != null && enhanced.content() != null && !enhanced.content().isBlank()) {
+                    String content = (enhanced.title() == null || enhanced.title().isBlank())
+                            ? enhanced.content()
+                            : "# " + enhanced.title().trim() + "\n\n" + enhanced.content();
+                    return formatResult(url, "火山引擎联网搜索（正文）", content);
+                }
+            } catch (Exception e) {
+                log.warn("火山引擎联网搜索正文失败，回退原有抓取: url={}, error={}", url, e.getMessage());
+            }
+        }
 
         // ★ 阶段零：DeepSeek 官方抓取优先——当前会话使用的 Provider 是 DeepSeek 官网 API 且目标为公网地址时，
         //   直接调用官方 /v1/tools/fetch（返回 Markdown 正文，对反爬 / JS 页面处理更好）；

@@ -10,6 +10,8 @@ export interface ProviderConfig {
   defaultModel?: string
   modelList?: string        // JSON 数组字符串
   parsedModelList?: string[] // 前端解析后的模型数组
+  /** 扩展配置（JSON 字符串）：火山引擎 accessKey/secretKey/searchApiKey 等平台增强凭证 */
+  extraConfig?: string
   requestTemplate?: string
   isDefault?: number
   enabled?: number
@@ -70,18 +72,39 @@ export interface ProviderBalanceInfo {
   totalBalance: string
   grantedBalance: string
   toppedUpBalance: string
+  /** 现金余额（火山引擎 / MiMo） */
+  cashBalance?: string
+  /** 信控额度（火山引擎）或剩余透支额度（MiMo） */
+  creditLimit?: string
+  /** 冻结金额（火山引擎 / MiMo） */
+  freezeAmount?: string
+  /** 欠费金额（火山引擎） */
+  arrearsBalance?: string
+  /** 账号 ID（火山引擎） */
+  accountId?: string
+  /** 剩余额度百分比（quota 类型：MiniMax Token Plan） */
+  remainingPercent?: number
+  /** 剩余次数（quota 类型） */
+  remainingCount?: number
+  /** 总额次数（quota 类型） */
+  totalCount?: number
+  /** 额度重置时间 epoch ms（quota 类型） */
+  resetAt?: number
+  /** 套餐名称（quota 类型） */
+  planName?: string
 }
 
-/** Provider 账户余额（目前仅 DeepSeek 支持查询） */
+/** Provider 账户余额 / 套餐额度（balance=金额，quota=额度百分比） */
 export interface ProviderBalance {
   providerCode: string
+  balanceType?: 'balance' | 'quota'
   isAvailable: boolean
   balanceInfos: ProviderBalanceInfo[]
   updatedAt?: number
 }
 
 /**
- * 查询 Provider 账户余额（目前仅 DeepSeek 支持）
+ * 查询 Provider 账户余额 / 额度（DeepSeek / 火山引擎 / MiniMax / MiMo 支持）
  */
 export async function getProviderBalance(code: string) {
   return request<ProviderBalance>(`/llm-providers/${code}/balance`, { method: 'GET' })

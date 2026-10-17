@@ -13,14 +13,24 @@ import java.util.*;
 /**
  * Ollama 本地模型的 LLMClient 实现
  *
+ * <h3>适用范围（选型指引）</h3>
+ * <ul>
+ *   <li><b>适用</b>：本机 / 内网 Ollama 服务（{@code /api/chat}），运行 llama、qwen、deepseek-r1 等
+ *       开源权重模型，离线或数据不出网的场景</li>
+ *   <li><b>不适用</b>：任何云端 OpenAI 兼容 API；Ollama Cloud / vLLM / LM Studio 的
+ *       {@code /v1/chat/completions} 端点请用 {@code openai} 公共契约</li>
+ *   <li><b>专属能力</b>：原生 {@code /api/chat} 协议；{@code options} 内合并采样参数；
+ *       {@code think=true}（0.6+ 推理模型）；保留 {@code tools}（0.4+ 支持函数调用）</li>
+ * </ul>
+ *
  * <h3>与 OpenAI/DeepSeek 的关键差异</h3>
  * <table>
  *   <tr><th>特性</th><th>OpenAI/DeepSeek</th><th>Ollama</th></tr>
  *   <tr><td>端点</td><td>/v1/chat/completions</td><td>/api/chat</td></tr>
  *   <tr><td>认证</td><td>Authorization: Bearer xxx</td><td>无需认证（本地服务）</td></tr>
  *   <tr><td>temperature</td><td>顶层字段</td><td>放在 options 子对象中</td></tr>
- *   <tr><td>thinking</td><td>支持</td><td>不支持（忽略）</td></tr>
- *   <tr><td>tools</td><td>支持 function calling</td><td>部分模型支持（当前忽略）</td></tr>
+ *   <tr><td>thinking</td><td>支持</td><td>顶层 think=true/false（0.6+ 推理模型）</td></tr>
+ *   <tr><td>tools</td><td>支持 function calling</td><td>0.4+ 已支持；旧实现会剔除 tools，现已保留</td></tr>
  *   <tr><td>SSE 格式</td><td>data: {"choices":[...]}</td><td>每行一个完整 JSON，含 message.content</td></tr>
  *   <tr><td>响应 content</td><td>choices[0].message.content</td><td>message.content (string)</td></tr>
  * </table>
@@ -50,8 +60,13 @@ public class OllamaClient extends AbstractLLMClient {
 
     @Override
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
-        // Ollama 不支持 thinking 参数
-        return Collections.emptyMap();
+        // Ollama 0.6+ 通过顶层 think 开关控制推理模型（qwen3 / deepseek-r1 等）是否输出思考过程。
+        // 仅在需要思考时显式下发 true：对不支持 think 的模型不传该字段，避免服务端报错。
+        Map<String, Object> params = new HashMap<>();
+        if (thinkingMode != null && !thinkingMode.isBlank() && !"non-thinking".equals(thinkingMode)) {
+            params.put("think", true);
+        }
+        return params;
     }
 
     @Override
@@ -62,18 +77,32 @@ public class OllamaClient extends AbstractLLMClient {
                                      String thinkingMode,
                                      boolean stream,
                                      List<Map<String, Object>> tools) {
-        // ===== 1. Ollama 的 temperature 放在 options 子对象中 =====
+        // ===== 1. Ollama 的 temperature 放在 options 子对象中（合并而非覆盖，保留其他采样参数） =====
+        Map<String, Object> options = new HashMap<>();
+        Object existingOptions = request.get("options");
+        if (existingOptions instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() instanceof String key) {
+                    options.put(key, entry.getValue());
+                }
+            }
+        }
         if (request.containsKey("temperature")) {
             Object temp = request.remove("temperature");
-            Map<String, Object> options = new HashMap<>();
             if (temp instanceof Number num) {
                 options.put("temperature", num.doubleValue());
             }
+        }
+        if (!options.isEmpty()) {
             request.put("options", options);
         }
 
-        // ===== 2. Ollama 不支持 function calling tools（忽略） =====
-        request.remove("tools");
+        // ===== 2. tools：现代 Ollama（0.4+）已支持 function calling，保留工具定义 =====
+        // 旧实现无条件 remove("tools")，导致本地模型彻底失去工具能力；不支持的模型会忽略该字段。
+        if (tools == null || tools.isEmpty()) {
+            request.remove("tools");
+        }
+        // tool_choice 不在 Ollama 协议内，仍需剔除
         request.remove("tool_choice");
 
         // ===== 3. 移除 Anthropic/OpenAI 特有字段 =====

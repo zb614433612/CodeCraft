@@ -5,6 +5,71 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [2.0.4] - 2026-10-18
+
+### 🌋 New: Volcengine Ark Provider (chat / vision / balance / web search & fetch)
+
+- **`VolcengineArkClient`** (template `volcengine`, aliases `ark` / `doubao`): endpoint resolution tolerant of baseUrl with/without `/api/v3` or a full `/chat/completions` path; `thinkingMode` maps to Ark `thinking.type` (`non-thinking→disabled`, `thinking / thinking_max→enabled`, `auto→auto`); `reasoning_effort` is only sent for `deepseek-v4` models to avoid `400 InvalidParameter`.
+- **Vision**: `FileVisionService` blocks Ark-hosted `deepseek-*` text models up-front; `doubao-seed` / `vision` / `-vl` models pass. The adapter normalizes OpenAI-style `image_url.detail=auto` to `high` (Ark only accepts low/high/xhigh). Images fall back to base64 `image_url` blocks (Ark has no Files API support here).
+- **Balance**: new `VolcengineBillingClient` calling Billing Center `QueryBalanceAcct` with a self-implemented **V4 HMAC-SHA256 signature**; `ProviderBalanceService` now supports multiple platforms and the VO exposes available/cash/credit/frozen/arrears fields.
+- **Web search**: new `VolcengineSearchApiClient` (Doubao Search Custom edition). `web_search` prefers it and falls back to Bing/Baidu; `web_fetch` gains a best-effort "search body" channel and falls back to Jina/local fetching.
+- **Data model**: new optional `llm_provider.extra_config` column (auto-created via `ALTER TABLE` at startup) for platform credentials; the provider list API masks secrets (`accessKey` / `secretKey` / `searchApiKey` / `apiKey` / `token`).
+
+### 🔧 Improved: existing adapters aligned with current APIs
+
+- **`AnthropicClient`**: fixed the extended-thinking parameter conflict — `max_tokens` (16000) is now strictly greater than `budget_tokens` (8000) and `temperature` is dropped in thinking mode (Anthropic requires 1); normal cap 4096 → 8192.
+- **`OpenAIClient`**: reasoning-model detection covers o1/o3/o4 and gpt-5 families; default output 4096 → 8192, reasoning models use `max_completion_tokens` (16384).
+- **`OllamaClient`**: no longer strips `tools` (Ollama 0.4+ supports function calling); adds `think=true` mapping (0.6+ reasoning models); `temperature` merges into `options` instead of overwriting.
+
+### 🔎 Added: MiniMax / Xiaomi MiMo capabilities
+
+- **`MiniMaxCodingPlanClient`**: web search (`/v1/coding_plan/search` → `organic[title/link/snippet/date]`), image understanding (`/v1/coding_plan/vlm`), Token Plan quota (`/v1/token_plan/remains`; note `current_interval_usage_count` actually means *remaining*).
+- **`ProviderBalanceService`** now covers four platforms: DeepSeek (balance), Volcengine (balance), MiniMax (quota, `balanceType=quota`), MiMo (console-cookie balance, ~24h validity with an explicit re-paste hint).
+- **`ProviderBalanceVO`** gains `balanceType` plus quota fields (`remainingPercent` / `remainingCount` / `totalCount` / `resetAt` / `planName`); the chat page renders quota as "💰 额度 67%".
+- **Vision compatibility**: MiMo v2.5 and MiniMax M3/VL models are supported; `AbstractLLMClient.stripImageDetail` removes the undocumented `image_url.detail` field for MiMo / MiniMax.
+- **Not implemented (honest scope)**: MiniMax exposes no public web-fetch API and MiMo none for search/fetch, so `web_fetch` keeps the Jina/local pipeline; MiMo cash balance has no OpenAPI and only works via console cookie.
+
+### 🐱 New: Qwen (Alibaba Model Studio / DashScope)
+
+- **`QwenClient`** (template `qwen`, aliases `dashscope` / `tongyi`): OpenAI-compatible endpoint with smart resolution (`/compatible-mode/v1/chat/completions`), `enable_thinking` + `thinking_budget`, chat-level `enable_search` via `extraConfig.enableSearch`, and `image_url.detail` removal for DashScope.
+- **`AliyunBillingClient`**: Billing `QueryAccountBalance` with a self-implemented RPC-style **HMAC-SHA1 signature**; credentials via `extraConfig.accessKey` / `secretKey`.
+- **`FileVisionService`**: Qwen-VL / Qwen3-VL / Omni allowed, text-only `qwen-plus` / `qwen-max` blocked up-front.
+- Qwen has **no structured web-search API** (its `enable_search` is chat-level), so the `web_search` tool keeps Bing/Baidu.
+
+### 🔌 Refactor: OpenAI / Anthropic become "protocol contract" adapters
+
+- **`OpenAIClient`**: endpoint auto-resolution (bare host → `/v1`, existing `/v1` not duplicated, full URLs as-is); parameter tiering (only the official host receives `max_tokens` / `reasoning_effort`; third-party services get neither); model-key normalization (`openai/gpt-4o`, `azure/o3-mini`); reasoning models still switch to `max_completion_tokens` and drop `temperature`.
+- **`AnthropicClient`**: endpoint auto-resolution (`/anthropic` compatibility layers → `/anthropic/v1/messages`); **new image protocol conversion** (`image_url → image/source`, data URLs → base64, http(s) → url); `thinking` is only sent when enabled; `max_tokens` overridable via `extraConfig.maxTokens` and widened to `budget + 8192` in thinking mode.
+
+### 🎯 New: GPT (OpenAI official) adapter + adapter selection notes
+
+- **`GptClient`** (template `gpt`, aliases `gpt-official` / `chatgpt`), strictly separated from `openai`:
+  - always sends `max_completion_tokens` (8192 normal / 16384 reasoning; injected `max_tokens` is converted) — `max_tokens` is deprecated and GPT-5 / o-series return 400;
+  - model-aware `reasoning_effort`: GPT-5 supports `none`/`minimal`, o-series rejects `none`; `thinking→medium`, `thinking_max→high`, explicit `low`/`high`/`xhigh` pass through;
+  - removes `temperature` for reasoning models or active reasoning; streaming adds `stream_options.include_usage`.
+- **`OpenAIClient`** returns to a pure protocol contract (no vendor-specific parameters).
+- **Maintainability**: every adapter class (DeepSeek / Volcengine / Qwen / GPT / OpenAI / Anthropic / Ollama / MiMo / MiniMax) now carries a "适用范围（选型指引）" Javadoc block (applicable / not applicable / exclusive capabilities); `LLMClientManager` documents a template selection matrix; docs gained sections 4.9 (GPT vs OpenAI) and 4.10 (adapter selection matrix).
+
+### 🖥️ Frontend
+
+- Provider page: template dropdown adds Volcengine Ark, Qwen and GPT (openai / anthropic labelled as protocol contracts); new "Extended config" JSON input with validation; template labels/colors/icons for `volcengine` / `ark` / `doubao` / `qwen` / `dashscope` / `tongyi` / `gpt`.
+- Chat page balance chip: supports DeepSeek + Volcengine + MiniMax + MiMo + Qwen, with `quota` type (percentage) and per-platform tooltips.
+
+### ✅ Tests
+
+- New `VolcengineAdapterTest` (32 assertions), `MiniMaxAdapterTest` (29), `QwenAdapterTest` (58), `GptAdapterTest` (31); `SearchToolLogicTest` (16) and `DeepSeekToolsApiClientTest` (26) regressions pass.
+
+### 🔖 Version bump (2.0.3 → 2.0.4)
+
+- Backend: `2.0.3` → `2.0.4` (pom.xml)
+- Frontend: `2.0.3` → `2.0.4` (package.json + package-lock.json)
+- Electron: `2.0.3` → `2.0.4` (package.json + package-lock.json, packaged jar path synced to `code-craft-2.0.4.jar`)
+- MCP Server handshake version: `2.0.3` → `2.0.4` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Build artifacts: `code-craft-2.0.3.jar` → `code-craft-2.0.4.jar`
+- Docs: README(_EN) / BUILD_AND_RUN(_EN) / CHANGELOG(_EN) / docs (ARCHITECTURE, DEEPSEEK_SERVICE_IMPL, LLM_PROVIDER_SYSTEM, DEV_QUICKREF, RELEASE_CHECKLIST, etc.) synced to v2.0.4, provider lists now include GPT / Qwen / Volcengine Ark
+
+---
+
 ## [2.0.3] - 2026-10-17
 
 ### 💬 Fixed: Chat Rendering Overlap / Misplacement / Slow Long Conversations

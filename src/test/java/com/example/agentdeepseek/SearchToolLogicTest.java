@@ -33,7 +33,7 @@ public class SearchToolLogicTest {
         CONFIG.getProxy().setMode("NEVER");
         // 传 null：本测试只覆盖 Bing/百度站点抓取的纯解析逻辑；
         // DeepSeekToolsApiClient 为 null 时 SearchTool 会自动跳过官方 API 分支（生产环境由 Spring 注入）
-        TOOL = new SearchTool(new ObjectMapper(), CONFIG, new ProxyResolver(CONFIG), null);
+        TOOL = new SearchTool(new ObjectMapper(), CONFIG, new ProxyResolver(CONFIG), null, null, null);
     }
 
     interface Assertion {
@@ -71,7 +71,7 @@ public class SearchToolLogicTest {
         // 有代理时恢复「全球版 Bing 优先」（mode=ALWAYS 不触发探测，测试无网络开销）
         NetworkToolConfig proxyConfig = new NetworkToolConfig();
         proxyConfig.getProxy().setMode("ALWAYS");
-        SearchTool proxyTool = new SearchTool(new ObjectMapper(), proxyConfig, new ProxyResolver(proxyConfig), null);
+        SearchTool proxyTool = new SearchTool(new ObjectMapper(), proxyConfig, new ProxyResolver(proxyConfig), null, null, null);
         test("引擎顺序: 有代理-英文 query 优先 bing-global", () -> {
             List<?> order = listOn(proxyTool, "resolveEngineOrder", new Class[]{String.class}, "virtual threads");
             return "bing-global".equals(order.get(0));

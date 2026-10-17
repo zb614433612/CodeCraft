@@ -10,6 +10,16 @@ import java.util.Map;
 /**
  * MiniMax API 的 LLMClient 实现（OpenAI 兼容协议）
  *
+ * <h3>适用范围（选型指引）</h3>
+ * <ul>
+ *   <li><b>适用</b>：MiniMax 开放平台的 OpenAI 兼容端点（{@code api.minimaxi.com} / {@code api.minimax.io}），
+ *       M3 / M2.x 系列模型</li>
+ *   <li><b>不适用</b>：MiniMax 的 <b>Anthropic 兼容端点</b>（{@code /anthropic}，请用 {@code anthropic} 公共契约）；
+ *       其他 OpenAI 兼容服务（用 {@code openai}）</li>
+ *   <li><b>专属能力</b>：{@code thinking.type=enabled/disabled/adaptive}、{@code max_completion_tokens}、
+ *       {@code reasoning_split}；搜索与套餐额度走 Coding Plan Key（{@code extraConfig.codingPlanKey}）</li>
+ * </ul>
+ *
  * <h3>MiniMax API 协议（官方文档：/docs/api-reference/text-chat-openai）</h3>
  * <ul>
  *   <li>端点：/v1/chat/completions，Base URL：https://api.minimaxi.com（国际站，不带 /v1）</li>
@@ -82,6 +92,9 @@ public class MiniMaxClient extends AbstractLLMClient {
                                      String thinkingMode,
                                      boolean stream,
                                      List<Map<String, Object>> tools) {
+        // 图片块中的 detail 字段 MiniMax 协议未声明，剔除后再下发，避免严格校验拒绝
+        stripImageDetail(messages);
+
         // 防御：post-build 注入的 max_tokens 转换为 max_completion_tokens
         if (request.containsKey("max_tokens")) {
             Object maxTokens = request.remove("max_tokens");

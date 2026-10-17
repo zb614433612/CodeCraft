@@ -11,6 +11,15 @@ import java.util.Map;
 /**
  * Xiaomi MiMo API 的 LLMClient 实现
  *
+ * <h3>适用范围（选型指引）</h3>
+ * <ul>
+ *   <li><b>适用</b>：小米 MiMo 开放平台（{@code api.xiaomimimo.com}）的 {@code mimo-v2.5} / {@code mimo-v2.5-pro}</li>
+ *   <li><b>不适用</b>：其他 OpenAI 兼容服务（用 {@code openai} 公共契约）</li>
+ *   <li><b>专属能力</b>：{@code max_completion_tokens}、{@code thinking.type=disabled/enabled}、
+ *       图片/音频/视频多模态（自动剔除协议未声明的 {@code detail}）；
+ *       余额查询需控制台 Cookie（{@code extraConfig.mimoCookie}，约 24h 有效）</li>
+ * </ul>
+ *
  * <h3>MiMo API 协议（完全兼容 OpenAI）</h3>
  * <ul>
  *   <li>端点：/v1/chat/completions</li>
@@ -88,6 +97,9 @@ public class MiMoClient extends AbstractLLMClient {
                                      String thinkingMode,
                                      boolean stream,
                                      List<Map<String, Object>> tools) {
+        // 图片块中的 detail 字段 MiMo 协议未声明，剔除后再下发，避免严格校验拒绝
+        stripImageDetail(messages);
+
         // 防御：如果有 max_tokens 被 post-build 注入，转换为 max_completion_tokens
         if (request.containsKey("max_tokens")) {
             Object maxTokens = request.remove("max_tokens");

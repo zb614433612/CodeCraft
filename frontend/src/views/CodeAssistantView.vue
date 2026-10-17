@@ -825,7 +825,7 @@
             </div>
           </div>
           <div class="footer-right" v-if="balanceText || currentMessages.length > 0">
-            <span v-if="balanceText" class="balance-chip" :title="balanceTitle">💰 余额 {{ balanceText }}</span>
+            <span v-if="balanceText" class="balance-chip" :title="balanceTitle">💰 {{ balanceChipLabel }} {{ balanceText }}</span>
             <span v-if="currentMessages.length > 0" class="context-tokens">
               上下文 Token: {{ formatTokenCount(totalContextTokens) }}
               <span v-if="settingsStore.contextMode === 'compact'" class="context-mode-badge" title="精简模式：非本轮工具调用和思考过程已精简">⚡ 精简</span>
@@ -1449,12 +1449,50 @@ const resolveActiveProvider = (): ProviderConfig | null => {
     : null) || providers[0]
 }
 
-/** 当前生效的 Provider 是否为 DeepSeek（余额能力仅 DeepSeek 提供） */
-const isDeepSeekProvider = computed(() => {
+/** 支持余额/额度查询的 Provider 模板（DeepSeek / 火山引擎 / MiniMax / MiMo / 通义千问） */
+const BALANCE_TEMPLATES = [
+  'deepseek', 'volcengine', 'ark', 'doubao',
+  'minimax', 'minimax-cn', 'minimax-intl', 'minimax-global',
+  'mimo', 'xiaomi-mimo',
+  'qwen', 'dashscope', 'tongyi'
+]
+
+/** 当前生效的 Provider 是否支持余额/额度查询 */
+const hasBalanceCapability = computed(() => {
   const prov = resolveActiveProvider()
   if (!prov) return false
-  return (prov.requestTemplate || prov.code || '').toLowerCase() === 'deepseek'
+  return BALANCE_TEMPLATES.includes((prov.requestTemplate || prov.code || '').toLowerCase())
 })
+
+/** 当前 Provider 是否为火山引擎（余额字段语义与 DeepSeek 不同） */
+const isVolcengineProvider = computed(() => {
+  const prov = resolveActiveProvider()
+  if (!prov) return false
+  const template = (prov.requestTemplate || prov.code || '').toLowerCase()
+  return template === 'volcengine' || template === 'ark' || template === 'doubao'
+})
+
+/** 当前 Provider 是否为小米 MiMo（余额需控制台 Cookie） */
+const isMiMoProvider = computed(() => {
+  const prov = resolveActiveProvider()
+  if (!prov) return false
+  const template = (prov.requestTemplate || prov.code || '').toLowerCase()
+  return template === 'mimo' || template === 'xiaomi-mimo'
+})
+
+/** 当前 Provider 是否为通义千问（余额来自阿里云费用中心） */
+const isQwenProvider = computed(() => {
+  const prov = resolveActiveProvider()
+  if (!prov) return false
+  const template = (prov.requestTemplate || prov.code || '').toLowerCase()
+  return template === 'qwen' || template === 'dashscope' || template === 'tongyi'
+})
+
+/** 当前返回的是「额度」（quota）而非「余额」（金额） */
+const isQuotaType = computed(() => providerBalance.value?.balanceType === 'quota')
+
+/** 指标标签：额度 / 余额 */
+const balanceChipLabel = computed(() => isQuotaType.value ? '额度' : '余额')
 
 /** 待展示的余额明细：优先人民币，否则取第一条 */
 const activeBalance = computed(() => {
@@ -1466,31 +1504,75 @@ const activeBalance = computed(() => {
 /** 货币符号 */
 const currencySymbol = (currency: string) => currency === 'CNY' ? '¥' : currency === 'USD' ? '$' : `${currency} `
 
-/** 余额文本（如 "¥110.00"）；非 DeepSeek 或无数据时为空串（对应 UI 不展示） */
+/** 余额/额度文本（如 "¥110.00" / "67%"）；不支持或无数时为空串（对应 UI 不展示） */
 const balanceText = computed(() => {
-  if (!isDeepSeekProvider.value) return ''
+  if (!hasBalanceCapability.value) return ''
   const info = activeBalance.value
   if (!info) return ''
+  if (isQuotaType.value) {
+    const percent = info.remainingPercent
+    if (percent != null) return `${Number(percent).toFixed(0)}%`
+    return info.totalBalance
+  }
   return `${currencySymbol(info.currency || '')}${info.totalBalance}`
 })
 
-/** 余额悬浮提示：总余额 / 赠金 / 充值 */
+/**
+ * 悬浮提示：
+ * - quota（MiniMax Token Plan）：套餐 / 剩余百分比 / 剩余次数 / 重置时间
+ * - 火山引擎：可用余额 / 现金余额 / 信控额度 / 冻结 / 欠费
+ * - MiMo：余额 / 现金 / 赠送 / 冻结
+ * - DeepSeek：总余额 / 赠金 / 充值
+ */
 const balanceTitle = computed(() => {
   const info = activeBalance.value
   if (!info) return ''
   const sym = currencySymbol(info.currency || '')
+
+  if (isQuotaType.value) {
+    const parts: string[] = []
+    if (info.planName) parts.push(info.planName)
+    if (info.remainingPercent != null) parts.push(`剩余 ${Number(info.remainingPercent).toFixed(1)}%`)
+    if (info.remainingCount != null && info.totalCount != null) {
+      parts.push(`${info.remainingCount}/${info.totalCount} 次`)
+    }
+    if (info.resetAt) parts.push(`重置 ${new Date(info.resetAt).toLocaleString()}`)
+    return parts.join(' · ')
+  }
+
+  if (isVolcengineProvider.value) {
+    const cash = info.cashBalance ?? info.toppedUpBalance ?? '0.00'
+    const credit = info.creditLimit ?? '0.00'
+    const freeze = info.freezeAmount ?? '0.00'
+    const arrears = info.arrearsBalance ?? '0.00'
+    return `可用余额 ${sym}${info.totalBalance} · 现金余额 ${sym}${cash} · 信控额度 ${sym}${credit} · 冻结 ${sym}${freeze} · 欠费 ${sym}${arrears}`
+  }
+
+  if (isMiMoProvider.value) {
+    const cash = info.cashBalance ?? info.toppedUpBalance ?? '0.00'
+    const gift = info.grantedBalance ?? '0.00'
+    const frozen = info.freezeAmount ?? '0.00'
+    return `余额 ${sym}${info.totalBalance} · 现金 ${sym}${cash} · 赠送 ${sym}${gift} · 冻结 ${sym}${frozen}`
+  }
+
+  if (isQwenProvider.value) {
+    const cash = info.cashBalance ?? info.toppedUpBalance ?? '0.00'
+    const credit = info.creditLimit ?? '0.00'
+    return `可用余额 ${sym}${info.totalBalance} · 现金余额 ${sym}${cash} · 信用额度 ${sym}${credit}（阿里云费用中心）`
+  }
+
   return `总余额 ${sym}${info.totalBalance} · 赠金 ${sym}${info.grantedBalance} · 充值 ${sym}${info.toppedUpBalance}`
 })
 
 /**
- * 刷新 DeepSeek 余额
+ * 刷新 Provider 余额
  * 触发时机：进入聊天页面（Provider 列表加载完成）、切换 Provider / Agent、每次对话结束后
- * 非 DeepSeek Provider 时清空展示；查询失败时静默保留上一次成功数据，不影响聊天主流程
+ * 不支持余额的 Provider 清空展示；查询失败时静默保留上一次成功数据，不影响聊天主流程
  */
 const refreshBalance = async () => {
   const prov = resolveActiveProvider()
   const template = prov ? (prov.requestTemplate || prov.code || '').toLowerCase() : ''
-  if (!prov || template !== 'deepseek') {
+  if (!prov || !BALANCE_TEMPLATES.includes(template)) {
     providerBalance.value = null
     return
   }
@@ -1500,8 +1582,8 @@ const refreshBalance = async () => {
       providerBalance.value = res.data
     }
   } catch (e) {
-    // 静默失败：保留上一次成功数据（如 API Key 未配置、网络异常等）
-    console.warn('获取 DeepSeek 余额失败:', e)
+    // 静默失败：保留上一次成功数据（如 API Key / AK/SK 未配置、网络异常等）
+    console.warn('获取 Provider 余额失败:', e)
   }
 }
 

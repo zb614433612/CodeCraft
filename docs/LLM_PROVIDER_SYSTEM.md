@@ -1,18 +1,18 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v2.0.3 | 更新：2026-10-17 | 受众：开发者 / AI 协作伙伴
+> 版本：v2.0.4 | 更新：2026-10-18 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
 
 ## 一、系统概述
 
-CodeCraft 支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等），用户可以在运行时动态切换不同的 LLM Provider，每个 Agent 也可以绑定特定的 Provider。
+CodeCraft 支持多种 LLM 平台（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax / 火山引擎方舟等），用户可以在运行时动态切换不同的 LLM Provider，每个 Agent 也可以绑定特定的 Provider。
 
 ### 1.1 核心特性
 
-- **多 Provider 支持**：支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax 等主流 LLM 平台
+- **多 Provider 支持**：支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax、火山引擎（方舟）等主流 LLM 平台
 - **动态切换**：前端运行时可随时切换 Provider，无需重启服务
 - **Agent 绑定**：每个 Agent 可以绑定特定的 Provider 和模型
 - **统一接口**：所有 Provider 通过统一的 `LLMClient` 接口调用，屏蔽平台差异
@@ -284,6 +284,7 @@ public class LLMClientManager {
 | Ollama | `OllamaClient` | `ollama` | 本地 Ollama 服务 |
 | MiMo | `MiMoClient` | `mimo` | 小米 MiMo 模型 |
 | MiniMax | `MiniMaxClient` | `minimax` | MiniMax API（OpenAI 兼容，thinking adaptive + reasoning_split） |
+| 火山引擎（方舟） | `VolcengineArkClient` | `volcengine`（别名 `ark` / `doubao`） | 方舟（豆包及方舟上的 DeepSeek/GLM 等），OpenAI 兼容；thinking.type = enabled/disabled/auto |
 | 自定义 | `OpenAIClient` | `custom` | 最小 OpenAI 兼容模式 |
 
 ### 4.4 DeepSeek 官方工具 API 联动（v2.0.3）
@@ -301,6 +302,141 @@ public class LLMClientManager {
 | 子 Agent | `AgentForkManager` 通过 `ToolContext.setProviderCode(...)` 传递，保证子 Agent 内判定一致 |
 
 > 为什么不用 providerCode：用户可自定义 code（如 `deepseek-proxy`），而域名是「是否官方」的客观事实。
+
+### 4.5 火山引擎（方舟）增强适配
+
+火山方舟提供聊天之外的多项平台能力，本系统按「能力按需启用、缺少凭证自动跳过、失败自动回退」的方式适配：
+
+| 能力 | 实现类 | 需要的配置 | 说明 |
+|------|--------|-----------|------|
+| 对话 / 工具调用 | `VolcengineArkClient` | 模板 `volcengine` + `apiKey`（Ark API Key） | 端点自动补齐 `/api/v3/chat/completions`（baseUrl 带不带 `/api/v3` 都可）；`thinking.type` 映射 `enabled/disabled/auto`；`reasoning_effort` 仅对 `deepseek-v4` 系列下发，避免其他模型 400 |
+| 图片识别（视觉理解） | `FileVisionService` + `image_url` 内容块 | 模型具备视觉能力 | 方舟只接受 `detail = low/high/xhigh`，适配器自动把 OpenAI 风格的 `auto` 归一为 `high`；`doubao-seed` 系列支持图像输入，方舟上的 `deepseek-*` 文本模型不支持（前置拦截并给出明确提示） |
+| 余额查询 | `VolcengineBillingClient` + `ProviderBalanceService` | `extraConfig` 中 `accessKey` / `secretKey` | 费用中心 OpenAPI `QueryBalanceAcct`（V4 签名，POST `billing.volcengineapi.com`）；返回可用余额/现金余额/信控额度/冻结/欠费；未配置 AK/SK 时仅该能力不可用 |
+| 联网搜索 | `VolcengineSearchApiClient` | `extraConfig` 中 `searchApiKey`，或环境变量 `VOLCENGINE_SEARCH_API_KEY` / `WEB_SEARCH_API_KEY` | 豆包搜索 Custom 版（`POST https://open.feedcoopapi.com/search_api/web_search`），返回结构化结果（Title/Url/Summary/Content/AuthInfoLevel 等）；`web_search` 工具优先使用，失败或无结果自动回退 Bing/百度 |
+| 网页抓取 | `VolcengineSearchApiClient#fetchByUrl` | 同上 | 以 URL 的域名 + 路径关键词检索并命中同一 URL 的正文（best-effort），未命中回退 Jina Reader / 本地抓取 |
+
+配置示例（Provider 管理页也可直接填表）：
+
+```sql
+UPDATE llm_provider SET
+  request_template = 'volcengine',
+  base_url         = 'https://ark.cn-beijing.volces.com/api/v3',
+  api_key          = '<ARK_API_KEY>',
+  default_model    = 'doubao-seed-2-1-pro-260628',
+  extra_config     = '{"accessKey":"AK...","secretKey":"SK...","searchApiKey":"..."}'
+WHERE code = 'volcengine';
+```
+
+> `extra_config` 是为平台增强凭证新增的可选列（启动时自动 `ALTER TABLE` 补齐，旧库无需手工迁移）。
+> 列表接口对 `accessKey` / `secretKey` / `searchApiKey` 做掩码返回，提交含掩码时视为「未修改」。
+> 联网搜索的 Key 与方舟 Ark Key **不通用**（需在联网搜索控制台单独创建）；未配置时该能力静默跳过，不影响对话。
+> 所有增强能力的能力判定都基于「请求模板 + 实际域名 + 凭证有效性」，与用户自定义的 providerCode 名称无关。
+
+### 4.6 MiniMax / 小米 MiMo 增强能力
+
+> 结论先说：**MiniMax 三件套（搜索 / 图片识别 / 额度）都能适配；MiMo 只能适配图片识别与（Cookie 方式的）余额；两家都没有公开的「网页抓取」接口。**
+
+| 平台 | 能力 | 支持情况 | 实现 / 配置 |
+|------|------|----------|-------------|
+| MiniMax | 联网搜索 | ✅ 支持 | `MiniMaxCodingPlanClient` → `POST {host}/v1/coding_plan/search`（body `{"q":"..."}`），返回 `organic[title/link/snippet/date]`；`web_search` 优先使用，失败或无结果回退 Bing/百度 |
+| MiniMax | 图片识别 | ✅ 支持（两条路径） | ① 模型侧：`MiniMax-M3` / VL 系列走 chat 多模态 `image_url` 块；② 独立接口：`POST {host}/v1/coding_plan/vlm`（prompt + image_url，支持公网 URL 或 base64，JPEG/PNG/WebP） |
+| MiniMax | 余额 / 额度 | ⚠️ 仅「套餐额度」 | `GET {host}/v1/token_plan/remains`（Coding Plan / Token Plan Key），展示剩余百分比、剩余次数、重置时间（`balanceType=quota`）；官方未开放「现金余额」OpenAPI，故前端以「额度 xx%」展示 |
+| MiniMax | 网页抓取 | ❌ 无官方抓取接口 | 保持 Jina Reader / 本地抓取链路 |
+| MiMo（小米） | 图片识别 | ✅ 支持 | `mimo-v2.5` / `mimo-v2.5-pro` 原生多模态（图片/音频/视频），走 chat `image_url` 块；适配器会剔除 MiMo 协议未声明的 `detail` 字段；早期纯文本模型前置拦截 |
+| MiMo（小米） | 余额 | ⚠️ 需控制台 Cookie | MiMo 未开放余额 OpenAPI（推理 Key `sk-` 无法查询）：`GET https://platform.xiaomimimo.com/api/v1/balance` + 扩展配置 `{"mimoCookie":"..."}`，Cookie 约 24 小时有效，过期需重新粘贴并给出明确提示 |
+| MiMo（小米） | 联网搜索 / 抓取 | ❌ 无官方接口 | 保持 Bing/百度 + Jina/本地链路 |
+
+配置示例（Provider 管理页「扩展配置」）：
+
+```json
+// MiniMax（搜索 + 额度；apiHost 可省略，默认跟随 baseUrl 域名，国内 api.minimaxi.com / 国际 api.minimax.io）
+{"codingPlanKey":"sk-cp-...","apiHost":"https://api.minimaxi.com"}
+
+// 小米 MiMo（余额，浏览器 F12 复制 balance 请求的 Cookie）
+{"mimoCookie":"api-platform_serviceToken=...; userId=..."}
+```
+
+> - MiniMax 的搜索 / 额度接口配套 **Coding Plan / Token Plan Key**，普通模型 Key 可能被拒（返回 `base_resp.status_code` 非 0，如 `2062 no active token plan`）；失败时搜索自动回退、额度仅不展示，不影响对话。
+> - MiniMax `current_interval_usage_count` 语义为「**剩余**」而非已用（社区实测），解析时优先用 `current_interval_remaining_percent`，计数做兜底。
+> - MiMo 的 Cookie 只有约 24 小时有效期，属于平台限制；失效时前端会提示重新粘贴，而不是静默失败。
+
+### 4.7 通义千问（阿里云百炼 DashScope / QwenCloud）
+
+| 能力 | 支持情况 | 实现 / 配置 |
+|------|----------|-------------|
+| 对话 / 工具调用 | ✅ 支持 | `QwenClient`，OpenAI 兼容端点 `{baseUrl}/compatible-mode/v1/chat/completions`（端点自适应：裸域名自动补 `/compatible-mode/v1`，已写全则原样使用） |
+| 思考模式 | ✅ 支持 | Qwen 扩展参数：`enable_thinking`（`non-thinking→false`、`thinking / thinking_max→true`）+ `thinking_budget`（thinking_max 默认 8192，可用 `extraConfig.thinkingBudget` 覆盖；留空则不下发，交给模型默认策略） |
+| 图片识别 | ✅ 支持 | Qwen-VL / Qwen3-VL / Omni 系列走 chat 多模态 `image_url` 块；`qwen-plus` / `qwen-max` 等纯文本模型前置拦截并给出提示 |
+| 对话级联网搜索 | ✅ 可选 | `extraConfig` 配 `{"enableSearch": true}` → 请求体下发 `enable_search: true` + `search_options`（OpenAI 的 `web_search_options` DashScope 不支持） |
+| 余额查询 | ✅ 支持 | 阿里云费用中心 `QueryAccountBalance`（BssOpenApi 2017-12-14，RPC 风格 HMAC-SHA1 签名），需 `extraConfig` 的 `accessKey` / `secretKey`（账号级 AK/SK，与百炼 API Key 不同） |
+| 结构化网页搜索 | ❌ 无 | Qwen 的 `enable_search` 是"对话级"能力（模型自行决定检索并直接作答），不是"给定 query 返回结果列表"的结构化搜索接口 → `web_search` 工具仍走 Bing/百度 |
+
+配置示例（Provider 管理页「扩展配置」）：
+
+```json
+{
+  "enableSearch": true,          // 可选：对话级联网
+  "thinkingBudget": 4096,        // 可选：思考预算上限
+  "accessKey": "LTAI...",        // 余额查询：阿里云 AK
+  "secretKey": "..."             // 余额查询：阿里云 SK
+}
+```
+
+> 百炼 API Key 按地域绑定：用北京地域的 Key 调新加坡 endpoint 会返回 401 `invalid_api_key`；
+> Base URL 建议使用工作空间专属域名 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`（旧域名 `https://dashscope.aliyuncs.com` 仍可用）。
+
+### 4.8 OpenAI / Anthropic「公共契约」适配器
+
+OpenAI 与 Anthropic 两个模板定位为**协议公共契约**：只要服务符合对应协议规范，就能用同一模板接入
+（官方、Azure、OpenRouter 与各类中转站、vLLM / LM Studio / One-API 自建网关、GLM / DeepSeek / MiniMax 的 `/anthropic` 兼容层等）。
+
+| 维度 | OpenAI（`openai` / `custom`） | Anthropic（`anthropic`） |
+|------|------------------------------|--------------------------|
+| 端点解析 | 裸域名 → `/v1/chat/completions`；已含 `/v1` → 不重复拼接；已写全 `/chat/completions` → 原样使用（绝对 URL，避免 baseUrl 路径被覆盖） | 裸域名 → `/v1/messages`；`/anthropic` 兼容层 → `/anthropic/v1/messages`；已写全 `/messages` → 原样使用 |
+| 参数分级 | **仅官方**（`api.openai.com`）下发 `max_tokens`（8192）与 `reasoning_effort`；第三方兼容服务不下发（各家上限与支持度不一，交给服务端默认，避免 400） | `thinking` **仅在开启时下发**（很多兼容层不认识该字段会 400）；`max_tokens` 默认 8192，可用 `extraConfig.maxTokens` 覆盖，思考模式自动放宽到 `budget + 8192` 以满足 `max_tokens > budget_tokens` |
+| 模型名归一 | `openai/gpt-4o`、`azure/o3-mini` 这类前缀写法按**最后一段**判定，避免把中转站命名误判成推理模型 | — |
+| 图片 | 直接透传 `image_url` 块 | **自动协议转换**：`image_url` → `image/source`（`data:` URL → `base64` + `media_type`；http(s) → `url`） |
+| 工具 | `tools` 原样透传（OpenAI 函数调用格式） | `tools` → `{name, description, input_schema}`，并移除部分兼容层不支持的 `tool_choice` |
+| 推理模型 | `o1 / o3 / o4 / gpt-5` 系列自动改用 `max_completion_tokens` 并移除 `temperature` | — |
+
+> 这两个适配器的能力判定与参数下发都以「协议 + 实际 baseUrl」为准，不绑定具体厂商，
+> 因此可以放心把任意兼容服务挂到这两个模板上；厂商专有能力（图片理解接口、余额、结构化搜索等）交给各自的专用模板。
+
+### 4.9 GPT（OpenAI 官方专精）vs OpenAI（公共契约）
+
+两个模板都跑 OpenAI Chat Completions 协议，但**职责严格分离**，别配错：
+
+| 维度 | `gpt`（官方专精，`GptClient`） | `openai`（公共契约，`OpenAIClient`） |
+|------|-------------------------------|--------------------------------------|
+| 适用对象 | OpenAI 官方 GPT / o 系列（`api.openai.com` 或官方代理） | Azure / OpenRouter / 各类中转站 / vLLM / LM Studio / One-API 等**任意兼容服务** |
+| 端点 | 默认 `https://api.openai.com/v1/chat/completions` | 任意 baseUrl（含中转站自定义路径，已写全则原样使用） |
+| 输出上限 | **统一下发** `max_completion_tokens`（普通 8192 / 推理 16384；外部注入的 `max_tokens` 自动转换） | **不下发**（各家上限未知，交给服务端默认，避免 400） |
+| `reasoning_effort` | **按模型精细下发**：GPT-5 支持 `none`/`minimal`；o 系列不支持 `none`（故 non-thinking 时不下发）；`thinking→medium`、`thinking_max→high`，也支持直接传 `low`/`high`/`xhigh` | 不下发（第三方支持度不一） |
+| `temperature` | 推理模型 或 开启推理（非 `none`）时自动移除 | 仅推理模型移除 |
+| `stream_options` | 流式自动带 `{"include_usage": true}` | 不添加 |
+| 模型名归一 | `openai/gpt-5`、`azure/gpt-5` 按最后一段判定 | 同左 |
+| 典型误用 | 把**第三方中转站**配到 `gpt` → 可能因 `max_completion_tokens`/`reasoning_effort`/`stream_options` 报 400 | 把**官方 GPT** 配到 `openai` → 失去推理档位控制，且不会统计流式用量 |
+
+> 官方侧有两个容易踩的坑：① `max_tokens` 在新接口中已废弃，GPT-5 / o 系列会直接 400，必须用 `max_completion_tokens`；
+> ② 推理模型与「开启了 reasoning_effort（非 none）」的请求都**不接受 `temperature`**。
+
+### 4.10 适配器选型总表（维护必读）
+
+| requestTemplate | 适配器类 | 适用对象 | 不要用于 |
+|-----------------|----------|----------|----------|
+| `deepseek` | `DeepSeekClient` | DeepSeek 官方 API（`thinking.type` / `reasoning_effort` 原生语义） | 方舟上的 DeepSeek（用 `volcengine`）、中转站（用 `openai`） |
+| `volcengine` / `ark` / `doubao` | `VolcengineArkClient` | 火山方舟（豆包及方舟托管模型），`thinking.type=auto/enabled/disabled` | DeepSeek 官方、第三方兼容中转站 |
+| `qwen` / `dashscope` / `tongyi` | `QwenClient` | 阿里云百炼千问（含 Qwen-VL），`enable_thinking` / `enable_search` | 官方 GPT/o 系列（用 `gpt`）、其他兼容服务（用 `openai`） |
+| `gpt` / `gpt-official` / `chatgpt` | `GptClient` | OpenAI 官方 GPT / o 系列：`max_completion_tokens` + `reasoning_effort` 全档位 + `stream_options` | 任何第三方兼容服务 |
+| `openai` | `OpenAIClient` | **公共契约**：任意 OpenAI 兼容服务 | 官方 GPT 需要推理档位控制时（用 `gpt`） |
+| `anthropic` | `AnthropicClient` | **公共契约**：Anthropic 官方 / Claude 中转 / GLM、DeepSeek、MiniMax 的 `/anthropic` 兼容层 | OpenAI 协议服务 |
+| `ollama` | `OllamaClient` | 本机 / 内网 Ollama（`/api/chat`），离线与数据不出网 | 云端 OpenAI 兼容 API（vLLM / LM Studio 的 `/v1` 端点用 `openai`） |
+| `mimo` / `xiaomi-mimo` | `MiMoClient` | 小米 MiMo 开放平台 v2.5 系列（多模态） | 其他兼容服务 |
+| `minimax` / `minimax-cn` / `minimax-intl` | `MiniMaxClient` | MiniMax OpenAI 兼容端点（M3 / M2.x） | MiniMax 的 `/anthropic` 端点（用 `anthropic`） |
+| `custom` | `OpenAIClient`（最小兼容模式） | 未知网关兜底 | 能匹配到具体模板时优先用具体模板（参数更准确） |
+
+> 每个适配器类的 Javadoc 顶部都有「适用范围（选型指引）」块（适用 / 不适用 / 专属能力），
+> 新增或调整 Provider 时先看类注释与本节表格；该总表与 `LLMClientManager` 类注释保持同步。
 
 ---
 

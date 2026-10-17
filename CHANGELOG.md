@@ -5,6 +5,109 @@
 
 ---
 
+## [2.0.4] - 2026-10-18
+
+### 🎯 新增：GPT（OpenAI 官方专精）适配器 + 适配器选型注释
+
+- **新增 `GptClient`**（模板 `gpt`，别名 `gpt-official` / `chatgpt`），与 `openai`（公共契约）职责严格分离：
+  - 输出上限统一 `max_completion_tokens`（普通 8192 / 推理 16384；post-build 注入的 `max_tokens` 自动转换）——`max_tokens` 已废弃，GPT-5 / o 系列会直接 400；
+  - `reasoning_effort` 按模型精细下发：GPT-5 支持 `none`/`minimal`，o 系列不支持 `none`（non-thinking 时不下发）；`thinking→medium`、`thinking_max→high`，也支持直接传 `low`/`high`/`xhigh`；
+  - 推理模型、或开启推理（effort≠none）时自动移除 `temperature`（官方会拒绝）；
+  - 流式自动带 `stream_options: {"include_usage": true}`；
+  - 端点默认 `https://api.openai.com/v1/chat/completions`，支持官方代理与自定义完整路径。
+- **`OpenAIClient` 回归纯公共契约**：移除「是否官方域名」分支，不再下发 `max_tokens` / `reasoning_effort` / `stream_options`（第三方兼容服务支持度不一，易 400），仅保留协议级处理（端点自适应、推理模型切 `max_completion_tokens`、模型名最后一段归一）。
+- **维护性：所有适配器补「适用范围（选型指引）」注释**
+  - 9 个适配器类（DeepSeek / 火山方舟 / 千问 / GPT / OpenAI / Anthropic / Ollama / MiMo / MiniMax）Javadoc 顶部统一增加「适用 / 不适用 / 专属能力」三段式说明；
+  - `LLMClientManager` 类注释新增「模板选型总览」表（模板 → 适配器 → 适用对象 → 不要用于），新增 Provider 时先看这张表；
+  - 文档 `LLM_PROVIDER_SYSTEM.md(+EN)` 新增 4.9（GPT vs OpenAI 分工）与 4.10（适配器选型总表）。
+- **前端**：请求模板下拉新增「GPT（OpenAI 官方 / o 系列专用）」，与「OpenAI（公共契约：任意 OpenAI 兼容服务）」并列区分；模板标签区分 `GPT（官方）` / `OpenAI 兼容`，GPT 使用独立图标 💠 与配色。
+
+### 🌋 新增：火山引擎（方舟）Provider 适配（对话 / 图片识别 / 余额 / 联网搜索抓取）
+
+- **对话适配器 `VolcengineArkClient`**（模板 `volcengine`，别名 `ark` / `doubao`）：
+  - 端点解析兼容 `baseUrl` 带 / 不带 `/api/v3`、带尾斜杠、已含完整 `chat/completions`（代理网关）四种写法，统一产出绝对 URL，避免 WebClient baseUrl 路径被覆盖导致 404；
+  - `thinkingMode` 映射方舟 `thinking.type`：`non-thinking → disabled`、`thinking / thinking_max → enabled`、`auto → auto`；
+  - `reasoning_effort`（low/high/max）仅对 `deepseek-v4` 系列下发，其他模型不下发，规避 `400 InvalidParameter`。
+- **图片识别（视觉理解）**：
+  - `FileVisionService.supportsVisionModel` 增加火山分支：方舟上的 `deepseek-*` 文本模型前置拦截并给出明确提示，`doubao-seed` / `vision` / `-vl` 系列放行；
+  - `VolcengineArkClient` 自动把 OpenAI 风格的 `image_url.detail=auto` 归一为 `high`（方舟取值域仅 low/high/xhigh）；
+  - 火山不在 Files API 白名单内 → 图片自动走 base64 `image_url` 块降级路径，无需额外配置。
+- **余额查询**：新增 `VolcengineBillingClient`（费用中心 OpenAPI `QueryBalanceAcct`，火山 V4 签名：HMAC-SHA256 + Credential Scope + X-Date/X-Content-Sha256），`ProviderBalanceService` 扩展为多平台（DeepSeek + 火山），返回可用余额/现金余额/信控额度/冻结/欠费/账号 ID；VO 增加对应可选字段，前端悬浮提示按平台显示不同语义。
+- **联网搜索**：新增 `VolcengineSearchApiClient`（豆包搜索 Custom 版 `POST https://open.feedcoopapi.com/search_api/web_search`）：
+  - `web_search` 工具在「当前 Provider 为火山 + 已配置联网搜索 Key」时优先调用官方接口，返回结构化结果（Title/Url/Summary/Content/SiteName/PublishTime/AuthInfoLevel），失败或无结果自动回退 Bing/百度链路；
+  - `web_fetch` 工具新增「联网搜索正文」通道（URL 域名 + 路径关键词检索并命中同 URL 正文，best-effort），未命中回退 Jina Reader / 本地抓取；
+  - 能力判定基于「请求模板 + 实际域名 + 凭证有效性」，与用户自定义 providerCode 无关；搜索 Key 支持 `extraConfig.searchApiKey` 或环境变量 `VOLCENGINE_SEARCH_API_KEY` / `WEB_SEARCH_API_KEY`。
+- **数据模型**：`llm_provider` 新增可选列 `extra_config`（TEXT，平台增强凭证 JSON），建表语句 + 启动自动 `ALTER TABLE` 兼容旧库；`LLMProviderController` 列表接口对 `accessKey/secretKey/searchApiKey/apiKey/token` 掩码返回，提交含掩码视为「未修改」，空串视为清空。
+
+### 🔧 优化：存量适配器对齐最新接口行为
+
+- **`OpenAIClient`**：推理模型判定从「o1/o3 前缀」扩展为 o1/o3/o4 与 gpt-5 系列；默认输出上限 4096 → 8192，推理模型走 `max_completion_tokens`（16384）；
+- **`AnthropicClient`**：修复扩展思考模式下的参数冲突——思考开启时 `max_tokens`（16000）严格大于 `budget_tokens`（8000），并移除 `temperature`（Anthropic 要求思考模式 temperature=1，自定义值会 400）；普通模式上限 4096 → 8192；
+- **`OllamaClient`**：不再无条件剔除 `tools`（Ollama 0.4+ 已支持 function calling），本地模型恢复工具能力；新增 `think=true` 映射（0.6+ 推理模型）；`temperature` 写入 `options` 时改为合并已有选项而非覆盖。
+
+### 🔎 补充：MiniMax / 小米 MiMo 平台能力适配
+
+调研结论：**MiniMax 的搜索、图片理解、套餐额度都有官方接口可接；MiMo 只有图片理解与（Cookie 方式的）余额；两家都没有公开的网页抓取 API。**
+
+- **新增 `MiniMaxCodingPlanClient`**（Bearer Coding Plan Key，区域 host 跟随 baseUrl：`api.minimaxi.com` / `api.minimax.io`，可用 `extraConfig.apiHost` 覆盖）：
+  - 联网搜索：`POST /v1/coding_plan/search`（`{"q":"..."}`）→ 解析 `organic[title/link/snippet/date]`；`web_search` 工具在该通道可用时优先调用，失败/无结果自动回退 Bing/百度；
+  - 图片理解：`POST /v1/coding_plan/vlm`（prompt + image_url，支持公网 URL 与 base64，JPEG/PNG/WebP）；
+  - 套餐额度：`GET /v1/token_plan/remains` → 剩余百分比 / 剩余次数 / 重置时间（注意 `current_interval_usage_count` 实为「剩余」，解析优先用 `remaining_percent`）。
+- **`ProviderBalanceService` 扩展为四平台**：DeepSeek（余额）、火山引擎（余额）、MiniMax（`balanceType=quota` 套餐额度）、小米 MiMo（控制台 Cookie 余额 `platform.xiaomimimo.com/api/v1/balance`，约 24h 有效，失效给明确提示）。
+- **`ProviderBalanceVO` 增加 `balanceType` 与额度字段**（`remainingPercent` / `remainingCount` / `totalCount` / `resetAt` / `planName`），前端聊天页额度型展示为「💰 额度 67%」，悬浮提示含套餐名、次数与重置时间。
+- **图片识别兼容**：`FileVisionService.supportsVisionModel` 增加 MiMo（v2.5 系列）与 MiniMax（M3 / VL / abab-vl，M2.x 为纯文本）判定；`AbstractLLMClient.stripImageDetail` 供 MiMo / MiniMax 适配器剔除协议未声明的 `image_url.detail` 字段，避免严格校验 400。
+- **不做的部分（如实说明）**：MiniMax 无官方网页抓取接口，MiMo 无官方搜索/抓取接口 → `web_fetch` 继续走 Jina 与本地抓取；MiMo 现金余额官方未开放 OpenAPI，只能靠控制台 Cookie。
+
+### 🐱 新增：通义千问（阿里云百炼 DashScope / QwenCloud）适配器
+
+- **新增 `QwenClient`**（模板 `qwen`，别名 `dashscope` / `tongyi`）：OpenAI 兼容协议 + Qwen 扩展参数
+  - 端点自适应：`https://dashscope.aliyuncs.com` → 自动补 `/compatible-mode/v1/chat/completions`；工作空间专属域名 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` 直接可用；已写全 `/chat/completions` 的中转站地址原样使用（绝对 URL，避免 baseUrl 路径被覆盖导致 404）
+  - 思考模式：`thinkingMode` → `enable_thinking`（`non-thinking=false`、`thinking / thinking_max=true`）+ `thinking_budget`（thinking_max 默认 8192，可用 `extraConfig.thinkingBudget` 覆盖；空模式不下发，交给模型默认策略）
+  - 对话级联网：`extraConfig.enableSearch=true` → 请求体下发 `enable_search: true` + `search_options`（DashScope 不支持 OpenAI 的 `web_search_options`）
+  - 图片：自动剔除 DashScope 未声明的 `image_url.detail` 字段
+- **新增 `AliyunBillingClient`**（余额查询）：阿里云费用中心 `QueryAccountBalance`（BssOpenApi 2017-12-14），自实现 **RPC 风格 HMAC-SHA1 签名**（参数排序 → percentEncode → StringToSign → Base64(HMAC-SHA1(SK+"&", ...))），返回可用余额 / 现金余额 / 信用额度 / 币种；凭证走 `extraConfig.accessKey` / `secretKey`（与百炼 API Key 是两套）。
+- **`FileVisionService`** 增加 Qwen 视觉判定：Qwen-VL / Qwen3-VL / Omni 系列放行，`qwen-plus` / `qwen-max` 等纯文本模型前置拦截。
+- **`ProviderBalanceService` 扩展为五平台**：DeepSeek / 火山引擎 / MiniMax（额度）/ MiMo（Cookie）/ 通义千问（阿里云余额）。
+
+### 🔌 重构：OpenAI / Anthropic 升级为「公共契约」适配器
+
+> 目标：用户通过这两个模板可以接入**任意符合协议规范的服务**（官方、Azure、OpenRouter 与中转站、vLLM / LM Studio / One-API 自建网关、GLM / DeepSeek / MiniMax 的 `/anthropic` 兼容层）。
+
+- **`OpenAIClient`**：
+  - 端点智能解析（裸域名补 `/v1`、已含 `/v1` 不重复、完整 URL 原样使用，统一绝对 URL）；
+  - **参数分级下发**：只有官方 `api.openai.com` 才下发 `max_tokens`（8192）与 `reasoning_effort`；第三方兼容服务不下发，避免各家上限/支持度差异导致 400；
+  - 模型名归一（`openai/gpt-4o`、`azure/o3-mini` 按最后一段判定），推理模型仍自动切 `max_completion_tokens` 并移除 `temperature`，不会因中转站命名误判；
+  - 清理其他适配器残留的内部标记字段。
+- **`AnthropicClient`**：
+  - 端点智能解析（裸域名 → `/v1/messages`、`/anthropic` 兼容层 → `/anthropic/v1/messages`、完整 URL 原样使用）；
+  - **图片块协议转换（新增能力）**：内部统一的 OpenAI 风格 `image_url` 块自动转成 Anthropic `image/source`（`data:` URL → `base64` + `media_type`，http(s) → `url`），让 Claude 兼容服务也能正常识图；
+  - `thinking` **只在开启时下发**（`non-thinking` 不发送该字段，规避兼容层 400）；`max_tokens` 支持 `extraConfig.maxTokens` 覆盖，思考模式自动放宽到 `budget + 8192` 满足 `max_tokens > budget_tokens`；
+  - 工具转换修正通配符类型问题（`parameters` / `description` 缺省值安全处理），并保留 `tool_choice` 移除策略。
+
+### 🖥️ 前端
+
+- Provider 管理页（`ProviderConfigView` / `ConfigView`）：请求模板下拉新增「火山方舟（豆包 / OpenAI 兼容）」「通义千问（阿里云百炼 / OpenAI 兼容）」，OpenAI / Anthropic 选项标注为「公共契约（任意兼容服务）」；新增「扩展配置」JSON 输入（带合法性校验）；模板标签/配色/图标补充 `volcengine` / `ark` / `doubao` / `qwen` / `dashscope` / `tongyi`；扩展配置提示汇总各平台凭证（火山 AK/SK + searchApiKey、通义 AK/SK + enableSearch、MiniMax codingPlanKey、MiMo mimoCookie、Anthropic maxTokens）；
+- 聊天页余额展示：从「仅 DeepSeek」扩展为 DeepSeek + 火山引擎 + MiniMax + MiMo + 通义千问（`BALANCE_TEMPLATES`），支持 `quota` 类型（额度百分比）与各平台差异化悬浮提示（通义显示可用余额/现金余额/信用额度）。
+
+### ✅ 测试
+
+- 新增 `VolcengineAdapterTest`（32 断言）：端点解析 4 例、thinking 映射 5 例、reasoning_effort 3 例、多模态 detail 归一、V4 签名结构与确定性 6 例、联网搜索解析 5 例、URL 关键词 3 例、vision 能力判定 5 例；
+- 新增 `MiniMaxAdapterTest`（29 断言）：搜索解析 9 例、图片理解 3 例、额度解析 6 例、区域 host 4 例、视觉判定 6 例；
+- 新增 `QwenAdapterTest`（58 断言）：千问端点/思考/联网/图片剔除、OpenAI 公共契约边界、Anthropic 端点与图片协议转换、阿里云 RPC 签名、千问视觉判定；
+- 新增 `GptAdapterTest`（31 断言）：GPT 端点、reasoning_effort 全档位映射、max_completion_tokens、temperature 移除、stream_options、注入 max_tokens 转换；
+- `SearchToolLogicTest`（16 断言）、`DeepSeekToolsApiClientTest`（26 断言）回归通过。
+
+### 🔖 版本号同步（2.0.3 → 2.0.4）
+
+- 后端：`2.0.3` → `2.0.4`（pom.xml）
+- 前端：`2.0.3` → `2.0.4`（package.json + package-lock.json）
+- Electron：`2.0.3` → `2.0.4`（package.json + package-lock.json，打包 jar 路径同步 `code-craft-2.0.4.jar`）
+- MCP Server 握手版本：`2.0.3` → `2.0.4`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 打包产物：`code-craft-2.0.3.jar` → `code-craft-2.0.4.jar`
+- 说明文档：README(_EN) / BUILD_AND_RUN(_EN) / CHANGELOG(_EN) / docs（ARCHITECTURE、DEEPSEEK_SERVICE_IMPL、LLM_PROVIDER_SYSTEM、DEV_QUICKREF、RELEASE_CHECKLIST 等）同步至 v2.0.4，平台支持列表补充 GPT / 通义千问 / 火山方舟
+
+---
+
 ## [2.0.3] - 2026-10-17
 
 ### 💬 修复：聊天记录渲染重叠 / 位置错乱 / 超长会话卡顿

@@ -126,6 +126,39 @@ public abstract class AbstractLLMClient implements LLMClient {
         // 默认不做额外定制
     }
 
+    /**
+     * 移除多模态图片块中的 {@code detail} 字段。
+     *
+     * <p>部分 OpenAI 兼容平台（MiMo / MiniMax 等）并未声明 {@code image_url.detail}，
+     * 下发未知字段存在被严格校验拒绝的风险；这些 Provider 的适配器在构造请求时调用本方法剔除。</p>
+     *
+     * @param messages 消息列表（就地修改）
+     */
+    @SuppressWarnings("unchecked")
+    protected static void stripImageDetail(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> msg : messages) {
+            Object content = msg.get("content");
+            if (!(content instanceof List<?> parts)) {
+                continue;
+            }
+            for (Object part : parts) {
+                if (!(part instanceof Map<?, ?> block)) {
+                    continue;
+                }
+                if (!"image_url".equals(block.get("type"))) {
+                    continue;
+                }
+                Object imageUrl = block.get("image_url");
+                if (imageUrl instanceof Map<?, ?> iu) {
+                    ((Map<String, Object>) iu).remove("detail");
+                }
+            }
+        }
+    }
+
     @Override
     public Flux<String> streamChat(Map<String, Object> requestBody) {
         // ★ 请求出口统一净化：会把「工具已下发但结果缺失」的脏序列修复成合法序列（幂等、纯内存）。

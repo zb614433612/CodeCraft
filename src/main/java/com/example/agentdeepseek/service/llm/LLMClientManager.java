@@ -2,6 +2,7 @@ package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.mapper.ProviderConfigMapper;
 import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -15,6 +16,61 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * LLM 客户端管理器
+ *
+ * <h3>模板选型总览（新增 Provider 时先看这张表）</h3>
+ * <table border="1">
+ *   <tr><th>requestTemplate</th><th>适配器</th><th>适用对象</th><th>不要用于</th></tr>
+ *   <tr>
+ *     <td>{@code deepseek}</td><td>{@link DeepSeekClient}</td>
+ *     <td>DeepSeek 官方 API（thinking.type / reasoning_effort 原生语义）</td>
+ *     <td>方舟上的 DeepSeek（用 {@code volcengine}）、中转站（用 {@code openai}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code volcengine} / {@code ark} / {@code doubao}</td><td>{@link VolcengineArkClient}</td>
+ *     <td>火山方舟（豆包及方舟托管模型），thinking.type=auto/enabled/disabled</td>
+ *     <td>DeepSeek 官方 API、任意第三方兼容中转站</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code qwen} / {@code dashscope} / {@code tongyi}</td><td>{@link QwenClient}</td>
+ *     <td>阿里云百炼千问（含 Qwen-VL），enable_thinking / enable_search 扩展参数</td>
+ *     <td>官方 GPT/o 系列（用 {@code gpt}）、其他兼容服务（用 {@code openai}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code gpt} / {@code gpt-official} / {@code chatgpt}</td><td>{@link GptClient}</td>
+ *     <td>OpenAI 官方 GPT / o 系列：max_completion_tokens + reasoning_effort 全档位 + stream_options</td>
+ *     <td>任何第三方兼容服务（它们常不支持这些官方参数，请用 {@code openai}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code openai}</td><td>{@link OpenAIClient}</td>
+ *     <td><b>公共契约</b>：Azure / OpenRouter / 中转站 / vLLM / LM Studio / One-API 等任意 OpenAI 兼容服务</td>
+ *     <td>OpenAI 官方需要 reasoning_effort 档位时（用 {@code gpt}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code anthropic}</td><td>{@link AnthropicClient}</td>
+ *     <td><b>公共契约</b>：Anthropic 官方 / Claude 中转 / GLM、DeepSeek、MiniMax 的 {@code /anthropic} 兼容层</td>
+ *     <td>OpenAI Chat Completions 协议的服务</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code ollama}</td><td>{@link OllamaClient}</td>
+ *     <td>本机 / 内网 Ollama（{@code /api/chat}），离线与数据不出网场景</td>
+ *     <td>云端 OpenAI 兼容 API（vLLM / LM Studio 的 /v1 端点用 {@code openai}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code mimo} / {@code xiaomi-mimo}</td><td>{@link MiMoClient}</td>
+ *     <td>小米 MiMo 开放平台 v2.5 系列（多模态）</td>
+ *     <td>其他兼容服务</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code minimax} / {@code minimax-cn} / {@code minimax-intl}</td><td>{@link MiniMaxClient}</td>
+ *     <td>MiniMax OpenAI 兼容端点（M3 / M2.x）</td>
+ *     <td>MiniMax 的 {@code /anthropic} 端点（用 {@code anthropic}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code custom}</td><td>{@link OpenAIClient}（最小兼容模式）</td>
+ *     <td>未知网关兜底</td>
+ *     <td>能匹配到具体模板时优先使用具体模板（参数更准确）</td>
+ *   </tr>
+ * </table>
  *
  * <h3>核心职责</h3>
  * <ol>
@@ -103,6 +159,7 @@ public class LLMClientManager {
                     "api_key VARCHAR(200), " +
                     "default_model VARCHAR(100), " +
                     "model_list TEXT, " +
+                    "extra_config TEXT, " +
                     "request_template VARCHAR(30) DEFAULT 'deepseek', " +
                     "is_default TINYINT DEFAULT 0, " +
                     "enabled TINYINT DEFAULT 1, " +
@@ -112,6 +169,12 @@ public class LLMClientManager {
                     ")");
         } catch (Exception e) {
             log.warn("LLMClientManager: initTable fallback 失败: {}", e.getMessage());
+        }
+        // 兼容旧表：extended 配置列（火山引擎 AK/SK、联网搜索 API Key 等），确保 refreshClients 前列已存在
+        try {
+            jdbcTemplate.execute("ALTER TABLE llm_provider ADD COLUMN extra_config TEXT");
+        } catch (Exception e) {
+            log.debug("LLMClientManager: extra_config 列已存在或添加失败: {}", e.getMessage());
         }
     }
 
@@ -338,13 +401,22 @@ public class LLMClientManager {
                 var wc = webClientManager.getOrCreate(config);
                 yield new DeepSeekClient(wc, objectMapper, config.getCode());
             }
-            case "openai" -> {
+            case "gpt", "gpt-official", "chatgpt" -> {
+                // OpenAI 官方 GPT / o 系列专用：max_completion_tokens + reasoning_effort + stream_options
+                // 与 openai（公共契约）区分：这里下发官方专有参数，只适合官方或官方代理
                 var wc = webClientManager.getOrCreate(config);
-                yield new OpenAIClient(wc, objectMapper, config.getCode());
+                yield new GptClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
+            }
+            case "openai" -> {
+                // 公共契约：任意 OpenAI 兼容服务（Azure / 中转站 / 自建网关），不下发厂商专有参数
+                var wc = webClientManager.getOrCreate(config);
+                yield new OpenAIClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
             }
             case "anthropic" -> {
+                // 公共契约：任意 Anthropic Messages 兼容服务（官方 / Claude 兼容层 / 中转站）
                 var wc = webClientManager.getOrCreate(config);
-                yield new AnthropicClient(wc, objectMapper, config.getCode());
+                yield new AnthropicClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
+                        readExtraInt(config, "maxTokens"));
             }
             case "ollama" -> {
                 var wc = webClientManager.getOrCreate(config);
@@ -354,7 +426,7 @@ public class LLMClientManager {
                 // 自定义 = 最小 OpenAI 兼容模式（不发送 thinking 等特有参数）
                 log.info("自定义 Provider [{}]，使用 OpenAI 兼容基础模式", config.getCode());
                 var wc = webClientManager.getOrCreate(config);
-                yield new OpenAIClient(wc, objectMapper, config.getCode());
+                yield new OpenAIClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
             }
             case "mimo" -> {
                 var wc = webClientManager.getOrCreate(config);
@@ -364,12 +436,62 @@ public class LLMClientManager {
                 var wc = webClientManager.getOrCreate(config);
                 yield new MiniMaxClient(wc, objectMapper, config.getCode());
             }
+            case "qwen", "dashscope", "tongyi" -> {
+                // 通义千问（阿里云百炼 DashScope / QwenCloud），OpenAI 兼容 + Qwen 扩展参数
+                var wc = webClientManager.getOrCreate(config);
+                yield new QwenClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
+                        readExtraBoolean(config, "enableSearch"),
+                        readExtraInt(config, "thinkingBudget"));
+            }
+            case "volcengine", "ark", "doubao" -> {
+                // 火山引擎方舟（豆包 / 方舟上的 DeepSeek、GLM、Kimi 等模型），OpenAI 兼容协议
+                var wc = webClientManager.getOrCreate(config);
+                yield new VolcengineArkClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
+            }
             default -> {
                 log.warn("未知的 request_template: {}，回退到 DeepSeekClient", template);
                 var wc = webClientManager.getOrCreate(config);
                 yield new DeepSeekClient(wc, objectMapper, config.getCode());
             }
         };
+    }
+
+    // ==================== 扩展配置读取（extraConfig） ====================
+
+    /** 读取扩展配置中的布尔开关（缺省 false） */
+    private boolean readExtraBoolean(ProviderConfig config, String field) {
+        String value = readExtraValue(config, field);
+        return value != null && ("true".equalsIgnoreCase(value.trim()) || "1".equals(value.trim()));
+    }
+
+    /** 读取扩展配置中的整数字段（缺省 null） */
+    private Integer readExtraInt(ProviderConfig config, String field) {
+        String value = readExtraValue(config, field);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (Exception e) {
+            log.warn("Provider [{}] 扩展配置字段 {} 不是合法整数: {}", config.getCode(), field, value);
+            return null;
+        }
+    }
+
+    /** 读取扩展配置中的字符串字段（非法 JSON 视为未配置） */
+    private String readExtraValue(ProviderConfig config, String field) {
+        String extraConfig = config.getExtraConfig();
+        if (extraConfig == null || extraConfig.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(extraConfig);
+            JsonNode value = node.get(field);
+            return value == null || value.isNull() ? null : value.asText();
+        } catch (Exception e) {
+            log.warn("Provider [{}] 扩展配置不是合法 JSON，已忽略: {}", config.getCode(), e.getMessage());
+            return null;
+        }
     }
 
     /**

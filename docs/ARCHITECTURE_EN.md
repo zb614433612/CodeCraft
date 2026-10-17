@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v2.0.3 | Updated: 2026-10-17 | Audience: Developers / AI Collaborators
+> Version: v2.0.4 | Updated: 2026-10-18 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -526,11 +526,12 @@ CodeCraft supports multiple LLM platforms. Core components:
 - **llm_provider table**: Stores Provider config (code/name/baseUrl/apiKey/defaultModel/requestTemplate, etc.)
 - **LLMClient Interface**: Unified abstraction layer; all Providers must implement it (buildRequestBody/streamChat/extractContent, etc.)
 - **LLMClientManager**: Core manager for Provider registration, routing (resolveClientByCode/resolveClientByProviderId), hot refresh
-- **6 Provider Implementations**: DeepSeekClient / OpenAIClient / AnthropicClient / OllamaClient / MiMoClient / MiniMaxClient (+ AbstractLLMClient abstract base)
+- **10 Provider Templates (v2.0.4)**: `DeepSeekClient` / `GptClient` (OpenAI official) / `OpenAIClient` (protocol contract) / `AnthropicClient` (protocol contract) / `QwenClient` (Alibaba Model Studio) / `VolcengineArkClient` (Volcengine Ark) / `OllamaClient` / `MiMoClient` / `MiniMaxClient` / `custom` (OpenAIClient minimal mode), all extending `AbstractLLMClient`; each class carries a "适用范围（选型指引）" Javadoc block
 - **Agent Binding**: agent_config table gains provider_id/provider_code fields; each Agent can be bound to a specific Provider
 - **Frontend Dynamic Switching**: CodeAssistantView supports runtime Provider switching with automatic model list refresh
 - **Provider Routing Priority**: Frontend dynamic providerCode > Agent config providerId > First available Provider
 - **DeepSeek Official Tool APIs (v2.0.3)**: `DeepSeekToolsApiClient` is enabled automatically when the Provider `baseUrl` host is `api.deepseek.com` and an API key is configured. `web_search` / `web_fetch` then prefer the official `/v1/tools/search` and `/v1/tools/fetch` endpoints and fall back to the legacy pipeline (Bing/Baidu, Jina/local) on failure. Detection uses the baseUrl host rather than providerCode, so third-party proxies / self-hosted services are never enabled
+- **Platform enhancement capabilities (v2.0.4)**: `llm_provider.extra_config` carries platform credentials (Volcengine AK/SK + search key, Alibaba Cloud AK/SK, MiniMax Coding Plan key, MiMo console cookie); capabilities work on an "opt-in + skip when credentials are missing + always fall back" basis. Balance/quota queries support DeepSeek / Volcengine / Alibaba Cloud (Qwen) / MiniMax / MiMo
 
 ---
 

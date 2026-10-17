@@ -341,7 +341,7 @@ public class LLMWebClientManager {
     /**
      * 按 Provider 模板获取认证头名称
      * <ul>
-     *   <li>deepseek / openai / minimax → Authorization</li>
+     *   <li>deepseek / openai / minimax / volcengine（火山方舟）→ Authorization</li>
      *   <li>anthropic → x-api-key</li>
      *   <li>mimo → api-key（MiMo 自定义头）</li>
      *   <li>ollama / custom → 无（返回 Authorization 但无前缀时跳过）</li>

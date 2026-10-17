@@ -10,6 +10,16 @@ import java.util.Map;
 /**
  * DeepSeek API 的 LLMClient 实现
  *
+ * <h3>适用范围（选型指引）</h3>
+ * <ul>
+ *   <li><b>适用</b>：DeepSeek 官方 API（{@code api.deepseek.com}），或需要 DeepSeek 原生
+ *       {@code thinking.type} / {@code reasoning_effort} 语义的调用</li>
+ *   <li><b>不适用</b>：方舟上的 DeepSeek 模型（用 {@code volcengine} 模板）；
+ *       任何 OpenAI 兼容中转站 / 自建网关（用 {@code openai} 公共契约）</li>
+ *   <li><b>专属能力</b>：{@code thinking.type=enabled/disabled} + {@code reasoning_effort=high/max}；
+ *       {@code web_search} / {@code web_fetch} 在该 Provider 下自动改走 DeepSeek 官方工具 API</li>
+ * </ul>
+ *
  * <h3>DeepSeek 特有参数</h3>
  * <ul>
  *   <li>thinking.type = "enabled" | "disabled"</li>

@@ -5,7 +5,7 @@
    <p><strong>多 LLM 驱动的 AI 编程 Agent · 终端级代码助手 · 自然语言开发工具</strong></p>
   <p>
     AI Coding Agent | AI Pair Programming | Autonomous Coding Assistant | Multi-LLM DevTool<br>
-    支持多种大语言模型（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax）的智能体编程助手——自然语言对话，自动读写文件、搜索代码、执行命令、管理 Git，复杂任务自动拆解并行执行
+    支持多种大语言模型（DeepSeek / GPT / OpenAI 兼容 / Anthropic / 通义千问 / 火山方舟 / Ollama / MiMo / MiniMax）的智能体编程助手——自然语言对话，自动读写文件、搜索代码、执行命令、管理 Git，复杂任务自动拆解并行执行
   </p>
 
   <p>
@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/badge/Spring%20Boot-3.4-brightgreen?logo=springboot" alt="Spring Boot 3.4">
     <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vuedotjs" alt="Vue 3.5">
     <img src="https://img.shields.io/badge/Electron-33-47848F?logo=electron" alt="Electron 33">
-    <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Ollama%20%7C%20MiMo%20%7C%20MiniMax-4B7BF5" alt="Multi-LLM">
+    <img src="https://img.shields.io/badge/Multi--LLM-DeepSeek%20%7C%20GPT%20%7C%20Claude%20%7C%20Qwen%20%7C%20Ark%20%7C%20Ollama%20%7C%20MiMo%20%7C%20MiniMax-4B7BF5" alt="Multi-LLM">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/download-exe%20%7C%20dmg%20%7C%20AppImage-brightgreen" alt="Download">
@@ -24,7 +24,7 @@
 
 ## 🏷️ 关键词 / Topics
 
-`ai-coding-assistant` `coding-agent` `ai-agent` `deepseek` `openai` `anthropic` `ollama` `mimo` `minimax` `multi-llm` `llm` `large-language-model` `vibe-coding` `developer-tools` `cli-tool` `terminal` `ai-pair-programming` `autonomous-agents` `multi-agent` `task-decomposition` `code-generation` `agentic-ai` `open-source` `ai-assisted-development` `coding-assistant` `git-automation` `ai-software-engineer` `agent-framework` `self-hosted` `natural-language-programming` `ai-code-editor`
+`ai-coding-assistant` `coding-agent` `ai-agent` `deepseek` `openai` `gpt` `anthropic` `qwen` `volcengine` `ollama` `mimo` `minimax` `multi-llm` `llm` `large-language-model` `vibe-coding` `developer-tools` `cli-tool` `terminal` `ai-pair-programming` `autonomous-agents` `multi-agent` `task-decomposition` `code-generation` `agentic-ai` `open-source` `ai-assisted-development` `coding-assistant` `git-automation` `ai-software-engineer` `agent-framework` `self-hosted` `natural-language-programming` `ai-code-editor`
 
 > 💡 **搜这些词都能找到 CodeCraft！** 以上是 GitHub 上同类 AI 编程助手（Cline / Aider / OpenCode / Codex / Cursor 等）用户最常用的搜索关键词，已全部覆盖。
 
@@ -32,7 +32,7 @@
 
 ## 📖 项目简介
 
-**CodeCraft** 是一个支持**多种大语言模型（DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax 等）** 的 **AI 编程 Agent（AI Coding Agent / AI Pair Programming Tool）**，以桌面应用 + 终端命令行的形态，将自然语言对话转化为生产力级的自动化编程操作。通过统一的 LLMClient 抽象层，用户可在运行时动态切换不同 LLM Provider，每个 Agent 也可绑定特定的 Provider 和模型。
+**CodeCraft** 是一个支持**多种大语言模型（DeepSeek / GPT / OpenAI 兼容 / Anthropic / 通义千问 / 火山方舟 / Ollama / MiMo / MiniMax 等）** 的 **AI 编程 Agent（AI Coding Agent / AI Pair Programming Tool）**，以桌面应用 + 终端命令行的形态，将自然语言对话转化为生产力级的自动化编程操作。通过统一的 LLMClient 抽象层，用户可在运行时动态切换不同 LLM Provider，每个 Agent 也可绑定特定的 Provider 和模型。
 
 与普通的 AI ChatBot 聊天助手不同，CodeCraft 是一个真正具备**完整工具调用能力（Tool Use / Function Calling）** 的 **Autonomous Coding Agent（自主编程智能体）**——它能读取项目文件、搜索代码库、执行 Shell 命令、操作 Git 版本控制，甚至自动创建子 Agent 并行处理复杂开发任务，像一位 **AI 软件工程师（AI Software Engineer）** 一样独立完成工作。
 
@@ -45,7 +45,11 @@
 Agent 之间可**任务委托**：智能体 A 在执行中通过 `agent_invoke` 工具调用智能体 B，B 以自身身份（自己的角色/模型/工作目录/工具集）在**独立会话**中执行——支持 `create_session`（为 B 新建会话）与 `continue_session`（按会话 ID 让 B 带着历史继续干）。**委托即授权**：用户批准一次委托后，B 执行期间免弹窗（信任沿调用链传递，环检测 + 深度 ≤3 防死循环）；A 停止任务会级联取消 B 的委托任务。B 的委托会话会出现在其会话列表（名称带「[A 委托]」前缀），透明可审计。详见 `docs/AGENT_INVOKE_DESIGN.md`。
 
 ### 🌐 多 LLM Provider 支持（Multi-LLM Platform）
-支持 DeepSeek、OpenAI、Anthropic、Ollama、MiMo、MiniMax 等主流 LLM 平台。通过统一的 LLMClient 抽象层屏蔽不同平台的 API 差异，前端运行时可随时切换 Provider，无需重启服务。每个 Agent 可以绑定特定的 Provider 和模型，Provider 配置变更后自动热刷新客户端缓存。使用 **DeepSeek 官方 API**（`api.deepseek.com`）时，`web_search` / `web_fetch` 会自动改走官方 `/v1/tools/search` 与 `/v1/tools/fetch` 接口，失败自动回退 Bing/百度与 Jina/本地抓取。详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
+支持 **10 类 Provider 模板**：DeepSeek、GPT（OpenAI 官方专精）、OpenAI（公共契约）、Anthropic（公共契约）、通义千问（阿里云百炼）、火山方舟（豆包）、Ollama、MiMo、MiniMax、自定义。
+
+其中 **OpenAI / Anthropic 是「公共契约」模板**——任何符合对应协议规范的服务（Azure、OpenRouter、各类中转站、vLLM / LM Studio / One-API 自建网关、GLM / DeepSeek / MiniMax 的 `/anthropic` 兼容层）都能直接接入，且会自动做协议转换（Anthropic 图片块 `image_url → image/source`、工具格式转换）；而 **GPT / DeepSeek / 火山方舟 / 通义千问** 等专用模板则启用各家专有参数（思考档位 `reasoning_effort` / `thinking.type` / `enable_thinking`、`max_completion_tokens`、图片理解、联网搜索等）。
+
+通过统一的 LLMClient 抽象层屏蔽不同平台的 API 差异，前端运行时可随时切换 Provider，无需重启服务；每个 Agent 可绑定特定 Provider 与模型，配置变更自动热刷新。平台增强能力按「按需启用 + 缺凭证自动跳过 + 失败自动回退」策略工作：搜索侧支持 DeepSeek 官方搜索、火山方舟联网搜索、MiniMax 搜索；余额/额度侧支持 DeepSeek、火山引擎（AK/SK）、通义千问（阿里云 AK/SK）、MiniMax（套餐额度）与 MiMo（控制台 Cookie）。详见 [LLM Provider 系统文档](docs/LLM_PROVIDER_SYSTEM.md)。
 
 ### 🛡️ 三层安全防护（Human-in-the-Loop）
 工具执行采用渐进式安全策略：Manual 模式下数据操作和路径敏感操作弹窗授权，Auto 模式下高危工具（file_writer action=delete / execute_sql 等）仍需人工确认。支持"本轮对话全部同意"一键放行，在 Autonomous Agent 自动化和 Human-in-the-Loop 人工管控之间取得最佳平衡。

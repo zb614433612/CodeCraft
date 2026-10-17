@@ -27,7 +27,16 @@ public class ProviderConfig {
     private String defaultModel;
     /** 可用模型列表（JSON数组字符串） */
     private String modelList;
-    /** 请求模板类型：deepseek / openai / anthropic / ollama / custom */
+    /**
+     * 扩展配置（JSON 字符串）
+     * <p>
+     * 用于存放平台增强能力所需的额外凭证/开关，例如火山引擎：
+     * {@code {"accessKey":"AK...","secretKey":"SK...","searchApiKey":"联网搜索Key","region":"cn-beijing"}}。
+     * 为空表示未配置，相关增强能力自动跳过（不影响对话主链路）。
+     * </p>
+     */
+    private String extraConfig;
+    /** 请求模板类型：deepseek / openai / anthropic / ollama / custom / volcengine */
     private String requestTemplate;
     /** 是否为默认 Provider */
     private Integer isDefault;

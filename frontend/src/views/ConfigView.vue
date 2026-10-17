@@ -136,11 +136,18 @@
                   <a-textarea v-model:value="modelListText" placeholder='JSON 数组：["model-a","model-b"]' :rows="3" :maxLength="1000" class="form-textarea" />
                   <div class="form-hint" style="margin-top:2px">JSON 数组格式，前端模型选择器据此动态渲染</div>
                 </a-form-item>
+                <a-form-item label="扩展配置">
+                  <a-textarea v-model:value="formData.extraConfig" placeholder='可选 JSON：{"accessKey":"...","secretKey":"...","searchApiKey":"..."}' :rows="3" :maxLength="2000" class="form-textarea" />
+                  <div class="form-hint" style="margin-top:2px">平台增强凭证（可选）：火山引擎 accessKey/secretKey（余额）+ searchApiKey（联网搜索）；通义千问 accessKey/secretKey（阿里云余额）+ enableSearch（对话级联网）；MiniMax codingPlanKey（搜索/额度）；MiMo mimoCookie（余额，约 24h）；Anthropic 兼容层可配 maxTokens</div>
+                </a-form-item>
                 <a-form-item label="请求模板">
                   <a-select v-model:value="formData.requestTemplate" class="form-input" :getPopupContainer="trigger => trigger.parentElement">
                     <a-select-option value="deepseek">DeepSeek</a-select-option>
-                    <a-select-option value="openai">OpenAI</a-select-option>
-                    <a-select-option value="anthropic">Anthropic</a-select-option>
+                    <a-select-option value="volcengine">火山方舟（豆包 / OpenAI 兼容）</a-select-option>
+                    <a-select-option value="qwen">通义千问（阿里云百炼 / OpenAI 兼容）</a-select-option>
+                    <a-select-option value="gpt">GPT（OpenAI 官方 / o 系列专用）</a-select-option>
+                    <a-select-option value="openai">OpenAI（公共契约：任意 OpenAI 兼容服务）</a-select-option>
+                    <a-select-option value="anthropic">Anthropic（公共契约：任意 Messages 兼容服务）</a-select-option>
                     <a-select-option value="ollama">Ollama</a-select-option>
                     <a-select-option value="mimo">MiMo（小米）</a-select-option>
                     <a-select-option value="minimax">MiniMax</a-select-option>
@@ -180,7 +187,7 @@ const apiKeyConfigured = ref(false)      // 当前编辑的 Provider 是否已�
 const showApiKeyInput = ref(false)       // 是否显示 Key 修改输入框
 
 const getDefaultForm = (): Partial<ProviderConfig> => ({
-  code: '', name: '', baseUrl: '', apiKey: '', defaultModel: '', modelList: '[]', requestTemplate: 'deepseek'
+  code: '', name: '', baseUrl: '', apiKey: '', defaultModel: '', modelList: '[]', extraConfig: '', requestTemplate: 'deepseek'
 })
 
 const formData = reactive<Partial<ProviderConfig>>(getDefaultForm())
@@ -210,13 +217,14 @@ function avatarGradient(id?: number, name?: string): string {
 }
 
 function providerEmoji(code: string): string {
-  const map: Record<string, string> = { deepseek: '🔍', openai: '🤖', anthropic: '🧠', ollama: '🦙', mimo: '📱', minimax: '🔮', custom: '⚙️' }
+  const map: Record<string, string> = { deepseek: '🔍', openai: '🤖', gpt: '💠', anthropic: '🧠', ollama: '🦙', mimo: '📱', minimax: '🔮', volcengine: '🌋', ark: '🌋', doubao: '🫘', qwen: '🌐', dashscope: '🌐', tongyi: '🌐', custom: '⚙️' }
   return map[code] || '🔌'
 }
 
 function templateLabel(template: string): string {
   const map: Record<string, string> = {
-    deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', ollama: 'Ollama',
+    deepseek: 'DeepSeek', volcengine: '火山方舟', ark: '火山方舟', doubao: '豆包',
+    openai: 'OpenAI 兼容', gpt: 'GPT（官方）', anthropic: 'Claude', ollama: 'Ollama',
     mimo: 'MiMo', minimax: 'MiniMax', custom: '自定义', qwen: '通义千问', glm: '智谱 GLM', moonshot: 'Moonshot',
   }
   return map[template] || template
@@ -225,6 +233,10 @@ function templateLabel(template: string): string {
 function templateStyle(template: string): Record<string, string> {
   const colors: Record<string, { bg: string; color: string; border: string }> = {
     deepseek: { bg: 'rgba(139,92,246,0.1)', color: '#7c3aed', border: '1px solid rgba(139,92,246,0.25)' },
+    volcengine: { bg: 'rgba(37,99,235,0.1)', color: '#1d4ed8', border: '1px solid rgba(37,99,235,0.25)' },
+    ark: { bg: 'rgba(37,99,235,0.1)', color: '#1d4ed8', border: '1px solid rgba(37,99,235,0.25)' },
+    doubao: { bg: 'rgba(37,99,235,0.1)', color: '#1d4ed8', border: '1px solid rgba(37,99,235,0.25)' },
+    gpt: { bg: 'rgba(16,163,127,0.12)', color: '#0f766e', border: '1px solid rgba(16,163,127,0.28)' },
     openai: { bg: 'rgba(16,185,129,0.1)', color: '#059669', border: '1px solid rgba(16,185,129,0.25)' },
     anthropic: { bg: 'rgba(245,158,11,0.1)', color: '#d97706', border: '1px solid rgba(245,158,11,0.25)' },
     ollama: { bg: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.25)' },
@@ -275,6 +287,7 @@ function openEditModal(p: ProviderConfig) {
     showApiKeyInput.value = true
     Object.assign(formData, { ...p })
   }
+  formData.extraConfig = p.extraConfig || ''
   modelListText.value = p.modelList || '[]'
   modalVisible.value = true
 }
@@ -287,6 +300,12 @@ async function handleSave() {
   if (!formData.baseUrl?.trim()) { message.warning('请输入 Base URL'); return }
   try { JSON.parse(modelListText.value || '[]') } catch { message.warning('模型列表不是合法的 JSON 数组'); return }
   formData.modelList = modelListText.value
+  // 校验扩展配置（可选 JSON）
+  const extraConfig = (formData.extraConfig || '').trim()
+  if (extraConfig) {
+    try { JSON.parse(extraConfig) } catch { message.warning('扩展配置不是合法的 JSON'); return }
+  }
+  formData.extraConfig = extraConfig
 
   modalSaving.value = true
   try {

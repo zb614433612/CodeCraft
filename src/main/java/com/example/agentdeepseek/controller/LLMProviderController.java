@@ -43,6 +43,8 @@ public class LLMProviderController {
             if (key != null && !key.isEmpty()) {
                 config.setApiKey("****");
             }
+            // 扩展配置中可能含 AccessKey/SecretKey、联网搜索 Key，同样掩码返回
+            config.setExtraConfig(maskExtraConfig(config.getExtraConfig()));
         }
         log.info("Provider 列表查询: count={}", list.size());
         return ApiResponse.success(list);
@@ -103,6 +105,15 @@ public class LLMProviderController {
         if (config.getApiKey() != null && !config.getApiKey().isEmpty() && !"****".equals(config.getApiKey())) existing.setApiKey(config.getApiKey());
         if (config.getDefaultModel() != null) existing.setDefaultModel(config.getDefaultModel());
         if (config.getModelList() != null) existing.setModelList(config.getModelList());
+        // 扩展配置：空串=清空；含掩码=未修改（保留原值）；其余=覆盖
+        if (config.getExtraConfig() != null) {
+            String extra = config.getExtraConfig().trim();
+            if (extra.isEmpty()) {
+                existing.setExtraConfig(null);
+            } else if (!extra.contains(MASK)) {
+                existing.setExtraConfig(extra);
+            }
+        }
         if (config.getRequestTemplate() != null) existing.setRequestTemplate(config.getRequestTemplate());
         if (config.getEnabled() != null) existing.setEnabled(config.getEnabled());
         if (config.getSortOrder() != null) existing.setSortOrder(config.getSortOrder());
@@ -126,6 +137,22 @@ public class LLMProviderController {
         llmClientManager.refreshClients();
         log.info("Provider 删除成功: id={}, code={}", id, existing.getCode());
         return ApiResponse.success(null, "Provider 已删除");
+    }
+
+    /** 脱敏占位符（前端收到该值表示"已配置但不可见"，提交时视为未修改） */
+    private static final String MASK = "****";
+
+    /**
+     * 脱敏扩展配置：把 JSON 中的密钥类字段值替换为掩码，保留结构供前端展示"已配置"状态。
+     * <p>覆盖火山引擎 AccessKey/SecretKey、联网搜索 API Key 等平台增强凭证。</p>
+     */
+    private static String maskExtraConfig(String extraConfig) {
+        if (extraConfig == null || extraConfig.isBlank()) {
+            return extraConfig;
+        }
+        return extraConfig.replaceAll(
+                "(\"(?:accessKey|secretKey|searchApiKey|apiKey|token|sessionToken)\"\\s*:\\s*\")[^\"]*(\")",
+                "$1" + MASK + "$2");
     }
 
     private void checkAdmin(HttpServletRequest request) {

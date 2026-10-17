@@ -13,7 +13,7 @@ import java.util.List;
 @Repository
 public interface ProviderConfigMapper {
 
-    @Select("SELECT id, code, name, base_url, api_key, default_model, model_list, request_template, " +
+    @Select("SELECT id, code, name, base_url, api_key, default_model, model_list, extra_config, request_template, " +
             "is_default, enabled, sort_order, created_at, updated_at FROM llm_provider WHERE id = #{id}")
     @Results(id = "providerConfigResultMap", value = {
         @Result(property = "id", column = "id"),
@@ -23,6 +23,7 @@ public interface ProviderConfigMapper {
         @Result(property = "apiKey", column = "api_key"),
         @Result(property = "defaultModel", column = "default_model"),
         @Result(property = "modelList", column = "model_list"),
+        @Result(property = "extraConfig", column = "extra_config"),
         @Result(property = "requestTemplate", column = "request_template"),
         @Result(property = "isDefault", column = "is_default"),
         @Result(property = "enabled", column = "enabled"),
@@ -32,27 +33,28 @@ public interface ProviderConfigMapper {
     })
     ProviderConfig selectById(Long id);
 
-    @Select("SELECT id, code, name, base_url, api_key, default_model, model_list, request_template, " +
+    @Select("SELECT id, code, name, base_url, api_key, default_model, model_list, extra_config, request_template, " +
             "is_default, enabled, sort_order, created_at, updated_at FROM llm_provider " +
             "WHERE code = #{code}")
     @ResultMap("providerConfigResultMap")
     ProviderConfig selectByCode(String code);
 
-    @Select("SELECT id, code, name, base_url, api_key, default_model, model_list, request_template, " +
+    @Select("SELECT id, code, name, base_url, api_key, default_model, model_list, extra_config, request_template, " +
             "is_default, enabled, sort_order, created_at, updated_at FROM llm_provider " +
             "WHERE enabled = 1 ORDER BY sort_order ASC, id ASC")
     @ResultMap("providerConfigResultMap")
     List<ProviderConfig> selectAllEnabled();
 
-    @Insert("INSERT INTO llm_provider (code, name, base_url, api_key, default_model, model_list, " +
+    @Insert("INSERT INTO llm_provider (code, name, base_url, api_key, default_model, model_list, extra_config, " +
             "request_template, is_default, enabled, sort_order, created_at, updated_at) " +
-            "VALUES (#{code}, #{name}, #{baseUrl}, #{apiKey}, #{defaultModel}, #{modelList}, " +
+            "VALUES (#{code}, #{name}, #{baseUrl}, #{apiKey}, #{defaultModel}, #{modelList}, #{extraConfig}, " +
             "#{requestTemplate}, #{isDefault}, #{enabled}, #{sortOrder}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(ProviderConfig config);
 
     @Update("UPDATE llm_provider SET code = #{code}, name = #{name}, base_url = #{baseUrl}, " +
             "api_key = #{apiKey}, default_model = #{defaultModel}, model_list = #{modelList}, " +
+            "extra_config = #{extraConfig}, " +
             "request_template = #{requestTemplate}, is_default = #{isDefault}, enabled = #{enabled}, " +
             "sort_order = #{sortOrder}, updated_at = #{updatedAt} WHERE id = #{id}")
     int update(ProviderConfig config);
