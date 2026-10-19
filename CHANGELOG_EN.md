@@ -5,6 +5,51 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.1] - 2026-10-19
+
+> Patch release: the v3 frontend's wallpaper now actually shows through **across the whole UI**
+> (L21) instead of only the three outer shell containers; the desktop 32px title-bar strip is
+> now painted by the frontend in the page's own colours (L22); version numbers are unified at
+> 3.0.1 and `scripts/sync-version.sh` is fixed. No backend API or schema changes.
+
+### 🖼 Wallpaper transparency across the whole UI (v3)
+
+- **Problem**: with a wallpaper set, only the sidebar / top bar / main content area were translucent. Message bubbles, the composer, cards, list rows and drawers stayed fully opaque, so stacking them hid the wallpaper completely — users saw "I set a wallpaper but can't see it".
+- **Approach (retarget tokens, not individual components)**: `tokens.css` now exposes 5 opaque base colours (`--bg-solid` / `--bg-sub-solid` / `--card-solid` / `--card-2-solid` / `--accent-soft-solid`) and the semantic variables reference them, so **behaviour is pixel-identical when no wallpaper is set**; `app.css` §37 rewrites those 5 surface colours to translucent values via `color-mix()` under `.cc-shell.has-bg`, covering all 283 background references at once — components added later can't be missed.
+- **Four layers** (wallpaper → content sheet → card → overlay): shell 62%–74% + backdrop blur; content sheet 40% (30% in light theme); cards 64% (58% in light theme); drawers 94%, popovers/dropdowns 90%, and code / log / diff / editor reading surfaces 96%.
+- **Wallpaper luminance correction**: `.cc-app-bg::after` darkens the wallpaper by 60% in dark theme and lightens it by 32% in light theme, so light text on a bright photo remains readable; the correction fades together with the opacity slider.
+- **Fallbacks and exceptions**: `@supports not (color-mix)` falls back to solid colours; Toast / Confirm / Prompt / Lightbox stay solid because they are teleported to `body` (outside `.cc-shell`) — topmost feedback must stay crisp.
+- **Verified**: automated audit across 18 pages × dark/light = 36 runs, **0** large opaque elements remaining.
+
+### 🪟 Desktop 32px title strip now matches the page (v3)
+
+- **Problem**: with `titleBarStyle: 'hidden'`, v3 reserves the top 32px via `.cc-shell { padding-top: 32px }`. That strip only showed the bare wallpaper layer, while the sidebar below it is 74% card colour + blur and the header 62% — the strip ended up one shade brighter, looking like "a piece of the shell glued on top".
+- **Approach**: the strip is now painted by the frontend in two segments — `.cc-titlebar__side` aligns with the sidebar layer and `.cc-titlebar__main` with the header layer (two stacked fills: `--bg-solid` at 40%/30% underneath, then 62% card colour, matching the compositing order of `.cc-chat__main` + `.cc-header`). Collapsed sidebar (`cc-sidebar-collapsed`), the login page (`is-plain`) and the no-wallpaper case each have their own branch; `<html>` now carries `cc-has-bg` / `cc-sidebar-collapsed` so the strip (outside `.cc-shell`) can read the state.
+- **Shell stays neutral**: `TITLE_BAR_THEME.color` in `electron/main.js` remains fully transparent and only drives the window-control symbol colour (this release only adds comments documenting the intent); the classic frontend keeps its own `.electron-titlebar-drag` + 32px scrim. Each version paints its own strip — no version has to compromise for the other's palette.
+- **Verified**: real Electron window, pixels sampled via `capturePage` — dark/light × wallpaper on/off × collapsed sidebar × login page, 7 scenarios; the strip differs from the page below by ≤ 8 levels (expected within the wallpaper's vertical gradient).
+
+### 🔧 Tooling
+
+- **Fixed `scripts/sync-version.sh` failing to read the version**: it looked for `<artifactId>codecraft</artifactId>` while `pom.xml` actually declares `<artifactId>code-craft</artifactId>` (with a hyphen), so running it without arguments always failed. The matcher is fixed and `tr -d '\r'` strips the CRLF tail from the extracted version.
+- **Widened the sync scope**: previously only `electron/package.json`; now the electron / frontend / frontend-v3 `package.json` files plus the top-level `version` of their `package-lock.json` (only the two root nodes in each lock file — dependency versions under `node_modules` are untouched).
+- **Documented the manual steps**: the Java constant `CodeCraftMcpServer.SERVER_VERSION`, the README badge and the docs version headers can't be changed safely by the script, so it now prints a reminder.
+
+### 🧾 Version bump
+
+- Backend: `3.0.0` → `3.0.1` (`pom.xml`, artifact `code-craft-3.0.1.jar`)
+- Classic frontend: `3.0.0` → `3.0.1` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.0` → `3.0.1` (`frontend-v3/package.json` + lock)
+- Electron: version and `extraResources` jar path → `3.0.1` / `code-craft-3.0.1.jar`
+- MCP Server handshake version: `3.0.0` → `3.0.1` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) headers, and the DEV_QUICKREF / RELEASE_CHECKLIST(_EN) build-command examples unified at v3.0.1
+
+### ⚠️ Upgrade notes
+
+- **No backend API or database schema changes** — just replace the installer; users on 3.0.0 can install over the top.
+- The wallpaper and title-strip work are pure frontend styling, but a page refresh alone does **not** necessarily pick them up: the desktop app serves the prebuilt `v3-static/` bundle from inside the jar, so the package has to be rebuilt.
+
+---
+
 ## [3.0.0] - 2026-10-19
 
 > Major release: the brand-new v3 frontend (`frontend-v3/`) ships alongside the classic one

@@ -5,6 +5,50 @@
 
 ---
 
+## [3.0.1] - 2026-10-19
+
+> 修订版：v3 前端的「背景图」从只作用于三个外壳容器，扩展为**全站透明化**（L21）；
+> 桌面端顶部 32px 让位区改为与页面同色自绘（L22）；版本号统一到 3.0.1，
+> 并修复 `scripts/sync-version.sh` 的版本提取缺陷。此版本无后端接口与数据结构变更。
+
+### 🖼 背景图全站透明（v3）
+
+- **问题**：开启「背景图」后只有侧栏 / 顶栏 / 主内容区三个外壳容器半透明，消息气泡、输入框、卡片、列表行、抽屉仍是实色卡面，层层叠加把壁纸完全盖住 —— 用户观感是「设了背景图但看不见」。
+- **改法（改 token 而非逐个改组件）**：`tokens.css` 拆出 5 个不透明基色（`--bg-solid` / `--bg-sub-solid` / `--card-solid` / `--card-2-solid` / `--accent-soft-solid`），原语义变量改为引用基色，**无背景图时行为逐像素不变**；`app.css` §37 在 `.cc-shell.has-bg` 下用 `color-mix()` 把这 5 个表面色统一改写为半透明，一次性覆盖全站 283 处背景引用，日后新增组件也不会漏。
+- **四级层次**（壁纸 → 内容纸面 → 卡片 → 浮层）：外壳 62%~74% + 毛玻璃；内容纸面 40%（亮色 30%）；卡片 64%（亮色 58%）；抽屉 94%、弹层 / 下拉 90%、代码与日志 / diff / 编辑器等密集阅读区 96%。
+- **背景图明暗校正**：`.cc-app-bg::after` 在深色主题压暗 60%、亮色主题提亮 32%，避免「亮壁纸 + 浅色文字」读不清；校正强度随不透明度一起变淡。
+- **回退与例外**：`@supports not (color-mix)` 时退回实色；Toast / Confirm / Prompt / Lightbox 因 Teleport 到 `body`、不在 `.cc-shell` 内，天然保持实色（最上层提示必须清晰）。
+- **验证**：18 个页面 × 明暗 2 套 = 36 次自动审计，大面积不透明元素命中 **0**。
+
+### 🪟 桌面端顶部 32px 与页面同色（v3）
+
+- **问题**：`titleBarStyle: 'hidden'` 下 v3 用 `.cc-shell { padding-top: 32px }` 为窗口控制按钮让位，这 32px 只剩裸壁纸层，而下方侧栏是 74% 卡色 + 毛玻璃、顶栏 62%，合成后比顶部亮一档 —— 视觉上像「壳的一块贴在上面」。
+- **改法**：顶部改由前端两段式自绘 —— `.cc-titlebar__side` 对齐侧栏层，`.cc-titlebar__main` 对齐顶栏层（且叠两层：先用 `--bg-solid` 40% / 30% 垫底，再压 62% 卡色，与页面 `.cc-chat__main` + `.cc-header` 的合成顺序一致）；折叠侧栏（`cc-sidebar-collapsed`）、登录页（`is-plain`）、无壁纸等场景各有分支；`<html>` 新增 `cc-has-bg` / `cc-sidebar-collapsed` 类，供壳外的标题栏读取状态。
+- **壳层保持中性**：`electron/main.js` 的 `TITLE_BAR_THEME.color` 仍为全透明，只负责切换窗口控制按钮的符号色（本次仅补充注释说明设计意图）；经典版沿用自身 `.electron-titlebar-drag` + 32px 遮罩色带。两版顶部各画各的，互不迁就对方配色。
+- **验证**：Electron 真窗口 `capturePage` 取像素，深 / 亮 × 有 / 无壁纸 × 折叠 × 登录页共 7 个场景，顶部与下方页面差值 ≤ 8 级（壁纸纵向渐变内的正常差异）。
+
+### 🔧 工具链
+
+- **修复 `scripts/sync-version.sh` 版本提取失效**：脚本此前按 `<artifactId>codecraft</artifactId>` 查找，而 `pom.xml` 里实际是 `<artifactId>code-craft</artifactId>`（带连字符），无参运行必然报「无法从 pom.xml 提取版本号」。已修正匹配串，并 `tr -d '\r'` 避免 CRLF 尾巴混入版本号。
+- **扩展同步范围**：从「仅 `electron/package.json`」扩到 electron / frontend / frontend-v3 三套 `package.json` 及其 `package-lock.json` 的顶层 `version`（lock 只改根节点前两处，不触碰 `node_modules` 里的依赖版本）。
+- **写明手工同步项**：Java 常量 `CodeCraftMcpServer.SERVER_VERSION`、README 版本徽章、docs 版本标注无法由脚本安全覆盖，脚本末尾会提示。
+
+### 🧾 版本号同步
+
+- 后端：`3.0.0` → `3.0.1`（`pom.xml`，产物 `code-craft-3.0.1.jar`）
+- 经典版前端：`3.0.0` → `3.0.1`（`frontend/package.json` + lock）
+- v3 前端：`3.0.0` → `3.0.1`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.1` / `code-craft-3.0.1.jar`
+- MCP Server 握手版本：`3.0.0` → `3.0.1`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例统一到 v3.0.1
+
+### ⚠️ 升级说明
+
+- 此版本**无后端接口与数据库结构变更**，替换安装包即可；已装 3.0.0 的用户可直接覆盖安装。
+- 背景图与顶部配色均为纯前端样式改动，不重新打包时刷新页面 **不一定**能生效 —— 桌面端加载的是 jar 内 `v3-static/` 的构建产物，需随包更新。
+
+---
+
 ## [3.0.0] - 2026-10-19
 
 > 大版本：全新 v3 前端（`frontend-v3/`）正式落地，与经典版（`frontend/`）**并存可切换**，

@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v3.0.0 | Updated: 2026-10-19 | Audience: Developers / AI Collaborators
+> Version: v3.0.1 | Updated: 2026-10-19 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---

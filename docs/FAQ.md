@@ -240,7 +240,7 @@ npm install
 1. **桌面客户端**：左下角头像 → 个人信息上方菜单，或「设置 → 版本与更新」（路由 `/about`）；
 2. **浏览器**：打开 `http://localhost:8084/v3/#/about`（经典版在「系统设置」）；
 3. **命令行**：`GET /api/system/version`（登录后）返回
-   `{"name":"CodeCraft","version":"3.0.0","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
+   `{"name":"CodeCraft","version":"3.0.1","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
 
 **为什么有两个版本号**：
 | 显示项 | 来源 | 什么时候会不一致 |
@@ -363,12 +363,12 @@ v3.0.1 的三处修复：
 `::1`，而后端 Tomcat 绑的是 IPv4，会出现「TCP 探测说端口有人监听、HTTP 探测说没响应」的自相矛盾判定，
 进而把正常机器误判成 `legacy` 或空等满超时。
 
-**手动解决（现场 A 适用，用当前 3.0.0 安装包即可，不必等新版）**：
+**手动解决（现场 A 适用，用 3.0.0 或更高版本的安装包即可，无需额外等待）**：
 
 1. 托盘图标右键退出 CodeCraft（任务管理器里不应再有 `CodeCraft.exe`）；
 2. 结束残留后端：任务管理器 → 详细信息 → 找到**命令行含 `codecraft.jar`** 的 `java.exe` 结束。
    ⚠️ 不要「结束所有 java.exe」，IDEA 等开发工具也用它；
-3. 重新运行 `CodeCraft.Setup.3.0.0.exe` 完成安装（这一步 jar 才会真正被替换）；
+3. 重新运行 `CodeCraft.Setup.3.0.1.exe` 完成安装（这一步 jar 才会真正被替换）；
 4. 启动。
 
 仓库 `scripts/fix-startup.bat` 可一键完成第 1、2 步，并检查 8084 是否已释放。
@@ -376,7 +376,7 @@ v3.0.1 的三处修复：
 **现场 B 的处理**：先按判断依据确认 `resources\jre\bin\java.exe` 是否存在；若被安全软件隔离，
 从隔离区恢复后重装；若文件本就不存在，说明安装包不完整，重新下载安装包。
 
-**已经改掉的代码**（进重发的 3.0.0 安装包起生效）：
+**已经改掉的代码**（3.0.0 重发包起生效，3.0.1 同样包含）：
 
 - 安装器 `customInit` 改为三步清理：`CodeCraft.exe` 优雅退出（触发 `before-quit` → 停后端）→
   强制结束 `CodeCraft.exe` → 兜底清理「命令行含 `codecraft.jar`」的 `java.exe`，全部做完才覆盖文件；

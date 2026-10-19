@@ -2,7 +2,7 @@
 # CodeCraft - AI-Powered Desktop Programming Assistant 🤖
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0.0-7C5CFC" alt="v3.0.0">
+  <img src="https://img.shields.io/badge/version-3.0.1-7C5CFC" alt="v3.0.1">
   <img src="https://img.shields.io/badge/Java-17-brightgreen" alt="Java 17">
   <img src="https://img.shields.io/badge/Spring_Boot-3.4-blue" alt="Spring Boot 3.4">
   <img src="https://img.shields.io/badge/Vue-3.4-42b883" alt="Vue 3.4">

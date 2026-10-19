@@ -7,7 +7,7 @@ echo ============================================================
 echo  CodeCraft 启动修复工具
 echo ------------------------------------------------------------
 echo  作用：结束残留的 CodeCraft 窗口进程与后端 java 进程
-echo        让 3.0.0 安装包能够真正覆盖 resources\backend\codecraft.jar
+echo        让新安装包能够真正覆盖 resources\backend\codecraft.jar
 echo  说明：只结束「命令行含 codecraft.jar」的 java，
 echo        不会影响 IDEA 等其它 JVM 程序
 echo ============================================================
@@ -40,7 +40,7 @@ echo.
 
 echo ============================================================
 echo  完成。接下来：
-echo    1) 重新运行 CodeCraft.Setup.3.0.0.exe 完成安装
+echo    1) 重新运行最新安装包（CodeCraft.Setup.x.y.z.exe）完成安装
 echo    2) 启动 CodeCraft
 echo  若仍提示启动超时，请看日志：
 echo    %%APPDATA%%\codecraft-desktop\runtime\logs\app.log
