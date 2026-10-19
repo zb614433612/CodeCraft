@@ -171,10 +171,20 @@ a { color: var(--accent); text-decoration: none; }
 }
 .cc-shell.is-collapsed { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
 
-/* ---- Electron 桌面壳：自绘标题栏让位（见 layouts/AppShell.vue 的 .cc-titlebar） ----
- * 桌面壳用 titleBarStyle: 'hidden'，最小化/最大化/关闭三个原生按钮浮在右上角。
+/* ---- Electron 桌面壳：自绘标题栏（元素见 App.vue 的 .cc-titlebar） ----
+ * 桌面壳用 titleBarStyle: 'hidden'，窗口控制按钮由 Electron 的 titleBarOverlay 覆盖层绘制。
  * `html.cc-electron` 由 AppShell 在检测到 window.electronAPI 时挂到 <html> 上，
  * 浏览器环境匹配不到这些选择器，完全无副作用。
+ *
+ * 为什么这 32px 要由页面自己画（而不是让壳去设标题栏颜色）：
+ *   titleBarOverlay.color 传透明时，Windows 上确实会把网页内容透出来（已实测），
+ *   但「透出来」的只是**裸露的背景图** —— 下方侧栏有 74% 卡色 + 毛玻璃、顶栏有 62%，
+ *   叠出来的颜色比裸背景图亮一档，于是顶部看起来像「壳的一块」，与页面割裂。
+ *   正确做法是让这 32px 也参与页面的分层：左段=侧栏层、右段=顶栏层，
+ *   颜色全部复用同一批 token，主题 / 壁纸 / 侧栏折叠都会自动跟随。
+ *
+ * 这条实现只属于 v3：经典版（/）用自己的 .electron-titlebar-drag + 32px 遮罩色带，
+ * 两套页面各自决定顶部怎么画，壳层保持中性 —— 谁都不用迁就对方的配色。
  *
  * 为什么抽屉和遮罩也要跟着让位：抽屉是 `position: fixed; top: 0`，其头部的
  * 关闭按钮正好落在原生窗口按钮那片区域，不让位就会被挡住点不到。
@@ -187,11 +197,57 @@ a { color: var(--accent); text-decoration: none; }
   height: 32px;
   /* 高于抽屉(70)/目录(80)/模型(90)，低于灯箱(190)/Toast(200)/Confirm(210) */
   z-index: 100;
+  /* 左段宽度与侧栏保持一致；折叠态由 html.cc-sidebar-collapsed 切换（AppShell 维护） */
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
   /* Chromium 私有属性：把这块区域变成窗口拖动把手；浏览器会忽略 */
   -webkit-app-region: drag;
   app-region: drag;
   background: transparent;
 }
+html.cc-sidebar-collapsed .cc-titlebar { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
+.cc-titlebar__side,
+.cc-titlebar__main {
+  /* 子块也要声明可拖，避免出现「只有缝隙能拖窗口」的死区 */
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+/* 左段 = 侧栏层：无壁纸时就是 --card 实色，与侧栏完全同色 */
+.cc-titlebar__side {
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.08);
+}
+/* 右段 = 顶栏层：同上，与 .cc-header 同色 */
+.cc-titlebar__main {
+  background: var(--card);
+  backdrop-filter: blur(16px) saturate(1.08);
+}
+/* 有壁纸时改用量与外壳一致的半透明档位（74% / 62%，与 37.2 节同口径）。
+ * 必须用 --card-solid：此刻 --card 本身已被改写成半透明，再 mix 一次算不出目标值。 */
+html.cc-has-bg .cc-titlebar__side { background: color-mix(in srgb, var(--card-solid) 74%, transparent); }
+/* 右段要叠**两层**才和页面顶部完全同色：
+ *   下层 = .cc-chat__main / .cc-page-scroll 的阅读纸面（--bg-solid 40%）
+ *   上层 = .cc-header 的 62% 卡色
+ * 少了下层会比 header 亮一档（实测 y=31 与 y=33 差 12 个亮度值），顶部仍像贴上的一条。
+ * background-color 垫下层、background-image（纯色渐变）压上层，顺序与页面一致。 */
+html.cc-has-bg .cc-titlebar__main {
+  background-color: color-mix(in srgb, var(--bg-solid) 40%, transparent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--card-solid) 62%, transparent),
+    color-mix(in srgb, var(--card-solid) 62%, transparent)
+  );
+}
+/* 亮色主题的纸面更薄（与 37.2 的 30% 变体对齐），否则顶部会偏白。
+ * 必须限定在 has-bg 下：没有壁纸时右段要用 --card 实色，否则会透出窗口底色。 */
+html.cc-has-bg:not([data-theme="dark"]) .cc-titlebar__main {
+  background-color: color-mix(in srgb, var(--bg-solid) 30%, transparent);
+}
+/* 登录页不套 AppShell（没有侧栏，也就没有左右分层）：整条用页面底色，避免两段拼色 */
+.cc-titlebar.is-plain { grid-template-columns: 1fr; }
+.cc-titlebar.is-plain .cc-titlebar__side { display: none; }
+.cc-titlebar.is-plain .cc-titlebar__main { background: var(--bg); backdrop-filter: none; }
+
 html.cc-electron .cc-shell { padding-top: 32px; }
 html.cc-electron .cc-drawer { top: 32px; height: calc(100% - 32px); }
 html.cc-electron .cc-mask { top: 32px; }
@@ -4417,6 +4473,9 @@ html[data-theme="dark"] .cc-log-toast { background: rgba(232, 230, 242, .94); co
   pointer-events: none;
 }
 
+/* 桌面端下移 32px：顶部那条已被自绘标题栏占用，否则提示会压在窗口控制按钮那一带 */
+html.cc-electron .cc-toast-host { top: 44px; }
+
 .cc-toast {
   display: flex;
   align-items: flex-start;
@@ -5034,11 +5093,23 @@ html[data-theme="dark"] .cc-log-toast { background: rgba(232, 230, 242, .94); co
 /* ============================ 37. 窗口背景层 ============================ */
 /**
  * 外观设置页（/appearance）把背景图 URL 写进 settingsStore，AppShell 据此渲染本层。
- * 设计要点：
- *   1) fixed 铺满且 pointer-events: none，不参与任何交互与滚动；
- *   2) inset 取负值：blur 会在边缘透出白边，向外放大 24px 由 body 的 overflow: hidden 裁掉；
- *   3) 只有 has-bg 时主区才透明 —— 否则 `.cc-main` 的 --bg 实色会把背景层完全盖住；
- *   4) 侧栏保持 --card 实色（导航需要稳定对比度，不与背景图抢注意力）。
+ *
+ * 设计演进（重要）：
+ *   早期只把 `.cc-main` / `.cc-sidebar` / `.cc-header` 三个外壳容器改成半透明，
+ *   结果内部卡片、消息气泡、输入框、列表行、抽屉全是 `var(--card)` 实色，
+ *   背景图被一层层盖住 —— 视觉上几乎等于没设。
+ *
+ *   现方案：**在 has-bg 下改写「表面色」token 本身**。
+ *   全站共 283 处 `background: var(--card|--card-2|--bg|--bg-sub)`，
+ *   改写 token 即可一次性覆盖全部页面与组件，不用逐个组件写死颜色；
+ *   没有背景图时 token 等于 tokens.css 里的 *-solid 基色，观感与改造前完全一致。
+ *
+ * 分层原则（越靠外层越透，越深的内容越实）：
+ *   L0 `.cc-app-bg`   背景图（opacity = bgOpacity，blur = bgBlur）
+ *   L1 外壳 .cc-main / .cc-sidebar / .cc-header
+ *   L2 卡片 / 列表行 / 消息气泡 / 面板（靠 --card 系 token 自动透）
+ *   L3 高密度阅读区（代码块 / 日志 / diff / 编辑器 / 终端）与浮层（抽屉 / 弹层 / 下拉）
+ *      —— 必须接近实色，否则代码与表单会糊在照片上
  */
 .cc-app-bg {
   position: fixed;
@@ -5051,32 +5122,189 @@ html[data-theme="dark"] .cc-log-toast { background: rgba(232, 230, 242, .94); co
   transition: opacity var(--tr);
 }
 
+/* 背景图明暗校正（关键）：
+ * 透明化之后最先暴露的不是「透不透」，而是「壁纸亮度和文字亮度撞车」——
+ * 深色主题配浅色壁纸时，浅色正文直接压浅色照片上，加多少不透明度都读不清，
+ * 一味加不透明度又等于把背景图压没。
+ * 这里按主题给背景层压一层同色系薄纱：深色压暗、浅色提亮，
+ * 让壁纸退成「低调底纹」，文字重新拿到对比度，界面才透得起来。
+ * 这一层是 .cc-app-bg 的伪元素，会跟着 bgOpacity 一起变淡，语义一致。 */
+.cc-app-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* 压暗到 60%：实测壁纸偏亮时（浅色插画、白底照片），
+     仅靠组件半透明压不住，会导致「页面标题被照片吃掉」。
+     压暗只降低壁纸的明度、不改变色相，图案与氛围仍然在。 */
+  background: rgba(10, 10, 18, .60);
+}
+
+html:not([data-theme="dark"]) .cc-app-bg::after {
+  /* 亮色遮罩更薄：白纱会把照片高光整片吃掉，0.46 时壁纸只剩一层灰 */
+  background: rgba(250, 250, 251, .32);
+}
+
+/* ---- 37.1 表面色降透明度：一处改写，全站组件透出背景 ----
+ * 取值口径：单个数值只代表「这一层自己有多不透明」，真正决定观感的是**叠加后的合成值**。
+ *   例：--bg 50% + --card 64% 合成 82%，即卡片里约 18% 背景图透出来；
+ *       再深的 --card-2 叠上去约 89%，属于「看得出底色、不干扰阅读」的区间。 */
+.cc-shell.has-bg {
+  /* 页面纸面：AI 消息正文没有气泡底、直接贴在这一层上，不能太透 */
+  --bg: color-mix(in srgb, var(--bg-solid) 50%, transparent);
+  /* 次级底（分区、hover 区、分段控件槽） */
+  --bg-sub: color-mix(in srgb, var(--bg-sub-solid) 56%, transparent);
+  /* 卡片 / 输入框 / 按钮 / 列表行 */
+  --card: color-mix(in srgb, var(--card-solid) 64%, transparent);
+  /* 卡片内次级区块、列表 hover、行内代码 */
+  --card-2: color-mix(in srgb, var(--card-2-solid) 56%, transparent);
+  /* 用户消息气泡 */
+  --accent-soft: color-mix(in srgb, var(--accent-soft-solid) 78%, transparent);
+}
+
+/* 亮色主题单独一档（白比黑更容易「糊」掉壁纸）：
+ * 同样 50% 的白叠在照片上，观感远比 50% 的黑更实 —— 实测亮色下壁纸几乎被漂白，
+ * 所以亮色统一比深色低 6~10 个百分点，两套主题的「壁纸可见度」才接近。 */
+html:not([data-theme="dark"]) .cc-shell.has-bg {
+  --bg: color-mix(in srgb, var(--bg-solid) 40%, transparent);
+  --bg-sub: color-mix(in srgb, var(--bg-sub-solid) 46%, transparent);
+  --card: color-mix(in srgb, var(--card-solid) 58%, transparent);
+  --card-2: color-mix(in srgb, var(--card-2-solid) 50%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent-soft-solid) 72%, transparent);
+}
+
+/* ---- 37.2 外壳三层 ----
+ * 侧栏 / 顶栏用毛玻璃：它们面积大、贴边放置，靠 blur 把背景图化开成「色块」，
+ * 既透得明显，又不会让菜单文字与照片细节打架。
+ * 这里必须用 --card-solid 而不是 --card：后者此刻已是半透明，再 mix 一次算不清最终值。 */
 .cc-shell.has-bg .cc-main {
-  /*
-   * 主区改成半透明，把背景图让出来一部分：
-   * 纯透明会让正文直接压在照片上，可读性差；完全不透明又等于背景图白设。
-   * color-mix 取 --bg 的 74%（浅色/暗色主题各自动取自己的底色），
-   * 剩下 26% 的透明度交给背景层，配合 bgOpacity（默认 0.5）呈现为「隐约可见」。
-   */
-  background: color-mix(in srgb, var(--bg) 74%, transparent);
+  background: var(--bg);
 }
 
-/* 侧栏同样半透明 + 轻微毛玻璃：比主区更实一点，保证导航文字对比度 */
 .cc-shell.has-bg .cc-sidebar {
-  background: color-mix(in srgb, var(--card) 86%, transparent);
-  backdrop-filter: blur(10px);
-}
-@supports not (background: color-mix(in srgb, red 50%, transparent)) {
-  /* 老浏览器不支持 color-mix 时退回实色：宁可看不见背景图，也不要文字糊在照片上 */
-  .cc-shell.has-bg .cc-main { background: var(--bg); }
-  .cc-shell.has-bg .cc-sidebar { background: var(--card); }
+  background: color-mix(in srgb, var(--card-solid) 74%, transparent);
+  backdrop-filter: blur(16px) saturate(1.08);
 }
 
-/* 顶栏同样半透明：主区透出背景、顶栏却是一条实色带，视觉上会割裂 */
 .cc-shell.has-bg .cc-header {
-  background: color-mix(in srgb, var(--card) 78%, transparent);
-  backdrop-filter: blur(10px);
+  background: color-mix(in srgb, var(--card-solid) 62%, transparent);
+  backdrop-filter: blur(16px) saturate(1.08);
 }
+
+/* 内容区垫一层「阅读纸面」（全站统一口径）：
+ * 管理页有卡片托着文字，聊天页是长段落直接铺在 .cc-main 上，少了这层正文会和照片纹理糊在一起。
+ * 只垫内容区、不垫整页 —— 侧栏与内容区之间保留一条能看到壁纸的边，
+ * 结构上就形成「壁纸 → 页面纸面 → 卡片 → 浮层」四级层次。
+ * 40% 是实测折中值：低于 30% 页面标题会被照片吃掉，高于 50% 壁纸等于看不见。 */
+.cc-shell.has-bg .cc-chat__main,
+.cc-shell.has-bg .cc-page-scroll {
+  background: color-mix(in srgb, var(--bg-solid) 40%, transparent);
+}
+
+/* 亮色主题的纸面同步减薄（见 37.1 的说明：白色更容易糊掉壁纸） */
+html:not([data-theme="dark"]) .cc-shell.has-bg .cc-chat__main,
+html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
+  background: color-mix(in srgb, var(--bg-solid) 30%, transparent);
+}
+
+/* 新会话的空状态再补一层：这里没有卡片托底，
+ * 标题、说明、输入框 placeholder 用的又是最浅的 --text-3 / --text-4，
+ * 只靠主列那 30% 压不住亮部壁纸，说明文字会糊进照片里。 */
+.cc-shell.has-bg .cc-empty {
+  background: color-mix(in srgb, var(--bg-solid) 30%, transparent);
+}
+
+/* ---- 37.3 浮层（抽屉 / 弹层 / 下拉菜单）----
+ * 比卡片更实、比阅读区更透：既要有「浮在背景之上」的层次感，也要能长时间停留阅读。
+ * 用 CSS 变量继承做「整棵子树统一提档」——在容器上重定义 token，
+ * 抽屉里所有后代（含以后新增的）自动跟着变实，不必逐个后代选择器点名。 */
+.cc-shell.has-bg .cc-drawer,
+.cc-shell.has-bg .cc-changes,
+.cc-shell.has-bg .cc-taskpop,
+.cc-shell.has-bg .cc-subagentpop,
+.cc-shell.has-bg .cc-modelpick__box,
+.cc-shell.has-bg .cc-wsp__menu,
+.cc-shell.has-bg .cc-conv-menu,
+.cc-shell.has-bg .cc-user-menu,
+.cc-shell.has-bg .cc-agentpick__pop,
+.cc-shell.has-bg .cc-attach-menu,
+.cc-shell.has-bg .cc-filepick,
+.cc-shell.has-bg .cc-dirpick {
+  --bg: color-mix(in srgb, var(--bg-solid) 84%, transparent);
+  --bg-sub: color-mix(in srgb, var(--bg-sub-solid) 82%, transparent);
+  --card: color-mix(in srgb, var(--card-solid) 90%, transparent);
+  --card-2: color-mix(in srgb, var(--card-2-solid) 84%, transparent);
+  backdrop-filter: blur(22px) saturate(1.08);
+}
+
+/* 抽屉再高一档：它是「临时覆盖」的操作面，层级上压在页面之上，
+ * 透明度必须明显高于常驻面板，否则用户分不清谁浮在谁上面。 */
+.cc-shell.has-bg .cc-drawer {
+  --card: color-mix(in srgb, var(--card-solid) 94%, transparent);
+  --card-2: color-mix(in srgb, var(--card-2-solid) 90%, transparent);
+  background-color: color-mix(in srgb, var(--card-solid) 94%, transparent);
+}
+
+/* 右侧工作区是常驻面板（不是浮层），跟侧栏同档：
+ * 它是「一边聊一边看代码」的并列关系，做得太白会把主列比下去。 */
+.cc-shell.has-bg .cc-ws {
+  background: color-mix(in srgb, var(--card-solid) 78%, transparent);
+  backdrop-filter: blur(16px) saturate(1.06);
+}
+
+/* ---- 37.4 高密度阅读区（代码 / 日志 / diff / 编辑器 / SQL 结果）----
+ * 几乎不透明：这些区域靠字符位置传达信息，任何背景花纹都是干扰。
+ * 面板自身也要显式上底色 —— 它们大多直接用 --card-2 / --card 而不带遮罩。 */
+.cc-shell.has-bg .cc-code,
+.cc-shell.has-bg .cc-code-ed,
+.cc-shell.has-bg .cc-dv,
+.cc-shell.has-bg .cc-log-panel,
+.cc-shell.has-bg .cc-ftree,
+.cc-shell.has-bg .cc-sql-block {
+  --bg: color-mix(in srgb, var(--bg-solid) 92%, transparent);
+  --bg-sub: color-mix(in srgb, var(--bg-sub-solid) 92%, transparent);
+  --card: color-mix(in srgb, var(--card-solid) 96%, transparent);
+  --card-2: color-mix(in srgb, var(--card-2-solid) 94%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+/* ---- 37.5 浏览器自动填充的浅蓝底 ----
+ * Chromium 对自动填充的 input 会强制刷一层 UA 默认的 rgb(232,240,254)，
+ * 那是整块实色，在半透明界面上非常扎眼（审计脚本每次都能抓到它）。
+ * 用 inset box-shadow 覆盖，并让 transition 拖到极慢以免出现闪烁。 */
+.cc-shell.has-bg input:-webkit-autofill,
+.cc-shell.has-bg textarea:-webkit-autofill,
+.cc-shell.has-bg select:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px color-mix(in srgb, var(--card-solid) 92%, transparent) inset;
+  -webkit-text-fill-color: var(--text-1);
+  caret-color: var(--text-1);
+  transition: background-color 9999s ease-out;
+}
+
+/* ---- 37.6 老浏览器回退 ----
+ * 不支持 color-mix 时把 token 退回实色：上面所有依赖 color-mix 的声明会自动失效，
+ * 回落到未改写前的规则（外壳与浮层仍是不透明实色，只是看不见背景图）。 */
+@supports not (background: color-mix(in srgb, red 50%, transparent)) {
+  .cc-shell.has-bg {
+    --bg: var(--bg-solid);
+    --bg-sub: var(--bg-sub-solid);
+    --card: var(--card-solid);
+    --card-2: var(--card-2-solid);
+    --accent-soft: var(--accent-soft-solid);
+  }
+  .cc-shell.has-bg .cc-sidebar,
+  .cc-shell.has-bg .cc-header,
+  .cc-shell.has-bg .cc-drawer,
+  .cc-shell.has-bg .cc-ws,
+  .cc-shell.has-bg .cc-changes,
+  .cc-shell.has-bg .cc-taskpop,
+  .cc-shell.has-bg .cc-subagentpop,
+  .cc-shell.has-bg .cc-modelpick__box,
+  .cc-shell.has-bg .cc-code,
+  .cc-shell.has-bg .cc-code-ed,
+  .cc-shell.has-bg .cc-dv,
+  .cc-shell.has-bg .cc-log-panel { backdrop-filter: none; }
+}
+
 
 /* ============================ 38. Markdown 正文与聊天增强 ============================ */
 

@@ -9,11 +9,23 @@
  * ========================================================================== */
 
 :root {
+  /* ---------- 不透明基色 ----------
+   * 只给「背景图模式」用：app.css 第 37 节在 .cc-shell.has-bg 下用
+   * color-mix() 把这些基色按不同比例掺成半透明，再赋回下面那组语义变量
+   * （--bg / --card ...）。这样全站 283 处 `background: var(--card)` 会
+   * 一次性透出背景图，无需逐个组件改样式。
+   * 没有背景图时下面 5 个语义变量仍等于这些基色，观感与改造前完全一致。 */
+  --bg-solid: #FAFAFB;
+  --bg-sub-solid: #F5F5F8;
+  --card-solid: #FFFFFF;
+  --card-2-solid: #F7F7F9;
+  --accent-soft-solid: #F3EFFF;
+
   /* ---------- 背景与容器 ---------- */
-  --bg: #FAFAFB;              /* 应用底色 */
-  --bg-sub: #F5F5F8;          /* 次级底色（分区、hover 区） */
-  --card: #FFFFFF;            /* 卡片 / 面板 */
-  --card-2: #F7F7F9;          /* 卡片内次级区块、列表 hover */
+  --bg: var(--bg-solid);            /* 应用底色 */
+  --bg-sub: var(--bg-sub-solid);    /* 次级底色（分区、hover 区） */
+  --card: var(--card-solid);        /* 卡片 / 面板 */
+  --card-2: var(--card-2-solid);    /* 卡片内次级区块、列表 hover */
   --overlay: rgba(17, 17, 27, .38); /* 遮罩 */
 
   /* ---------- 描边 ---------- */
@@ -88,10 +100,17 @@
 
 /* ============================ 暗色主题 ============================ */
 html[data-theme="dark"] {
-  --bg: #121117;
-  --bg-sub: #17161F;
-  --card: #1A1925;
-  --card-2: #201F2C;
+  /* 先覆盖不透明基色，下面的语义变量沿用 var() 引用，自动跟着变 */
+  --bg-solid: #121117;
+  --bg-sub-solid: #17161F;
+  --card-solid: #1A1925;
+  --card-2-solid: #201F2C;
+  --accent-soft-solid: #241F3A;
+
+  --bg: var(--bg-solid);
+  --bg-sub: var(--bg-sub-solid);
+  --card: var(--card-solid);
+  --card-2: var(--card-2-solid);
   --overlay: rgba(0, 0, 0, .55);
 
   --border: #2A2838;
@@ -105,7 +124,7 @@ html[data-theme="dark"] {
   --accent: #9B85FF;
   --accent-dk: #8A72FF;
   --accent-lt: rgba(155, 133, 255, .14);
-  --accent-soft: #241F3A;
+  --accent-soft: var(--accent-soft-solid);
   --accent-ring: rgba(155, 133, 255, .16);
 
   --ok-lt: rgba(18, 183, 106, .16);

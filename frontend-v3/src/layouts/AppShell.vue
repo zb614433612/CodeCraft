@@ -135,13 +135,36 @@ const COLLAPSE_KEY = 'codecraft.sidebar-collapsed'
 const collapsed = ref(
   typeof localStorage === 'undefined' ? false : localStorage.getItem(COLLAPSE_KEY) === '1'
 )
+
+/**
+ * 把「侧栏折叠 / 是否启用壁纸」同步到 `<html>` 的类名上。
+ *
+ * <p>顶部自绘标题栏（App.vue 的 `.cc-titlebar`）在 `.cc-shell` 之外，读不到本组件的
+ * props / state，只能靠 html 上的类名来决定「左段多宽」「两段用哪一档透明度」：
+ *   cc-sidebar-collapsed -> 左段宽度切到 --sidebar-w-collapsed
+ *   cc-has-bg            -> 两段改用 74% / 62% 半透明卡色（与外壳同口径）
+ * 这两件事都必须跟着状态实时变，否则折叠后顶部会和侧栏错位、切壁纸后顶部颜色断层。</p>
+ */
+function syncChromeFlags() {
+  if (typeof document === 'undefined') return
+  const el = document.documentElement
+  el.classList.toggle('cc-sidebar-collapsed', collapsed.value)
+  el.classList.toggle('cc-has-bg', Boolean(settings.bgImageUrl))
+}
+
 watch(collapsed, value => {
   try {
     localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0')
   } catch {
     // 隐私模式 / 存储被禁用时 localStorage 可能抛错，折叠功能本身不受影响
   }
+  syncChromeFlags()
 })
+
+watch(() => settings.bgImageUrl, syncChromeFlags)
+
+// setup 阶段先同步一次：否则首帧顶部左段宽度与透明度会用默认值，出现一次可见跳变
+syncChromeFlags()
 
 /** 系统外观是否为深色：theme === 'auto' 时用它决定实际明暗 */
 const systemDark = ref(false)
@@ -195,5 +218,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   media?.removeEventListener('change', onSystemThemeChange)
   media = null
+  // 退出登录后 AppShell 会被卸载、换成 LoginView（没有侧栏，也没有背景图层）：
+  // 这两个类名若留在 <html> 上，登录页顶部会误用「折叠宽度 / 半透明档位」。
+  if (typeof document !== 'undefined') {
+    document.documentElement.classList.remove('cc-sidebar-collapsed', 'cc-has-bg')
+  }
 })
 </script>

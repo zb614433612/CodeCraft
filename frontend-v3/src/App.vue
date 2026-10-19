@@ -11,14 +11,24 @@
 -->
 <template>
   <!--
-    Electron 窗口拖拽条
+    Electron 桌面壳的顶部 32px（窗口控制按钮那条）
     ----------------------------------------------------------------------------
     必须放在登录页/主界面的分支**之外**：登录页（/login）是独立全屏布局，不套
     AppShell，若只把拖拽条写进 AppShell，用户在登录页就拖不动窗口（桌面壳是
     `titleBarStyle: 'hidden'` 的无边框窗口，没有原生标题栏）。
-    浏览器环境 isElectron 为 false，这个 div 不会渲染。
+    浏览器环境 isElectron 为 false，这个元素不会渲染。
+
+    为什么是「两段」而不是一条纯色条：
+      壳把 titleBarOverlay 设成透明后，这 32px 透出的是**裸背景图**；而下方侧栏有
+      74% 卡色 + 毛玻璃、顶栏有 62%，合成色比裸背景图亮一档 —— 顶部就会像「壳的一
+      块」，与页面割裂。这里让左段对齐侧栏、右段对齐顶栏，颜色全走同一批 token，
+      主题 / 壁纸 / 侧栏折叠都会自动跟随（样式见 app.css「Electron 桌面壳」一节）。
+      登录页没有侧栏，用 is-plain 退化成整条页面底色。
   -->
-  <div v-if="isElectron" class="cc-titlebar" />
+  <div v-if="isElectron" class="cc-titlebar" :class="{ 'is-plain': isLoginPage }">
+    <div class="cc-titlebar__side" />
+    <div class="cc-titlebar__main" />
+  </div>
 
   <!--
     登录页：独立全屏，不套 AppShell。
