@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell } = require('electron')
-const { spawn, exec } = require('child_process')
+const { spawn, exec, execFile } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
@@ -278,11 +278,7 @@ function scanStartupAnchors (text) {
  * 进度双重保障：① 时间维度兜底估算；② 启动日志锚点跳跃提升（见 scanStartupAnchors）
  * 若后端进程提前退出，立即失败，不再空等剩余轮询
  */
-// 轮询次数 × 间隔 = 最长等待时长。
-// 3.0.0 的 jar 约 108MB，在低配机器 / 机械硬盘上首次启动（解压嵌套 jar + 初始化 H2 + Spring 组件扫描）
-// 明显慢于开发机，原实现 90 秒就判失败并弹「后端服务启动超时」—— 用户看到的其实是「还没起来」，
-// 不是「起不来」。这里放宽到 180 秒；进程一旦退出仍会立即失败（见 javaExited 分支），不会白等。
-function waitForBackend(retries = 90, interval = 2000) {
+function waitForBackend(retries = 45, interval = 2000) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
       // 后端进程已退出：立即失败（退出原因 + 控制台最后若干行，用户截图即可定位）
@@ -379,6 +375,36 @@ function findJava() {
   // 最后回退到系统 PATH
   appendBackendConsole('[java] 回退到系统 PATH 的 java —— 若系统未安装 Java 17+，后端将启动失败')
   return 'java'
+}
+
+/**
+ * 预检 Java 运行环境是否真的能被执行。
+ *
+ * 为什么必须先做这一步：
+ *   内置 JRE 的 java.exe 有可能「文件存在但跑不起来」——
+ *     · 缺系统运行库（VCRUNTIME140.dll / MSVCP140.dll，需要 VC++ 2015-2022 运行库）；
+ *     · 被杀毒软件隔离或阻止执行（jlink 裁剪出的 java.exe 没有数字签名）；
+ *     · 与系统架构不匹配（x64 包跑在 ARM Windows 上）；
+ *     · 安装不完整（文件被截断）。
+ *   这几种情况下 spawn 出来的进程会立即消失、不产生任何 stdout/stderr，
+ *   用户侧表现就是「8084 没占用、版本对、日志空白，只有一句启动超时」。
+ *   先跑一次 `java -version`，就能把「Java 跑不起来」与「Java 能跑但后端启动失败」彻底分开。
+ *
+ * @returns {Promise<{ok: boolean, version?: string, message?: string}>}
+ */
+function verifyJavaRuntime (javaCmd) {
+  return new Promise((resolve) => {
+    // java -version 的版本号输出在 stderr，正常退出码为 0
+    execFile(javaCmd, ['-version'], { timeout: 8000, windowsHide: true }, (err, stdout, stderr) => {
+      const out = `${stdout || ''}${stderr || ''}`.trim()
+      if (out) {
+        // 只要拿到了版本串就算可用（部分实现退出码可能非 0，但输出了版本即为可用）
+        resolve({ ok: true, version: out.split(/\r?\n/)[0] || '' })
+        return
+      }
+      resolve({ ok: false, message: err ? err.message : '未返回任何版本信息' })
+    })
+  })
 }
 
 /**
@@ -882,6 +908,21 @@ async function startBackend() {
 
   console.log(`启动后端服务: ${jarPath}`)
   console.log(`Java 路径: ${javaCmd}`)
+
+  // 预检：先确认这个 java 真的能被执行。若它跑不起来（缺 VC++ 运行库 / 被杀软拦截 / 架构不符），
+  // 直接给出可读原因，而不是让用户对着「启动超时」干等 90 秒、日志目录里却什么都没有。
+  const javaCheck = await verifyJavaRuntime(javaCmd)
+  if (!javaCheck.ok) {
+    const reason = `Java 运行环境无法执行：${javaCheck.message}\n\n` +
+      `路径：${javaCmd}\n` +
+      '常见原因：内置 JRE 被杀毒软件隔离 / 系统缺少 VC++ 2015-2022 运行库 / 安装包不完整。\n' +
+      '可尝试：把安装目录加入杀毒软件白名单后重装，或安装「Microsoft Visual C++ 2015-2022 Redistributable (x64)」。'
+    appendBackendConsole(`[java] 预检失败 - ${javaCheck.message}`)
+    console.error('[backend]', reason.replace(/\n+/g, ' '))
+    backendExitReason = reason
+    return false
+  }
+  appendBackendConsole(`[java] 预检通过: ${javaCheck.version}`)
 
   // cwd 决定 Java 的 user.dir → H2 数据库 ./data、快照 ./snapshots、日志 ./logs 的落点。
   // 打包后必须指向 <userData>/runtime（与安装目录解耦），否则覆盖安装会丢失用户数据。
