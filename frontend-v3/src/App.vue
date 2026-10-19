@@ -5830,7 +5830,10 @@ const pageView = computed((): PageBinding => {
           export: onDataExport,
           import: onDataImport,
           'clear-import': onDataClearImport,
-          reset: onDataReset
+          reset: onDataReset,
+          // 「更新设置」（自动检查 / 下载加速 / 升级前备份份数）集中在版本与更新页，
+          // 数据管理页只嵌入检测/下载/安装卡片，故这里给一个跳转
+          'open-version-page': () => { void router.push('/about') }
         }
       }
 

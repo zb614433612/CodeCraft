@@ -38,6 +38,10 @@
         <button class="cc-btn" @click="onOpenRelease">
           <svg class="cc-i cc-i--sm"><use href="#i-link" /></svg>打开发布页
         </button>
+        <!-- 嵌入数据管理页时才有：更新设置（自动检查 / 下载加速 / 备份份数）在版本与更新页 -->
+        <button v-if="showSettingsLink" class="cc-btn cc-btn--ghost" @click="emit('open-settings')">
+          <svg class="cc-i cc-i--sm"><use href="#i-cog" /></svg>更新设置
+        </button>
       </div>
     </div>
 
@@ -176,9 +180,19 @@ import {
 const props = withDefaults(
   defineProps<{
     backendInfo?: AppVersionInfo | null
+    /**
+     * 是否显示「更新设置」跳转按钮。
+     * VersionCard 有两处宿主：独立的版本与更新页（自带设置区，不需要按钮）
+     * 和「数据管理」页（只嵌入检测/下载卡片，设置区仍在版本与更新页，故给一个入口）。
+     */
+    showSettingsLink?: boolean
   }>(),
-  { backendInfo: null }
+  { backendInfo: null, showSettingsLink: false }
 )
+
+const emit = defineEmits<{
+  (e: 'open-settings'): void
+}>()
 
 const api = getUpdateApi()
 const supported = isUpdateSupported()

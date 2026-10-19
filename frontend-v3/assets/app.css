@@ -3849,6 +3849,8 @@ html[data-theme="dark"] .cc-log-toast { background: rgba(232, 230, 242, .94); co
 }
 /* 危险操作整行通栏 */
 .cc-data-card--wide { grid-column: 1 / -1; }
+/* 版本与更新卡片（VersionCard 复用 .cc-about-card 外观）嵌入本页：整行通栏，与数据卡片视觉一致 */
+.cc-data-grid > .cc-vercard { grid-column: 1 / -1; }
 
 .cc-data-card__head { display: flex; align-items: flex-start; gap: var(--sp-3); }
 .cc-data-card__icon {

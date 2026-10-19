@@ -1,18 +1,22 @@
 <!--
   数据管理页（v2）
   ----------------------------------------------------------------------------
-  布局：页面头（刷新统计）→ 内联统计 → 双列卡片（导出备份 / 导入备份）→ 通栏危险操作 → 重置确认抽屉
-  数据接缝（全部在 /api/system 下，均需管理员权限）：
-    stats                 -> GET  /api/system/data-stats（7 个类别的行数）
-    emit('export', types) -> GET  /api/system/export-data?types=...（附件下载，文件名由 Content-Disposition 给出）
-    emit('import', file)  -> POST /api/system/import-data（multipart，字段名 file）
-    emit('reset')         -> POST /api/system/reset-data（清表 + 重建出厂数据 + 删文件类数据）
-    emit('refresh')       -> 重新拉取 data-stats
-    emit('clear-import')  -> 清空上一次导入结果
-  说明：
-    1) 统计口径：类别行数 = 类别下各表行数之和（后端 DataTransferService.stats()）；
-    2) 表数量固定 10 张（llm_provider / agent_config / skill / conversation ×3 / lesson ×2 / mcp_server / db_connection）；
-    3) 「最近导出」由前端记录（接口不返回），仅作本次会话内的提示。
+   布局：页面头（刷新统计）→ 内联统计 → 双列卡片（导出备份 / 导入备份）
+        → 通栏「版本与更新」（VersionCard，检测/下载/安装）→ 通栏危险操作 → 重置确认抽屉
+   数据接缝（全部在 /api/system 下，均需管理员权限）：
+     stats                 -> GET  /api/system/data-stats（7 个类别的行数）
+     emit('export', types) -> GET  /api/system/export-data?types=...（附件下载，文件名由 Content-Disposition 给出）
+     emit('import', file)  -> POST /api/system/import-data（multipart，字段名 file）
+     emit('reset')         -> POST /api/system/reset-data（清表 + 重建出厂数据 + 删文件类数据）
+     emit('refresh')       -> 重新拉取 data-stats
+     emit('clear-import')  -> 清空上一次导入结果
+     emit('open-version-page') -> 跳到 /about（更新设置：自动检查 / 下载加速 / 升级前备份份数）
+   说明：
+     1) 统计口径：类别行数 = 类别下各表行数之和（后端 DataTransferService.stats()）；
+     2) 表数量固定 10 张（llm_provider / agent_config / skill / conversation ×3 / lesson ×2 / mcp_server / db_connection）；
+     3) 「最近导出」由前端记录（接口不返回），仅作本次会话内的提示；
+     4) 「版本与更新」卡片自包含（window.electronAPI.update + GET /api/system/version），
+        浏览器环境自动降级为只读版本展示 —— 与旧版「数据管理页内含检测更新」的位置保持一致。
 -->
 <template>
   <div class="cc-page-scroll">
@@ -54,6 +58,15 @@
           @import="$emit('import', $event)"
           @clear="$emit('clear-import')"
         />
+
+        <!--
+          版本与更新（整行通栏）
+          旧版「数据管理」页的「版本与更新」卡片就在这个位置，v3 沿用同一处：
+          检查更新 / 下载安装包 / 安装 / 打开发布页由组件自包含（electronAPI.update），
+          浏览器环境自动降级为只读版本展示，不渲染假按钮。
+          「更新设置」单独在 /about 页，故这里给一个跳转入口。
+        -->
+        <VersionCard show-settings-link @open-settings="$emit('open-version-page')" />
 
         <!-- 危险操作（整行通栏） -->
         <section class="cc-data-card cc-data-card--wide cc-data-card--danger">
@@ -103,6 +116,7 @@ import { computed, ref, watch, onMounted } from 'vue'
 import DataExportCard from '../components/DataExportCard.vue'
 import DataImportCard from '../components/DataImportCard.vue'
 import DataResetDrawer from '../components/DataResetDrawer.vue'
+import VersionCard from '../components/VersionCard.vue'
 import {
   DATA_CATEGORIES,
   DATA_FORMAT_VERSION,
@@ -142,6 +156,8 @@ defineEmits<{
   (e: 'import', file: File): void
   (e: 'clear-import'): void
   (e: 'reset'): void
+  /** 跳到 /about（更新设置的唯一入口） */
+  (e: 'open-version-page'): void
 }>()
 
 const resetOpen = ref(false)
