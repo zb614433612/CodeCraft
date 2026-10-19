@@ -40,6 +40,7 @@
 - 沿用上一版修复的 macOS 生命周期处理（单实例锁、关窗不杀后端、`activate` 重建窗口与自愈重试、最小应用菜单恢复 `Cmd+Q`）。
 - **修复：覆盖安装后仍启动失败（重要）**。`electron/installer.nsh` 的 `customInit` 现在按「`CodeCraft.exe` 优雅退出（触发 `before-quit` → `stopBackend`）→ 强制结束 `CodeCraft.exe` → 兜底清理命令行含 `codecraft.jar` 的 `java.exe`」三步释放文件句柄。此前安装器不结束任何进程：`codecraft.jar` / `app.asar` 被占用时 NSIS **静默跳过写入**却照样弹「安装完成」，结果装完仍运行旧 jar，残留 java 还占着 8084 与 H2 文件锁，新客户端启动即报「后端服务启动失败：后端服务启动超时」。清理只精确匹配 `java.exe` 且命令行必须含 `codecraft.jar`，不会误杀 IDEA 等其它 JVM。
 - **修复：启动自愈**。`main.js` 新增后端代际探测（`none` / `current` / `legacy` / `foreign`）：遇到旧版遗留后端先结束再启动；端口被非 CodeCraft 程序占用时直接报出占用者 PID，不再盲目 spawn 一个必然卡死的新 java；启动超时文案附带端口占用者与后端日志路径。另新增 `scripts/fix-startup.bat`，可一键结束残留进程，供已装坏的用户自救。
+- **修复：启动失败时看不到任何依据**。java 子进程的 stdout / stderr 此前只写 `console.log`，而打包后的 Windows GUI 应用没有控制台，等于**直接丢弃** —— 于是「java 根本没起来」这类问题在用户侧表现为「8084 没被占用、版本号也对、日志里空无一物」，完全无从排查。现在子进程输出原样落盘到 `runtime/logs/backend-console.log`（文件开头记录平台 / 应用版本 / Java 路径 / JAR 路径 / 工作目录），启动失败的原生弹窗直接附带最后 30 行；`findJava()` 的三级回退（内置 JRE → `JAVA_HOME` → 系统 `PATH`）也会逐步写入该日志。
 
 ### 🧾 版本号同步
 

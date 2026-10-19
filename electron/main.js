@@ -281,9 +281,9 @@ function scanStartupAnchors (text) {
 function waitForBackend(retries = 45, interval = 2000) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
-      // 后端进程已退出：立即失败（附上退出原因）
+      // 后端进程已退出：立即失败（退出原因 + 控制台最后若干行，用户截图即可定位）
       if (javaExited) {
-        reject(new Error(backendExitReason || '后端进程意外退出'))
+        reject(new Error(`${backendExitReason || '后端进程意外退出'}\n\n${backendDiagnostics()}`))
         return
       }
       if (remaining <= 0) {
@@ -294,7 +294,7 @@ function waitForBackend(retries = 45, interval = 2000) {
           const hint = owner
             ? `端口 ${PORT} 当前被 ${owner} 占用，新后端无法绑定。\n\n请先完全退出 CodeCraft（含任务栏托盘图标），结束残留 java 进程后重试。`
             : `后端进程仍在运行但 ${elapsedSec} 秒内未响应，可能正在初始化数据库或启动异常。`
-          reject(new Error(`后端服务启动超时（${elapsedSec} 秒）\n${hint}\n\n日志：${backendLogPath()}`))
+          reject(new Error(`后端服务启动超时（${elapsedSec} 秒）\n${hint}\n\n${backendDiagnostics()}`))
         })
         return
       }
@@ -329,16 +329,19 @@ function findJava() {
   if (app.isPackaged) {
     const bundledJava = path.join(process.resourcesPath, 'jre', 'bin', javaExe)
     if (fs.existsSync(bundledJava)) {
+      appendBackendConsole(`[java] 使用内置 JRE: ${bundledJava}`)
       return bundledJava
     }
     // 内置 JRE 与当前平台不匹配（安装包里放的是别的平台的 JRE，例如 Windows 的 jre/ 被塞进 mac 包）
-    // 这里记录一条日志便于排查「启动时提示找不到 java」，随后回退到系统 JDK
+    // 或安装包被安全软件删改。两种通道都要留痕：console 给开发看，控制台日志给用户看。
+    appendBackendConsole(`[java] 内置 JRE 缺失: ${bundledJava}`)
     console.warn(`内置 JRE 不可用（${bundledJava} 不存在），回退系统 JDK`)
   }
   // 其次使用 JAVA_HOME 环境变量
   if (process.env.JAVA_HOME) {
     const javaHomePath = path.join(process.env.JAVA_HOME, 'bin', javaExe)
     if (fs.existsSync(javaHomePath)) {
+      appendBackendConsole(`[java] 使用 JAVA_HOME: ${javaHomePath}`)
       return javaHomePath
     }
   }
@@ -370,6 +373,7 @@ function findJava() {
     }
   }
   // 最后回退到系统 PATH
+  appendBackendConsole('[java] 回退到系统 PATH 的 java —— 若系统未安装 Java 17+，后端将启动失败')
   return 'java'
 }
 
@@ -687,6 +691,101 @@ function backendLogPath () {
 }
 
 /**
+ * 后端「控制台」日志：java 子进程 stdout / stderr 的原样落盘。
+ *
+ * 为什么必须单独存一份（3.0.0 在部分用户机器上实测踩坑）：
+ *   Spring Boot 的 logback 只有在 ApplicationContext 初始化之后才会写 app.log。
+ *   若 java 在更早的阶段就失败 —— 内置 JRE 模块缺失、jar 损坏、PATH 上的 java 版本过低、
+ *   被杀毒软件静默拦截、spawn 直接报 ENOENT/EACCES —— app.log 压根不会被创建。
+ *   此时用户侧的现象是「没有 8084 占用、版本号也对、日志里什么报错都没有，只有一句启动超时」，
+ *   完全无从下手。把子进程输出原样落盘后，这类问题至少能一眼看到原因。
+ */
+function backendConsolePath () {
+  try {
+    if (app.isPackaged) {
+      return path.join(app.getPath('userData'), 'runtime', 'logs', 'backend-console.log')
+    }
+    return path.join(__dirname, '..', 'logs', 'backend-console.log')
+  } catch (e) {
+    return 'logs/backend-console.log'
+  }
+}
+
+// 内存中保留的最后若干行后端输出：启动失败时直接拼进错误弹窗，
+// 避免让用户自己去安装目录里翻日志（重启后日志可能已被下一次启动覆盖）
+const BACKEND_CONSOLE_TAIL_LIMIT = 30
+const BACKEND_CONSOLE_LINE_LIMIT = 400
+let backendConsoleTail = []
+let backendConsoleStream = null
+
+/** 追加后端控制台输出（同时进内存缓冲与磁盘文件） */
+function appendBackendConsole (text) {
+  const raw = String(text || '')
+  if (!raw.trim()) return
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.replace(/\s+$/, '')
+    if (!trimmed.trim()) continue
+    backendConsoleTail.push(
+      trimmed.length > BACKEND_CONSOLE_LINE_LIMIT
+        ? `${trimmed.slice(0, BACKEND_CONSOLE_LINE_LIMIT)} …`
+        : trimmed
+    )
+  }
+  if (backendConsoleTail.length > BACKEND_CONSOLE_TAIL_LIMIT) {
+    backendConsoleTail = backendConsoleTail.slice(-BACKEND_CONSOLE_TAIL_LIMIT)
+  }
+  if (backendConsoleStream) {
+    try {
+      backendConsoleStream.write(raw.endsWith('\n') ? raw : `${raw}\n`)
+    } catch (_) {
+      // 写日志失败不能影响启动流程
+    }
+  }
+}
+
+/** 打开（截断）本次启动的控制台日志 */
+function openBackendConsole () {
+  backendConsoleTail = []
+  try {
+    const file = backendConsolePath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    backendConsoleStream = fs.createWriteStream(file, { flags: 'w' })
+    backendConsoleStream.on('error', () => { backendConsoleStream = null })
+  } catch (e) {
+    backendConsoleStream = null
+  }
+}
+
+/** 关闭控制台日志流（进程退出 / 停止后端时调用） */
+function closeBackendConsole () {
+  if (!backendConsoleStream) return
+  try {
+    backendConsoleStream.end()
+  } catch (_) { /* 忽略 */ }
+  backendConsoleStream = null
+}
+
+/**
+ * 启动失败时附加的诊断信息：控制台最后几行 + 两份日志路径。
+ * 直接进原生错误弹窗，用户截图即可反馈问题。
+ */
+function backendDiagnostics () {
+  const parts = []
+  if (backendConsoleTail.length) {
+    parts.push(`后端输出（最后 ${backendConsoleTail.length} 行）：\n${backendConsoleTail.join('\n')}`)
+  } else {
+    parts.push(
+      '后端进程没有任何输出。\n' +
+      '这通常意味着 java 根本没被启动起来：内置 JRE 缺失或与系统不匹配、\n' +
+      '安装目录被杀毒软件拦截、或系统找不到可用的 Java。'
+    )
+  }
+  parts.push(`控制台日志：${backendConsolePath()}`)
+  parts.push(`应用日志：${backendLogPath()}`)
+  return parts.join('\n\n')
+}
+
+/**
  * 探测本机是否已有可用的 CodeCraft 后端在监听（保留给非启动路径的快速判断）。
  * 语义等价于 detectBackendGeneration() === 'current'。
  * @returns {Promise<boolean>} 是否已存在可复用的后端
@@ -710,13 +809,17 @@ function backendAlive () {
  * 停止后端进程（关闭窗口 / 退出应用 / 覆盖安装前调用）
  */
 function stopBackend () {
-  if (!javaProcess) return
+  if (!javaProcess) {
+    closeBackendConsole()
+    return
+  }
   try {
     javaProcess.kill()
   } catch (e) {
     console.warn('停止后端进程失败:', e.message)
   }
   javaProcess = null
+  closeBackendConsole()
 }
 
 /**
@@ -760,8 +863,13 @@ async function startBackend() {
     }
     console.log('旧版本后端已结束，端口已释放，继续启动新后端')
   }
+  // 先打开控制台日志：此后无论 java 起不来、起来就崩、还是正常启动，
+  // 都会在 backend-console.log 里留下原始输出（app.log 可能永远不会被创建）
+  openBackendConsole()
+
   const jarPath = getJarPath()
   if (!jarPath) {
+    appendBackendConsole('[fatal] 未找到后端 JAR 文件')
     console.error('未找到后端 JAR 文件，请先在项目根目录执行 "mvn package" 构建后端')
     // 失败提示统一由 start() 处理（启动画面展示错误 + 原生弹窗），这里仅返回失败标志
     return false
@@ -785,6 +893,19 @@ async function startBackend() {
   javaExited = false
   backendExitReason = ''
   externalBackend = false   // 本次由自己拉起，退出时需由自己负责 stop
+
+  // 记录本次启动的关键参数：用户反馈「启动超时」时，这几行就能先排除版本 / 路径 / 平台类问题
+  appendBackendConsole(
+    '==== CodeCraft 后端启动 ====\n' +
+    `时间: ${new Date().toISOString()}\n` +
+    `平台: ${process.platform} ${process.arch}\n` +
+    `应用版本: ${app.getVersion()}${app.isPackaged ? ' (packaged)' : ' (dev)'}\n` +
+    `Java: ${javaCmd}\n` +
+    `JAR: ${jarPath}\n` +
+    `工作目录: ${workDir}\n` +
+    '==========================='
+  )
+
   javaProcess = spawn(javaCmd, [
     '-Dfile.encoding=UTF-8',
     `-Dapp.userdata=${userDataDir}`,
@@ -795,31 +916,41 @@ async function startBackend() {
   })
 
   javaProcess.stdout.on('data', (data) => {
-    const text = data.toString().trim()
-    console.log(`[backend] ${text}`)
+    const raw = data.toString()
+    // 原样落盘：Spring Boot 启动日志、异常栈、JVM 报错都会在这里留下痕迹
+    appendBackendConsole(raw)
+    const text = raw.trim()
+    if (text) console.log(`[backend] ${text}`)
     // 命中启动日志锚点则推进启动画面进度（只升不降）
-    scanStartupAnchors(text)
+    scanStartupAnchors(raw)
   })
 
   javaProcess.stderr.on('data', (data) => {
-    console.error(`[backend-err] ${data.toString().trim()}`)
+    const raw = data.toString()
+    appendBackendConsole(raw)
+    const text = raw.trim()
+    if (text) console.error(`[backend-err] ${text}`)
   })
 
   javaProcess.on('error', (err) => {
+    appendBackendConsole(`[spawn error] ${err.code || ''} ${err.message}`)
     console.error('启动后端失败:', err.message)
     // 标记提前失败：waitForBackend 会立即结束等待，错误统一在 start() 中提示
     backendExitReason = `无法启动后端服务：${err.message}`
     javaExited = true
+    closeBackendConsole()
   })
 
-  javaProcess.on('exit', (code) => {
+  javaProcess.on('exit', (code, signal) => {
+    appendBackendConsole(`[process exit] code=${code} signal=${signal || 'none'}`)
     console.log(`后端进程退出，退出码: ${code}`)
     if (!backendExitReason) {
-      backendExitReason = `后端进程意外退出（退出码 ${code}）`
+      backendExitReason = `后端进程意外退出（退出码 ${code}${signal ? `，信号 ${signal}` : ''}）`
     }
     javaExited = true
     javaProcess = null
     externalBackend = false
+    closeBackendConsole()
   })
 
   return true
@@ -1207,7 +1338,7 @@ async function start() {
         await failStartup(
           `启动失败：${reason.split('\n')[0]}`,
           backendExitReason
-            ? `${reason}\n\n日志：${backendLogPath()}`
+            ? `${reason}\n\n${backendDiagnostics()}`
             : '未找到后端 JAR 文件。\n\n请先在项目根目录执行 "mvn package" 构建后端，或确认 target 目录存在构建产物。'
         )
         return

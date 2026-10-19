@@ -266,19 +266,45 @@ npm install
 
 **典型现场**：旧版（2.0.2 / 2.0.4）一直正常，覆盖安装 3.0.0 后启动直接失败，重装一次仍然一样。
 
+现象其实分两类，排查方向完全不同 —— 先对号入座再动手：
+
+#### 现场 A：安装目录里仍是旧 jar（安装时文件被锁）
+
+判断依据（任一命中即是）：
+
+- `安装目录\resources\backend\codecraft.jar` 的修改时间仍是旧构建时间；
+- 解包后包内没有 `BOOT-INF/classes/v3-static/`。
+
 **根因（两个问题叠加）**：
 
 1. **旧后端进程没被结束，锁住了 jar**。安装器只会结束 `CodeCraft.exe`，不会结束它拉起的
    `java.exe -jar ...\resources\backend\codecraft.jar`。这个 java 进程持有 jar 文件句柄，
-   导致 NSIS 覆盖写 `codecraft.jar` 失败 —— 装完安装目录里**仍是旧 jar**
-   （核对方式：看 `resources\backend\codecraft.jar` 的修改时间是否还是旧构建时间，
-   或用解压工具确认包内有没有 `BOOT-INF/classes/v3-static/`）。
+   导致 NSIS 覆盖写 `codecraft.jar` 失败 —— 而 NSIS 对这种失败是**静默的**：照样弹「安装完成」，
+   但装完安装目录里**仍是旧 jar**。
 2. **3.0.0 新增的「复用已有后端」探测在旧后端仍占用端口时会误判**。8084 被旧 java 占着时：
    - 探测成功 → 复用旧后端 → 界面缺 `/v3/` 与 3.x 新接口（白屏 / 功能缺失）；
    - 探测超时（旧后端正忙，1.5s 未响应）→ 直接拉起新 java → 撞上端口占用 + H2 文件锁 →
      新进程卡住不退出 → 等满超时 → 弹出「后端服务启动超时」。
 
-**手动解决（用现有 3.0.0 安装包即可，不必等新版）**：
+#### 现场 B：jar 已是新版，但 java 根本没被启动起来
+
+判断依据：`CodeCraft.exe` 版本已经是 3.0.0、**8084 端口没有任何占用**、
+`runtime\logs\app.log` 里看不到本次启动的任何记录。
+
+这种情况说明 Spring Boot 进程根本没跑起来（还没走到写 logback 的阶段），常见原因：
+
+- 内置 JRE 缺失或与系统不匹配：`安装目录\resources\jre\bin\java.exe` 不存在（被杀毒软件隔离、
+  安装残留、跨平台打包）；
+- 内置 JRE 的 jlink 裁剪漏了模块，`java` 启动即报 `Module ... not found`；
+- 机器上既没有内置 JRE、系统也没装 Java 17+，回退到 PATH 的 `java` 时 spawn 直接 `ENOENT`；
+- jar 文件损坏（安装不完整）。
+
+排查方式（重发包起）：打开 `%APPDATA%\codecraft-desktop\runtime\logs\backend-console.log`，
+这是 java 子进程 stdout / stderr 的**原样记录**，开头几行就写明 Java 路径、JAR 路径、工作目录与平台，
+后面是 JVM / Spring Boot 的原始输出；启动失败的原生弹窗也会直接附带该日志的最后 30 行。
+若该文件只有启动头、后面一片空白，基本可判定为「java 没能启动」，请对照上面四条逐项核对。
+
+**手动解决（现场 A 适用，用当前 3.0.0 安装包即可，不必等新版）**：
 
 1. 托盘图标右键退出 CodeCraft（任务管理器里不应再有 `CodeCraft.exe`）；
 2. 结束残留后端：任务管理器 → 详细信息 → 找到**命令行含 `codecraft.jar`** 的 `java.exe` 结束。
@@ -288,15 +314,22 @@ npm install
 
 仓库 `scripts/fix-startup.bat` 可一键完成第 1、2 步，并检查 8084 是否已释放。
 
-**已经改掉的代码**（进 3.0.1 起生效）：
+**现场 B 的处理**：先按判断依据确认 `resources\jre\bin\java.exe` 是否存在；若被安全软件隔离，
+从隔离区恢复后重装；若文件本就不存在，说明安装包不完整，重新下载安装包。
 
-- 安装器 `customInit` 会先精确结束「命令行含 `codecraft.jar`」的 java 进程，再覆盖文件；
+**已经改掉的代码**（进重发的 3.0.0 安装包起生效）：
+
+- 安装器 `customInit` 改为三步清理：`CodeCraft.exe` 优雅退出（触发 `before-quit` → 停后端）→
+  强制结束 `CodeCraft.exe` → 兜底清理「命令行含 `codecraft.jar`」的 `java.exe`，全部做完才覆盖文件；
 - 启动时区分 `none / current / legacy / foreign` 四种端口状态：
   - 旧版后端或缺响应 → 先结束旧进程、等端口释放，再启动新后端（自愈）；
   - 被其它程序占用 → 直接报错并给出「进程名 + PID」，不再盲等 90 秒；
 - 页面特征匹配从裸 `CodeCraft` 子串收紧为 `<div id="app">` / `<title>CodeCraft`，
   避免把任意含 codecraft 字样的第三方服务误判成自家后端；
-- 启动超时提示会附带端口占用者与日志路径（`userData/runtime/logs/app.log`）。
+- **新增 `runtime/logs/backend-console.log`**：java 子进程的 stdout / stderr 原样落盘，
+  并在启动失败时把最后 30 行直接拼进错误弹窗 —— 专门解决「现场 B 什么报错都看不到」的问题；
+- `findJava()` 的每一步探测（内置 JRE → `JAVA_HOME` → 系统 `PATH`）都会写入该日志，
+  版本不对或回退路径一目了然。
 
 **数据会不会丢**：不会。2.0.2 及更早的数据在安装目录内，安装器会先备份到
 `%APPDATA%\codecraft-desktop\legacy-backup`，首次启动自动恢复到 `userData/runtime`。
