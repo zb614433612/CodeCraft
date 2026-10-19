@@ -278,7 +278,11 @@ function scanStartupAnchors (text) {
  * 进度双重保障：① 时间维度兜底估算；② 启动日志锚点跳跃提升（见 scanStartupAnchors）
  * 若后端进程提前退出，立即失败，不再空等剩余轮询
  */
-function waitForBackend(retries = 45, interval = 2000) {
+// 轮询次数 × 间隔 = 最长等待时长。
+// 3.0.0 的 jar 约 108MB，在低配机器 / 机械硬盘上首次启动（解压嵌套 jar + 初始化 H2 + Spring 组件扫描）
+// 明显慢于开发机，原实现 90 秒就判失败并弹「后端服务启动超时」—— 用户看到的其实是「还没起来」，
+// 不是「起不来」。这里放宽到 180 秒；进程一旦退出仍会立即失败（见 javaExited 分支），不会白等。
+function waitForBackend(retries = 90, interval = 2000) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
       // 后端进程已退出：立即失败（退出原因 + 控制台最后若干行，用户截图即可定位）
