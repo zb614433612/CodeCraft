@@ -101,7 +101,18 @@ function getBackendPort() {
 }
 
 const PORT = getBackendPort()
-const BACKEND_URL = `http://localhost:${PORT}`
+/**
+ * 探测与页面加载统一走 IPv4 回环地址。
+ *
+ * 为什么不用 localhost：
+ *   Windows 上 localhost 可能优先解析到 ::1（IPv6），而后端 Tomcat 绑的是 IPv4 通配地址。
+ *   一旦解析到 ::1，http.get 会得到 ECONNREFUSED 或长时间挂起——
+ *   而 isPortListening 用的是 127.0.0.1（IPv4），于是出现
+ *   「TCP 说端口有人监听、HTTP 说完全没响应」的自相矛盾判定，
+ *   进而被误判成 legacy/foreign，把「后端其实早已就绪」的机器拖进满超时分支。
+ */
+const BACKEND_HOST = '127.0.0.1'
+const BACKEND_URL = `http://${BACKEND_HOST}:${PORT}`
 
 let mainWindow = null
 let javaProcess = null
@@ -273,12 +284,32 @@ function scanStartupAnchors (text) {
   }
 }
 
+// ── 后端启动等待参数 ─────────────────────────────────────────────
+// 轮询次数 × 间隔 = 最长等待时长。
+//
+// 为什么是 300 秒（实测日志证据，2026-10-19 用户机器）：
+//   18:52:20  Application 启动
+//   18:53:01  Tomcat 初始化          → 已 41 秒
+//   18:53:39  ParserFactory         → 已 79 秒
+//   18:53:56  AvatarStore           → 已 96 秒，仍未走完（后面还有大量 Bean 初始化）
+// 各阶段均匀变慢，是「杀毒软件实时防护 + 机械硬盘」的典型特征：Spring 需要逐个读取
+// 108MB 嵌套 jar 内的 class，而每个文件都被安全软件拦下来扫一遍。这类机器完整启动要 2~3 分钟，
+// 原来的 90 秒上限会把「正在正常启动」误判成「启动失败」——用户看到的日志其实停在中途。
+// 进程一旦退出（javaExited）仍会立即失败，不会白等。
+const BACKEND_WAIT_RETRIES = 150        // 150 × 2s = 300s
+const BACKEND_EXPECT_SECONDS = 60       // 进度条按「60 秒走完」估算，超出后停在 92% 继续提示
+
+/** 单轮就绪探测的 HTTP 超时：防止「端口已 listen 但响应不回」把 Promise 永久挂住 */
+const READY_PROBE_TIMEOUT_MS = 3000
+/** 后端持续有输出时的续期窗口：30 秒内还有输出就继续等，不判超时 */
+const PROGRESS_GRACE_MS = 30000
+
 /**
  * 检查后端服务是否已就绪（同步上报启动画面进度）
  * 进度双重保障：① 时间维度兜底估算；② 启动日志锚点跳跃提升（见 scanStartupAnchors）
  * 若后端进程提前退出，立即失败，不再空等剩余轮询
  */
-function waitForBackend(retries = 45, interval = 2000) {
+function waitForBackend(retries = BACKEND_WAIT_RETRIES, interval = 2000) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
       // 后端进程已退出：立即失败（退出原因 + 控制台最后若干行，用户截图即可定位）
@@ -287,30 +318,54 @@ function waitForBackend(retries = 45, interval = 2000) {
         return
       }
       if (remaining <= 0) {
-        // 超时诊断：把「端口被谁占用 / 进程是否还活着 / 日志在哪」一并写进错误，
-        // 避免用户只看到一句「后端服务启动超时」而无从下手（3.0.0 覆盖安装实测踩坑）
-        const elapsedSec = Math.round((retries * interval) / 1000)
-        describePortOwner(PORT).then((owner) => {
-          const hint = owner
-            ? `端口 ${PORT} 当前被 ${owner} 占用，新后端无法绑定。\n\n请先完全退出 CodeCraft（含任务栏托盘图标），结束残留 java 进程后重试。`
-            : `后端进程仍在运行但 ${elapsedSec} 秒内未响应，可能正在初始化数据库或启动异常。`
-          reject(new Error(`后端服务启动超时（${elapsedSec} 秒）\n${hint}\n\n${backendDiagnostics()}`))
-        })
-        return
+        // ── 「慢」与「死」的区分 ────────────────────────────────────────
+        // 只要 java 仍在往 stdout/stderr 写日志，就说明它在正常推进（H2 初始化、
+        // Spring 组件扫描、类加载都可能拖很久），此时把轮询次数续期，不判失败；
+        // 只有「长时间零输出 + 端口不响应」才是真卡死。
+        // 这一条专门用来消除「后端其实在正常启动，却因为固定轮询次数用尽而被判超时」。
+        const sinceOutput = lastBackendOutputAt ? Date.now() - lastBackendOutputAt : -1
+        const progressing = !externalBackend && sinceOutput >= 0 && sinceOutput < PROGRESS_GRACE_MS
+        if (progressing) {
+          remaining = Math.max(1, Math.round(PROGRESS_GRACE_MS / interval))
+          console.log(`[backend] 轮询次数用尽，但后端 ${Math.round(sinceOutput / 1000)} 秒前仍有输出，续期 ${remaining} 轮继续等待`)
+          updateSplashProgress(92, '后端仍在启动（持续有输出），继续等待…')
+        } else {
+          const elapsedSec = Math.round((retries * interval) / 1000)
+          describePortOwner(PORT).then((owner) => {
+            const head = owner
+              ? `端口 ${PORT} 当前被 ${owner} 占用，新后端无法绑定。\n\n请先完全退出 CodeCraft（含任务栏托盘图标），结束残留 java 进程后重试。`
+              : sinceOutput < 0
+                ? `后端进程在 ${elapsedSec} 秒内没有任何输出，也没有响应端口探测 —— java 未能真正跑起来（内置 JRE 缺失/不匹配，或安装不完整）。`
+                : `后端进程仍在运行，但已连续 ${Math.round(sinceOutput / 1000)} 秒无任何输出且不响应端口探测 —— 进程处于卡死状态。`
+            reject(new Error(`后端服务启动超时（${elapsedSec} 秒）\n${head}\n\n${backendDiagnostics()}`))
+          })
+          return
+        }
       }
-      // 时间维度进度兜底：从 8% 随等待时间平滑爬升至 90%（日志锚点可进一步推高）
-      const elapsed = retries - remaining
-      const timePercent = Math.min(90, 8 + Math.round((elapsed / retries) * 82))
-      const slowMessage = timePercent >= 78 ? '首次启动需要初始化数据，请耐心等待…' : undefined
+      // 时间维度进度兜底：按「60 秒走完」估算，从 8% 爬到 92%；
+      // 超过 60 秒后不再上涨（避免进度条冲到头却迟迟不动，反而让人以为卡死），转为文字提示。
+      const passedSec = ((retries - remaining) * interval) / 1000
+      const ratio = Math.min(1, passedSec / BACKEND_EXPECT_SECONDS)
+      const timePercent = Math.min(92, 8 + Math.round(ratio * 84))
+      const slowMessage = passedSec >= 60
+        ? '首次启动较慢（正在初始化数据库与类加载），请再等一会儿，不要关闭窗口…'
+        : undefined
       updateSplashProgress(timePercent, slowMessage)
 
-      http.get(`${BACKEND_URL}/`, (res) => {
+      // 单轮探测自带超时：Tomcat 已 listen 但 Spring 还在初始化时，请求会挂起不返回；
+      // 若不加超时，check() 再也不会被调度，Promise 永久 pending，
+      // 用户看到的就是「启动画面一直转圈、拿不到任何结论」。
+      const req = http.get(`${BACKEND_URL}/`, (res) => {
         if (res.statusCode >= 200 && res.statusCode < 500) {
           resolve()
         } else {
           setTimeout(() => check(remaining - 1), interval)
         }
-      }).on('error', () => {
+      })
+      req.setTimeout(READY_PROBE_TIMEOUT_MS, () => {
+        req.destroy()   // destroy 触发下方 error 分支 → 正常进入下一轮
+      })
+      req.on('error', () => {
         setTimeout(() => check(remaining - 1), interval)
       })
     }
@@ -600,8 +655,20 @@ async function detectBackendGeneration () {
   const v3 = await httpProbe('/v3/', 1500)
   if (v3 && v3.status === 200 && /<div\s+id="app"|<html/i.test(v3.body)) return 'current'
   if (v3 && v3.status === 404) return 'legacy'
-  // /v3/ 探测异常（超时 / 5xx）：保守视为当前版本，避免误杀一个还能用的后端
-  return 'current'
+  // ── /v3/ 探测异常（超时 / 5xx / 连接被重置）────────────────────────────
+  // 这里曾经写成 `return 'current'`（注释为「避免误杀一个还能用的后端」），是错误的：
+  // 一旦判成 current，startBackend() 会直接 return true 且【不 spawn 任何 java】，
+  // 随后 waitForBackend 拿着一个「其实没人在服务」的端口干等满 90 秒，
+  // 最终报「后端服务启动失败：后端服务启动超时」——
+  // 这正是「后端本身 8 秒就能起来，用户却看到启动超时」的真实成因之一。
+  //
+  // 正确做法：探测结果不确定时，用 TCP 层判断端口到底有没有人在监听。
+  //   有人监听 → 无法确认它是哪个版本，按 legacy 处理（结束可疑进程后重启自己的后端，
+  //              宁可多花 8 秒重启，也要得到一个确定可用的状态）；
+  //   没人监听 → 端口真空闲，按 none 正常启动。
+  const listening = await isPortListening(PORT, 1200)
+  console.log(`[backend] /v3/ 探测结果不确定（status=${v3 ? v3.status : 'timeout'}），TCP 探测端口${listening ? '已被监听 → 按 legacy 重启后端' : '空闲 → 按 none 启动后端'}`)
+  return listening ? 'legacy' : 'none'
 }
 
 /**
@@ -642,7 +709,7 @@ function killStaleBackend () {
  */
 function isPortListening (port, timeoutMs = 1200) {
   return new Promise((resolve) => {
-    const socket = net.connect({ host: '127.0.0.1', port })
+    const socket = net.connect({ host: BACKEND_HOST, port })
     socket.setTimeout(timeoutMs)
     socket.once('connect', () => {
       socket.destroy()
@@ -748,10 +815,22 @@ const BACKEND_CONSOLE_LINE_LIMIT = 400
 let backendConsoleTail = []
 let backendConsoleStream = null
 
+/**
+ * 后端最后一次产生输出的时刻（ms）。
+ *
+ * 用途：区分「慢」和「死」。
+ *   - H2 初始化 / Spring 组件扫描 / 类加载都可能拖很久，但只要 java 还在往
+ *     stdout/stderr 写日志，就说明它在正常推进，此时不该判超时；
+ *   - 真正卡死（进程挂起、被系统阻断、等待一个永远不来的锁）的特征是
+ *     「长时间零输出」，这才是需要报失败的场景。
+ */
+let lastBackendOutputAt = 0
+
 /** 追加后端控制台输出（同时进内存缓冲与磁盘文件） */
 function appendBackendConsole (text) {
   const raw = String(text || '')
   if (!raw.trim()) return
+  lastBackendOutputAt = Date.now()
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.replace(/\s+$/, '')
     if (!trimmed.trim()) continue
@@ -776,6 +855,8 @@ function appendBackendConsole (text) {
 /** 打开（截断）本次启动的控制台日志 */
 function openBackendConsole () {
   backendConsoleTail = []
+  // 每轮启动都从零开始计时，避免被上一次运行留下的时间戳误判成「仍在输出」
+  lastBackendOutputAt = 0
   try {
     const file = backendConsolePath()
     fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -954,6 +1035,12 @@ async function startBackend() {
   javaProcess = spawn(javaCmd, [
     '-Dfile.encoding=UTF-8',
     `-Dapp.userdata=${userDataDir}`,
+    // ── 启动优化（针对「启动要 130 秒」的机器）────────────────────
+    // 实测日志：Starting → Tomcat 初始化 41 秒，WebApplicationContext → 第一个 Bean 36 秒。
+    // 这两段没有业务逻辑，全是「读 class → 解析 → 编译」。桌面工具优先缩启动时间而非峰值吞吐：
+    '-XX:TieredStopAtLevel=1',   // 只用 C1 编译，省掉 C2 的编译开销（启动快 10~20%，长跑性能略降，桌面场景可接受）
+    '-XX:+UseSerialGC',          // 小堆应用用串行 GC，少一个 GC 线程池的初始化开销
+    '-Xshare:auto',              // 启用类数据共享（JDK 自带 archive），跳过部分类解析
     '-jar', jarPath
   ], {
     cwd: workDir,
