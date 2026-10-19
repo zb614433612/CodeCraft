@@ -37,7 +37,10 @@ frontend/node_modules/
 frontend/dist/
 frontend/node/
 
-### Frontend v3（新版，产物直接输出到 src/main/resources/static/v3/）###
+### frontend-maven-plugin 安装的 node/npm（installDirectory = 项目根）###
+/node/
+
+### Frontend v3（新版，产物直接输出到 src/main/resources/v3-static/，访问路径 /v3/）###
 frontend-v3/node_modules/
 frontend-v3/dist/
 frontend-v3/.vite/

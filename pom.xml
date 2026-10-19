@@ -40,12 +40,18 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!--
             前端构建开关（frontend-maven-plugin）。
-            默认 false = 打包时自动构建经典版前端（frontend/ -> src/main/resources/static/）。
-            命令行 -DskipFrontend=true 可跳过（只编译后端、或前端已单独构建过时用）。
+            默认 false = 打包时自动构建**两套**前端：
+              ① 经典版 frontend/    -> src/main/resources/static/     （访问 /）
+              ② 新版   frontend-v3/ -> src/main/resources/v3-static/  （访问 /v3/）
+            命令行 -DskipFrontend=true 可同时跳过两者（只编译后端、或前端已单独构建过时用）。
 
             注意：历史上这里只在 plugin 注释里写了「可用 -DskipFrontend 跳过」，
             但 plugin 一直没有 <skip> 配置，该参数是空操作 —— 每次 package 都会重建
             经典版前端，并顺手清空 src/main/resources/static（v3 曾因此被误删）。
+
+            另一个历史坑：v3 的构建原先只写在 scripts/pack-v3.bat 里，CI 只跑
+            `mvn clean package`，导致发布出去的安装包缺 v3 产物（/v3/ 404）。
+            现在两套前端都在 pom 里构建，本地与 CI 走同一条链路。
         -->
         <skipFrontend>false</skipFrontend>
         <!--
@@ -220,7 +226,21 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
-            <!-- 前端构建：自动编译 Vue3 项目（可使用 -DskipFrontend=true 跳过） -->
+            <!--
+                前端构建：自动编译两套 Vue3 前端（可使用 -DskipFrontend=true 跳过）
+
+                  ① 经典版   frontend/     → src/main/resources/static/     （访问 /）
+                  ② 新版 v3  frontend-v3/  → src/main/resources/v3-static/  （访问 /v3/）
+
+                两套产物目录必须互相独立：经典版 vite 的 outDir 是 static/ 且带 emptyOutDir，
+                每次构建都会清空整个 static，v3 若放在 static/v3/ 会被一起删掉
+                （所以 v3 输出到 static 之外的 v3-static/，由后端 SpaConfig 用
+                ResourceHandler 把 /v3/** 映射过去）。
+
+                CI（.github/workflows/release.yml）走的就是这条链路，只跑
+                `mvn clean package`，不会调 scripts/pack-v3.bat —— 这里漏配 v3，
+                发布出来的安装包就会 /v3/ 404（曾经发生过一次，故此处显式配置）。
+            -->
             <plugin>
                 <groupId>com.github.eirslett</groupId>
                 <artifactId>frontend-maven-plugin</artifactId>
@@ -231,6 +251,11 @@
                         `-DskipFrontend=true` 一直是空操作（打包照旧重建前端）。
                     -->
                     <skip>${skipFrontend}</skip>
+                    <!--
+                        node/npm 统一装到 ${project.basedir}/node，两套前端共用一份
+                        （版本一致时后续 execution 直接跳过下载）。该目录已加入 .gitignore。
+                    -->
+                    <installDirectory>${project.basedir}</installDirectory>
                 </configuration>
                 <executions>
                     <execution>
@@ -259,6 +284,35 @@
                         <configuration>
                             <arguments>run build</arguments>
                             <workingDirectory>${project.basedir}/frontend</workingDirectory>
+                        </configuration>
+                    </execution>
+
+                    <!-- ============ 新版前端（frontend-v3，访问路径 /v3/）============ -->
+                    <!--
+                        产物由 frontend-v3/vite.config.ts 的 build.outDir 直接落到
+                        src/main/resources/v3-static/，与经典版的 static/ 完全隔离。
+
+                        不重复 install-node-and-npm：node/npm 已由上面的 execution 装到
+                        ${project.basedir}/node，两套前端共用。
+
+                        注意 execution id 不能与经典版重名，否则 Maven 会告警并只保留一个。
+                    -->
+                    <execution>
+                        <id>v3 npm install</id>
+                        <goals><goal>npm</goal></goals>
+                        <phase>generate-resources</phase>
+                        <configuration>
+                            <arguments>install --no-audit --no-fund</arguments>
+                            <workingDirectory>${project.basedir}/frontend-v3</workingDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>v3 npm build</id>
+                        <goals><goal>npm</goal></goals>
+                        <phase>generate-resources</phase>
+                        <configuration>
+                            <arguments>run build</arguments>
+                            <workingDirectory>${project.basedir}/frontend-v3</workingDirectory>
                         </configuration>
                     </execution>
                 </executions>
