@@ -397,4 +397,46 @@ v3.0.1 的三处修复：
 
 ---
 
+### Q20. 启动还是很慢（60 秒以上），还能再快吗？
+
+**先把「慢在哪」拆开看。** 一份真实的慢机器日志（`Started ... in 68.281 seconds`）拆解如下：
+
+| 阶段 | 耗时 | 说明 |
+| --- | --- | --- |
+| JVM 启动 → Tomcat 初始化 | 17.7s | 纯类加载（上万次「解压 + 解析 + 校验」） |
+| WebApplicationContext → 第一个业务 Bean | 15.4s | Spring 组件扫描 + Bean 创建 + H2 打开库文件 |
+| P2P：TLS 初始化 + Netty 绑端口 | 8.6s | 可选协作功能，却在主链路里同步执行 |
+| P2P 之后 → Tomcat 真正监听 | 8.8s | Lifecycle 收尾 + 静态资源准备 |
+| 其余（ProxyResolver 出网验证、TokenStore、建表等） | 17.8s | 其中有 100+ 条 DDL，每条一次 fsync |
+
+**v3.0.1 针对慢磁盘做了 5 件事**（都在不改业务逻辑的前提下）：
+
+1. **P2P 移出启动关键路径**：`ConnectionManager.start()` 从 `@Bean` 工厂方法挪到 `ApplicationReadyEvent` 之后异步执行。主界面不再等 TLS + Netty（省约 8.6s）。
+2. **移除两个「看起来能加速」实则有害的 JVM 参数**：`-XX:TieredStopAtLevel=1`（Spring 启动期大量反射代码停在 C1 反而更慢）、`-XX:+UseSerialGC`（JDK 17 的 ergonomics 本来就会按机器选 GC）。
+3. **关闭 SpringDoc**：桌面端没人看 `/api-docs`，关掉省掉 Controller 的 OpenAPI 建模（`--springdoc.api-docs.enabled=false`）。
+4. **Hikari `minimum-idle` 5 → 1**：启动少开 4 个 H2 连接（每次都要打开库文件）。
+5. **H2 `WRITE_DELAY=2000`**：把 100+ 条 DDL 触发的 fsync 合并，慢磁盘上能省数秒。代价是强杀进程时最多丢最后 2 秒写入。
+
+**还有一项自动生效的加速：AppCDS 类归档。**
+
+- 首次启动后 20 秒，主进程会在后台拉起一个「预热进程」（独立端口 + 内存库，不碰用户数据），
+  它跑完完整启动流程后正常退出，JVM 顺手把「这次加载过的类」写成 `runtime/cds/codecraft.jsa`。
+- 之后每次启动自动带上 `-XX:SharedArchiveFile` 直接内存映射复用，跳过类解析与字节码校验。
+- 实测同一台机器：**首次 7.12s → 第二次 5.54s（-22%）**。jar 更新后指纹不匹配会自动重建。
+- 归档状态可在 `runtime/logs/backend-console.log` 里搜 `[cds]` 查看。
+
+**如果这些都做完还是慢**，基本可以判定为硬件/环境问题，按这个顺序排查：
+
+1. **安装目录和数据目录是不是机械硬盘**：`%LOCALAPPDATA%\Programs\CodeCraft` 与
+   `%APPDATA%\codecraft-desktop\runtime`。H2 是文件库，随机 IO 在 HDD 上会放大 5~10 倍。
+2. **是否被实时防护逐文件扫描**：本项目已排除「杀软是唯一原因」，但如果确实装了第三方安全软件，
+   把安装目录 + runtime 目录加入排除项仍是最省事的加速手段。
+3. **CPU 单核性能**：类加载是单线程的，低功耗 U 系列处理器（15W）比桌面 CPU 慢 2~3 倍属正常。
+4. **内存是否吃紧**：物理内存不足触发换页时，JVM 启动会成倍变慢。任务管理器看「提交大小」是否接近上限。
+
+> 提示：启动失败/超时的现场排查见 Q19；`runtime/logs/backend-console.log` 里能看到每一行后端输出，
+> 包括 `[cds]` 归档状态、Java 探测路径、进程退出码。
+
+---
+
 > 💡 找不到答案？查看日志 `logs/app.log` 中的错误信息，或在 GitHub Issues 中搜索/提问。

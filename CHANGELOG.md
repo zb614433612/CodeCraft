@@ -7,8 +7,43 @@
 
 ## [3.0.0] - 2026-10-19
 
-> 大版本：全新 v3 前端（`frontend-v3/`）正式落地，与经典版（`frontend/`）**并存可切换**；
+> 大版本：全新 v3 前端（`frontend-v3/`）正式落地，与经典版（`frontend/`）**并存可切换**，
 > 补齐「版本与更新」页（F06），版本号统一到 3.0.0。
+>
+> **本次重建追加（同版本号覆盖发布）**：慢机器启动优化（P2P 异步化 + JVM/Spring 调优 + AppCDS 类归档）、
+> 导入备份上限 64MB → 500MB。业务功能与首次构建一致。
+
+### ⚡ 启动性能（针对慢磁盘 / 低配机器）
+
+以一份真实慢机器日志（`Started ... in 68.281 seconds`）为准逐段优化：
+
+- **P2P 移出启动关键路径**：`ConnectionManager.start()` 从 `@Bean` 工厂方法改为 `ApplicationReadyEvent` 之后异步执行。
+  此前 TLS 初始化 + Netty 绑端口（实测 3.3s + 5.3s）全部计入 Spring 容器刷新，主界面必须等它跑完才能打开。
+  现在 Tomcat 先对外服务，P2P 就绪前后 `/api/p2p/status` 返回 `running=false`。
+- **移除两个适得其反的 JVM 参数**：`-XX:TieredStopAtLevel=1`（Spring 启动期大量反射/注解解析停在 C1 反而更慢）、
+  `-XX:+UseSerialGC`（JDK 17 ergonomics 会按机器规格选 GC，显式指定在 8G 机器上限制了 G1）。
+- **关闭 SpringDoc**：`--springdoc.api-docs.enabled=false`、`--springdoc.swagger-ui.enabled=false`，桌面端不需要 OpenAPI 建模。
+- **Hikari `minimum-idle` 5 → 1**：启动少开 4 个 H2 连接（每个都要打开库文件）。
+- **H2 连接串增加 `WRITE_DELAY=2000`**：把 schema.sql 100+ 条 DDL 触发的 fsync 合并，慢磁盘上省数秒。
+  代价：进程被强杀时最多丢最后 2 秒写入。
+- **新增 AppCDS 类归档（自动、自适应）**：首次启动 20 秒后由后台预热进程生成 `runtime/cds/codecraft.jsa`，
+  后续启动用 `-XX:SharedArchiveFile` 直接内存映射复用。实测同机 **7.12s → 5.54s（-22%）**；
+  jar 指纹变化自动重建；归档异常时 `-Xshare:auto` 静默回退，不影响启动。
+  为此后端新增 `--app.cds-warmup=true`（跑完启动流程即正常退出，供 Electron 产归档）。
+
+### 📦 导入备份上限 64MB → 500MB
+
+- `spring.servlet.multipart.max-file-size` 64MB → **500MB**，`max-request-size` → 520MB，
+  `server.tomcat.max-swallow-size` 70MB → 520MB（保证超限时客户端能收到错误响应而非连接重置）。
+- 后端 `/api/system/import-data` 改用 `file.getInputStream()` 流式解析，避免 500MB 文件被 `getBytes()` 再复制一份进堆。
+- 前端（v3 `DataImportCard` + 经典版 `SystemSettingView`）同步放开校验并提示「单文件 ≤500MB」；
+  超限时保留文件信息并明确告知超出多少，而不是静默失败。
+- **导入失败提示细化**：上传中断时不再笼统提示「请确认后端服务已启动」，改为「文件多大 + 可能原因
+  （旧版 64MB 上限 / 后端异常退出）」。
+
+### 🛠 其它
+
+- `docs/FAQ.md` 新增 Q20（启动慢的分阶段拆解 + 5 项优化 + 硬件排查顺序）。
 
 ### 🎨 新增：v3 前端（`frontend-v3/`，服务在 `/v3/`，默认入口）
 

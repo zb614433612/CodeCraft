@@ -249,6 +249,11 @@ public class SystemController {
      * 导入完成后自动刷新 LLM Provider 内存缓存，使新导入的 Provider / API Key 立即生效；
      * 单行导入失败不中断整体，结果统计（新增/更新/失败）返回给前端展示。
      * </p>
+     * <p>
+     * 体积：multipart 全局上限 500MB（见 application.yml）。这里刻意用
+     * {@code file.getInputStream()} 而不是 {@code file.getBytes()}——后者会把整个文件
+     * 再复制一份到堆里，500MB 备份会在解析峰值上多占 500MB，直接拖出 OOM。
+     * </p>
      */
     @PostMapping("/import-data")
     @Operation(summary = "导入备份数据", description = "上传此前导出的 JSON 备份文件，一键恢复数据（合并策略：同 id 覆盖更新、新 id 追加，不清空现有数据）。导入后自动刷新 LLM Provider 缓存。")
@@ -258,7 +263,7 @@ public class SystemController {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("请选择要导入的备份文件");
         }
-        Map<String, Object> bundle = objectMapper.readValue(file.getBytes(), new TypeReference<Map<String, Object>>() {});
+        Map<String, Object> bundle = objectMapper.readValue(file.getInputStream(), new TypeReference<Map<String, Object>>() {});
         Map<String, Object> result = dataTransferService.importData(bundle);
 
         // 导入的 LLM Provider / API Key 立即生效

@@ -635,8 +635,8 @@ function handleImportFileSelected(ev: Event) {
     message.warning('请选择 .json 格式的备份文件')
     return
   }
-  if (file.size > 64 * 1024 * 1024) {
-    message.warning('备份文件超过 64MB 上限，无法导入')
+  if (file.size > 500 * 1024 * 1024) {
+    message.warning('备份文件超过 500MB 上限，无法导入')
     return
   }
   importParsing.value = true

@@ -10,6 +10,47 @@ This document records all important version changes of the CodeCraft project.
 > Major release: the brand-new v3 frontend (`frontend-v3/`) ships alongside the classic one
 > (`frontend/`) with a runtime switcher; the Version & Updates page (F06) is added and all
 > version numbers are unified at 3.0.0.
+>
+> **Rebuild addendum (republished under the same version)**: startup optimizations for slow
+> machines (async P2P startup + JVM/Spring tuning + AppCDS class archive) and the backup-import
+> limit raised from 64MB to 500MB. Functional behaviour is unchanged from the first build.
+
+### ⚡ Startup performance (slow disks / low-end machines)
+
+Measured against a real slow-machine log (`Started ... in 68.281 seconds`):
+
+- **P2P moved off the startup critical path**: `ConnectionManager.start()` now runs asynchronously
+  after `ApplicationReadyEvent` instead of inside the `@Bean` factory method. TLS init + Netty port
+  binding (3.3s + 5.3s measured) no longer block Spring context refresh; `/api/p2p/status` reports
+  `running=false` until it is ready.
+- **Removed two counter-productive JVM flags**: `-XX:TieredStopAtLevel=1` (Spring's reflection-heavy
+  startup is slower when pinned to C1) and `-XX:+UseSerialGC` (JDK 17 ergonomics already picks a
+  suitable GC; forcing Serial limits G1's parallel collection on 8GB machines).
+- **SpringDoc disabled on desktop**: `--springdoc.api-docs.enabled=false`, `--springdoc.swagger-ui.enabled=false`.
+- **Hikari `minimum-idle` 5 → 1**: four fewer H2 connections opened at startup.
+- **H2 `WRITE_DELAY=2000`**: coalesces the fsyncs triggered by 100+ DDL statements in `schema.sql`.
+  Trade-off: a hard kill may lose up to 2 seconds of writes.
+- **AppCDS class archive (automatic, self-adapting)**: 20 seconds after the first launch a background
+  warm-up process writes `runtime/cds/codecraft.jsa`; subsequent launches reuse it via
+  `-XX:SharedArchiveFile`. Measured on the same machine: **7.12s → 5.54s (-22%)**. The archive is
+  rebuilt automatically when the jar fingerprint changes and silently falls back via `-Xshare:auto`
+  if it is unusable. Backend adds `--app.cds-warmup=true` for this purpose.
+
+### 📦 Backup import limit: 64MB → 500MB
+
+- `spring.servlet.multipart.max-file-size` → **500MB**, `max-request-size` → 520MB,
+  `server.tomcat.max-swallow-size` → 520MB (so oversized requests still receive an error response
+  instead of a connection reset).
+- `/api/system/import-data` now streams via `file.getInputStream()` instead of `getBytes()`, avoiding
+  a second in-heap copy of a 500MB upload.
+- Both frontends (v3 `DataImportCard`, classic `SystemSettingView`) accept up to 500MB and report the
+  actual overshoot instead of failing silently.
+- **Clearer import failure message**: an interrupted upload now reports the file size and likely cause
+  (old 64MB server limit / backend exited) instead of a generic "is the backend running?".
+
+### 🛠 Misc
+
+- `docs/FAQ.md` gains Q20 (per-stage startup breakdown, the five optimizations, hardware checklist).
 
 ### 🎨 New: v3 frontend (`frontend-v3/`, served at `/v3/`, default entry)
 

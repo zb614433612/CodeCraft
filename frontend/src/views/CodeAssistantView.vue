@@ -1162,7 +1162,9 @@ interface AttachedFile {
   previewOwned?: boolean
 }
 
-// 单文件上传上限：64MB（与 application.yml 的 spring.servlet.multipart.max-file-size 及 DeepSeek Files API 上限对齐）
+// 单文件上传上限：64MB（这是**聊天附件自己的业务上限**，对齐 DeepSeek Files API 单文件上限）。
+// 注意：application.yml 的 spring.servlet.multipart.max-file-size 已放宽到 500MB（供「导入备份」用），
+// 两者不是同一个额度，不要把这里的 64MB 跟着调大——上传超 64MB 的附件 Web 端本来就传不到 DeepSeek。
 const MAX_UPLOAD_SIZE = 64 * 1024 * 1024
 
 const attachedFiles = ref<AttachedFile[]>([])

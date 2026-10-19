@@ -104,9 +104,31 @@ export interface DataImportResult {
 export async function importSystemData(file: File): Promise<ApiResponse<DataImportResult>> {
   const form = new FormData()
   form.append('file', file)
-  return request<DataImportResult>(
-    '/system/import-data',
-    { method: 'POST', body: form },
-    300000 // 大数据量导入可能较慢：5 分钟超时
-  )
+  try {
+    return await request<DataImportResult>(
+      '/system/import-data',
+      { method: 'POST', body: form },
+      300000 // 大数据量导入可能较慢：5 分钟超时
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    /*
+     * 上传大文件时，最常见的两种失败长这样：
+     *   1) 请求体超过服务器 multipart 上限 → Tomcat 直接重置连接 → 浏览器只报
+     *      `TypeError: Failed to fetch`，被 http-client 统一翻成「请确认后端服务已启动」；
+     *   2) 后端确实是旧版本（上限 64MB）或进程没起来。
+     * 两者对用户来说长得一样，但处理方式完全不同，所以这里补一句「文件多大 + 可能原因」，
+     * 避免用户反复重启客户端排查。
+     */
+    if (/后端服务已启动|网络连接失败|Failed to fetch|NetworkError|请求超时/i.test(msg)) {
+      const sizeText = file.size >= 1024 * 1024
+        ? `${(file.size / 1024 / 1024).toFixed(1)} MB`
+        : `${Math.max(1, Math.round(file.size / 1024))} KB`
+      throw new Error(
+        `导入请求被中断（文件 ${sizeText}）。可能原因：① 后端尚未重启到支持 500MB 的版本（旧版上限 64MB）；` +
+        `② 后端进程异常退出。请确认后端已更新并重启后重试。`
+      )
+    }
+    throw err
+  }
 }

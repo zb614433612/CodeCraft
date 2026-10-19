@@ -44,7 +44,7 @@
     >
       <svg class="cc-i" style="width: 22px; height: 22px"><use href="#i-disk" /></svg>
       <div class="cc-data-drop__title">选择或拖入 JSON 备份文件</div>
-      <div class="cc-data-drop__hint">仅支持 CodeCraft 导出的 .json；单行失败不影响其余数据</div>
+      <div class="cc-data-drop__hint">仅支持 CodeCraft 导出的 .json，单文件 ≤500MB；单行失败不影响其余数据</div>
     </div>
 
     <!-- 已选文件 -->
@@ -149,12 +149,26 @@ const preview = ref<BackupPreview | null>(null)
 const parseError = ref('')
 const dragOver = ref(false)
 
-/** 读取并解析备份文件（校验 app 标识 + 统计各类别条数） */
+/**
+ * 单文件上限 500MB。
+ * 与后端两处配置保持一致：application.yml 的 spring.servlet.multipart.max-file-size（500MB）
+ * 与 server.tomcat.max-swallow-size（520MB）。
+ * 前端先拦一次的意义：超限文件不必等上传完再被 Spring 拒绝（大文件白传几分钟）。
+ */
+const MAX_IMPORT_BYTES = 500 * 1024 * 1024
+
+/** 读取并解析备份文件（校验体积 + app 标识 + 统计各类别条数） */
 async function handleFile(next: File | null | undefined) {
   if (!next) return
   file.value = next
   preview.value = null
   parseError.value = ''
+  // 体积超限：保留文件名与原因，让用户看到「哪个文件、多重、为什么不行」（不进入可导入状态）
+  if (next.size > MAX_IMPORT_BYTES) {
+    parseError.value =
+      `文件体积 ${formatDataSize(next.size)} 超过 500MB 上限，请拆分或精简后再导入`
+    return
+  }
   try {
     const text = await next.text()
     preview.value = parseBackupJson(text)

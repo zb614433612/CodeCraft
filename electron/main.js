@@ -933,6 +933,122 @@ function stopBackend () {
   closeBackendConsole()
 }
 
+// ==================== 类数据共享（AppCDS）====================
+//
+// 为什么要做这件事：
+//   慢机器（机械硬盘 / 低主频 CPU）上，Spring Boot 启动耗时的一半花在「读 class → 解析 → 校验」。
+//   一次启动要加载上万个类，每个类都要从 jar 里解压出来再校验字节码。
+//   JDK 的动态 CDS 可以把这次工作的结果固化成 .jsa 归档，下次启动直接内存映射复用。
+//
+// 为什么是「自适应」而不是安装时预置：
+//   归档与「jar 内容 + JDK 版本 + 平台」强绑定，任何一项变了都必须重建，
+//   所以采用「首次启动后台生成 → 后续启动自动使用 → jar 变了自动重建」的闭环。
+//
+// 为什么用独立预热进程（而不是主进程退出时归档）：
+//   Windows 上 Electron 停后端走的是 TerminateProcess（强杀），JVM 来不及执行退出钩子，
+//   -XX:ArchiveClassesAtExit 根本不会写出归档。所以改成：主进程正常服务的同时，
+//   另外拉起一个「跑完启动流程就 System.exit」的一次性进程专门负责产归档。
+
+const CDS_ARCHIVE_NAME = 'codecraft.jsa'
+const CDS_STAMP_NAME = 'archive-stamp.txt'
+
+/** jar 指纹：jar 一变，旧归档立即作废（避免用错归档导致类不匹配） */
+function cdsFingerprint (jarPath) {
+  try {
+    const st = fs.statSync(jarPath)
+    return `${st.size}|${Math.round(st.mtimeMs)}|${process.platform}|${process.arch}`
+  } catch (_) {
+    return ''
+  }
+}
+
+/**
+ * 读取 CDS 状态
+ * mode = 'use'     已有可用归档 → 启动时带 -XX:SharedArchiveFile
+ *        'pending' 无归档或已失效 → 启动成功后在后台生成
+ *        'off'     拿不到 jar 信息 → 完全不用 CDS
+ */
+function readCdsState (jarPath, userDataDir) {
+  const dir = path.join(userDataDir, 'runtime', 'cds')
+  const archive = path.join(dir, CDS_ARCHIVE_NAME)
+  const stamp = path.join(dir, CDS_STAMP_NAME)
+  const fingerprint = cdsFingerprint(jarPath)
+  if (!fingerprint) return { mode: 'off', dir, archive, stamp, fingerprint }
+  try {
+    const saved = fs.readFileSync(stamp, 'utf8').trim()
+    if (saved === fingerprint && fs.statSync(archive).size > 8192) {
+      return { mode: 'use', dir, archive, stamp, fingerprint }
+    }
+  } catch (_) {
+    // 归档或指纹缺失：走 pending（首次启动的正常路径）
+  }
+  return { mode: 'pending', dir, archive, stamp, fingerprint }
+}
+
+/**
+ * 后台生成 CDS 归档（一次性进程，与主进程完全隔离）
+ * 独立端口 + 内存库 + 独立工作目录：不碰用户数据库、不占正式端口、不写用户日志。
+ */
+function warmCdsArchive (state, javaCmd, jarPath, userDataDir) {
+  if (!state || state.mode !== 'pending') return
+  try {
+    fs.mkdirSync(state.dir, { recursive: true })
+  } catch (e) {
+    appendBackendConsole(`[cds] 无法创建归档目录: ${e.message}`)
+    return
+  }
+  const warmArgs = [
+    '-Dfile.encoding=UTF-8',
+    `-Dapp.userdata=${userDataDir}`,
+    `-XX:ArchiveClassesAtExit=${state.archive}`,
+    '-jar', jarPath,
+    '--app.cds-warmup=true',
+    '--server.port=0',
+    // 注意：不能用 --p2p.enabled=false —— P2pController 强依赖 P2pConnectionManager bean，
+    // 关掉会让整个应用启动失败（预热进程也会失败）。改用端口 0 让 Netty 绑随机端口，
+    // 既避免与正式实例的 9527 冲突，又能让 P2P 相关类一并进归档（下次启动受益）。
+    '--p2p.port=0',
+    '--spring.datasource.url=jdbc:h2:mem:cds_warmup;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false',
+    '--springdoc.api-docs.enabled=false',
+    '--springdoc.swagger-ui.enabled=false'
+  ]
+  appendBackendConsole('[cds] 后台生成类归档（不影响正常使用，只为让下次启动更快）')
+  let child = null
+  try {
+    // cwd 指向归档目录：让预热进程产生的 logs/ data/ 都落在 cds 子目录，不污染用户 runtime
+    child = spawn(javaCmd, warmArgs, { cwd: state.dir, stdio: 'ignore' })
+  } catch (e) {
+    appendBackendConsole(`[cds] 预热进程启动失败: ${e.message}`)
+    return
+  }
+  child.on('error', (e) => {
+    appendBackendConsole(`[cds] 预热进程异常: ${e.message}`)
+  })
+  child.on('exit', (code) => {
+    // 判定成功以「归档文件是否有效」为准，而不是退出码：
+    // JVM 在写出归档的阶段已经进入 VM 退出流程，个别 shutdown hook 抛异常就会让退出码非 0，
+    // 但归档其实已经完整生成。用文件大小判断更贴近事实。
+    let archiveSize = 0
+    try {
+      archiveSize = fs.statSync(state.archive).size
+    } catch (_) {
+      archiveSize = 0
+    }
+    if (archiveSize > 8192) {
+      try {
+        fs.writeFileSync(state.stamp, state.fingerprint, 'utf8')
+        appendBackendConsole(
+          `[cds] 类归档已生成（${(archiveSize / 1024 / 1024).toFixed(1)} MB，exit=${code}），下次启动生效`
+        )
+      } catch (e) {
+        appendBackendConsole(`[cds] 归档指纹写入失败: ${e.message}`)
+      }
+    } else {
+      appendBackendConsole(`[cds] 未生成有效归档（exit=${code}），下次启动会重试`)
+    }
+  })
+}
+
 /**
  * 启动 Spring Boot 后端 JAR
  */
@@ -1032,16 +1148,37 @@ async function startBackend() {
     '==========================='
   )
 
+  // 类归档：有可用的就直接复用（省掉上万次「解压 + 解析 + 校验」）；没有就本次先不用，启动成功后在后台生成
+  const cds = readCdsState(jarPath, userDataDir)
+  if (cds.mode === 'use') {
+    appendBackendConsole(`[cds] 复用类归档: ${cds.archive}`)
+  } else if (cds.mode === 'pending') {
+    appendBackendConsole('[cds] 暂无可复用类归档，本次启动后会在后台生成（不影响使用）')
+  }
+
   javaProcess = spawn(javaCmd, [
     '-Dfile.encoding=UTF-8',
     `-Dapp.userdata=${userDataDir}`,
-    // ── 启动优化（针对「启动要 130 秒」的机器）────────────────────
-    // 实测日志：Starting → Tomcat 初始化 41 秒，WebApplicationContext → 第一个 Bean 36 秒。
-    // 这两段没有业务逻辑，全是「读 class → 解析 → 编译」。桌面工具优先缩启动时间而非峰值吞吐：
-    '-XX:TieredStopAtLevel=1',   // 只用 C1 编译，省掉 C2 的编译开销（启动快 10~20%，长跑性能略降，桌面场景可接受）
-    '-XX:+UseSerialGC',          // 小堆应用用串行 GC，少一个 GC 线程池的初始化开销
-    '-Xshare:auto',              // 启用类数据共享（JDK 自带 archive），跳过部分类解析
-    '-jar', jarPath
+    // ── JVM 参数：只保留「确认有益」的，其余交给 JVM 自己的 ergonomics ────────────
+    // 踩坑记录（v3.0.0 首版曾加过下面两条，实测对慢机器无效，反而多一层变量）：
+    //   -XX:TieredStopAtLevel=1  仅 C1 编译。命令行小工具受益，但 Spring Boot 启动期
+    //                            大量反射/注解解析代码停在 C1 反而更慢，且长跑性能下降；
+    //   -XX:+UseSerialGC         小堆省线程初始化。JDK 17 默认 ergonomics 已会按机器规格选 GC，
+    //                            显式指定在 8G 内存机器上反而限制了 G1 的并行回收。
+    // 结论：两者移除。真正的启动耗时在「类加载 + H2 初始化 + P2P 绑定端口」，不在 GC/编译策略。
+    '-Xshare:auto',              // 启用 JDK 自带的类数据共享（默认行为，显式写出便于排查）
+    // 有归档就挂上去。配合 -Xshare:auto：归档损坏 / 与当前 jar 不匹配时 JVM 会静默回退到默认 CDS，
+    // 不会因为归档问题导致后端起不来。
+    ...(cds.mode === 'use' ? [`-XX:SharedArchiveFile=${cds.archive}`] : []),
+    '-jar', jarPath,
+    // ── Spring 侧启动优化：削掉桌面端用不到的能力 ────────────────────────────
+    // SpringDoc 会为所有 Controller 建 OpenAPI 模型；桌面客户端没人看 /api-docs，
+    // 关掉可省掉这部分 bean 创建与扫描（排查问题时可用 --springdoc.api-docs.enabled=true 临时打开）。
+    '--springdoc.api-docs.enabled=false',
+    '--springdoc.swagger-ui.enabled=false',
+    // Hikari 默认 minimum-idle=5，启动即开 5 个 H2 连接（每个都要打开库文件）。
+    // 桌面端单用户并发极低，改为 1：少 4 次文件打开，慢磁盘上能省下可观测的时间。
+    '--spring.datasource.hikari.minimum-idle=1'
   ], {
     cwd: workDir,
     stdio: ['ignore', 'pipe', 'pipe']
@@ -1084,6 +1221,15 @@ async function startBackend() {
     externalBackend = false
     closeBackendConsole()
   })
+
+  // 没有可用归档时，等后端稳定运行后再在后台生成（延迟 20s 避开启动高峰，
+  // 此时后端必然已就绪，预热进程与主进程争抢 CPU/磁盘的影响最小）。
+  if (cds.mode === 'pending') {
+    setTimeout(() => {
+      if (javaExited) return   // 后端已退出就不必预热了
+      warmCdsArchive(cds, javaCmd, jarPath, userDataDir)
+    }, 20000)
+  }
 
   return true
 }
