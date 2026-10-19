@@ -262,4 +262,47 @@ npm install
 
 ---
 
+### Q19：从旧版本覆盖安装 3.0.0 后，启动报「后端服务启动失败：后端服务启动超时」
+
+**典型现场**：旧版（2.0.2 / 2.0.4）一直正常，覆盖安装 3.0.0 后启动直接失败，重装一次仍然一样。
+
+**根因（两个问题叠加）**：
+
+1. **旧后端进程没被结束，锁住了 jar**。安装器只会结束 `CodeCraft.exe`，不会结束它拉起的
+   `java.exe -jar ...\resources\backend\codecraft.jar`。这个 java 进程持有 jar 文件句柄，
+   导致 NSIS 覆盖写 `codecraft.jar` 失败 —— 装完安装目录里**仍是旧 jar**
+   （核对方式：看 `resources\backend\codecraft.jar` 的修改时间是否还是旧构建时间，
+   或用解压工具确认包内有没有 `BOOT-INF/classes/v3-static/`）。
+2. **3.0.0 新增的「复用已有后端」探测在旧后端仍占用端口时会误判**。8084 被旧 java 占着时：
+   - 探测成功 → 复用旧后端 → 界面缺 `/v3/` 与 3.x 新接口（白屏 / 功能缺失）；
+   - 探测超时（旧后端正忙，1.5s 未响应）→ 直接拉起新 java → 撞上端口占用 + H2 文件锁 →
+     新进程卡住不退出 → 等满超时 → 弹出「后端服务启动超时」。
+
+**手动解决（用现有 3.0.0 安装包即可，不必等新版）**：
+
+1. 托盘图标右键退出 CodeCraft（任务管理器里不应再有 `CodeCraft.exe`）；
+2. 结束残留后端：任务管理器 → 详细信息 → 找到**命令行含 `codecraft.jar`** 的 `java.exe` 结束。
+   ⚠️ 不要「结束所有 java.exe」，IDEA 等开发工具也用它；
+3. 重新运行 `CodeCraft.Setup.3.0.0.exe` 完成安装（这一步 jar 才会真正被替换）；
+4. 启动。
+
+仓库 `scripts/fix-startup.bat` 可一键完成第 1、2 步，并检查 8084 是否已释放。
+
+**已经改掉的代码**（进 3.0.1 起生效）：
+
+- 安装器 `customInit` 会先精确结束「命令行含 `codecraft.jar`」的 java 进程，再覆盖文件；
+- 启动时区分 `none / current / legacy / foreign` 四种端口状态：
+  - 旧版后端或缺响应 → 先结束旧进程、等端口释放，再启动新后端（自愈）；
+  - 被其它程序占用 → 直接报错并给出「进程名 + PID」，不再盲等 90 秒；
+- 页面特征匹配从裸 `CodeCraft` 子串收紧为 `<div id="app">` / `<title>CodeCraft`，
+  避免把任意含 codecraft 字样的第三方服务误判成自家后端；
+- 启动超时提示会附带端口占用者与日志路径（`userData/runtime/logs/app.log`）。
+
+**数据会不会丢**：不会。2.0.2 及更早的数据在安装目录内，安装器会先备份到
+`%APPDATA%\codecraft-desktop\legacy-backup`，首次启动自动恢复到 `userData/runtime`。
+旧安装器曾误备份到 `%APPDATA%\CodeCraft\legacy-backup`（productName 目录），
+新版本已兼容读取该路径 —— 历史备份仍可在上述两个目录之一找回。
+
+---
+
 > 💡 找不到答案？查看日志 `logs/app.log` 中的错误信息，或在 GitHub Issues 中搜索/提问。

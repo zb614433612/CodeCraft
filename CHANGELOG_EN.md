@@ -39,6 +39,8 @@ This document records all important version changes of the CodeCraft project.
 
 - `electron/package.json` version and bundled jar path synced to `code-craft-3.0.0.jar`.
 - Keeps the previously fixed macOS lifecycle handling (single-instance lock, closing the window keeps the backend alive, `activate` recreates the window with self-healing retries, minimal app menu restoring `Cmd+Q`).
+- **Fixed: upgrade install could leave the app broken (important)**. `customInit` in `electron/installer.nsh` now releases file handles in three steps: graceful `CodeCraft.exe` shutdown (triggers `before-quit` → `stopBackend`) → forced kill of `CodeCraft.exe` → fallback cleanup of any `java.exe` whose command line contains `codecraft.jar`. Previously the installer killed nothing: while `codecraft.jar` / `app.asar` were locked, NSIS **silently skipped** writing them yet still showed "Installation complete", so the old jar kept running; the leftover java also held port 8084 and the H2 file lock, making the new client fail with "backend failed to start: backend startup timed out". Cleanup matches only `java.exe` with `codecraft.jar` in its command line, so other JVMs such as IntelliJ IDEA are never touched.
+- **Fixed: startup self-healing**. `main.js` now detects the backend generation (`none` / `current` / `legacy` / `foreign`): a legacy backend left over from an older version is stopped before starting a new one; if the port is held by a non-CodeCraft program the owner PID is reported instead of blindly spawning a java process that is doomed to hang; the timeout message now includes the port owner and the backend log path. A new `scripts/fix-startup.bat` lets affected users clean up leftover processes in one click.
 
 ### 🧾 Version sync
 

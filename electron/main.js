@@ -3,6 +3,7 @@ const { spawn, exec } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
+const net = require('net')
 // 自动更新管理器（检测 GitHub Releases / 下载 / 安装 / 升级前备份）
 const { initUpdateManager } = require('./update-manager')
 
@@ -277,7 +278,7 @@ function scanStartupAnchors (text) {
  * 进度双重保障：① 时间维度兜底估算；② 启动日志锚点跳跃提升（见 scanStartupAnchors）
  * 若后端进程提前退出，立即失败，不再空等剩余轮询
  */
-function waitForBackend(retries = 30, interval = 2000) {
+function waitForBackend(retries = 45, interval = 2000) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
       // 后端进程已退出：立即失败（附上退出原因）
@@ -286,7 +287,15 @@ function waitForBackend(retries = 30, interval = 2000) {
         return
       }
       if (remaining <= 0) {
-        reject(new Error('后端服务启动超时'))
+        // 超时诊断：把「端口被谁占用 / 进程是否还活着 / 日志在哪」一并写进错误，
+        // 避免用户只看到一句「后端服务启动超时」而无从下手（3.0.0 覆盖安装实测踩坑）
+        const elapsedSec = Math.round((retries * interval) / 1000)
+        describePortOwner(PORT).then((owner) => {
+          const hint = owner
+            ? `端口 ${PORT} 当前被 ${owner} 占用，新后端无法绑定。\n\n请先完全退出 CodeCraft（含任务栏托盘图标），结束残留 java 进程后重试。`
+            : `后端进程仍在运行但 ${elapsedSec} 秒内未响应，可能正在初始化数据库或启动异常。`
+          reject(new Error(`后端服务启动超时（${elapsedSec} 秒）\n${hint}\n\n日志：${backendLogPath()}`))
+        })
         return
       }
       // 时间维度进度兜底：从 8% 随等待时间平滑爬升至 90%（日志锚点可进一步推高）
@@ -422,10 +431,23 @@ function resolveBackendWorkDir (jarDir) {
     if (fs.existsSync(runtimeDb)) return runtimeDir
 
     // 2) 首次从「数据在安装目录」的旧版本升级：安装包 customInit 已把旧数据备份到 legacy-backup，
-    //    这里恢复到 runtime（保留 legacy-backup 作为额外副本，不删除）
-    const legacyBackupDir = path.join(app.getPath('userData'), 'legacy-backup')
-    const legacyBackupDb = path.join(legacyBackupDir, 'data', 'codecraft.mv.db')
-    if (fs.existsSync(legacyBackupDb)) {
+    //    这里恢复到 runtime（保留 legacy-backup 作为额外副本，不删除）。
+    //    ⚠ 备份目录有两个历史来源，必须都兼容：
+    //      · userData 实际是 %APPDATA%\codecraft-desktop（取自 package.json 的 name）；
+    //      · 早期 installer.nsh 却备份到了 %APPDATA%\CodeCraft（productName）。
+    //    两者是不同目录（名字不同，不是大小写差异），只查一处会让 2.0.2 → 3.0.0 的升级
+    //    「看起来数据全丢了」（其实备份还在，只是没被读取）。
+    const legacyBackupCandidates = [
+      path.join(app.getPath('userData'), 'legacy-backup'),
+      path.join(app.getPath('appData'), 'CodeCraft', 'legacy-backup')
+    ]
+    const legacyBackupDir = legacyBackupCandidates.find(
+      (dir) => fs.existsSync(path.join(dir, 'data', 'codecraft.mv.db'))
+    )
+    if (legacyBackupDir) {
+      if (legacyBackupDir !== legacyBackupCandidates[0]) {
+        console.log(`[migrate] 在兼容路径找到旧版本备份: ${legacyBackupDir}`)
+      }
       const restoreTmp = runtimeDir + '.restoring'
       fs.rmSync(restoreTmp, { recursive: true, force: true })
       fs.mkdirSync(restoreTmp, { recursive: true })
@@ -472,32 +494,208 @@ function resolveBackendWorkDir (jarDir) {
 }
 
 /**
- * 探测本机是否已有可用的 CodeCraft 后端在监听
- * 场景：应用被强制退出（macOS 上「强制退出」或旧版 Cmd+Q 不可用时的强杀）后，
- * java 子进程会成为孤儿进程继续占用 8084 端口与 H2 数据库文件锁。
- * 若不检测就直接 spawn 新的 java，新进程会因端口/文件锁失败 → 表现为「再次启动失败」。
- * @returns {Promise<boolean>} 是否已存在可复用的后端
+ * 识别「这个响应确实来自 CodeCraft 页面」的特征。
+ * 必须严格：早期用 /CodeCraft/i 做裸子串匹配，会把任何响应体里出现 codecraft 字样的
+ * 第三方服务（错误页、健康检查 JSON 等）误判成自家后端，进而复用错误的后端。
  */
-function probeExistingBackend (timeoutMs = 1500) {
+const CODECRAFT_PAGE_RE = /<div\s+id="app"|<title[^>]*>\s*CodeCraft/i
+
+/**
+ * 单次 HTTP 探测后端：成功返回 { status, body }，连接失败/超时返回 null。
+ * 只读前 4KB，足够做页面特征与状态码判断。
+ */
+function httpProbe (pathName, timeoutMs = 1500) {
   return new Promise((resolve) => {
-    const req = http.get(`${BACKEND_URL}/`, (res) => {
-      // 只读前 4KB：足够判断是不是 CodeCraft 页面，避免把无关服务当成后端
+    const req = http.get(`${BACKEND_URL}${pathName}`, (res) => {
       let body = ''
       res.setEncoding('utf8')
       res.on('data', (chunk) => {
         if (body.length < 4096) body += chunk
       })
-      res.on('end', () => {
-        const okStatus = res.statusCode >= 200 && res.statusCode < 400
-        resolve(okStatus && /<div\s+id="app"|CodeCraft/i.test(body))
-      })
+      res.on('end', () => resolve({ status: res.statusCode, body }))
     })
-    req.on('error', () => resolve(false))
+    req.on('error', () => resolve(null))
     req.setTimeout(timeoutMs, () => {
       req.destroy()
+      resolve(null)
+    })
+  })
+}
+
+/**
+ * 判定「当前占用后端端口」的服务身份，决定是复用、替换还是报错。
+ *
+ * 背景（3.0.0 实测踩坑）：
+ * - 旧版 2.x 的桌面端被强制结束/覆盖安装时，java 子进程不会随之退出，成为孤儿进程，
+ *   继续占用 8084 端口与 H2 文件锁；
+ * - 若此时直接 spawn 新 java：8084 被占 + H2 文件锁 → 新进程卡住不退出 →
+ *   waitForBackend 干等满超时 → 用户看到「后端服务启动失败：后端服务启动超时」；
+ * - 若直接复用孤儿后端：旧 jar 没有 /v3/ 静态资源与 3.x 新接口 → 界面白屏 / 功能缺失。
+ * 因此必须区分「可复用的新版后端」与「必须替换的旧版后端」。
+ *
+ * 判定依据（已实测）：新版 jar 的 GET /v3/ 返回 200 且是 HTML；
+ * 旧版 jar 没有该路由，GET /v3/ 返回 404（Spring 默认错误 JSON）。
+ * 注：不能使用 /api/system/version 判定 —— TokenAuthenticationFilter 会先拦下所有 /api/ 请求，
+ * 新旧版本未登录时都返回 401，无法区分。
+ *
+ * @returns {Promise<'none'|'current'|'legacy'|'foreign'>}
+ *   none    端口无人监听（可安全启动）
+ *   current 已是新版后端（可复用）
+ *   legacy  旧版后端（缺 /v3/ 资源，必须结束并替换）
+ *   foreign 端口被非 CodeCraft 程序占用（必须提示用户，不能盲目 spawn）
+ */
+async function detectBackendGeneration () {
+  const root = await httpProbe('/', 1500)
+  if (!root) {
+    // HTTP 无响应有两种可能，必须区分开：
+    //   a) 端口真的空闲 → 'none'，可以安全 spawn；
+    //   b) 端口被监听但页面拿不到（旧后端正忙于长任务 / 正在启动 / 非 CodeCraft 服务）
+    //      → 若此时直接 spawn 新 java，会因端口占用 + H2 文件锁卡在启动阶段不退出，
+    //        最终报「后端服务启动超时」——这正是 3.0.0 覆盖安装后的现场形态。
+    // 因此先用 TCP 探测端口是否真的有人监听。
+    const listening = await isPortListening(PORT, 1200)
+    if (listening) {
+      console.log('[backend] 端口已被监听但 HTTP 未响应（旧后端忙或正在启动），按需替换处理')
+      return 'legacy'
+    }
+    return 'none'
+  }
+  const isCodeCraft = root.status >= 200 && root.status < 400 && CODECRAFT_PAGE_RE.test(root.body)
+  if (!isCodeCraft) return 'foreign'
+
+  const v3 = await httpProbe('/v3/', 1500)
+  if (v3 && v3.status === 200 && /<div\s+id="app"|<html/i.test(v3.body)) return 'current'
+  if (v3 && v3.status === 404) return 'legacy'
+  // /v3/ 探测异常（超时 / 5xx）：保守视为当前版本，避免误杀一个还能用的后端
+  return 'current'
+}
+
+/**
+ * 结束「命令行包含 codecraft.jar」的 java 进程。
+ * 只精确匹配本应用的后端 JAR，绝不 taskkill /IM java.exe —— 用户机器上常同时跑着
+ * IntelliJ IDEA 等 JVM 进程，按镜像名强杀会误伤。
+ */
+function killStaleBackend () {
+  return new Promise((resolve) => {
+    if (IS_WIN) {
+      // 注意：这里必须用 -EncodedCommand（base64/UTF-16LE）传脚本，不能用 -Command "..."。
+      // 原因：exec 经 cmd.exe 转发，脚本内的双引号（如 -Filter "Name='java.exe'"）会被 cmd 吃掉，
+      // PowerShell 收到的是无引号的 -Filter Name='java.exe' → 报「无效查询」→ 静默失败 →
+      // 残留 java 依然占着 8084 与 jar 句柄，用户侧表现为「重装后仍然启动超时」。
+      // 编码后命令行里不含任何引号，彻底规避该问题。
+      const script = 'Get-CimInstance Win32_Process | ' +
+        "Where-Object { $_.Name -eq 'java.exe' -and $_.CommandLine -like '*codecraft.jar*' } | " +
+        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }'
+      const encoded = Buffer.from(script, 'utf16le').toString('base64')
+      exec(`powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, { windowsHide: true }, (err, stdout, stderr) => {
+        if (err) console.warn('[backend] 结束遗留后端进程失败:', err.message, (stderr || '').trim())
+        else console.log('[backend] 已请求结束遗留后端进程')
+        resolve()
+      })
+      return
+    }
+    exec("pkill -f 'codecraft.jar'", (err) => {
+      if (err) console.warn('[backend] 结束遗留后端进程失败:', err.message)
+      else console.log('[backend] 已请求结束遗留后端进程')
+      resolve()
+    })
+  })
+}
+
+/**
+ * 端口是否已被监听（TCP 层判断，不依赖 HTTP 是否响应）。
+ * 用于区分「端口真空闲」与「有进程占着但 HTTP 没回」——后者直接 spawn 新 java 会撞车。
+ */
+function isPortListening (port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => {
+      socket.destroy()
+      resolve(true)
+    })
+    socket.once('error', () => {
+      socket.destroy()
+      resolve(false)
+    })
+    socket.once('timeout', () => {
+      socket.destroy()
       resolve(false)
     })
   })
+}
+
+/**
+ * 等待端口释放（用于「结束旧后端 → 启动新后端」之间的衔接）
+ * @returns {Promise<boolean>} 端口是否已空闲
+ */
+async function waitPortFree (port, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await isPortListening(port, 1200))) return true
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  return !(await isPortListening(port, 1200))
+}
+
+/**
+ * 查询占用后端端口的进程（Windows），用于拼出可读的失败原因。
+ * 只为诊断展示，任何一步失败都返回空串，不影响主流程。
+ */
+function describePortOwner (port) {
+  return new Promise((resolve) => {
+    if (!IS_WIN) {
+      resolve('')
+      return
+    }
+    exec(`netstat -ano -p tcp | findstr :${port}`, { windowsHide: true }, (err, stdout) => {
+      if (err || !stdout) {
+        resolve('')
+        return
+      }
+      const m = stdout.match(/LISTENING\s+(\d+)/)
+      if (!m) {
+        resolve('')
+        return
+      }
+      const pid = m[1]
+      exec(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { windowsHide: true }, (err2, out2) => {
+        if (err2 || !out2) {
+          resolve(`PID ${pid}`)
+          return
+        }
+        const name = (out2.split(',')[0] || '').replace(/"/g, '').trim()
+        resolve(name ? `${name} (PID ${pid})` : `PID ${pid}`)
+      })
+    })
+  })
+}
+
+/**
+ * 后端日志文件路径（打包后 cwd = <userData>/runtime，日志在 ./logs/app.log）
+ * 仅用于启动失败提示，帮助用户自助排查。
+ */
+function backendLogPath () {
+  try {
+    if (app.isPackaged) {
+      return path.join(app.getPath('userData'), 'runtime', 'logs', 'app.log')
+    }
+    return path.join(__dirname, '..', 'logs', 'app.log')
+  } catch (e) {
+    return 'logs/app.log'
+  }
+}
+
+/**
+ * 探测本机是否已有可用的 CodeCraft 后端在监听（保留给非启动路径的快速判断）。
+ * 语义等价于 detectBackendGeneration() === 'current'。
+ * @returns {Promise<boolean>} 是否已存在可复用的后端
+ */
+async function probeExistingBackend (timeoutMs = 1500) {
+  const root = await httpProbe('/', timeoutMs)
+  if (!root) return false
+  const okStatus = root.status >= 200 && root.status < 400
+  return okStatus && CODECRAFT_PAGE_RE.test(root.body)
 }
 
 /**
@@ -531,14 +729,36 @@ async function startBackend() {
     console.log('后端服务已在运行，跳过重复启动')
     return true
   }
-  // 残留后端检测：上次被强制退出遗留的 java 仍占着 8084 与数据库文件锁，
-  // 此时直接复用比再 spawn 一个更安全（新进程必然起不来）
-  if (await probeExistingBackend()) {
-    console.log('检测到已有后端实例在运行，直接复用（不再启动新进程）')
+  // 端口占用检测：区分「可复用的新版后端 / 必须替换的旧版后端 / 被其它程序占用」。
+  // 历史实现只做布尔探测并直接 spawn，一旦端口被旧版后端或其它程序占着，
+  // 新 java 会卡在 H2 文件锁上不退出 → 干等满 90s → 报「后端服务启动超时」，用户无从判断。
+  const generation = await detectBackendGeneration()
+  if (generation === 'current') {
+    console.log('检测到已有新版后端实例在运行，直接复用（不再启动新进程）')
     javaExited = false
     backendExitReason = ''
     externalBackend = true
     return true
+  }
+  if (generation === 'foreign') {
+    const owner = await describePortOwner(PORT)
+    backendExitReason = `端口 ${PORT} 已被其它程序占用${owner ? `（${owner}）` : ''}。\n\n` +
+      '请关闭占用该端口的程序后重试，或修改后端 application.yml 中的 server.port。'
+    console.error('[backend]', backendExitReason.replace(/\n+/g, ' '))
+    return false
+  }
+  if (generation === 'legacy') {
+    console.log('检测到旧版本后端仍在运行（缺少 /v3/ 资源），先结束它再启动新后端')
+    await killStaleBackend()
+    const freed = await waitPortFree(PORT, 10000)
+    if (!freed) {
+      const owner = await describePortOwner(PORT)
+      backendExitReason = `检测到旧版本后台服务仍在占用端口 ${PORT}${owner ? `（${owner}）` : ''}，且无法自动结束。\n\n` +
+        '请先完全退出 CodeCraft（含任务栏托盘图标），或在任务管理器中结束命令行含 codecraft.jar 的 java 进程后重试。'
+      console.error('[backend]', backendExitReason.replace(/\n+/g, ' '))
+      return false
+    }
+    console.log('旧版本后端已结束，端口已释放，继续启动新后端')
   }
   const jarPath = getJarPath()
   if (!jarPath) {
@@ -982,9 +1202,13 @@ async function start() {
 
       // 启动后端进程（失败时提前终止，不进入无意义的等待）
       if (!(await startBackend())) {
+        // startBackend 内部会把具体原因（端口被占 / 旧后端无法结束 / 找不到 JAR）写入 backendExitReason
+        const reason = backendExitReason || '未找到后端 JAR 文件'
         await failStartup(
-          '启动失败：未找到后端 JAR 文件',
-          '未找到后端 JAR 文件。\n\n请先在项目根目录执行 "mvn package" 构建后端，或确认 target 目录存在构建产物。'
+          `启动失败：${reason.split('\n')[0]}`,
+          backendExitReason
+            ? `${reason}\n\n日志：${backendLogPath()}`
+            : '未找到后端 JAR 文件。\n\n请先在项目根目录执行 "mvn package" 构建后端，或确认 target 目录存在构建产物。'
         )
         return
       }
@@ -993,9 +1217,10 @@ async function start() {
         await waitForBackend()
         updateSplashProgress(100, '启动完成')
       } catch (err) {
+        // 启动画面只能显示单行：首行用作标题，完整诊断信息放原生错误框（支持换行）
         await failStartup(
-          `启动失败：${err.message}`,
-          `后端服务启动失败：${err.message}\n\n请检查后端日志后重试。`
+          `启动失败：${err.message.split('\n')[0]}`,
+          `后端服务启动失败：${err.message}`
         )
         return
       }
