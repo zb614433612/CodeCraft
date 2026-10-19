@@ -204,13 +204,13 @@ public class AgentConfigServiceImpl implements AgentConfigService {
                 existing.setSystemPrompt(updated.getSystemPrompt());
             }
         }
-        // ★ 防御性修复：toolNames 为 "[]" 或空字符串且数据库原值为 null 时不覆盖（保留 NULL = 使用内置默认工具集）
+        // toolNames：`"[]"` 与空串都表示「使用全部工具」，统一归一为 NULL。
+        // 若把 `"[]"` 原样写进库，DeepSeekServiceImpl 的 objectMapper.readValue 会解析出空列表，
+        // 该 Agent 会变成「一个工具都没有」；而 NULL 才会命中「回退默认工具集」分支。
+        // 前端「全部工具」提交的是空串，这里一并归一，避免依赖调用方的写法。
         if (updated.getToolNames() != null) {
-            if (("[]".equals(updated.getToolNames()) || updated.getToolNames().trim().isEmpty()) && existing.getToolNames() == null) {
-                // 保持数据库 NULL，不覆盖
-            } else {
-                existing.setToolNames(updated.getToolNames());
-            }
+            String rawToolNames = updated.getToolNames().trim();
+            existing.setToolNames(("[]".equals(rawToolNames) || rawToolNames.isEmpty()) ? null : updated.getToolNames());
         }
         if (updated.getModelName() != null) existing.setModelName(updated.getModelName());
         if (updated.getThinkingMode() != null) existing.setThinkingMode(updated.getThinkingMode());

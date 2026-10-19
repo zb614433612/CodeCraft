@@ -50,9 +50,30 @@ public interface McpServerMapper {
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(McpServerConfig config);
 
-    @Update("UPDATE mcp_server SET name = #{name}, type = #{type}, url = #{url}, command = #{command}, " +
-            "headers = #{headers}, tool_prefix = #{toolPrefix}, permission_level = #{permissionLevel}, " +
-            "enabled = #{enabled}, auto_register = #{autoRegister}, updated_at = #{updatedAt} WHERE id = #{id}")
+    /**
+     * 更新服务器配置（动态 SQL：null 字段保持原值）
+     *
+     * <p>为什么不能全量覆盖：{@code headers} 含 Authorization 等密钥，列表接口（{@code McpServerVO}）
+     * 只回显 {@code hasHeaders} 布尔值，前端编辑时拿不到明文，留空即表示「保持原值」。
+     * 若这里用全量 UPDATE，{@code headers=null} 会把已配置的密钥清空，导致原本能连上的
+     * 服务器在改个名字后突然鉴权失败，属于静默数据丢失。</p>
+     *
+     * <p>需要真正清空 headers 时，前端传空对象字符串 {@code "{}"}（非 null）即可覆盖。</p>
+     */
+    @Update("<script>" +
+            "UPDATE mcp_server SET " +
+            "<if test='name != null'>name = #{name}, </if>" +
+            "<if test='type != null'>type = #{type}, </if>" +
+            "<if test='url != null'>url = #{url}, </if>" +
+            "<if test='command != null'>command = #{command}, </if>" +
+            "<if test='headers != null'>headers = #{headers}, </if>" +
+            "<if test='toolPrefix != null'>tool_prefix = #{toolPrefix}, </if>" +
+            "<if test='permissionLevel != null'>permission_level = #{permissionLevel}, </if>" +
+            "<if test='enabled != null'>enabled = #{enabled}, </if>" +
+            "<if test='autoRegister != null'>auto_register = #{autoRegister}, </if>" +
+            "updated_at = #{updatedAt} " +
+            "WHERE id = #{id}" +
+            "</script>")
     int update(McpServerConfig config);
 
     @Delete("DELETE FROM mcp_server WHERE id = #{id}")

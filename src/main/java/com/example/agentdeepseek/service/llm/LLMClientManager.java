@@ -10,6 +10,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -371,6 +373,22 @@ public class LLMClientManager {
     }
 
     /**
+     * 获取所有已启用 Provider 的配置快照（按 sortOrder 升序，其次按 code 升序保证顺序稳定）。
+     *
+     * <p>用于「无法依赖 {@code ToolContext.providerCode}」的兜底场景：
+     * 后台线程 / 子任务 / 非主链路工具调用可能没有设置工具上下文，此时按平台特征反查唯一匹配的 Provider。</p>
+     *
+     * @return 只读快照（新列表，元素为缓存中的配置对象）；无配置时返回空列表（不为 null）
+     */
+    public List<ProviderConfig> getAllProviderConfigs() {
+        List<ProviderConfig> providers = new ArrayList<>(configMap.values());
+        providers.sort(Comparator
+                .comparingInt((ProviderConfig c) -> c.getSortOrder() == null ? 0 : c.getSortOrder())
+                .thenComparing(ProviderConfig::getCode, Comparator.nullsLast(Comparator.naturalOrder())));
+        return providers;
+    }
+
+    /**
      * 列出所有已注册的 Provider Code
      */
     public java.util.Set<String> getRegisteredProviders() {
@@ -445,8 +463,17 @@ public class LLMClientManager {
             }
             case "volcengine", "ark", "doubao" -> {
                 // 火山引擎方舟（豆包 / 方舟上的 DeepSeek、GLM、Kimi 等模型），OpenAI 兼容协议
+                // 专属可配置项（Provider「扩展配置」extraConfig）：
+                //   imageDetail / reasoningEffortModels / reasoningEffortEnabled /
+                //   reasoningEffortHigh / reasoningEffortMax / searchApiKey / accessKey / secretKey
                 var wc = webClientManager.getOrCreate(config);
-                yield new VolcengineArkClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
+                yield new VolcengineArkClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
+                        new VolcengineArkClient.Options(
+                                readExtraValue(config, "imageDetail"),
+                                readExtraCsv(config, "reasoningEffortModels"),
+                                readExtraBoolean(config, "reasoningEffortEnabled"),
+                                readExtraValue(config, "reasoningEffortHigh"),
+                                readExtraValue(config, "reasoningEffortMax")));
             }
             default -> {
                 log.warn("未知的 request_template: {}，回退到 DeepSeekClient", template);
@@ -491,6 +518,46 @@ public class LLMClientManager {
         } catch (Exception e) {
             log.warn("Provider [{}] 扩展配置不是合法 JSON，已忽略: {}", config.getCode(), e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 读取扩展配置中的字符串列表字段。
+     *
+     * <p>两种写法都支持：JSON 数组 {@code ["deepseek-v4","doubao-seed-1-6"]}，
+     * 或逗号分隔字符串 {@code "deepseek-v4,doubao-seed-1-6"}（手填配置更省事）。</p>
+     *
+     * @return 去空后的列表；未配置或格式非法返回空列表（不为 null）
+     */
+    private List<String> readExtraCsv(ProviderConfig config, String field) {
+        String extraConfig = config.getExtraConfig();
+        if (extraConfig == null || extraConfig.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode value = objectMapper.readTree(extraConfig).get(field);
+            if (value == null || value.isNull()) {
+                return List.of();
+            }
+            List<String> result = new ArrayList<>();
+            if (value.isArray()) {
+                for (JsonNode item : value) {
+                    String text = item.asText("");
+                    if (!text.isBlank()) {
+                        result.add(text.trim());
+                    }
+                }
+                return result;
+            }
+            for (String part : value.asText("").split(",")) {
+                if (!part.isBlank()) {
+                    result.add(part.trim());
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("Provider [{}] 扩展配置字段 {} 解析失败，已忽略: {}", config.getCode(), field, e.getMessage());
+            return List.of();
         }
     }
 

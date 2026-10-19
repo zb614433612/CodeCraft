@@ -45,6 +45,22 @@ public interface ConversationService {
     ConversationMessagePageVO getMessagesPage(Long conversationId, Long beforeId, int rounds);
 
     /**
+     * 从指定轮次起删除消息（含该轮自身）——「重新生成」的前置动作。
+     *
+     * <p>语义：找到该 turnId 对应的最早一条消息（即那轮的 user 提问），
+     * 把它及其后所有消息一并删除，让前端可以原样重发同一条提问，
+     * 而不会在历史里留下两条并存的回复。</p>
+     *
+     * <p>只删消息、不动快照：这一轮真实发生过的文件改动仍可从「改动与回滚」面板回退，
+     * 删掉快照等于把用户的撤销能力一并清掉。</p>
+     *
+     * @param conversationId 会话ID
+     * @param turnId         轮次ID（前端生成，落在 user 消息的 turn_id 上）
+     * @return 删除的消息条数；turnId 找不到对应消息时返回 0
+     */
+    int deleteMessagesFromTurn(Long conversationId, String turnId);
+
+    /**
      * 删除会话及其关联消息
      * @param conversationId 会话ID
      * @return 删除是否成功

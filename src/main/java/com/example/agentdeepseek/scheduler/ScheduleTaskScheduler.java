@@ -123,4 +123,40 @@ public class ScheduleTaskScheduler {
         // 5. 异步调用 AI 处理
         deepSeekService.processConversationAsync(conversationId, task.getInstruction(), task.getAgentType(), task.getAgentConfigId());
     }
+
+    /**
+     * 手动「立即执行一次」。
+     * <p>
+     * 与定时触发共用「建会话 → 异步跑指令」的流程，但**不改** {@code status} 与 {@code execute_time}：
+     * 手动执行属于用户临时插队，不应打乱既有调度计划（否则 cron 任务会因手动执行被算成一次到期，
+     * 一次性任务会被直接禁用）。执行统计（execute_count / last_execute_time / last_conversation_id）
+     * 照常累加，页面上的「已执行 N 次」与「查看会话」因此同样可用。
+     *
+     * @param taskId 任务 id
+     * @return 新建会话 id；任务不存在时返回 {@code null}
+     */
+    public Long runNow(Long taskId) {
+        ScheduleTask task = taskMapper.selectById(taskId);
+        if (task == null) {
+            log.warn("立即执行失败，任务不存在: taskId={}", taskId);
+            return null;
+        }
+
+        String name = task.getName() == null ? "定时任务" : task.getName();
+        Conversation conv = new Conversation();
+        conv.setName(name.length() > 20 ? name.substring(0, 20) : name);
+        conv.setUserId(task.getUserId());
+        conv.setAgentType(task.getAgentType());
+        conv.setAgentConfigId(task.getAgentConfigId());
+        conv.setCreatedAt(LocalDateTime.now());
+        conv.setUpdatedAt(LocalDateTime.now());
+        conversationMapper.insert(conv);
+        Long conversationId = conv.getId();
+
+        taskMapper.updateExecuteInfo(taskId, conversationId);
+        log.info("定时任务手动执行: taskId={}, name={}, conversationId={}", taskId, name, conversationId);
+
+        deepSeekService.processConversationAsync(conversationId, task.getInstruction(), task.getAgentType(), task.getAgentConfigId());
+        return conversationId;
+    }
 }

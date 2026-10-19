@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -32,6 +33,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -67,6 +69,26 @@ public class SystemController {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    /** 应用名（取自 spring.application.name，与前端品牌一致） */
+    @Value("${spring.application.name:CodeCraft}")
+    private String appName;
+
+    /**
+     * 版本号（application.yml 的 app.version，由 Maven 资源过滤注入 @project.version@）。
+     * <p>
+     * IDE 直接运行 / 资源未过滤时会拿到字面量 `@project.version@`，由 {@link #resolveAppVersion()} 兜底。
+     * </p>
+     */
+    @Value("${app.version:}")
+    private String appVersion;
+
+    /** 构建时间（application.yml 的 app.build-time，Maven 资源过滤注入） */
+    @Value("${app.build-time:}")
+    private String appBuildTime;
+
+    /** 版本号兜底值：资源过滤未生效时使用（与 pom.xml 的 &lt;version&gt; 保持一致） */
+    private static final String FALLBACK_VERSION = "3.0.0";
 
     /** 需要清空的业务表（按外键依赖顺序：先子表后父表） */
     private static final String[] BUSINESS_TABLES = {
@@ -131,6 +153,57 @@ public class SystemController {
 
         log.warn("所有数据已重置完成");
         return ApiResponse.success(null, "所有数据已重置，系统已恢复出厂默认状态");
+    }
+
+    // ==================== 版本信息 ====================
+
+    /**
+     * 解析后端版本号。
+     * <p>
+     * 三种来源按优先级：Maven 资源过滤注入的 {@code app.version} → 兜底常量。
+     * 未替换的占位符（以 {@code @} 开头或含 {@code ${}}）视为无效，避免把 {@code @project.version@}
+     * 原样显示到界面上。
+     * </p>
+     */
+    private String resolveAppVersion() {
+        String value = appVersion == null ? "" : appVersion.trim();
+        if (value.isEmpty() || value.startsWith("@") || value.contains("${")) {
+            return FALLBACK_VERSION;
+        }
+        return value;
+    }
+
+    /** 解析构建时间；未替换的占位符返回 null（前端不展示该行） */
+    private String resolveBuildTime() {
+        String value = appBuildTime == null ? "" : appBuildTime.trim();
+        if (value.isEmpty() || value.startsWith("@") || value.contains("${")) {
+            return null;
+        }
+        return value;
+    }
+
+    /**
+     * 应用版本与运行环境信息（供「版本与更新」页展示）。
+     * <p>
+     * 与其它系统接口不同，本接口<b>不做管理员校验</b>：只返回版本号、构建时间与 JVM 运行环境，
+     * 不含任何凭证或业务数据，普通用户也需要看到自己用的是什么版本。
+     * </p>
+     */
+    @GetMapping("/version")
+    @Operation(summary = "应用版本信息", description = "返回应用名、后端版本、构建时间与运行环境（Java / OS / PID）。任何登录用户可读，不含敏感数据。")
+    public ApiResponse<Map<String, Object>> version() {
+        Map<String, Object> info = new LinkedHashMap<>();
+        info.put("name", appName);
+        info.put("version", resolveAppVersion());
+        String buildTime = resolveBuildTime();
+        if (buildTime != null) {
+            info.put("buildTime", buildTime);
+        }
+        info.put("javaVersion", System.getProperty("java.version"));
+        info.put("osName", System.getProperty("os.name"));
+        info.put("osArch", System.getProperty("os.arch"));
+        info.put("pid", ProcessHandle.current().pid());
+        return ApiResponse.success(info);
     }
 
     // ==================== 数据导出 / 导入（备份与恢复） ====================

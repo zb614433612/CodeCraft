@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 BUILD_AND_RUN](./BUILD_AND_RUN.md)
 # Build & Run Guide (Lazy Channel)
 
-> Applicable version: v2.0.4+
+> Applicable version: v3.0.0+
 
 ## TL;DR
 
@@ -9,10 +9,10 @@
 
 ```bash
 # Windows
-scripts\build.bat v2.0.4
+scripts\build.bat v3.0.0
 
 # Mac / Linux
-./scripts/build.sh v2.0.4
+./scripts/build.sh v3.0.0
 ```
 
 ### One-click Run

@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.example</groupId>
     <artifactId>code-craft</artifactId>
-    <version>2.0.4</version>
+    <version>3.0.0</version>
     <name>CodeCraft</name>
     <description>CodeCraft - AI Coding Assistant</description>
     <url/>
@@ -38,6 +38,22 @@
         <!-- MCP Java SDK 版本（官方 modelcontextprotocol/java-sdk v2.0.0，跟踪 MCP 2025-11-25 规范） -->
         <mcp.version>2.0.0</mcp.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!--
+            前端构建开关（frontend-maven-plugin）。
+            默认 false = 打包时自动构建经典版前端（frontend/ -> src/main/resources/static/）。
+            命令行 -DskipFrontend=true 可跳过（只编译后端、或前端已单独构建过时用）。
+
+            注意：历史上这里只在 plugin 注释里写了「可用 -DskipFrontend 跳过」，
+            但 plugin 一直没有 <skip> 配置，该参数是空操作 —— 每次 package 都会重建
+            经典版前端，并顺手清空 src/main/resources/static（v3 曾因此被误删）。
+        -->
+        <skipFrontend>false</skipFrontend>
+        <!--
+            构建时间：application.yml 的 app.build-time 使用 @maven.build.timestamp@，
+            由 spring-boot-starter-parent 的资源过滤（@ 分隔符）注入，供「版本与更新」页展示。
+            实测注入值为 Maven 内置默认格式（ISO 8601 UTC，如 2026-10-19T09:23:34Z）——
+            前端按本地时区格式化成 YYYY-MM-DD HH:mm 再显示，故这里不再自定义格式化属性。
+        -->
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     </properties>
 
@@ -209,6 +225,13 @@
                 <groupId>com.github.eirslett</groupId>
                 <artifactId>frontend-maven-plugin</artifactId>
                 <version>1.15.0</version>
+                <configuration>
+                    <!--
+                        真正生效的跳过开关。此前缺失，导致注释里承诺的
+                        `-DskipFrontend=true` 一直是空操作（打包照旧重建前端）。
+                    -->
+                    <skip>${skipFrontend}</skip>
+                </configuration>
                 <executions>
                     <execution>
                         <id>install node and npm</id>

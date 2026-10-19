@@ -78,6 +78,17 @@ public class SnapshotService {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class FileEntry {
         private String relativePath;
+        /**
+         * 文件绝对路径（2026-10 新增）。
+         *
+         * <p>背景：相对路径由「对项目根做 relativize」得来，当被改文件不在项目根内（最典型的是
+         * 工作目录在 E 盘、实际改的是 C 盘项目）时 relativize 会抛异常或得到 ../.. 逃逸路径，
+         * 旧实现直接放弃快照 —— 表现为聊天里所有轮次都没有「回滚改动」按钮。</p>
+         *
+         * <p>现在统一记录绝对路径：定位文件以它为准，relativePath 只作为展示名（根外时即绝对路径）。
+         * 旧快照没有该字段，读取时回退到「projectRoot + relativePath」。</p>
+         */
+        private String absolutePath;
         private long originalSize;
         private boolean wasNewFile;
         /** 新增行数（快照后由 computeDiffStats 计算填充） */
@@ -116,6 +127,13 @@ public class SnapshotService {
         private int fileCount;
         private long totalSize;
         private boolean rolledBack;
+        /**
+         * 该快照所属轮次的用户提问（列表接口回填，非持久化字段）。
+         *
+         * <p>快照本身只有时间 / 文件数，改动面板里根本认不出是哪一轮；由 SnapshotController
+         * 按 turnId 联查 conversation_message 回填，前端直接展示。</p>
+         */
+        private String turnPrompt;
     }
 
     @Data
@@ -139,10 +157,104 @@ public class SnapshotService {
 
     /**
      * 获取用户当前操作的项目根目录（来自 ProjectRootContext）
-     * 与 getBasePath() 不同，项目可能位于与应用程序不同的盘符
+     * 与 getBasePath() 不同，项目可能位于与应用程序不同的盘符。
+     *
+     * <p>上下文缺失时返回 null（旧实现直接 Path.of(null) 会 NPE）。
+     * 调用方需容忍 null：此时所有文件都按「根外文件」处理，快照照样能建。</p>
      */
     private Path getProjectRootPath() {
-        return Path.of(ProjectRootContext.get()).normalize().toAbsolutePath();
+        String root = ProjectRootContext.get();
+        if (root == null || root.isBlank()) return null;
+        try {
+            return Path.of(root).normalize().toAbsolutePath();
+        } catch (Exception e) {
+            log.warn("项目根目录不合法，按无根处理: {}", root);
+            return null;
+        }
+    }
+
+    /** 取快照元数据里记录的项目根；缺失时回退到当前上下文（兼容旧快照） */
+    private Path projectRootOf(SnapshotMetadata meta) {
+        if (meta != null) {
+            String root = meta.getProjectRoot();
+            if (root != null && !root.isBlank()) {
+                try {
+                    return Path.of(root).normalize().toAbsolutePath();
+                } catch (Exception ignore) {
+                    // 落到下面的上下文兜底
+                }
+            }
+        }
+        return getProjectRootPath();
+    }
+
+    /**
+     * 计算「展示用的文件标识」：能相对化就用相对路径，否则用绝对路径。
+     *
+     * <p>关键点：同盘不同目录时 {@code relativize} 会成功返回 {@code ../../x}，这种路径一旦拼到
+     * 快照目录下就会逃逸出 files 目录，所以凡是以 {@code ..} 开头的一律按根外处理。</p>
+     */
+    private String toDisplayPath(Path projectRoot, Path absPath) {
+        if (projectRoot != null) {
+            try {
+                Path rel = projectRoot.relativize(absPath);
+                String s = rel.toString().replace('\\', '/');
+                if (!rel.isAbsolute() && !s.startsWith("..")) {
+                    return s;
+                }
+            } catch (Exception ignore) {
+                // 跨盘符：relativize 抛 IllegalArgumentException，走绝对路径
+            }
+        }
+        return absPath.toString().replace('\\', '/');
+    }
+
+    /**
+     * 文件在快照目录里的备份位置。
+     *
+     * <ul>
+     *   <li>根内文件 / 旧数据：{@code files/<relativePath>}（与旧结构完全一致，旧快照照旧可读）；</li>
+     *   <li>根外文件：{@code files/_ext/<盘符>/<路径>}，避免 {@code ..} 逃逸与冒号等非法字符。</li>
+     * </ul>
+     */
+    private Path resolveBackupPath(String snapshotId, SnapshotMetadata meta, FileEntry entry) {
+        Path filesDir = getSnapshotFilesDir(snapshotId);
+        String absStr = entry.getAbsolutePath();
+        if (absStr == null || absStr.isBlank()) {
+            // 旧快照：只有相对路径
+            return filesDir.resolve(entry.getRelativePath());
+        }
+        Path abs = Path.of(absStr).normalize();
+        Path root = projectRootOf(meta);
+        if (root != null && abs.startsWith(root)) {
+            return filesDir.resolve(root.relativize(abs).toString().replace('\\', '/'));
+        }
+        return filesDir.resolve(encodeExternal(abs));
+    }
+
+    /** 根外文件的备份相对名：{@code C:\a\b.txt} → {@code _ext/C/a/b.txt}（去掉冒号等非法字符） */
+    private String encodeExternal(Path absPath) {
+        String s = absPath.toString().replace('\\', '/').replace(":", "");
+        if (s.startsWith("//")) {
+            s = s.substring(1); // UNC：\\server\share → /server/share
+        } else if (!s.startsWith("/")) {
+            s = "/" + s;
+        }
+        return "_ext" + s.replaceAll("[*?\"<>|]", "_");
+    }
+
+    /** 快照里记录的目标文件真实位置：优先绝对路径，旧数据回退 projectRoot + 相对路径 */
+    private Path resolveTargetPath(SnapshotMetadata meta, FileEntry entry) {
+        String absStr = entry.getAbsolutePath();
+        if (absStr != null && !absStr.isBlank()) {
+            return Path.of(absStr).normalize();
+        }
+        Path root = projectRootOf(meta);
+        if (root == null) {
+            log.warn("无法定位回滚目标（缺少项目根）: {}", entry.getRelativePath());
+            return null;
+        }
+        return root.resolve(entry.getRelativePath()).normalize();
     }
 
     private Path getSnapshotsDir() {
@@ -197,15 +309,10 @@ public class SnapshotService {
             return null;
         }
 
-        Path absPath = Path.of(absoluteFilePath).normalize();
+        Path absPath = Path.of(absoluteFilePath).normalize().toAbsolutePath();
         Path projectRootPath = getProjectRootPath();
-        String relativePath;
-        try {
-            relativePath = projectRootPath.relativize(absPath).toString().replace('\\', '/');
-        } catch (Exception e) {
-            log.warn("文件不在项目目录内，跳过快照: {}", absoluteFilePath);
-            return null;
-        }
+        // 根内 → 相对路径；根外/跨盘 → 绝对路径（旧实现在这里直接放弃快照，见 FileEntry#absolutePath）
+        String relativePath = toDisplayPath(projectRootPath, absPath);
 
         String snapshotId = getOrCreateSnapshotId(turnId);
         SnapshotMetadata metadata = readMetadata(snapshotId);
@@ -218,26 +325,32 @@ public class SnapshotService {
                 metadata.setTurnId(turnId);
                 metadata.setSessionId(sessionId);
                 metadata.setTimestamp(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
-                metadata.setProjectRoot(ProjectRootContext.get());
+                // 项目根记「能覆盖该文件」的那个根：根外文件用文件自身所在盘符根，避免回滚时又按错根解析
+                metadata.setProjectRoot(projectRootPath != null && absPath.startsWith(projectRootPath)
+                        ? projectRootPath.toString()
+                        : String.valueOf(absPath.getRoot()));
                 Files.createDirectories(getSnapshotFilesDir(snapshotId));
             }
 
             // 检查是否已备份过该文件
             boolean alreadyBackedUp = metadata.getFiles().stream()
-                    .anyMatch(f -> f.getRelativePath().equals(relativePath));
+                    .anyMatch(f -> relativePath.equals(f.getRelativePath())
+                            || (f.getAbsolutePath() != null && !f.getAbsolutePath().isEmpty()
+                                && Path.of(f.getAbsolutePath()).normalize().equals(absPath)));
             if (alreadyBackedUp) {
-                log.debug("文件已在本次对话中备份，跳过: {}", relativePath);
+                log.debug("文件已在本轮中备份，跳过: {}", relativePath);
                 return toSummary(metadata);
             }
 
             // 备份文件
             FileEntry entry = new FileEntry();
             entry.setRelativePath(relativePath);
+            entry.setAbsolutePath(absPath.toString());
 
             if (Files.exists(absPath)) {
                 entry.setOriginalSize(Files.size(absPath));
                 entry.setWasNewFile(false);
-                Path targetPath = getSnapshotFilesDir(snapshotId).resolve(relativePath);
+                Path targetPath = resolveBackupPath(snapshotId, metadata, entry);
                 Files.createDirectories(targetPath.getParent());
                 Files.copy(absPath, targetPath, StandardCopyOption.REPLACE_EXISTING);
                 log.debug("已备份文件: {} ({} bytes)", relativePath, entry.getOriginalSize());
@@ -322,19 +435,17 @@ public class SnapshotService {
             return false;
         }
 
-        // 使用快照创建时的项目根目录来定位目标文件，确保跨盘符/换项目时回滚路径正确
-        String rootStr = meta.getProjectRoot();
-        if (rootStr == null || rootStr.isEmpty()) {
-            rootStr = ProjectRootContext.get();
-        }
-        Path projectRootPath = Path.of(rootStr).normalize().toAbsolutePath();
-        Path snapshotFilesDir = getSnapshotFilesDir(snapshotId);
-
         int restoreCount = 0;
         int deleteCount = 0;
 
         for (FileEntry fe : meta.getFiles()) {
-            Path targetPath = projectRootPath.resolve(fe.getRelativePath());
+            // 目标位置以快照记录的绝对路径为准（旧快照回退 projectRoot + relativePath），
+            // 这样即使文件原本在项目根之外（跨盘）也能回滚到正确位置
+            Path targetPath = resolveTargetPath(meta, fe);
+            if (targetPath == null) {
+                log.warn("回滚跳过（无法定位目标）: {}", fe.getRelativePath());
+                continue;
+            }
             try {
                 if (fe.isWasNewFile()) {
                     // 删除工具创建的文件
@@ -343,7 +454,7 @@ public class SnapshotService {
                     log.info("回滚删除文件: {}", fe.getRelativePath());
                 } else {
                     // 恢复原始文件
-                    Path sourcePath = snapshotFilesDir.resolve(fe.getRelativePath());
+                    Path sourcePath = resolveBackupPath(snapshotId, meta, fe);
                     if (Files.exists(sourcePath)) {
                         Files.createDirectories(targetPath.getParent());
                         Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
@@ -487,23 +598,19 @@ public class SnapshotService {
         SnapshotMetadata meta = readMetadata(snapshotId);
         if (meta == null) return;
 
-        Path absPath = Path.of(absoluteFilePath).normalize();
-        Path projectRootPath = getProjectRootPath();
-        String relativePath;
-        try {
-            relativePath = projectRootPath.relativize(absPath).toString().replace('\\', '/');
-        } catch (Exception e) {
-            log.warn("computeDiffStats: 无法计算相对路径: {}", absoluteFilePath);
-            return;
-        }
+        Path absPath = Path.of(absoluteFilePath).normalize().toAbsolutePath();
+        String displayPath = toDisplayPath(projectRootOf(meta), absPath);
 
         FileEntry entry = meta.getFiles().stream()
-                .filter(f -> f.getRelativePath().equals(relativePath))
+                .filter(f -> displayPath.equals(f.getRelativePath())
+                        || (f.getAbsolutePath() != null && !f.getAbsolutePath().isEmpty()
+                            && Path.of(f.getAbsolutePath()).normalize().equals(absPath)))
                 .findFirst().orElse(null);
         if (entry == null) return;
 
+        String relativePath = entry.getRelativePath();
         try {
-            Path backupPath = getSnapshotFilesDir(snapshotId).resolve(relativePath);
+            Path backupPath = resolveBackupPath(snapshotId, meta, entry);
             if (entry.isWasNewFile()) {
                 // 新建文件：全部新增行
                 if (Files.exists(absPath)) {
@@ -591,7 +698,9 @@ public class SnapshotService {
             SnapshotMetadata meta = readMetadata(ss.getSnapshotId());
             if (meta == null) continue;
             for (FileEntry fe : meta.getFiles()) {
-                if (fe.getRelativePath().equals(relativePath)) {
+                // relativePath 是展示名（根内是相对路径，根外是绝对路径）；顺带兼容按绝对路径精确查找
+                if (fe.getRelativePath().equals(relativePath)
+                        || (fe.getAbsolutePath() != null && fe.getAbsolutePath().replace('\\', '/').equals(relativePath))) {
                     if (earliest == null) {
                         earliest = ss;
                         earliestEntry = fe;
@@ -605,29 +714,26 @@ public class SnapshotService {
             return false;
         }
 
-        // 使用最早快照创建时的项目根目录来定位目标文件
+        // 目标位置以「最早快照」里记录的信息为准（旧快照无 absolutePath 时回退 projectRoot + relativePath）
         SnapshotMetadata earliestMeta = readMetadata(earliest.getSnapshotId());
-        String rootStr = earliestMeta != null ? earliestMeta.getProjectRoot() : null;
-        if (rootStr == null || rootStr.isEmpty()) {
-            rootStr = ProjectRootContext.get();
+        Path targetPath = resolveTargetPath(earliestMeta, earliestEntry);
+        if (targetPath == null) {
+            log.warn("rollbackFile: 无法定位目标文件: {}", relativePath);
+            return false;
         }
-        Path projectRootPath = Path.of(rootStr).normalize().toAbsolutePath();
-        Path snapshotFilesDir = getSnapshotFilesDir(earliest.getSnapshotId());
+        Path backupPath = resolveBackupPath(earliest.getSnapshotId(), earliestMeta, earliestEntry);
 
         try {
             if (earliestEntry.isWasNewFile()) {
-                Path targetPath = projectRootPath.resolve(relativePath);
                 Files.deleteIfExists(targetPath);
                 log.info("回滚删除文件: {}", relativePath);
             } else {
-                Path sourcePath = snapshotFilesDir.resolve(relativePath);
-                if (Files.exists(sourcePath)) {
-                    Path targetPath = projectRootPath.resolve(relativePath);
+                if (Files.exists(backupPath)) {
                     Files.createDirectories(targetPath.getParent());
-                    Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                    Files.copy(backupPath, targetPath, StandardCopyOption.REPLACE_EXISTING);
                     log.info("回滚恢复文件: {}", relativePath);
                 } else {
-                    log.warn("回滚跳过（快照文件丢失）: {}", sourcePath);
+                    log.warn("回滚跳过（快照文件丢失）: {}", backupPath);
                     return false;
                 }
             }
@@ -817,7 +923,7 @@ public class SnapshotService {
         }
         // 即使文件是最早快照中的新建文件，备份目录中也有其初始内容，可用于 diff 对比
         try {
-            Path sourcePath = getSnapshotFilesDir(earliest.getSnapshotId()).resolve(relativePath);
+            Path sourcePath = resolveBackupPath(earliest.getSnapshotId(), readMetadata(earliest.getSnapshotId()), earliestEntry);
             if (Files.exists(sourcePath)) {
                 return FileEncodingDetector.readString(sourcePath);
             }

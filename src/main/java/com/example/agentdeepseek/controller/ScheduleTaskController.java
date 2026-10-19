@@ -2,6 +2,7 @@ package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
 import com.example.agentdeepseek.model.entity.ScheduleTask;
+import com.example.agentdeepseek.scheduler.ScheduleTaskScheduler;
 import com.example.agentdeepseek.service.ScheduleTaskService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -20,6 +21,9 @@ public class ScheduleTaskController {
 
     @Autowired
     private ScheduleTaskService scheduleTaskService;
+
+    @Autowired
+    private ScheduleTaskScheduler scheduleTaskScheduler;
 
     @Operation(summary = "获取定时任务列表")
     @GetMapping("/list")
@@ -60,6 +64,18 @@ public class ScheduleTaskController {
         checkAdmin(request);
         scheduleTaskService.enableTask(id);
         return ApiResponse.success(null);
+    }
+
+    @Operation(summary = "立即执行一次", description = "手动触发一次执行：新建会话并异步跑任务指令；不改任务状态与下次执行时间，仅累加执行统计")
+    @PostMapping("/run/{id}")
+    public ApiResponse<Long> runTask(@PathVariable Long id, HttpServletRequest request) {
+        checkAdmin(request);
+        Long conversationId = scheduleTaskScheduler.runNow(id);
+        if (conversationId == null) {
+            throw new RuntimeException("任务不存在或已被删除");
+        }
+        log.info("手动触发定时任务: taskId={}, conversationId={}", id, conversationId);
+        return ApiResponse.success(conversationId);
     }
 
     @Operation(summary = "禁用定时任务")

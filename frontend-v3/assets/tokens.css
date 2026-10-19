@@ -1,0 +1,119 @@
+/* ============================================================================
+ * CodeCraft 设计 Token（v2 前端重写）
+ * ----------------------------------------------------------------------------
+ * 约定：
+ *  1) 颜色 / 圆角 / 间距 / 字号 全部走 CSS 变量，组件里不写死数值；
+ *  2) 亮色为默认，暗色通过 html[data-theme="dark"] 覆盖；
+ *  3) 间距阶梯为 4 的倍数（4 / 8 / 12 / 16 / 20 / 24 / 32）；
+ *  4) 动画统一 150ms ease，不做位移动画（列表项只允许背景/颜色变化）。
+ * ========================================================================== */
+
+:root {
+  /* ---------- 背景与容器 ---------- */
+  --bg: #FAFAFB;              /* 应用底色 */
+  --bg-sub: #F5F5F8;          /* 次级底色（分区、hover 区） */
+  --card: #FFFFFF;            /* 卡片 / 面板 */
+  --card-2: #F7F7F9;          /* 卡片内次级区块、列表 hover */
+  --overlay: rgba(17, 17, 27, .38); /* 遮罩 */
+
+  /* ---------- 描边 ---------- */
+  --border: #ECECF1;          /* 常规分隔线 */
+  --border-strong: #E2E2EA;   /* 输入框、需要强调的描边 */
+
+  /* ---------- 文字 ---------- */
+  --text-1: #1A1A2E;          /* 主文字 */
+  --text-2: #5C5C78;          /* 次文字 */
+  --text-3: #8E8EA3;          /* 辅助文字 / 图标 */
+  --text-4: #B4B4C4;          /* 占位符 / 极弱信息 */
+
+  /* ---------- 主色 ---------- */
+  --accent: #7C5CFC;
+  --accent-dk: #6A48F0;
+  --accent-lt: rgba(124, 92, 252, .10);   /* 选中底 */
+  --accent-soft: #F3EFFF;                 /* 用户气泡底 */
+  --accent-ring: rgba(124, 92, 252, .10); /* 聚焦光圈 */
+
+  /* ---------- 语义色 ---------- */
+  --ok: #12B76A;      --ok-lt: rgba(18, 183, 106, .10);
+  --warn: #F79009;    --warn-lt: rgba(247, 144, 9, .10);
+  --danger: #EF4444;  --danger-lt: rgba(239, 68, 68, .10);
+  --info: #2E90FA;    --info-lt: rgba(46, 144, 250, .10);
+
+  /* ---------- 阴影（最多两级：浮层 / 弹窗） ---------- */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .05);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, .06);
+  --shadow-lg: 0 12px 32px rgba(16, 24, 40, .10);
+
+  /* ---------- 圆角 ---------- */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-full: 999px;
+
+  /* ---------- 间距 ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* ---------- 布局尺寸 ---------- */
+  --sidebar-w: 268px;
+  --sidebar-w-collapsed: 64px;
+  --header-h: 56px;
+  --content-max: 820px;     /* 消息区与输入区最大宽度 */
+  --drawer-w: 340px;        /* 右侧工具抽屉 */
+
+  /* ---------- 字体 ---------- */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+
+  --fs-xs: 11.5px;   /* 极弱信息：时间戳、上下文 token */
+  --fs-sm: 12.5px;   /* 辅助信息：meta、折叠行 */
+  --fs-base: 14px;   /* 正文基准 */
+  --fs-md: 14.5px;   /* 聊天正文 */
+  --fs-lg: 16px;     /* 区块标题 */
+  --fs-xl: 20px;     /* 空状态标题 */
+
+  --lh-tight: 1.45;
+  --lh-base: 1.6;
+  --lh-loose: 1.78;  /* 聊天正文行高 */
+
+  --tr: .15s ease;   /* 统一过渡 */
+}
+
+/* ============================ 暗色主题 ============================ */
+html[data-theme="dark"] {
+  --bg: #121117;
+  --bg-sub: #17161F;
+  --card: #1A1925;
+  --card-2: #201F2C;
+  --overlay: rgba(0, 0, 0, .55);
+
+  --border: #2A2838;
+  --border-strong: #34324A;
+
+  --text-1: #E8E6F2;
+  --text-2: #A9A6BF;
+  --text-3: #7C7A93;
+  --text-4: #5E5C74;
+
+  --accent: #9B85FF;
+  --accent-dk: #8A72FF;
+  --accent-lt: rgba(155, 133, 255, .14);
+  --accent-soft: #241F3A;
+  --accent-ring: rgba(155, 133, 255, .16);
+
+  --ok-lt: rgba(18, 183, 106, .16);
+  --warn-lt: rgba(247, 144, 9, .16);
+  --danger-lt: rgba(239, 68, 68, .16);
+  --info-lt: rgba(46, 144, 250, .16);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .40);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, .45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, .55);
+}

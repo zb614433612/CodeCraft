@@ -5,6 +5,52 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.0] - 2026-10-19
+
+> Major release: the brand-new v3 frontend (`frontend-v3/`) ships alongside the classic one
+> (`frontend/`) with a runtime switcher; the Version & Updates page (F06) is added and all
+> version numbers are unified at 3.0.0.
+
+### 🎨 New: v3 frontend (`frontend-v3/`, served at `/v3/`, default entry)
+
+- **Rewritten stack**: Vue 3.5 + Vite 8 + TypeScript + Pinia (3 stores) + hash router; no UI component library — a self-built `cc-` design system (1px outlined cards, line icons, hover-revealed actions, light/dark themes).
+- **All 19 pages wired to real APIs** (no demo data left): chat, agents, skills, MCP, scheduled tasks, lessons, database connections, files, logs, data management, P2P, users, menu permissions, providers, appearance, settings hub, profile, version & updates, login.
+- **Chat page parity**: markdown + highlight.js rendering (`diff` coloring, filelist / cmd cards), structured tool-result cards, independently scrolling thinking area, image lightbox (zoom/drag/multi-image), three approval modes (permission / clarification / iteration confirm +10/+20/+50), task checklist with priority & blocked-by, per-turn "rollback this turn's changes", regenerate (deletes and re-sends for real), supplement request injection, context-token accounting, `full` / `compact` context mode and runtime provider switching, multi-conversation parallel streams (background streams survive navigation), sub-agent panel (polls `sub_agent_log`), P2P chat & file transfer, right-side workspace (multi-tab + split panes + embedded web + code editor + Git client + xterm terminal).
+- **Static preview `preview.html`**: an isomorphic static prototype kept on the dev machine (not shipped in this repo).
+- **Silent login removed**: v3 uses a real login page (`/login`), supports logout, auto re-login after password change, and redirects 401s back to login with the original path preserved.
+
+### 🔄 New: Version & Updates page (F06)
+
+- **New page `/about`** (Settings → System configuration): header + version matrix (client version / backend version / build time / runtime / last check / backend PID) + update card + update settings + update-policy notes.
+- **New backend endpoint `GET /api/system/version`**: returns app name, version, build time, Java version, OS and PID; **no admin check** (no sensitive data, every user should see the version). The version is injected from `application.yml` via Maven resource filtering (`@project.version@`) with a built-in fallback when the placeholder is not replaced.
+- **Reuses the existing Electron update pipeline** (`electron/update-manager.js` + `electronAPI.update` from `preload.js`, zero changes): check (GitHub Releases, 6-hour cache + 30s manual interval), download with progress (mirror acceleration with direct fallback), one-click install (Windows installer / macOS dmg / Linux reveal), open release page.
+- **Safe degradation in browsers**: without `electronAPI` the card becomes read-only with an explanatory note, the settings block turns into read-only text, and "Check for updates" shows a toast instead of throwing.
+- **Two deliberate choices**: (1) client version and backend version are shown separately (replacing only the jar without reinstalling the client makes them diverge — merging would hide that); (2) release notes are rendered as markdown (`html:false` prevents XSS, external links get `target=_blank`).
+- **Data cleanup hook**: after "Reset all data" succeeds, `clearLocalData()` wipes upgrade backups / downloaded installers / update cache so the reset is truly complete (no-op in browsers).
+
+### 🔧 Backend
+
+- New `GET /api/system/version` (see above).
+- `application.yml` gains `app.version` / `app.build-time` (Maven resource filtering).
+- `SystemController` injects the values via `@Value` and falls back to `3.0.0` when placeholders are unreplaced.
+- Version bump: `pom.xml`, `CodeCraftMcpServer.SERVER_VERSION` (MCP handshake version).
+
+### 🖥️ Desktop
+
+- `electron/package.json` version and bundled jar path synced to `code-craft-3.0.0.jar`.
+- Keeps the previously fixed macOS lifecycle handling (single-instance lock, closing the window keeps the backend alive, `activate` recreates the window with self-healing retries, minimal app menu restoring `Cmd+Q`).
+
+### 🧾 Version sync
+
+- Backend: `2.0.4` → `3.0.0` (`pom.xml`, artifact `code-craft-3.0.0.jar`)
+- Classic frontend: `2.0.4` → `3.0.0` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.0` (`frontend-v3/package.json`, aligned in this release)
+- Electron: `2.0.4` → `3.0.0` (`package.json` + lock + `extraResources` jar path)
+- MCP Server handshake version: `2.0.4` → `3.0.0`
+- Docs: README(_EN) / BUILD_AND_RUN(_EN) / CHANGELOG(_EN) / docs (ARCHITECTURE, DEEPSEEK_SERVICE_IMPL, LLM_PROVIDER_SYSTEM, DEV_QUICKREF, RELEASE_CHECKLIST) unified at v3.0.0
+
+---
+
 ## [2.0.4] - 2026-10-18
 
 ### 🌋 New: Volcengine Ark Provider (chat / vision / balance / web search & fetch)

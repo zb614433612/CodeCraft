@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v2.0.4 | 更新：2026-10-18 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.0.0 | 更新：2026-10-19 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -198,12 +198,13 @@ src/main/java/com/example/agentdeepseek/
 │   ├── RoleController         # 角色管理
 │   ├── ConfigController       # 系统配置（API Key等）
 │   ├── LogController          # 日志查询
-│   ├── SystemController       # 系统信息（运行状态/版本等）
+│   ├── SystemController       # 系统信息（数据统计/导出导入/重置 + GET /system/version 版本与构建时间）
 │   ├── DbConnectionController # 外部数据库连接（Phase 20）
 │   ├── FileAssetController    # 文件资产（上传/列表/引用，vision-files-api）
 │   ├── ProviderBalanceController # Provider 余额查询
 │   ├── AppearanceController    # 外观设置（背景图上传/读取）
 │   ├── AvatarController        # 头像上传/读取
+│   ├── SubAgentController      # 子 Agent 运行记录（GET /api/sub-agents，读 sub_agent_log）
 │   └── ScheduleTaskController # 定时任务
 ├── filter/                    # TokenAuthenticationFilter（Token 鉴权拦截器）
 ├── initializer/               # UserInitializer（首次启动初始化管理员）
@@ -547,12 +548,12 @@ CodeCraft 支持多种 LLM 平台，核心组件：
 - **llm_provider 表**：存储 Provider 配置（code/name/baseUrl/apiKey/defaultModel/requestTemplate 等）
 - **LLMClient 接口**：统一抽象层，所有 Provider 必须实现（buildRequestBody/streamChat/extractContent 等）
 - **LLMClientManager**：核心管理器，负责 Provider 注册、路由（resolveClientByCode/resolveClientByProviderId）、热刷新
-- **10 类 Provider 模板（v2.0.4）**：`DeepSeekClient` / `GptClient`（OpenAI 官方专精）/ `OpenAIClient`（公共契约）/ `AnthropicClient`（公共契约）/ `QwenClient`（阿里云百炼）/ `VolcengineArkClient`（火山方舟）/ `OllamaClient` / `MiMoClient` / `MiniMaxClient` / `custom`（复用 OpenAIClient 最小兼容模式），统一继承 `AbstractLLMClient`；每个类的 Javadoc 顶部均有「适用范围（选型指引）」
+- **10 类 Provider 模板（v3.0.0）**：`DeepSeekClient` / `GptClient`（OpenAI 官方专精）/ `OpenAIClient`（公共契约）/ `AnthropicClient`（公共契约）/ `QwenClient`（阿里云百炼）/ `VolcengineArkClient`（火山方舟）/ `OllamaClient` / `MiMoClient` / `MiniMaxClient` / `custom`（复用 OpenAIClient 最小兼容模式），统一继承 `AbstractLLMClient`；每个类的 Javadoc 顶部均有「适用范围（选型指引）」
 - **Agent 绑定**：agent_config 表新增 provider_id/provider_code 字段，每个 Agent 可绑定特定 Provider
 - **前端动态切换**：CodeAssistantView 支持运行时切换 Provider，自动刷新模型列表
 - **Provider 路由优先级**：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
 - **DeepSeek 官方工具 API（v2.0.3）**：`DeepSeekToolsApiClient` 在 Provider 的 `baseUrl` 主机为 `api.deepseek.com` 且配置了 API Key 时自动启用，`web_search` / `web_fetch` 优先调用官方 `/v1/tools/search` 与 `/v1/tools/fetch`，异常时自动回退原链路（Bing/百度、Jina/本地）。判定依据是 baseUrl 域名而非 providerCode，第三方中转/自建服务不会启用
-- **平台增强能力（v2.0.4）**：`llm_provider.extra_config` 承载平台凭证（火山 AK/SK + 联网搜索 Key、阿里云 AK/SK、MiniMax Coding Plan Key、MiMo 控制台 Cookie），能力按「按需启用 + 缺凭证跳过 + 失败回退」工作；余额/额度查询支持 DeepSeek / 火山引擎 / 阿里云（通义千问）/ MiniMax / MiMo
+- **平台增强能力（v3.0.0）**：`llm_provider.extra_config` 承载平台凭证（火山 AK/SK + 联网搜索 Key、阿里云 AK/SK、MiniMax Coding Plan Key、MiMo 控制台 Cookie），能力按「按需启用 + 缺凭证跳过 + 失败回退」工作；余额/额度查询支持 DeepSeek / 火山引擎 / 阿里云（通义千问）/ MiniMax / MiMo
 
 ---
 

@@ -85,11 +85,32 @@ if [ -z "$JAVA_BIN" ]; then
     log_warn "未找到 JDK 17+，跳过热裁剪。如需裁剪请安装 JDK 17 并设置 JAVA_HOME"
 else
     JLINK="$(dirname "$JAVA_BIN")/jlink"
+
+    # 判断现有 electron/jre 是否属于当前平台。
+    # 背景：仓库里的 electron/jre 是「构建机上一次裁剪的产物」，跨平台构建时会被复用 ——
+    # 例如在 Windows 上构建过之后，macOS 上再构建会直接跳过裁剪，
+    # 结果把 Windows 的 JRE（bin/java.exe）打进 dmg，安装后找不到 bin/java → 后端起不来。
+    jre_matches_platform() {
+        local java_bin="$JRE_DIR/bin/java"
+        [ -f "$java_bin" ] || return 1
+        if command -v file >/dev/null 2>&1; then
+            local desc
+            desc="$(file -b "$java_bin" 2>/dev/null || true)"
+            case "$PLATFORM" in
+                mac)   echo "$desc" | grep -qi "Mach-O" || return 1 ;;
+                linux) echo "$desc" | grep -qi "ELF"    || return 1 ;;
+            esac
+        fi
+        return 0
+    }
+
     if [ -x "$JLINK" ] || [ -f "$JLINK" ]; then
-        # 如果 JRE 已存在且 JDK 版本未变，跳过
-        if [ -d "$JRE_DIR/bin" ]; then
-            log_info "内置 JRE 已存在，跳过裁剪（如需重新裁剪请删除 electron/jre 目录）"
+        if jre_matches_platform; then
+            log_info "内置 JRE 已存在且匹配 $PLATFORM，跳过裁剪（如需重新裁剪请删除 electron/jre 目录）"
         else
+            if [ -d "$JRE_DIR" ]; then
+                log_warn "检测到不匹配 $PLATFORM 的 JRE（很可能来自其它平台构建），重新裁剪..."
+            fi
             log_info "正在裁剪 JRE（约 30 秒）..."
             rm -rf "$JRE_DIR"
             if "$JLINK" \

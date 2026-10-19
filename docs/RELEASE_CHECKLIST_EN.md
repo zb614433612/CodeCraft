@@ -8,17 +8,29 @@
 ## Pre-Release Checks
 
 > 🚀 **Recommended**: Use one-click build scripts to automatically complete Steps 1-3:
-> - Windows: `scripts\build.bat v2.0.3`
-> - Mac/Linux: `./scripts/build.sh v2.0.3`
+> - Windows: `scripts\build.bat v3.0.0`
+> - Mac/Linux: `./scripts/build.sh v3.0.0`
 >
 > Below are manual steps for scenarios requiring fine-grained control.
 
 - [ ] `<version>` in `pom.xml` updated to target version
-- [ ] `version` in `electron/package.json` synced
+- [ ] `version` in `electron/package.json` synced, and `build.extraResources` points to `../target/code-craft-{version}.jar`
+- [ ] `frontend-v3/package.json` (v3 frontend) and `frontend/package.json` (classic) versions match the backend
+- [ ] `CodeCraftMcpServer.SERVER_VERSION` (MCP handshake version) synced
+- [ ] `app.version` in `application.yml` stays as the placeholder `@project.version@` (**never hardcode a number**, otherwise the Version & Updates page drifts from the actual jar version)
 - [ ] `CHANGELOG.md` updated
 - [ ] All code committed, `git status` shows no uncommitted changes
 - [ ] API Key and other sensitive info not hardcoded
 - [ ] `application-local.yml` not committed (already in .gitignore)
+
+---
+
+## Post-Release Verification (Version & Updates)
+
+- [ ] Open `http://localhost:8084/v3/#/about` (or the desktop app's Settings → Version & Updates) and confirm **both** client version and backend version equal this release
+- [ ] `GET /api/system/version` (with token) returns the same `version` as `pom.xml`, and `buildTime` is not the literal `@maven.build.timestamp@`
+- [ ] Desktop app: "Check for updates" resolves the latest GitHub release (with notes and installer size)
+- [ ] In a browser, `/about` shows the read-only version card plus the "download manually from GitHub Releases" hint, **with no console errors**
 
 ---
 
@@ -129,7 +141,7 @@ git push origin v{version}
 - [ ] Platform artifacts downloadable
 - [ ] Downloaded EXE installs and runs
 - [ ] Download links in `README.md` point to latest Release
-- [ ] "Data Management → Version & Updates → Check for updates" detects the new version (v2.0.3+ clients)
+- [ ] "Settings → Version & Updates" (`/about`) → "Check for updates" detects the new version (both client and backend versions should show this release)
 - [ ] Download progress and installation flow work (Windows launches the installer; macOS opens the dmg for drag-and-drop)
 
 ---

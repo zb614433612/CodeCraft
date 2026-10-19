@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CodeCraft</title>
+  <!--
+    这是 Vite 构建入口（v3 应用，部署在后端 `/v3/` 子路径下）。
+    ----------------------------------------------------------------------------
+    · `data-theme` 由外观设置切换（`document.documentElement.dataset.theme`），
+      tokens.css 通过 `html[data-theme="dark"]` 覆盖变量；
+    · 样式（tokens.css / app.css）在 src/main.ts 里 import，让 Vite 参与打包，
+      因此此处不写 <link rel="stylesheet">；
+    · Electron 标记必须在这里同步判定（而不是等 Vue 挂载后再加类）：
+      桌面壳是 `titleBarStyle: 'hidden'` 的无边框窗口，若首帧没有 `cc-electron`
+      类，`.cc-shell` 就不会让出顶部 32px，内容会先在原生窗口按钮底下闪一下。
+  -->
+  <script>
+    // preload.js 在页面脚本之前执行，这里能拿到 electronAPI
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      document.documentElement.classList.add('cc-electron')
+    }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -2,6 +2,7 @@
 # CodeCraft - AI-Powered Desktop Programming Assistant 🤖
 
 <p align="center">
+  <img src="https://img.shields.io/badge/version-3.0.0-7C5CFC" alt="v3.0.0">
   <img src="https://img.shields.io/badge/Java-17-brightgreen" alt="Java 17">
   <img src="https://img.shields.io/badge/Spring_Boot-3.4-blue" alt="Spring Boot 3.4">
   <img src="https://img.shields.io/badge/Vue-3.4-42b883" alt="Vue 3.4">
@@ -29,7 +30,7 @@
 - 💬 **Long-Conversation Rendering**: Chat history is lazy-loaded by round (latest 5 rounds first, 5 more when scrolling to the top) with a virtual list and ResizeObserver-based height self-heal — no overlapping bubbles, misplacement or scrollbar jumps even in thousand-message sessions
 - 🖌️ **Appearance**: Global background image (≤10MB) with background opacity / blur / window overall opacity sliders; the title bar and whole window become translucent in sync
 - 🖥️ **Desktop App**: Electron + built-in JRE, zero-installation ready to use
-- 🔄 **Auto Update**: The desktop app checks GitHub Releases 15 seconds after startup (6-hour cache); download with progress and one-click install from the "Data Management → Version & Updates" card (mirror acceleration with automatic direct fallback). Upgrades keep all local data — the backend cwd lives in `userData/runtime`, the database is backed up before upgrading, and the installer backs up legacy data on the first upgrade
+- 🔄 **Auto Update**: The desktop app checks GitHub Releases 15 seconds after startup (6-hour cache). v3 adds a dedicated **Version & Updates page** (`/about`): client version and backend version shown side by side, release notes rendered as markdown, progress-tracked download, one-click install (Windows launches the installer and restarts; macOS opens the dmg for drag-and-drop; Linux reveals the package), mirror acceleration with automatic direct fallback, and configurable auto-check / mirror prefix / backup retention; in a browser it degrades to a read-only version card. Upgrades keep all local data — the backend cwd lives in `userData/runtime` (untouched by the installer), the database is backed up before upgrading, and the installer backs up legacy data on the first upgrade
 - 🌐 **P2P Remote Collaboration**: Peer-to-peer encrypted channels for remote agent invocation between devices
 - 💾 **Snapshot System**: Auto-backup before code changes, support multi-granularity rollback
 - 🔐 **Security**: Three-layer permission pipeline + path traversal check + audit logging

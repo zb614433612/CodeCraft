@@ -1,0 +1,259 @@
+import { request } from '@/utils/http-client'
+import { getAuthHeaders } from '@/utils/http-client'
+
+export interface P2pStatus {
+  running: boolean
+  peerId: string
+  port: number
+  peerCount: number
+  certFingerprint: string
+  myName: string
+}
+
+export interface P2pAddressInfo {
+  addresses: string[]
+  bestAddress: string | null
+  hasIpv6: boolean
+}
+
+export interface P2pSignalingResult {
+  qrCodeBase64: string
+  connectionString: string
+  compactString: string
+  qrError?: string
+}
+
+export interface P2pPeer {
+  peerId: string
+  address: string
+  name: string
+  displayName: string
+  remark: string
+  connectedAt: number
+  lastHeartbeat: number
+  online: boolean
+}
+
+export interface ChatMessage {
+  name: string
+  content: string
+  messageType?: string
+  agentConfigId?: number
+  agentName?: string
+}
+
+export interface HistoryMessage {
+  name: string
+  content: string
+  direction: string
+  messageType?: string
+  agentConfigId?: number
+  agentName?: string
+  time: string
+}
+
+export interface AgentAuthItem {
+  id: number
+  name: string
+  avatar?: string
+}
+
+export interface FileTransferProgress {
+  transferId: string
+  totalChunks: number
+  receivedChunks: number
+  status: string
+}
+
+// ==================== API ====================
+
+export async function getP2pStatus() {
+  const res = await request<P2pStatus>('/p2p/status')
+  return res.data
+}
+
+export async function getP2pAddress() {
+  const res = await request<P2pAddressInfo>('/p2p/address')
+  return res.data
+}
+
+export async function getP2pName() {
+  const res = await request<{ name: string }>('/p2p/name')
+  return res.data
+}
+
+export async function setP2pName(name: string) {
+  const res = await request<{ name: string; status: string }>('/p2p/name', {
+    method: 'POST',
+    body: JSON.stringify({ name })
+  })
+  return res.data
+}
+
+export async function generateQrCode() {
+  const res = await request<P2pSignalingResult>('/p2p/qrcode', { method: 'POST' })
+  return res.data
+}
+
+export async function parseQrCode(image: string) {
+  const res = await request<{ peerId: string; address: string; fingerprint: string }>('/p2p/qrcode/parse', {
+    method: 'POST',
+    body: JSON.stringify({ image })
+  })
+  return res.data
+}
+
+export async function connectPeer(connectionString: string) {
+  const res = await request<{ status: string; peerId: string; address: string; channelActive: boolean }>('/p2p/connect', {
+    method: 'POST',
+    body: JSON.stringify({ connectionString })
+  })
+  return res.data
+}
+
+export async function disconnectPeer(peerId: string) {
+  const res = await request<{ status: string; peerId: string }>(`/p2p/disconnect/${peerId}`, {
+    method: 'POST'
+  })
+  return res.data
+}
+
+/** 彻底删除节点（聊天记录 + 节点信息） */
+export async function deletePeer(peerId: string) {
+  const res = await request<{ status: string; peerId: string }>(`/p2p/peer/${peerId}`, {
+    method: 'DELETE'
+  })
+  return res.data
+}
+
+/** 重连离线节点（使用数据库保存的连接信息） */
+export async function reconnectPeer(peerId: string) {
+  const res = await request<{ status: string; peerId: string; address: string; channelActive: boolean }>(
+    `/p2p/reconnect/${peerId}`,
+    { method: 'POST' }
+  )
+  return res.data
+}
+
+export async function getPeers() {
+  const res = await request<P2pPeer[]>('/p2p/peers')
+  return res.data
+}
+
+export async function sendMessage(peerId: string, content: string) {
+  const res = await request<{ status: string }>(`/p2p/send/${peerId}`, {
+    method: 'POST',
+    body: JSON.stringify({ content })
+  })
+  return res.data
+}
+
+export async function pollMessages(peerId: string) {
+  const res = await request<ChatMessage[]>(`/p2p/messages/${peerId}`)
+  return res.data
+}
+
+/**
+ * 历史消息（P2pController：`ORDER BY created_at ASC LIMIT ? OFFSET ?`）
+ * 注意：offset=0 拿到的是「最早的 limit 条」，不是最新 —— 后端无倒序参数与总数接口，
+ * 聊天抽屉一次拉 HISTORY_LIMIT 条覆盖真实使用量（见 utils/p2p-chat.ts 文件头注释）。
+ */
+export async function getHistory(peerId: string, offset = 0, limit = 50) {
+  const res = await request<HistoryMessage[]>(
+    `/p2p/messages/${peerId}/history?offset=${offset}&limit=${limit}`
+  )
+  return res.data
+}
+
+export async function deleteMessages(peerId: string) {
+  const res = await request<{ status: string }>(`/p2p/messages/${peerId}`, { method: 'DELETE' })
+  return res.data
+}
+
+export async function setRemark(peerId: string, remark: string) {
+  const res = await request<{ status: string; remark: string }>(`/p2p/peer/${peerId}/remark`, {
+    method: 'PUT',
+    body: JSON.stringify({ remark })
+  })
+  return res.data
+}
+
+// ==================== Agent 授权与调用 ====================
+
+/** 授权 Agent 给对方 */
+export async function grantAgentAuth(peerId: string, agentConfigIds: number[]) {
+  const res = await request<{ status: string; peerId: string; agentCount: number }>(
+    `/p2p/agent-auth/grant/${peerId}`,
+    { method: 'POST', body: JSON.stringify({ agentConfigIds }) }
+  )
+  return res.data
+}
+
+/** 取消授权 */
+export async function cancelAgentAuth(peerId: string, agentConfigIds: number[]) {
+  const res = await request<{ status: string; peerId: string }>(
+    `/p2p/agent-auth/cancel/${peerId}`,
+    { method: 'POST', body: JSON.stringify({ agentConfigIds }) }
+  )
+  return res.data
+}
+
+/** 获取我授权给某节点的 Agent 列表 */
+export async function getMyAuthToPeer(peerId: string) {
+  const res = await request<AgentAuthItem[]>(`/p2p/agent-auth/sent/${peerId}`)
+  return res.data
+}
+
+/** 获取某节点授权给我的 Agent 列表（我可调用的） */
+export async function getPeerAuthToMe(peerId: string) {
+  const res = await request<AgentAuthItem[]>(`/p2p/agent-auth/received/${peerId}`)
+  return res.data
+}
+
+/** 调用对方的 Agent */
+export async function invokeAgent(peerId: string, agentConfigId: number, message: string) {
+  const res = await request<{ status: string; requestId: string }>(
+    `/p2p/agent/invoke/${peerId}`,
+    { method: 'POST', body: JSON.stringify({ agentConfigId, message }) }
+  )
+  return res.data
+}
+
+// ==================== 文件传输 API ====================
+
+/** 发送文件（FormData上传） */
+export async function sendFile(peerId: string, file: File): Promise<{ status: string; transferId: string; category: string }> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const authHeader = await getAuthHeaders()
+  const res = await request<{ status: string; transferId: string; category: string }>(
+    `/p2p/send-file/${peerId}`,
+    {
+      method: 'POST',
+      body: formData,
+      headers: authHeader  // 显式传入 token，确保 FormData 请求不被过滤
+    }
+  )
+  return res.data
+}
+
+/** 获取文件URL（用于图片src） */
+export function getFileUrl(peerId: string, transferId: string): string {
+  return `/api/p2p/file/${peerId}/${transferId}`
+}
+
+/** 获取缩略图URL */
+export function getThumbnailUrl(peerId: string, transferId: string): string {
+  return `/api/p2p/file/${peerId}/${transferId}/thumbnail`
+}
+
+/** 打开文件所在目录 */
+export async function openFileDir(peerId: string, transferId: string): Promise<void> {
+  await request(`/p2p/file/${peerId}/${transferId}/open-dir`, { method: 'POST' })
+}
+
+/** 查询传输进度 */
+export async function getTransferProgress(peerId: string, transferId: string): Promise<FileTransferProgress> {
+  const res = await request<FileTransferProgress>(`/p2p/file/${peerId}/${transferId}/progress`)
+  return res.data
+}

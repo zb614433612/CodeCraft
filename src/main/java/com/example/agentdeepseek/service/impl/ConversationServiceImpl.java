@@ -130,11 +130,28 @@ public class ConversationServiceImpl implements ConversationService {
         return affectedRows > 0;
     }
 
+    @Override
+    @Transactional
+    public int deleteMessagesFromTurn(Long conversationId, String turnId) {
+        if (conversationId == null || turnId == null || turnId.isEmpty()) {
+            return 0;
+        }
+        // 起点 = 该轮 user 提问的消息 id；找不到说明这轮还没落库（或已被删），无事可做
+        Long fromId = conversationMessageMapper.selectFirstIdByTurnId(conversationId, turnId);
+        if (fromId == null) {
+            log.info("从轮次删除消息：未找到 turnId 对应消息，conversationId={}, turnId={}", conversationId, turnId);
+            return 0;
+        }
+        int deleted = conversationMessageMapper.deleteFromId(conversationId, fromId);
+        log.info("从轮次删除消息完成：conversationId={}, turnId={}, fromId={}, 删除={}条",
+                conversationId, turnId, fromId, deleted);
+        return deleted;
+    }
+
     /**
      * 收集会话引用的文件资产ID（失败返回空列表：不阻塞会话删除主链路）
      */
-    private List<Long> collectReferencedAssetIds(Long conversationId) {
-        try {
+    private List<Long> collectReferencedAssetIds(Long conversationId) {        try {
             List<Long> ids = fileReferenceMapper.selectAssetIdsByConversationId(conversationId);
             return ids == null ? Collections.emptyList() : ids;
         } catch (Exception e) {

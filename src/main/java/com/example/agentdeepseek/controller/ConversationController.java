@@ -133,6 +133,37 @@ public class ConversationController {
     }
 
     /**
+     * 从指定轮次起删除消息（含该轮自身）——「重新生成」的前置动作。
+     *
+     * <p>前端「重新生成」的完整流程：先调本接口丢掉该轮（以及其后的）消息，
+     * 再用同一条提问重新发起 /chat/stream。这样历史里不会出现两条并存的回复。</p>
+     *
+     * <p>约束：调用方需自行确保该会话没有正在运行的任务（前端会在 isStreaming 时禁用按钮），
+     * 否则删掉的消息会被运行中的任务重新写回，导致序列错乱。</p>
+     */
+    @Operation(summary = "从某一轮起删除消息", description = "删除指定轮次（turnId）及其后所有消息，用于聊天页「重新生成」，需要Authorization头")
+    @DeleteMapping("/{conversationId}/messages")
+    public ApiResponse<Integer> deleteMessagesFromTurn(
+            @Parameter(description = "会话ID", required = true)
+            @PathVariable Long conversationId,
+            @Parameter(description = "轮次ID（前端生成，落在 user 消息的 turn_id 上）", required = true)
+            @RequestParam("turnId") String turnId,
+            @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
+            @RequestAttribute("userId") Long userId) {
+        log.info("从轮次删除消息请求: conversationId={}, turnId={}, userId={}", conversationId, turnId, userId);
+        Conversation conversation = conversationMapper.selectById(conversationId).orElse(null);
+        if (conversation == null || conversation.getUserId() == null || !conversation.getUserId().equals(userId)) {
+            return ApiResponse.error(404, "会话不存在或无权访问");
+        }
+        int deleted = conversationService.deleteMessagesFromTurn(conversationId, turnId);
+        if (deleted <= 0) {
+            // 0 条不是错误：可能是「该轮还没落库」或「并发下已被删除」，前端按幂等处理即可
+            return ApiResponse.success(0, "该轮次没有可删除的消息");
+        }
+        return ApiResponse.success(deleted, "已删除 " + deleted + " 条消息");
+    }
+
+    /**
      * 删除会话及其关联消息
      * 需要验证会话属于当前用户
      */

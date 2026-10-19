@@ -9,6 +9,7 @@
   </p>
 
   <p>
+    <img src="https://img.shields.io/badge/version-3.0.0-7C5CFC" alt="v3.0.0">
     <img src="https://img.shields.io/badge/Java-17%2B-blue?logo=openjdk" alt="Java 17+">
     <img src="https://img.shields.io/badge/Spring%20Boot-3.4-brightgreen?logo=springboot" alt="Spring Boot 3.4">
     <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vuedotjs" alt="Vue 3.5">
@@ -21,6 +22,11 @@
 </div>
 
 ---
+
+> 📦 **前端说明**：仓库内并存两套前端 —— `frontend/`（经典版，服务在 `/`）与
+> `frontend-v3/`（新版，服务在 `/v3/`，默认入口）。构建、版本切换、localStorage
+> 键划分、Electron 适配等部署细节见 **[frontend-v3/MIGRATION.md](./frontend-v3/MIGRATION.md)**。
+> 一句话发版：`scripts\pack-v3.bat` → 重启后端。
 
 ## 🏷️ 关键词 / Topics
 
@@ -103,7 +109,7 @@ AI 可"看到"并"操控"电脑：`screen_capture` 一键截屏（分辨率标�
 基于 Netty + TLS 的点对点安全通道，可将 Agent 授权给远程伙伴调用。支持二维码配对、IPv6 直连、端到端加密、图片/文件传输。
 
 ### 🔄 应用内自动更新（Auto Update）
-桌面端启动 15 秒后自动检查 GitHub Releases（6 小时缓存，规避 API 限流），发现新版本弹出通知；在「数据管理 → 版本与更新」卡片内可查看版本、带进度下载、一键安装（Windows 启动安装器并自动重启；macOS 打开 dmg 引导拖拽），下载支持镜像加速、失败自动回退直连。**升级不丢数据**：后端工作目录已迁至 `userData/runtime`，升级前自动备份数据库，安装包首次升级也会备份旧数据目录。
+桌面端启动 15 秒后自动检查 GitHub Releases（6 小时缓存，规避 API 限流），发现新版本弹出通知。v3 新增**独立「版本与更新」页**（`/about`，设置页可进）：客户端版本与后端版本分列展示（只换 jar 不重装客户端时能一眼看出不一致）、Release 说明按 markdown 渲染、带进度条下载、一键安装（Windows 启动安装器并自动重启；macOS 打开 dmg 引导拖拽；Linux 定位安装包），下载支持镜像加速与失败自动回退直连，「自动检查 / 镜像前缀 / 备份保留份数」可配；浏览器环境自动降级为只读版本卡片并给出「请到 Releases 手动下载」提示。**升级不丢数据**：后端工作目录已迁至 `userData/runtime`（安装器不触碰），升级前自动备份数据库，安装包首次升级也会备份旧数据目录。
 
 ### 💾 开箱即用（Zero Config / Portable）
 Electron 桌面应用，内置 JRE + Node.js + H2 嵌入式数据库，下载安装即用，零配置。支持 Windows / macOS / Linux 三平台。

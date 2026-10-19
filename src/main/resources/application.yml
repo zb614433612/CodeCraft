@@ -1,3 +1,10 @@
+# 应用元信息（供 GET /api/system/version 与「版本与更新」页展示）
+# @project.version@ / @maven.build.timestamp@ 由 Maven 资源过滤替换（spring-boot-starter-parent 默认对
+# application*.yml 开启 filtering，分隔符为 @…@）；IDE 直接运行时可能保留字面量，
+# 后端 SystemController 已做兜底（以 @ 开头视为未替换，回退内置常量）。
+app:
+  version: '@project.version@'
+  build-time: '@maven.build.timestamp@'
 # 服务器配置
 server:
   # 服务器端口

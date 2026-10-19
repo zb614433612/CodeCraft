@@ -5,6 +5,51 @@
 
 ---
 
+## [3.0.0] - 2026-10-19
+
+> 大版本：全新 v3 前端（`frontend-v3/`）正式落地，与经典版（`frontend/`）**并存可切换**；
+> 补齐「版本与更新」页（F06），版本号统一到 3.0.0。
+
+### 🎨 新增：v3 前端（`frontend-v3/`，服务在 `/v3/`，默认入口）
+
+- **技术栈重写**：Vue 3.5 + Vite 8 + TypeScript + Pinia（3 store）+ hash 路由；零 UI 组件库依赖，全部自研 `cc-` 设计系统（1px 描边卡片、线性图标、hover 才显操作、深浅主题）。
+- **19 个页面全部对接真实接口**（无一处 DEMO 数据）：对话、智能体、技能、MCP、定时任务、踩坑经验、数据库连接、文件管理、运行日志、数据管理、设备互联、用户管理、菜单权限、模型配置、外观设置、设置聚合、个人信息、版本与更新、登录。
+- **聊天页能力补齐**：markdown + highlight.js 渲染（含 `diff` 红绿着色、filelist / cmd 卡片）、工具结果语义化卡片、思考过程独立滚动跟随、图片灯箱（缩放/拖拽/多图）、审批三形态（权限 / 澄清 / 迭代确认 +10/+20/+50）、任务清单（优先级 / 依赖阻塞）、快照级「回滚本轮改动」、重新生成（真删重发）、补充需求注入、上下文 Token 统计、`full` / `compact` 上下文模式与 Provider 运行时切换、多会话并行流（切页不中断后台流）、子 Agent 面板（读 `sub_agent_log` 轮询）、P2P 聊天与文件传输、右侧工作区（多标签 + 分屏 + 内嵌网页 + 代码编辑器 + Git 客户端 + xterm 终端）。
+- **静态预览 `preview.html`**：与 Vue 应用同构的纯静态原型（保留在开发机，未纳入本仓库）。
+- **启动时隐形登录已移除**：v3 改为真实登录页（`/login`），支持退出登录、改密后自动重登、401 统一回跳并保留原地址。
+
+### 🔄 新增：版本与更新页（F06）
+
+- **新增页面 `/about`**（左侧「设置 → 系统配置」入口）：页面头 + 版本矩阵（客户端版本 / 后端版本 / 构建时间 / 运行环境 / 最近检查 / 后端 PID）+ 更新卡片 + 更新设置 + 更新策略说明。
+- **新增后端接口 `GET /api/system/version`**：返回应用名、版本、构建时间、Java 版本、OS、PID；**不做管理员校验**（不含敏感数据，普通用户也需可见）。版本号由 `application.yml` 的 `app.version` 经 Maven 资源过滤注入（`@project.version@`），未替换时回退内置常量。
+- **复用现有 Electron 更新链路**（`electron/update-manager.js` + `preload.js` 的 `electronAPI.update`，零改动）：检查更新（GitHub Releases，6 小时缓存 + 手动 30s 最小间隔）、带进度条下载（镜像加速 + 失败回退直连）、一键安装（Windows 安装器 / macOS dmg / Linux 定位）、打开发布页。
+- **浏览器环境安全降级**：无 `electronAPI` 时只显示只读版本卡片 + 一行说明，更新设置区退化为只读文案，点「检查更新」给 toast 提示而非报错。
+- **两处刻意设计**：① 客户端版本与后端版本分列（只换 jar 不重装客户端时能看出不一致，不强行合并）；② Release 说明按 markdown 渲染（`html:false` 防 XSS，外链自动 `target=_blank`）。
+- **数据清理联动**：「重置所有数据」成功后自动调 `clearLocalData()`，清掉升级前备份 / 已下载安装包 / 检测缓存，让「清空」是彻底清空（浏览器环境无副作用）。
+
+### 🔧 后端
+
+- 新增 `GET /api/system/version`（见上）。
+- `application.yml` 新增 `app.version` / `app.build-time`（Maven 资源过滤注入）。
+- `SystemController` 注入 `@Value` 配置并新增版本解析兜底（占位符未替换时回退 `3.0.0`）。
+- 版本号同步：`pom.xml`、`CodeCraftMcpServer.SERVER_VERSION`（MCP 握手版本）。
+
+### 🖥️ 桌面端
+
+- `electron/package.json` 版本与随包 jar 路径同步到 `code-craft-3.0.0.jar`。
+- 沿用上一版修复的 macOS 生命周期处理（单实例锁、关窗不杀后端、`activate` 重建窗口与自愈重试、最小应用菜单恢复 `Cmd+Q`）。
+
+### 🧾 版本号同步
+
+- 后端：`2.0.4` → `3.0.0`（`pom.xml`，产物 `code-craft-3.0.0.jar`）
+- 经典版前端：`2.0.4` → `3.0.0`（`frontend/package.json` + lock）
+- v3 前端：`3.0.0`（`frontend-v3/package.json`，本次保持一致）
+- Electron：`2.0.4` → `3.0.0`（`package.json` + lock + `extraResources` jar 路径）
+- MCP Server 握手版本：`2.0.4` → `3.0.0`
+- 文档：README(_EN) / BUILD_AND_RUN(_EN) / CHANGELOG(_EN) / docs（ARCHITECTURE、DEEPSEEK_SERVICE_IMPL、LLM_PROVIDER_SYSTEM、DEV_QUICKREF、RELEASE_CHECKLIST）统一到 v3.0.0
+
+---
+
 ## [2.0.4] - 2026-10-18
 
 ### 🎯 新增：GPT（OpenAI 官方专精）适配器 + 适配器选型注释

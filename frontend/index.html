@@ -2,6 +2,69 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      UI 版本切换（v2 经典版 <-> v3 新版）
+      ==========================================================================
+      这是「两套前端并存」的唯一粘合剂。v3 侧的对应实现是
+      frontend-v3/src/utils/ui-version.ts，两边读写同一个 localStorage 键
+      `cc.uiVersion`，键名与取值必须完全一致：
+
+        · 未设置 或 'v3'  ->  新版（默认启动新版）
+        · 'v2'            ->  留在经典版（用户主动切过来的）
+
+      为什么紧跟在 <meta charset> 之后：越早执行越好。等旧版 Vue 挂载完再跳转，
+      用户会先看到旧界面闪一下，还会白跑一堆接口（会话列表、日志、余额……）。
+
+      兜底：地址栏带 ?v2=1 时强制留在经典版。万一 v3 产物损坏导致白屏，
+      用户仍可访问 /index.html?v2=1 回到这里，不至于两个版本都进不去。
+      ==========================================================================
+    -->
+    <script>
+      (function () {
+        var KEY = 'cc.uiVersion'
+        try {
+          var ver = localStorage.getItem(KEY)
+          if (ver === 'v2') return
+          if (/[?&]v2=1(&|$)/.test(location.search)) return
+          if (!ver) localStorage.setItem(KEY, 'v3')
+          location.replace('/v3/')
+        } catch (e) {
+          /* localStorage 被禁用（隐私模式）时不自动跳转，留在经典版仍可用 */
+        }
+      })()
+    </script>
+    <script>
+      /*
+       * 经典版右下角「体验新版」入口。
+       * 只在用户主动选了经典版（cc.uiVersion === 'v2'）时才出现 ——
+       * 其余情况页面已经被上面的脚本跳走了，这个按钮根本来不及渲染。
+       * 用运行时 DOM 注入而不是写死在 HTML 里：不污染旧版布局，也便于日后整体移除。
+       */
+      window.addEventListener('DOMContentLoaded', function () {
+        try {
+          if (localStorage.getItem('cc.uiVersion') !== 'v2') return
+        } catch (e) {
+          return
+        }
+        var btn = document.createElement('button')
+        btn.type = 'button'
+        btn.textContent = '体验新版'
+        btn.title = '切换到新版界面'
+        btn.style.cssText =
+          'position:fixed;right:16px;bottom:16px;z-index:99999;padding:8px 14px;' +
+          'border-radius:999px;border:1px solid rgba(124,92,252,.35);background:#fff;' +
+          'color:#7C5CFC;font:500 13px/1 system-ui,-apple-system,sans-serif;' +
+          'box-shadow:0 4px 16px rgba(0,0,0,.12);cursor:pointer;'
+        btn.onclick = function () {
+          try {
+            localStorage.setItem('cc.uiVersion', 'v3')
+          } catch (e) {}
+          location.href = '/v3/'
+        }
+        document.body.appendChild(btn)
+      })
+    </script>
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CodeCraft</title>

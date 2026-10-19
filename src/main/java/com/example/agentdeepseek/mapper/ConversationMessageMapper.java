@@ -117,6 +117,60 @@ public interface ConversationMessageMapper {
     int deleteByConversationId(Long conversationId);
 
     /**
+     * 查询某一轮（turnId）最早的一条消息 id —— 「从该轮起删除」的起点。
+     *
+     * <p>后端只给 user 消息写 turn_id，因此命中的就是那轮的提问；<br>
+     * 同一 turnId 若有多条（历史脏数据），取 id 最小的一条，保证删除范围从提问开始。</p>
+     *
+     * @param conversationId 会话ID
+     * @param turnId         轮次ID
+     * @return 起始消息 id；找不到返回 null
+     */
+    @Select("SELECT id FROM conversation_message WHERE conversation_id = #{conversationId} "
+            + "AND turn_id = #{turnId} ORDER BY id ASC LIMIT 1")
+    Long selectFirstIdByTurnId(@Param("conversationId") Long conversationId,
+                               @Param("turnId") String turnId);
+
+    /**
+     * 删除 id &gt;= fromId 的所有消息（含 fromId 自身）——「重新生成」丢弃该轮及其后内容。
+     *
+     * <p>限定 conversationId，避免调用方传错 id 时误删别的会话。</p>
+     *
+     * @param conversationId 会话ID
+     * @param fromId         起始消息 id（含）
+     * @return 受影响的行数
+     */
+    @Delete("DELETE FROM conversation_message WHERE conversation_id = #{conversationId} AND id >= #{fromId}")
+    int deleteFromId(@Param("conversationId") Long conversationId, @Param("fromId") Long fromId);
+
+    /**
+     * 批量查询若干轮次（turnId）的用户提问原文 —— 给「改动回滚」面板标注「这是哪一轮」用。
+     *
+     * <p>为什么需要：快照（snapshot）只记录 turnId / 时间 / 文件数，而聊天页默认只加载最近 5 轮，
+     * 更早的轮次不在内存里，前端无从得知提问内容。这里按 turnId 精确取，避免全量拉历史消息。</p>
+     *
+     * <p>返回 VO 而不是 Map：{@code content} 是 LONGTEXT（H2 → CLOB），Map 方式拿到的是
+     * {@code JdbcClob}，还得在调用方判类型；声明 String 字段后由 StringTypeHandler 取值。</p>
+     *
+     * @param conversationId 会话ID
+     * @param turnIds        轮次ID集合（调用方需保证非空）
+     * @return 每个命中轮次的 turnId + 提问原文
+     */
+    @Select("<script>"
+            + "SELECT turn_id AS turn_id, content AS content FROM conversation_message "
+            + "WHERE conversation_id = #{conversationId} AND role = 'USER' AND turn_id IN "
+            + "<foreach collection='turnIds' item='tid' open='(' separator=',' close=')'>#{tid}</foreach>"
+            + " ORDER BY id ASC"
+            + "</script>")
+    @Results(id = "TurnPromptResultMap", value = {
+        @Result(property = "turnId", column = "turn_id"),
+        @Result(property = "content", column = "content")
+    })
+    List<com.example.agentdeepseek.model.vo.TurnPromptVO> selectUserPromptsByTurnIds(
+            @Param("conversationId") Long conversationId,
+            @Param("turnIds") List<String> turnIds);
+
+    /**
      * 删除指定消息
      * @param id 消息ID
      * @return 受影响的行数

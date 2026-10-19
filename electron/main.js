@@ -8,6 +8,20 @@ const { initUpdateManager } = require('./update-manager')
 
 const DEV_MODE = process.env.DEV_MODE === 'true'
 
+const IS_MAC = process.platform === 'darwin'
+const IS_WIN = process.platform === 'win32'
+
+// ── 单实例锁（必须）────────────────────────────────────────────
+// 场景：macOS 上关闭窗口后进程仍在 Dock 里（点不消失），用户再次双击 .app，
+// 若没有单实例锁会拉起第二个应用实例 → 第二个实例重复 spawn 后端 →
+// H2 数据库文件锁 + 8084 端口被第一个实例占用 → 后端起不来 →
+// 弹出「启动失败」或白屏。加锁后第二次启动只会激活已有实例的窗口。
+const singleInstanceLock = app.requestSingleInstanceLock()
+if (!singleInstanceLock) {
+  // 已有实例在运行：本实例立即退出，由已运行实例的 second-instance 处理器唤起窗口
+  app.quit()
+}
+
 // ── 标题栏配置（透明自定义标题栏）──
 // color 为全透明：系统标题栏隐藏后，标题栏区域直接露出网页内容
 //（普通模式为主题底色；开启「背景图」时透出背景图 —— 标题栏随应用背景变化）；
@@ -42,13 +56,16 @@ function applyTitleBarTheme(mode) {
   nativeTheme.themeSource = mode === 'auto' ? 'system' : (mode === 'dark' ? 'dark' : 'light')
 
   // 更新窗口标题栏覆盖层（透明背景 + 主题化按钮符号色）
+  // 注意：setTitleBarOverlay 仅在 Windows / Linux 生效，macOS 由系统 traffic lights 托管，跳过以免无谓调用
   const overlay = TITLE_BAR_THEME[resolved]
   if (mainWindow) {
-    mainWindow.setTitleBarOverlay({
-      color: overlay.color,
-      symbolColor: overlay.symbolColor,
-      height: 32  // 与前端自定义标题栏拖拽区高度一致（32px）
-    })
+    if (!IS_MAC) {
+      mainWindow.setTitleBarOverlay({
+        color: overlay.color,
+        symbolColor: overlay.symbolColor,
+        height: 32  // 与前端自定义标题栏拖拽区高度一致（32px）
+      })
+    }
     // 窗口底色兜底：页面首帧渲染前与当前主题接近，避免加载阶段白边闪烁
     mainWindow.setBackgroundColor(resolved === 'dark' ? '#16171d' : '#ffffff')
   }
@@ -98,6 +115,9 @@ const splashProgress = { percent: 0, message: '正在准备启动', error: false
 // ── 后端进程状态（启动等待期间用于「提前失败」判断）──
 let javaExited = false           // 后端进程是否已退出
 let backendExitReason = ''       // 提前退出的原因描述
+// 是否为「非本进程拉起的残留后端」（上次被强制退出后遗留的 java 进程）：
+// 这类后端可复用但无法由本进程 kill，需单独标记，否则每次 activate 都会误判为「无后端」而走完整重启动流程
+let externalBackend = false
 
 // ── 启动画面（Splash）────────────────────────────────────
 
@@ -294,7 +314,7 @@ function waitForBackend(retries = 30, interval = 2000) {
  * 优先级：内置 JRE > JAVA_HOME > 系统 PATH
  */
 function findJava() {
-  const javaExe = process.platform === 'win32' ? 'java.exe' : 'java'
+  const javaExe = IS_WIN ? 'java.exe' : 'java'
 
   // 打包模式下优先使用内置 JRE
   if (app.isPackaged) {
@@ -302,12 +322,42 @@ function findJava() {
     if (fs.existsSync(bundledJava)) {
       return bundledJava
     }
+    // 内置 JRE 与当前平台不匹配（安装包里放的是别的平台的 JRE，例如 Windows 的 jre/ 被塞进 mac 包）
+    // 这里记录一条日志便于排查「启动时提示找不到 java」，随后回退到系统 JDK
+    console.warn(`内置 JRE 不可用（${bundledJava} 不存在），回退系统 JDK`)
   }
   // 其次使用 JAVA_HOME 环境变量
   if (process.env.JAVA_HOME) {
     const javaHomePath = path.join(process.env.JAVA_HOME, 'bin', javaExe)
     if (fs.existsSync(javaHomePath)) {
       return javaHomePath
+    }
+  }
+  // macOS 专用探测：macOS 的 /usr/bin/java 只是 stub，未装 JDK 时执行会失败，
+  // 且 macOS 上 JAVA_HOME 默认未设置。这里主动找常见 JDK 安装位置，
+  // 覆盖 Apple Silicon(arm64) 与 Intel(x64) 两种 Homebrew 路径 + 系统 JVM 目录。
+  if (IS_MAC) {
+    const directCandidates = [
+      '/opt/homebrew/opt/openjdk/bin/java', // Apple Silicon Homebrew
+      '/usr/local/opt/openjdk/bin/java'     // Intel Homebrew
+    ]
+    for (const candidate of directCandidates) {
+      if (fs.existsSync(candidate)) {
+        return candidate
+      }
+    }
+    try {
+      const jvmBase = '/Library/Java/JavaVirtualMachines'
+      if (fs.existsSync(jvmBase)) {
+        for (const dir of fs.readdirSync(jvmBase)) {
+          const candidate = path.join(jvmBase, dir, 'Contents', 'Home', 'bin', 'java')
+          if (fs.existsSync(candidate)) {
+            return candidate
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('探测 macOS JDK 目录失败（回退系统 PATH）:', e.message)
     }
   }
   // 最后回退到系统 PATH
@@ -422,9 +472,74 @@ function resolveBackendWorkDir (jarDir) {
 }
 
 /**
+ * 探测本机是否已有可用的 CodeCraft 后端在监听
+ * 场景：应用被强制退出（macOS 上「强制退出」或旧版 Cmd+Q 不可用时的强杀）后，
+ * java 子进程会成为孤儿进程继续占用 8084 端口与 H2 数据库文件锁。
+ * 若不检测就直接 spawn 新的 java，新进程会因端口/文件锁失败 → 表现为「再次启动失败」。
+ * @returns {Promise<boolean>} 是否已存在可复用的后端
+ */
+function probeExistingBackend (timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const req = http.get(`${BACKEND_URL}/`, (res) => {
+      // 只读前 4KB：足够判断是不是 CodeCraft 页面，避免把无关服务当成后端
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => {
+        if (body.length < 4096) body += chunk
+      })
+      res.on('end', () => {
+        const okStatus = res.statusCode >= 200 && res.statusCode < 400
+        resolve(okStatus && /<div\s+id="app"|CodeCraft/i.test(body))
+      })
+    })
+    req.on('error', () => resolve(false))
+    req.setTimeout(timeoutMs, () => {
+      req.destroy()
+      resolve(false)
+    })
+  })
+}
+
+/**
+ * 后端进程是否仍在运行
+ * 注意：仅代表进程存在，不代表 HTTP 端口已就绪（就绪判定见 waitForBackend）
+ */
+function backendAlive () {
+  return (!!javaProcess && !javaExited) || externalBackend
+}
+
+/**
+ * 停止后端进程（关闭窗口 / 退出应用 / 覆盖安装前调用）
+ */
+function stopBackend () {
+  if (!javaProcess) return
+  try {
+    javaProcess.kill()
+  } catch (e) {
+    console.warn('停止后端进程失败:', e.message)
+  }
+  javaProcess = null
+}
+
+/**
  * 启动 Spring Boot 后端 JAR
  */
-function startBackend() {
+async function startBackend() {
+  // 幂等保护：后端已在运行时不再重复 spawn，
+  // 否则第二个 java 进程会因 8084 端口占用 + H2 文件锁失败（macOS 重开窗口场景会走到这里）
+  if (backendAlive()) {
+    console.log('后端服务已在运行，跳过重复启动')
+    return true
+  }
+  // 残留后端检测：上次被强制退出遗留的 java 仍占着 8084 与数据库文件锁，
+  // 此时直接复用比再 spawn 一个更安全（新进程必然起不来）
+  if (await probeExistingBackend()) {
+    console.log('检测到已有后端实例在运行，直接复用（不再启动新进程）')
+    javaExited = false
+    backendExitReason = ''
+    externalBackend = true
+    return true
+  }
   const jarPath = getJarPath()
   if (!jarPath) {
     console.error('未找到后端 JAR 文件，请先在项目根目录执行 "mvn package" 构建后端')
@@ -449,6 +564,7 @@ function startBackend() {
   const userDataDir = app.isPackaged ? app.getPath('userData') : workDir
   javaExited = false
   backendExitReason = ''
+  externalBackend = false   // 本次由自己拉起，退出时需由自己负责 stop
   javaProcess = spawn(javaCmd, [
     '-Dfile.encoding=UTF-8',
     `-Dapp.userdata=${userDataDir}`,
@@ -483,18 +599,92 @@ function startBackend() {
     }
     javaExited = true
     javaProcess = null
+    externalBackend = false
   })
 
   return true
+}
+
+// 防止「加载失败 → 恢复 → 又失败」递归触发
+let recovering = false
+
+/**
+ * 主窗口连续加载失败后的恢复处理
+ * 1) 后端进程已不在（macOS 关闭窗口后被杀 / 意外退出）→ 销毁白屏窗口，重新走完整启动流程；
+ * 2) 后端仍在但页面就是打不开 → 弹窗告知并给出「重试 / 退出」，避免用户面对无提示的白屏。
+ */
+async function recoverFromLoadFailure () {
+  if (recovering) return
+  recovering = true
+  try {
+    // 情况 1：后端进程已不在（意外退出 / 被清理）→ 完整重启后端并重建窗口
+    if (!DEV_MODE && !backendAlive()) {
+      console.log('[recover] 后端未运行，重新拉起后端并重建窗口')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.destroy()
+      }
+      mainWindow = null
+      await start()
+      return
+    }
+
+    // 情况 2：后端进程还在（很可能仍在慢启动）→ 先等它就绪，再重新加载页面
+    if (!DEV_MODE) {
+      try {
+        await waitForBackend(20, 1000)
+        console.log('[recover] 后端已就绪，重新加载界面')
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.loadURL(BACKEND_URL).catch(() => {})
+        }
+        return
+      } catch (err) {
+        console.warn('[recover] 等待后端就绪失败:', err.message)
+      }
+    }
+
+    // 情况 3：后端就绪但页面仍然打不开 → 弹窗告知，给出重试/退出
+    const { response } = await dialog.showMessageBox({
+      type: 'error',
+      buttons: ['重试', '退出'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '界面加载失败',
+      message: '无法加载 CodeCraft 界面',
+      detail: `本地服务（${BACKEND_URL}）响应异常，界面可能显示为空白。\n\n` +
+        '· 点击「重试」将重新加载界面\n' +
+        '· 若持续失败，请退出应用（macOS 上按 Cmd+Q）后重新启动'
+    })
+    if (response === 0) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(BACKEND_URL).catch(() => {})
+      }
+    } else {
+      app.quit()
+    }
+  } finally {
+    recovering = false
+  }
 }
 
 /**
  * 创建主窗口
  */
 function createWindow() {
-  // 移除默认菜单栏
-  Menu.setApplicationMenu(null)
-  
+  // 菜单栏：
+  // - macOS：绝对不能置空。macOS 的应用菜单由系统统一托管，置空会导致
+  //   Cmd+Q（退出）、Cmd+W（关窗）、Cmd+C/Cmd+V（复制粘贴）、Cmd+M 等标准快捷键全部失效，
+  //   用户只能点红叉关窗（进程不退、Dock 点不消失）而无法真正退出应用。
+  // - Windows / Linux：保持无菜单（界面自带自定义标题栏）
+  if (IS_MAC) {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },   // 关于 / 服务 / 隐藏 / 退出（Cmd+Q）
+      { role: 'editMenu' },  // 撤销 / 复制 / 粘贴 / 全选（聊天输入框必需）
+      { role: 'windowMenu' } // 最小化 / 缩放 / 关闭（Cmd+W）
+    ]))
+  } else {
+    Menu.setApplicationMenu(null)
+  }
+
   // 根据当前系统主题预设 titleBarOverlay 初始值
   const initialDark = nativeTheme.shouldUseDarkColors
   const initialOverlay = initialDark ? TITLE_BAR_THEME.dark : TITLE_BAR_THEME.light
@@ -528,7 +718,33 @@ function createWindow() {
     show: false
   })
 
-  mainWindow.loadURL(BACKEND_URL)
+  // ── 加载失败自愈（防白屏）──────────────────────────────────
+  // 背景：macOS 上关闭窗口后后端可能已退出，重新激活时窗口会加载 http://localhost:8084，
+  // 若后端未就绪，Chromium 会停在空白/错误页，用户只看到「白屏」且无任何提示。
+  // 策略：连续失败先自动重试（后端可能正在慢启动）；多次仍失败则重建后端或弹窗说明。
+  let loadFailCount = 0
+  mainWindow.webContents.on('did-finish-load', () => {
+    loadFailCount = 0
+  })
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // 只关心主框架；-3 = ERR_ABORTED（用户主动中断或导航被替换，属正常）
+    if (!isMainFrame || errorCode === -3) return
+    loadFailCount += 1
+    console.warn(`主窗口加载失败（第 ${loadFailCount} 次）: ${errorCode} ${errorDescription} ${validatedURL}`)
+    if (loadFailCount <= 6) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.loadURL(BACKEND_URL).catch(() => {})
+        }
+      }, 1200)
+      return
+    }
+    recoverFromLoadFailure()
+  })
+
+  mainWindow.loadURL(BACKEND_URL).catch((err) => {
+    console.warn('主窗口 loadURL 调用失败:', err.message)
+  })
 
   // 阻止主窗口被外部链接「导航走」：否则点击聊天中的链接后当前页面被替换，无法返回应用
   // 应用自身（后端页面）的导航放行，外部 http(s) 链接一律阻止（由前端改为在「网页标签页」内打开）
@@ -551,7 +767,20 @@ function createWindow() {
     console.log('HTTP 缓存已清除')
   }).catch(() => {})
 
+  // 兜底显示：窗口以 show:false 创建，正常情况下等 ready-to-show。
+  // 但页面加载失败时 ready-to-show 可能不触发，窗口会一直隐藏 ——
+  // 用户看到的现象就是「点了没反应 / 启动失败」。因此加超时强制显示。
+  const forceShowTimer = setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      console.warn('[window] ready-to-show 超时，强制显示窗口')
+      mainWindow.show()
+      closeSplashWindow()
+    }
+  }, 12000)
+
   mainWindow.once('ready-to-show', () => {
+    clearTimeout(forceShowTimer)
+    if (!mainWindow || mainWindow.isDestroyed()) return
     mainWindow.show()
     // 主窗口已显示：关闭启动画面（先淡出再移除，衔接过渡自然）
     closeSplashWindow()
@@ -563,6 +792,7 @@ function createWindow() {
   }
 
   mainWindow.on('closed', () => {
+    clearTimeout(forceShowTimer)
     mainWindow = null
   })
 }
@@ -725,41 +955,63 @@ async function failStartup (message, detail) {
   app.quit()
 }
 
+// 启动流程互斥：macOS 上 whenReady 与 activate 可能接连触发，
+// 也可能因「后端已退出」而重新进入 start()，必须避免并发拉起多个后端与多个窗口
+let starting = false
+
 /**
  * 应用启动流程
  */
 async function start() {
-  // 注册 P2P 防火墙规则
-  registerFirewallRules()
-
-  // 非开发模式：先展示启动画面，再拉起后端并等待就绪
-  if (!DEV_MODE) {
-    createSplashWindow()
-    updateSplashProgress(3, '正在启动本地服务')
-
-    // 启动后端进程（失败时提前终止，不进入无意义的等待）
-    if (!startBackend()) {
-      await failStartup(
-        '启动失败：未找到后端 JAR 文件',
-        '未找到后端 JAR 文件。\n\n请先在项目根目录执行 "mvn package" 构建后端，或确认 target 目录存在构建产物。'
-      )
-      return
-    }
-
-    try {
-      await waitForBackend()
-      updateSplashProgress(100, '启动完成')
-    } catch (err) {
-      await failStartup(
-        `启动失败：${err.message}`,
-        `后端服务启动失败：${err.message}\n\n请检查后端日志后重试。`
-      )
-      return
-    }
+  if (starting) {
+    console.log('[lifecycle] 启动流程已在进行中，忽略重复调用')
+    return
   }
+  starting = true
+  try {
+    // 注册 P2P 防火墙规则
+    registerFirewallRules()
 
-  createWindow()
+    // 非开发模式：先展示启动画面，再拉起后端并等待就绪
+    if (!DEV_MODE) {
+      // 已有残留启动画面时先清掉，避免叠加多个启动窗口
+      if (!splashWindow || splashWindow.isDestroyed()) {
+        createSplashWindow()
+      }
+      updateSplashProgress(3, '正在启动本地服务')
+
+      // 启动后端进程（失败时提前终止，不进入无意义的等待）
+      if (!(await startBackend())) {
+        await failStartup(
+          '启动失败：未找到后端 JAR 文件',
+          '未找到后端 JAR 文件。\n\n请先在项目根目录执行 "mvn package" 构建后端，或确认 target 目录存在构建产物。'
+        )
+        return
+      }
+
+      try {
+        await waitForBackend()
+        updateSplashProgress(100, '启动完成')
+      } catch (err) {
+        await failStartup(
+          `启动失败：${err.message}`,
+          `后端服务启动失败：${err.message}\n\n请检查后端日志后重试。`
+        )
+        return
+      }
+    }
+
+    // 已有窗口（例如加载失败恢复路径）则复用，避免同一应用出现两个主窗口
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.loadURL(BACKEND_URL).catch(() => {})
+      return
+    }
+    createWindow()
+  } finally {
+    starting = false
+  }
 }
+
 
 /**
  * 安装更新前停止后端进程：释放数据库/日志文件句柄。
@@ -781,6 +1033,19 @@ async function stopBackendForUpdate () {
 }
 
 app.whenReady().then(() => {
+  // 未拿到单实例锁：已有实例在运行，本实例不启动后端、不建窗口，直接退出
+  if (!singleInstanceLock) {
+    console.log('[lifecycle] 检测到已有实例在运行，本次启动立即退出')
+    app.quit()
+    return
+  }
+
+  // 第二次启动（再次双击 .app / 从 Dock 重开）由持有锁的本实例负责唤到前台
+  app.on('second-instance', () => {
+    console.log('[lifecycle] 捕获到第二次启动请求，激活已有窗口')
+    handleActivate()
+  })
+
   // 自动更新管理器不依赖后端，尽早初始化（自动检查在 15s 后触发，不阻塞启动）
   initUpdateManager({
     getMainWindow: () => mainWindow,
@@ -790,21 +1055,60 @@ app.whenReady().then(() => {
   start()
 })
 
+/**
+ * 激活应用（点 Dock 图标 / 第二次启动）：
+ * 有窗口就聚焦；没窗口则按「后端是否还在」决定「仅重建窗口」还是「完整重启后端」
+ */
+function handleActivate () {
+  // ① 主窗口还在（可能只是被隐藏 / 最小化）→ 直接唤到前台
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+    return
+  }
+  // ② 启动流程进行中：它自己会创建窗口，这里不打断
+  if (starting) return
+  // ③ 忽略启动画面窗口：splash 存在不代表有可用主界面（不能因此跳过重建）
+  const otherWindows = BrowserWindow.getAllWindows()
+    .filter((w) => !w.isDestroyed() && w !== splashWindow)
+  if (otherWindows.length > 0) {
+    const win = otherWindows[0]
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    return
+  }
+  // ④ 清理可能残留的启动画面，避免与新建窗口叠加
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    closeSplashWindow(true)
+  }
+  // ⑤ 后端仍在（macOS 关窗不杀后端）：直接重建窗口，秒开；
+  //    后端已退出（异常退出 / 旧版本残留）：走完整启动流程（含启动画面与就绪等待）
+  if (DEV_MODE || backendAlive()) {
+    createWindow()
+  } else {
+    console.log('[lifecycle] 后端未在运行，重新执行完整启动流程')
+    start()
+  }
+}
+
 app.on('window-all-closed', () => {
-  // 关闭 Java 进程
-  if (javaProcess) {
-    javaProcess.kill()
-    javaProcess = null
+  if (IS_MAC) {
+    // macOS 惯例：关闭最后一个窗口 ≠ 退出应用（Dock 图标保留、下方小圆点不消失属预期行为）。
+    // 关键修复：这里**不能**停止后端。原实现在 mac 上关窗就 kill 掉 java 进程却不退出应用，
+    // 用户再次点 Dock 图标时 activate 只重建窗口、不重启后端，
+    // 窗口加载 http://localhost:8084 连接失败 → 白屏 / 再次启动失败。
+    console.log('[lifecycle] macOS 已关闭全部窗口：应用与后端保持后台运行（Cmd+Q 才退出）')
+    return
   }
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  // Windows / Linux：关闭窗口即退出应用，同时释放后端
+  stopBackend()
+  app.quit()
 })
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow()
-  }
+  handleActivate()
 })
 
 app.on('before-quit', () => {
@@ -814,8 +1118,7 @@ app.on('before-quit', () => {
   }
   splashWindow = null
   removeFirewallRules()
-  if (javaProcess) {
-    javaProcess.kill()
-    javaProcess = null
-  }
+  // 真正退出（Cmd+Q / 菜单退出 / app.quit()）时才停止后端进程
+  stopBackend()
 })
+

@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 火山引擎「豆包搜索 Custom 版」（联网搜索）API 客户端。
@@ -35,8 +36,20 @@ import java.util.Set;
  * <ol>
  *   <li>当前工具上下文的 LLM Provider 是火山引擎（请求模板 volcengine/ark/doubao，或 baseUrl 域名为 *.volces.com）；</li>
  *   <li>该 Provider 的「扩展配置」中配置了 {@code searchApiKey}（联网搜索控制台的 Key，与方舟 Ark Key 不通用），
- *       或环境变量 {@code VOLCENGINE_SEARCH_API_KEY} 已设置且非占位符。</li>
+ *       或环境变量 {@code VOLCENGINE_SEARCH_API_KEY} / {@code WEB_SEARCH_API_KEY} 已设置且非占位符。</li>
  * </ol>
+ *
+ * <h3>凭证解析顺序（每步都记录状态变化日志，不再静默失效）</h3>
+ * <ol>
+ *   <li><b>工具上下文有 providerCode</b>：只认该 Provider——
+ *       未注册 / 非火山 → 判定不可用（<b>不会</b>去猜别的 Provider，避免「用户实际用 DeepSeek
+ *       却被火山搜索接管」的越界行为）；是火山 → {@code extraConfig.searchApiKey} → 环境变量。</li>
+ *   <li><b>工具上下文无 providerCode</b>（后台线程 / 子任务 / 非主链路入口）：
+ *       ① 环境变量优先；② 否则若「已启用的火山 Provider 恰好只有一个」且配了 searchApiKey，则用它；
+ *       ③ 多于一个火山 Provider 时不猜，日志提示配置环境变量或检查 providerCode 传递链路。</li>
+ * </ol>
+ * <p><b>历史问题</b>：旧实现在 providerCode 为 null 时直接 {@code return null} 且不打任何日志，
+ * 表现为「明明配了 Key 但火山联网搜索完全不生效」，排查成本极高；现在任何不可用原因都会在状态变化时落一条 INFO 日志。</p>
  *
  * <p><b>职责边界</b>：本类只负责「调用 + 解析」，不做回退决策——调用失败抛出异常，
  * 由 {@code SearchTool} / {@code WebFetchTool} 捕获后回退原有 Bing/百度/Jina/本地抓取链路，保证工具始终可用。</p>
@@ -67,6 +80,9 @@ public class VolcengineSearchApiClient {
     private final LLMClientManager llmClientManager;
     private final ObjectMapper objectMapper;
 
+    /** 上一次凭证解析状态（仅状态变化时打日志，避免每次工具调用刷屏） */
+    private final AtomicReference<String> lastStatus = new AtomicReference<>("");
+
     public VolcengineSearchApiClient(LLMClientManager llmClientManager, ObjectMapper objectMapper) {
         this.llmClientManager = llmClientManager;
         this.objectMapper = objectMapper;
@@ -85,21 +101,89 @@ public class VolcengineSearchApiClient {
      * 解析联网搜索 API Key。
      * <p>判定依据是「Provider 模板/域名 + 凭证有效性」，与 providerCode 名称无关，避免用户自定义 code 时失效。</p>
      *
-     * @return 有效 Key；不满足条件返回 null
+     * @return 有效 Key；不满足条件返回 null（原因会在状态变化时记录日志，不再静默返回）
      */
     private String resolveSearchApiKey() {
         String code = ToolContext.getProviderCode();
-        if (code == null || code.isBlank()) {
-            return null;
+
+        // === 情况一：工具上下文携带了 providerCode —— 只认这个 Provider，绝不猜别的 ===
+        //    （避免「用户实际用的是 DeepSeek，却因兜底被火山搜索接管」这类越界行为）
+        if (code != null && !code.isBlank()) {
+            ProviderConfig config = llmClientManager.getProviderConfig(code);
+            if (config == null) {
+                return unavailable("Provider [" + code + "] 未注册，无法读取联网搜索 Key");
+            }
+            if (!isVolcengineProvider(config)) {
+                // 正常情况：用户当前用的是别的平台（如 DeepSeek），不应刷火山相关日志 → 降级到 debug
+                return unavailableQuiet("当前 Provider [" + code + "] 不是火山方舟（模板 " + templateOf(config)
+                        + "），不启用火山联网搜索");
+            }
+            String key = fromExtraKey(config);
+            if (key == null) {
+                key = fromEnv();
+            }
+            if (key == null) {
+                return unavailable("火山 Provider [" + code + "] 未配置联网搜索 Key（extraConfig.searchApiKey 或环境变量 "
+                        + ENV_KEY_PRIMARY + " / " + ENV_KEY_FALLBACK + "）");
+            }
+            reportStatus("Provider [" + code + "] 的凭证", true);
+            return key;
         }
-        ProviderConfig config = llmClientManager.getProviderConfig(code);
-        if (config == null || !isVolcengineProvider(config)) {
+
+        // === 情况二：工具上下文未携带 providerCode（后台线程 / 子任务 / 非主链路入口）===
+        //    历史实现此处直接 return null 且无任何日志，表现为「明明配了 Key 但搜索完全不生效」，
+        //    排查成本极高；改为「环境变量 → 唯一火山 Provider」两级兜底 + 状态日志。
+        String envKey = fromEnv();
+        if (envKey != null) {
+            reportStatus("环境变量 " + ENV_KEY_PRIMARY + " / " + ENV_KEY_FALLBACK, true);
+            return envKey;
+        }
+
+        List<ProviderConfig> volcProviders = enabledVolcengineProviders();
+        if (volcProviders.size() == 1) {
+            ProviderConfig only = volcProviders.get(0);
+            String key = fromExtraKey(only);
+            if (key != null) {
+                reportStatus("兜底 Provider [" + only.getCode() + "]（工具上下文未携带 providerCode）", true);
+                return key;
+            }
+            return unavailable("工具上下文未携带 providerCode，且唯一火山 Provider ["
+                    + only.getCode() + "] 未配置联网搜索 Key");
+        }
+        if (volcProviders.size() > 1) {
+            return unavailable("工具上下文未携带 providerCode，且存在 " + volcProviders.size()
+                    + " 个火山 Provider（无法确定用哪个），请配置环境变量 " + ENV_KEY_PRIMARY
+                    + " 或检查 providerCode 传递链路");
+        }
+        return unavailable("工具上下文未携带 providerCode，且没有已启用的火山 Provider");
+    }
+
+    /** 已启用的火山 Provider 列表（按 sortOrder 排序，取 LLMClientManager 的配置快照） */
+    private List<ProviderConfig> enabledVolcengineProviders() {
+        List<ProviderConfig> providers = llmClientManager.getAllProviderConfigs();
+        if (providers == null || providers.isEmpty()) {
+            return List.of();
+        }
+        List<ProviderConfig> result = new ArrayList<>();
+        for (ProviderConfig config : providers) {
+            if (isVolcengineProvider(config)) {
+                result.add(config);
+            }
+        }
+        return result;
+    }
+
+    /** 读取 Provider 扩展配置中的联网搜索 Key（不可用时返回 null） */
+    private String fromExtraKey(ProviderConfig config) {
+        if (config == null) {
             return null;
         }
         String key = readExtraValue(config.getExtraConfig(), "searchApiKey");
-        if (isUsableKey(key)) {
-            return key.trim();
-        }
+        return isUsableKey(key) ? key.trim() : null;
+    }
+
+    /** 读取环境变量兜底 Key（主变量优先，其次 WEB_SEARCH_API_KEY） */
+    private String fromEnv() {
         String env = System.getenv(ENV_KEY_PRIMARY);
         if (!isUsableKey(env)) {
             env = System.getenv(ENV_KEY_FALLBACK);
@@ -108,10 +192,10 @@ public class VolcengineSearchApiClient {
     }
 
     private boolean isVolcengineProvider(ProviderConfig config) {
-        String template = config.getRequestTemplate();
-        if (template == null || template.isBlank()) {
-            template = config.getCode();
+        if (config == null) {
+            return false;
         }
+        String template = templateOf(config);
         if (template != null && TEMPLATES_VOLCENGINE.contains(template.toLowerCase(Locale.ROOT))) {
             return true;
         }
@@ -119,7 +203,53 @@ public class VolcengineSearchApiClient {
         return host != null && host.toLowerCase(Locale.ROOT).endsWith("volces.com");
     }
 
-    private static boolean isUsableKey(String key) {
+    /** 取请求模板标识（为空时用 provider code 兜底，与 LLMClientManager 的选型逻辑保持一致） */
+    private static String templateOf(ProviderConfig config) {
+        if (config == null) {
+            return null;
+        }
+        String template = config.getRequestTemplate();
+        return (template == null || template.isBlank()) ? config.getCode() : template;
+    }
+
+    /** 标记不可用并记录原因（同一原因只记一次，正常对话不会刷屏） */
+    private String unavailable(String reason) {
+        reportStatus(reason, false);
+        return null;
+    }
+
+    /**
+     * 标记不可用但只写 debug 日志。
+     *
+     * <p>用于「本来就不该启用」的正常分支（例如用户当前用的是 DeepSeek Provider），
+     * 避免给非火山用户刷无关的 INFO 日志。</p>
+     */
+    private String unavailableQuiet(String reason) {
+        String current = "不可用 ← " + reason;
+        if (!current.equals(lastStatus.getAndSet(current))) {
+            log.debug("火山联网搜索{}", current);
+        }
+        return null;
+    }
+
+    /**
+     * 状态变化时记录一次日志。
+     *
+     * <p>只在「可用 ↔ 不可用」或原因变化时打印，既保证任何失效原因可追溯，又不会每次工具调用都刷日志。</p>
+     */
+    private void reportStatus(String source, boolean available) {
+        String current = (available ? "可用 ← " : "不可用 ← ") + source;
+        if (current.equals(lastStatus.getAndSet(current))) {
+            return;
+        }
+        if (available) {
+            log.info("火山联网搜索{}", current);
+        } else {
+            log.info("火山联网搜索{}（自动回退 Bing/百度/Jina/本地抓取链路）", current);
+        }
+    }
+
+    static boolean isUsableKey(String key) {
         return key != null && !key.isBlank() && !MASK.equals(key.trim()) && !key.contains(MASK);
     }
 

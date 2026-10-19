@@ -46,6 +46,13 @@ public class VolcengineAdapterTest {
 
         // ==================== 多模态 detail 归一 ====================
         imageDetailNormalizedToHigh();
+        imageDetailConfigurable();
+
+        // ==================== 扩展配置：档位白名单 / 全模型开关 / 档位文案 ====================
+        reasoningEffortConfigurable();
+
+        // ==================== 联网搜索凭证判定 ====================
+        searchKeyMaskHandling();
 
         // ==================== 费用中心签名 ====================
         billingAuthorizationStructure();
@@ -138,6 +145,66 @@ public class VolcengineAdapterTest {
         VolcengineArkClient client = new VolcengineArkClient(null, MAPPER, "volcengine",
                 "https://ark.cn-beijing.volces.com/api/v3");
 
+        check("多模态：detail=auto 归一为 high（方舟取值域 low/high/xhigh）", "high", detailOf(client));
+    }
+
+    /** 扩展配置 imageDetail：显式生效 / 大小写不敏感 / 非法值回落 */
+    private static void imageDetailConfigurable() {
+        check("detail：imageDetail=low 生效", "low",
+                detailOf(arcClient(new VolcengineArkClient.Options("low", null, false, null, null))));
+        check("detail：imageDetail 大小写不敏感（XHIGH → xhigh）", "xhigh",
+                detailOf(arcClient(new VolcengineArkClient.Options("XHIGH", null, false, null, null))));
+        check("detail：非法值 auto 回落 high", "high",
+                detailOf(arcClient(new VolcengineArkClient.Options("auto", null, false, null, null))));
+    }
+
+    /** 扩展配置：档位白名单 / 全模型开关 / 档位文案可配 */
+    private static void reasoningEffortConfigurable() {
+        // 1) 自定义白名单：doubao-seed-1-6 命中，deepseek-v4 不再命中
+        VolcengineArkClient custom = arcClient(
+                new VolcengineArkClient.Options(null, List.of("doubao-seed-1-6"), false, null, null));
+        check("reasoning_effort：自定义白名单命中 doubao", "high",
+                String.valueOf(custom.buildRequestBody(messages(), "doubao-seed-1-6-thinking-250715",
+                        0.3, "thinking", false, null).get("reasoning_effort")));
+        check("reasoning_effort：自定义白名单后 deepseek-v4 不下发", "false",
+                String.valueOf(custom.buildRequestBody(messages(), "deepseek-v4-pro-260425",
+                        0.3, "thinking", false, null).containsKey("reasoning_effort")));
+
+        // 2) 全模型开关 + 自定义档位文案（medium / high）
+        VolcengineArkClient all = arcClient(
+                new VolcengineArkClient.Options(null, null, true, "medium", "high"));
+        check("reasoning_effort：全模型开关对任意模型下发（thinking → medium）", "medium",
+                String.valueOf(all.buildRequestBody(messages(), "kimi-k2-250711",
+                        0.3, "thinking", false, null).get("reasoning_effort")));
+        check("reasoning_effort：档位文案可配（thinking_max → high）", "high",
+                String.valueOf(all.buildRequestBody(messages(), "kimi-k2-250711",
+                        0.3, "thinking_max", false, null).get("reasoning_effort")));
+
+        // 3) 非思考模式一律不下发
+        check("reasoning_effort：non-thinking 不下发", "false",
+                String.valueOf(all.buildRequestBody(messages(), "kimi-k2-250711",
+                        0.3, "non-thinking", false, null).containsKey("reasoning_effort")));
+    }
+
+    /** 联网搜索凭证：掩码 / 空值必须视为未配置 */
+    private static void searchKeyMaskHandling() {
+        check("搜索 Key：空串不可用", "false", String.valueOf(VolcengineSearchApiClient.isUsableKey("")));
+        check("搜索 Key：空白不可用", "false", String.valueOf(VolcengineSearchApiClient.isUsableKey("   ")));
+        check("搜索 Key：掩码 **** 不可用", "false",
+                String.valueOf(VolcengineSearchApiClient.isUsableKey("****")));
+        check("搜索 Key：含掩码的脱敏串不可用", "false",
+                String.valueOf(VolcengineSearchApiClient.isUsableKey("sk-abc****123")));
+        check("搜索 Key：正常 Key 可用", "true",
+                String.valueOf(VolcengineSearchApiClient.isUsableKey("sk-search-123")));
+    }
+
+    private static VolcengineArkClient arcClient(VolcengineArkClient.Options options) {
+        return new VolcengineArkClient(null, MAPPER, "volcengine",
+                "https://ark.cn-beijing.volces.com/api/v3", options);
+    }
+
+    /** 构建带 image_url(detail=auto) 的多模态消息 */
+    private static List<Map<String, Object>> imageMessages() {
         List<Map<String, Object>> messages = new ArrayList<>();
         Map<String, Object> user = new LinkedHashMap<>();
         user.put("role", "user");
@@ -155,8 +222,12 @@ public class VolcengineAdapterTest {
         parts.add(imageBlock);
         user.put("content", parts);
         messages.add(user);
+        return messages;
+    }
 
-        Map<String, Object> body = client.buildRequestBody(messages, "doubao-seed-2-1-pro-260628",
+    /** 走一次请求体构建，取出归一后的 image detail */
+    private static String detailOf(VolcengineArkClient client) {
+        Map<String, Object> body = client.buildRequestBody(imageMessages(), "doubao-seed-2-1-pro-260628",
                 0.3, "non-thinking", true, null);
 
         @SuppressWarnings("unchecked")
@@ -165,8 +236,7 @@ public class VolcengineAdapterTest {
         List<Object> bodyParts = (List<Object>) bodyMessages.get(0).get("content");
         @SuppressWarnings("unchecked")
         Map<String, Object> bodyImage = (Map<String, Object>) ((Map<?, ?>) bodyParts.get(1)).get("image_url");
-        check("多模态：detail=auto 归一为 high（方舟取值域 low/high/xhigh）", "high",
-                String.valueOf(bodyImage.get("detail")));
+        return String.valueOf(bodyImage.get("detail"));
     }
 
     // ==================== 费用中心签名 ====================

@@ -1,0 +1,194 @@
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+
+// 执行模式
+export type ExecutionMode = 'auto' | 'manual'
+
+// 各助手的执行模式配置，手动为默认
+export interface ExecutionModes {
+  code_assistant: ExecutionMode
+}
+
+/**
+ * 模型类型
+ *
+ * <p>v2 曾写死 DeepSeek 两个型号（deepseek-v4-pro / deepseek-v4-flash）；
+ * v3 支持多 Provider（火山方舟 / 通义千问 / Anthropic / Ollama 等），
+ * 实际可用模型名由 Provider 的 {@code defaultModel} 与 {@code modelList} 决定，
+ * 故此处放开为字符串，避免新增 Provider 时前端类型需要同步改。</p>
+ */
+export type Model = string
+
+// 思考模式类型
+// non-thinking -> thinking.type=disabled
+// thinking    -> thinking.type=enabled + reasoning_effort=high
+// thinking_max -> thinking.type=enabled + reasoning_effort=max
+export type ThinkingMode = 'non-thinking' | 'thinking' | 'thinking_max'
+
+// 上下文模式类型
+// full     -> 全量注入，所有历史消息完整保留
+// compact  -> 精简模式，非本轮对话的工具调用结果只保留成功/失败摘要，思考过程移除
+export type ContextMode = 'full' | 'compact'
+
+// 各助手的模型配置
+export interface Models {
+  code_assistant: Model
+}
+
+// 各助手的思考模式配置
+export interface ThinkingModes {
+  code_assistant: ThinkingMode
+}
+
+// 主题模式
+export type ThemeMode = 'light' | 'dark' | 'auto'
+
+export const useSettingsStore = defineStore('settings', () => {
+  // 各助手的执行模式，默认 manual
+  const executionModes = ref<ExecutionModes>({
+    code_assistant: 'manual'
+  })
+
+  // 各助手的模型，默认 deepseek-v4-flash
+  const models = ref<Models>({
+    code_assistant: 'deepseek-v4-flash'
+  })
+
+  // 各助手的思考模式，默认 non-thinking
+  const thinkingModes = ref<ThinkingModes>({
+    code_assistant: 'non-thinking'
+  })
+
+  // 主题模式（持久化，刷新不丢失）
+  const theme = ref<ThemeMode>('auto')
+
+  // ==================== 外观（背景图 / 透明度）持久化 ====================
+
+  // 背景图 URL（'' 表示无背景图），形如 /api/appearance/file/xxx.png
+  const bgImageUrl = ref('')
+
+  // 背景图不透明度（0~1）
+  const bgOpacity = ref(0.5)
+
+  // 背景图模糊程度（px）
+  const bgBlur = ref(0)
+
+  // 窗口整体不透明度（0.2~1，Electron 窗口级；浏览器环境无效）
+  const windowOpacity = ref(1)
+
+  // 项目工作目录（持久化，刷新不丢失）
+  const projectRoot = ref('')
+
+  // 上下文模式（持久化，刷新不丢失），默认 full
+  const contextMode = ref<ContextMode>('full')
+
+  /**
+   * 右侧面板形态（P4 · F02）
+   *   true  = 多标签工作区（可拆分屏、可开网页）
+   *   false = 传统单抽屉（旧习惯，随时可切回）
+   * 默认工作区：新能力默认可见，不满意可在「外观设置」或工作区头部一键切回。
+   */
+  const workspaceMode = ref(true)
+
+  // 切换右侧面板形态
+  function setWorkspaceMode(value: boolean) {
+    workspaceMode.value = value
+  }
+
+  // 获取指定助手的执行模式
+  function getMode(agentType: string): ExecutionMode {
+    const key = agentType as keyof ExecutionModes
+    return executionModes.value[key] || 'manual'
+  }
+
+  // 设置指定助手的执行模式
+  function setMode(agentType: string, mode: ExecutionMode) {
+    const key = agentType as keyof ExecutionModes
+    if (key in executionModes.value) {
+      executionModes.value[key] = mode
+    }
+  }
+
+  // 切换指定助手的执行模式
+  function toggleMode(agentType: string) {
+    const key = agentType as keyof ExecutionModes
+    if (key in executionModes.value) {
+      executionModes.value[key] =
+        executionModes.value[key] === 'auto' ? 'manual' : 'auto'
+    }
+  }
+
+  // 获取指定助手的模型
+  function getModel(agentType: string): Model {
+    const key = agentType as keyof Models
+    return models.value[key] || 'deepseek-v4-flash'
+  }
+
+  // 设置指定助手的模型
+  function setModel(agentType: string, model: Model) {
+    const key = agentType as keyof Models
+    if (key in models.value) {
+      models.value[key] = model
+    }
+  }
+
+  // 获取指定助手的思考模式
+  function getThinkingMode(agentType: string): ThinkingMode {
+    const key = agentType as keyof ThinkingModes
+    return thinkingModes.value[key] || 'non-thinking'
+  }
+
+  // 设置指定助手的思考模式
+  function setThinkingMode(agentType: string, mode: ThinkingMode) {
+    const key = agentType as keyof ThinkingModes
+    if (key in thinkingModes.value) {
+      thinkingModes.value[key] = mode
+    }
+  }
+
+  // 获取主题模式
+  function getTheme(): ThemeMode {
+    return theme.value
+  }
+
+  // 设置主题模式
+  function setTheme(mode: ThemeMode) {
+    theme.value = mode
+  }
+
+  // 恢复外观默认（背景图 / 背景不透明度 / 模糊 / 窗口整体透明度）
+  function resetAppearance() {
+    bgImageUrl.value = ''
+    bgOpacity.value = 0.5
+    bgBlur.value = 0
+    windowOpacity.value = 1
+  }
+
+  return {
+    executionModes,
+    models,
+    thinkingModes,
+    theme,
+    projectRoot,
+    contextMode,
+    workspaceMode,
+    // 外观
+    bgImageUrl,
+    bgOpacity,
+    bgBlur,
+    windowOpacity,
+    getMode,
+    setMode,
+    toggleMode,
+    getModel,
+    setModel,
+    getThinkingMode,
+    setThinkingMode,
+    getTheme,
+    setTheme,
+    setWorkspaceMode,
+    resetAppearance
+  }
+}, {
+  persist: true
+})

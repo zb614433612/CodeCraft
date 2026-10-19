@@ -81,7 +81,7 @@ public interface AgentConfigMapper {
     int insert(AgentConfig agentConfig);
 
     @Update("UPDATE agent_config SET name = #{name}, description = #{description}, avatar = #{avatar}, " +
-            "system_prompt = #{systemPrompt}, tool_names = #{toolNames}, model_name = #{modelName}, " +
+            "system_prompt = #{systemPrompt}, tool_names = #{toolNames,jdbcType=VARCHAR}, model_name = #{modelName}, " +
             "thinking_mode = #{thinkingMode}, execution_mode = #{executionMode}, temperature = #{temperature}, work_dir = #{workDir}, " +
             "sort_order = #{sortOrder}, enabled = #{enabled}, is_default = #{isDefault}, provider_id = #{providerId}, " +
             "provider_code = #{providerCode}, character_profile = #{characterProfile}, updated_at = #{updatedAt} WHERE id = #{id}")

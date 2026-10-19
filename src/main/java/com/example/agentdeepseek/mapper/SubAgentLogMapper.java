@@ -65,6 +65,21 @@ public interface SubAgentLogMapper {
     @ResultMap("subAgentLogResultMap")
     List<SubAgentLog> selectByConversationId(@Param("conversationId") Long conversationId);
 
+    /**
+     * 列表查询（轻量版）：<b>不查 full_messages</b>。
+     * <p>
+     * 子Agent面板只需要状态 / 摘要 / 文件变更等元信息，而 full_messages 是整段消息历史 JSON
+     * （单条可达数十 KB）。原 {@link #selectByConversationId} 会把每条记录的全部历史都拉出来，
+     * 一次列表请求在长会话下就会变成几百 KB 的无用传输。
+     * </p>
+     */
+    @Select("SELECT id, agent_id, parent_conversation_id, parent_turn_id, name, status, " +
+            "instructions, context_mode, tools, skills, summary, file_changes, " +
+            "compile_result, iterations_used, max_iterations, error_message, created_at, completed_at, updated_at " +
+            "FROM sub_agent_log WHERE parent_conversation_id = #{conversationId} ORDER BY created_at ASC")
+    @ResultMap("subAgentLogResultMap")
+    List<SubAgentLog> selectMetaByConversationId(@Param("conversationId") Long conversationId);
+
     @Update("UPDATE sub_agent_log SET status = #{status}, summary = #{summary}, " +
             "full_messages = #{fullMessages}, file_changes = #{fileChanges}, " +
             "compile_result = #{compileResult}, iterations_used = #{iterationsUsed}, " +
