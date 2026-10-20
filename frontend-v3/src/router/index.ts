@@ -160,13 +160,34 @@ router.beforeEach(async (to) => {
  *
  * <p>只做两件事：清会话、带原地址回登录页。放在这里而不是 http-client 内部，
  * 是因为 http-client 引入 router 会形成 router → session → http-client → router 的循环依赖。</p>
+ *
+ * <p><b>为什么要 catch + 改 hash 兜底</b>：`router.replace` 返回 Promise，
+ * 并发导航（例如同时有别的 push / 用户点菜单）会打断本次跳转，导航被打断后
+ * 用户仍停在业务页 —— 观感就是「提示登录过期，但没退出」。这里在失败时直接改
+ * hash（hash 路由下等价于一次导航），不依赖 router 的导航队列。</p>
  */
 setUnauthorizedHandler(() => {
   clearSession()
   const current = router.currentRoute.value
   if (current.path === LOGIN_PATH) return
   const redirect = current.fullPath && current.fullPath !== '/' ? current.fullPath : ''
-  void router.replace({ path: LOGIN_PATH, query: redirect ? { redirect } : undefined })
+  const target = { path: LOGIN_PATH, query: redirect ? { redirect } : undefined }
+  /** 兜底跳转：不依赖 router 的导航队列，hash 模式下等价于一次正常导航 */
+  const fallback = () => {
+    const query = redirect ? `?redirect=${encodeURIComponent(redirect)}` : ''
+    window.location.hash = `#${LOGIN_PATH}${query}`
+  }
+  router
+    .replace(target)
+    .then(failure => {
+      /*
+        vue-router 4 在「导航被打断」时**不抛错**，而是 resolve 一个 NavigationFailure。
+        并发场景很常见：401 风暴恰逢用户点了菜单 / 流式事件触发了 replace。
+        不处理的话用户就停在被取消的页面上，又是「提示过期但没退出」。
+      */
+      if (failure) fallback()
+    })
+    .catch(() => fallback())
 })
 
 /** 同步页面标题：`页面名 · CodeCraft` */

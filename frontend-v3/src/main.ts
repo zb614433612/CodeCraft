@@ -26,6 +26,9 @@ import { ensureIdentity, refreshProfile } from './utils/session'
 
 import '../assets/tokens.css'
 import '../assets/app.css'
+/* 动效层必须最后引入：它集中声明全站 keyframes 与入场动画，
+ * 并要在组件样式（app.css）之后，才能覆盖个别组件的 transition 组合。 */
+import '../assets/motion.css'
 
 const app = createApp(App)
 

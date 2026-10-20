@@ -9,7 +9,7 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-3.0.5-7C5CFC" alt="v3.0.5">
+    <img src="https://img.shields.io/badge/version-3.0.6-7C5CFC" alt="v3.0.6">
     <img src="https://img.shields.io/badge/Java-17%2B-blue?logo=openjdk" alt="Java 17+">
     <img src="https://img.shields.io/badge/Spring%20Boot-3.4-brightgreen?logo=springboot" alt="Spring Boot 3.4">
     <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vuedotjs" alt="Vue 3.5">

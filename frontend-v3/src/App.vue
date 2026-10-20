@@ -151,6 +151,8 @@ import { useUserStore } from './store/user'
 import { useSettingsStore } from './store/settings'
 import { useFileRefStore } from './store/file-ref'
 import { clearSession } from './utils/session'
+/* token 失效出口：聊天流里的 401 / 「登录已过期」必须把用户送回登录页（见 consumeChatStream 的 catch） */
+import { notifyUnauthorized } from './utils/http-client'
 import { switchToLegacy } from './utils/ui-version'
 import { logout as apiLogout } from './api/user'
 import type { ApprovalPayload, ConversationDetail } from './views/ChatView.vue'
@@ -2602,10 +2604,16 @@ async function consumeChatStream(
             if (taskItems) setSessionTasks(taskItems, key)
             /*
               技能命中（兜底通道）：summaries 通道缺失时，从技能加载结果反解。
-              `skill(action=load)` 的固定输出形如「【技能详情】xxx (ID:12)」，
-              与经典版同一套正则；命中后挂在消息上，由 ChatMessage 显示 🎯 标签。
+              `skill(action=load)` 的固定输出形如「【技能详情】xxx (ID:12)」。
+
+              ★ 只对 skill 工具解析：以前这里无条件扫描**所有**工具输出，
+              而 file_explorer 读 skill-hit.ts / App.vue / 文档时，输出里全是我们自己写的
+              示例文本「【技能详情】xxx (ID:n)」，于是被当成一次真实命中，
+              界面上冒出「🎯 命中技能：xxx」——这就是「技能名显示 XXX」的真因。
+              解析函数内部另有「行首锚定 + 名字白名单」两道闸门。
             */
-            const skillHit = parseSkillHitFromToolOutput(toolContent)
+            const maybeSkillTool = name === 'skill' || name === '工具'
+            const skillHit = maybeSkillTool ? parseSkillHitFromToolOutput(toolContent) : null
             if (skillHit) {
               appendSkillHits(assistant, [skillHit])
             }
@@ -2712,12 +2720,21 @@ async function consumeChatStream(
     const message = err?.message || '发送失败'
     if (message !== '__USER_ABORT__') {
       /*
-        token 失效：SSE 层已清 token 并跳登录页（见 utils/sse-client 的 401 分支）。
-        这里再弹一条「发送失败」只会在登录页上留一块红字 —— ToastHost 挂在根组件，
-        不随路由切换消失，所以直接跳过提示。
+        token 失效：这里**再主动通知一次**未授权出口，而不是只「跳过提示」。
+
+        SSE 层确实会在 401 时调用 notifyUnauthorized，但错误可能来自别的分支
+        （后端把 401 包成 200 + 业务码、中间层改写状态码、或流在中途被掐断只剩
+        一句「登录已过期」）。只要文案命中，就说明这一轮已经拿不到有效身份，
+        统一清 token + 跳登录页，绝不能停在聊天页继续让用户点。
+
+        跳过 toast 的原因：ToastHost 挂在根组件，不随路由切换消失，
+        这里弹「发送失败」只会在登录页上留一块红字。
       */
-      // consumeChatStream 约定返回会话 key（调用方用它收尾），这里提前退出也要带上
-      if (message.includes('HTTP 401') || message.includes('登录已过期')) return key
+      if (message.includes('HTTP 401') || message.includes('登录已过期')) {
+        notifyUnauthorized('登录已过期，请重新登录')
+        // consumeChatStream 约定返回会话 key（调用方用它收尾），这里提前退出也要带上
+        return key
+      }
       if (activeConversationId.value === key) chatError.value = message
       if (!assistant.content) assistant.content = message
       toast.error('发送失败', { description: abbreviate(message, 200) })

@@ -1,0 +1,574 @@
+/* ============================================================================
+ * CodeCraft 动效层（motion.css）
+ * ----------------------------------------------------------------------------
+ * 一句话约定：**全站动画只在这一个文件里定义与挂载**，组件样式（app.css）不再写
+ * @keyframes，也不单独声明入场 animation。
+ *
+ * 为什么要单独一层（而不是散在 app.css 的 55 个 section 里）：
+ *   1) 调手感只改 §1 的 --dur-* / --ease-*，不用翻 9000 行 app.css；
+ *   2) 同类元素（卡片 / 列表行 / 浮层 / 折叠体）复用同一个 keyframes 与同一档时长，
+ *      不会出现「这个卡片 .35s、那个 .2s」的不统一；
+ *   3) 降级只有一个开关（系统 prefers-reduced-motion 或 html[data-motion="reduced"]）。
+ *
+ * 三条硬约定（踩过的坑，改动画前先读）：
+ *   · 入场动画只用 animation + fill-mode: backwards，**禁止 forwards / both**。
+ *     残留的 transform 会让后代的 position: fixed 改为相对该元素定位，
+ *     表现为「抽屉 / 下拉菜单跑到页面中间」（本仓库 v3.0.5 侧栏菜单踩过一次）。
+ *   · 分页 / 窗口化列表（聊天消息）**不加位移入场动画**，见 §6 的详细注释。
+ *   · fixed 浮层（抽屉 / 灯箱 / Toast）不要放进带 transform 的动画容器里。
+ *
+ * 引入顺序：tokens.css → app.css → motion.css（本文件最后加载，因此可覆盖组件样式）。
+ * ========================================================================== */
+
+/* ==========================================================================
+ * §1 动效 Token —— 全站时长 / 缓动只在这里定义
+ * --------------------------------------------------------------------------
+ * 档位怎么选：
+ *   --dur-1 微交互：按钮按下、图标 hover、开关拨动（要「立刻」有反馈）
+ *   --dur-2 常规：底色 / 描边 / 颜色渐变、hover 抬升
+ *   --dur-3 浮层：下拉、弹层、抽屉、页面切换
+ *   --dur-4 强调：卡片入场、空状态、一次性大动作
+ * 缓动怎么选：
+ *   --ease-out    快起慢收，用于「出现 / 位移」（默认首选，观感最利落）
+ *   --ease-in-out 两端慢，用于「循环呼吸 / 状态来回」
+ *   --ease-spring 轻微回弹，只给「值得庆祝」的小元素（技能标签、徽标），别用于大块
+ * ========================================================================== */
+:root {
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 260ms;
+  --dur-4: 340ms;
+
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.46, .64, 1);
+
+  /* 列表错峰：第 N 项延时 = (N-1) × --stagger-step */
+  --stagger-step: 26ms;
+}
+
+/* ==========================================================================
+ * §2 Keyframes 库 —— 新动效必须从这里挑，不要就地另写
+ * --------------------------------------------------------------------------
+ * 命名：cc-<动作>[-<方向>]，动作词只用下面这几个，避免同义满天飞：
+ *   fade / up / down / left / right / pop / rise / spin / pulse / blink /
+ *   ring / bounce / slide / float / glow / shimmer
+ * ========================================================================== */
+
+/* ---- 2.1 通用入场 ---- */
+@keyframes cc-fade-in {
+  from { opacity: 0; }
+}
+
+@keyframes cc-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+}
+
+@keyframes cc-fade-down {
+  from { opacity: 0; transform: translateY(-6px); }
+}
+
+@keyframes cc-slide-in-left {
+  from { opacity: 0; transform: translateX(-8px); }
+}
+
+@keyframes cc-pop-in {
+  from { opacity: 0; transform: scale(.96); }
+}
+
+/* 折叠体展开：位移比卡片更小，避免把下方内容推得太明显 */
+@keyframes cc-rise-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+/* 技能标签这类「刚刚发生」的小徽标：带一点回弹 */
+@keyframes cc-tag-pop {
+  from { opacity: 0; transform: translateY(-3px) scale(.9); }
+}
+
+/* ---- 2.2 循环 / 呼吸 ---- */
+@keyframes cc-spin { to { transform: rotate(360deg); } }
+
+@keyframes cc-blink { 50% { opacity: 0; } }
+
+@keyframes cc-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .45; transform: scale(.82); }
+}
+
+/* 柔和透明度呼吸：给文字 / 图标用，不带缩放（不触发重排感） */
+@keyframes cc-soft-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
+
+/* 光圈扩散：给「等待你处理」这类需要吸引注意的点 */
+@keyframes cc-pending-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .45); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0); }
+}
+
+@keyframes cc-dock-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 45%, transparent); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* P2P「正在输入」三点：三颗点错峰呼吸 */
+@keyframes cc-p2p-blink {
+  0%, 80%, 100% { opacity: .25; }
+  40% { opacity: 1; }
+}
+
+/* 空状态装饰：缓慢浮动 + 主色光晕呼吸 */
+@keyframes cc-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+@keyframes cc-glow {
+  0%, 100% { box-shadow: 0 10px 28px rgba(124, 92, 252, .28); }
+  50% { box-shadow: 0 10px 34px rgba(124, 92, 252, .44); }
+}
+
+/* ---- 2.3 进度 / 加载 ---- */
+/* 不确定进度条：一条 40% 宽的亮块从左扫到右 */
+@keyframes cc-bar-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(350%); }
+}
+
+/* 进度条表面流光：叠加在 fill 上，表达「还在跑」 */
+@keyframes cc-shimmer {
+  from { background-position: -160% 0; }
+  to { background-position: 260% 0; }
+}
+
+/* ---- 2.4 浮层（沿用既有名字，别改：app.css 有引用） ---- */
+@keyframes cc-dock-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes cc-dirpick-in { from { opacity: 0; } }
+@keyframes cc-dirpick-panel-in { from { opacity: 0; transform: scale(.97); } }
+
+/* ==========================================================================
+ * §3 页面与外壳
+ * ========================================================================== */
+
+/* ---- 3.1 侧栏折叠：列宽平滑收放 ---- */
+/* 只动 grid-template-columns，不动字体/内边距 —— 折叠态的文字由 app.css 的
+ * `.cc-shell.is-collapsed …{display:none}` 直接藏掉，收放过程只有图标在平移。 */
+.cc-shell {
+  transition: grid-template-columns var(--dur-3) var(--ease-out);
+}
+
+/* ---- 3.2 路由页面入场 ---- */
+/* 页面组件随路由真实挂载 / 卸载，所以新页面的根节点会重新播放一次动画。
+ * `.cc-chat` 例外（见下）：聊天页内挂 fixed 抽屉，不能有 transform。 */
+.cc-main > * {
+  animation: cc-fade-up var(--dur-3) var(--ease-out) backwards;
+}
+.cc-main > .cc-chat {
+  animation: cc-fade-in var(--dur-2) var(--ease-out) backwards;
+}
+
+/* 登录页：整页淡入 + 卡片轻微弹入 */
+.cc-login {
+  animation: cc-fade-in var(--dur-3) var(--ease-out) backwards;
+}
+.cc-login__card {
+  animation: cc-pop-in var(--dur-4) var(--ease-out) backwards;
+}
+
+/* ==========================================================================
+ * §4 侧栏
+ * ========================================================================== */
+
+.cc-sidebar__head {
+  animation: cc-fade-in var(--dur-3) var(--ease-out) backwards;
+}
+
+.cc-new-chat {
+  animation: cc-rise-in var(--dur-3) var(--ease-out) backwards;
+}
+
+/* 一级导航：从左滑入，8 项错峰（再多也没意义，首屏之外用户看不到） */
+.cc-nav__item {
+  animation: cc-slide-in-left var(--dur-3) var(--ease-out) backwards;
+}
+.cc-nav__item:nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+.cc-nav__item:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.cc-nav__item:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.cc-nav__item:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.cc-nav__item:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.cc-nav__item:nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
+.cc-nav__item:nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+
+/* 会话列表：只淡入 + 2px 位移。
+ * 会话项在「搜索过滤 / 新建会话」时会被插入，延迟必须短、位移必须小，
+ * 否则每敲一个字列表就跳一下。 */
+.cc-conv-item {
+  animation: cc-rise-in var(--dur-2) var(--ease-out) backwards;
+}
+.cc-conv-item:nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+.cc-conv-item:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.cc-conv-item:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.cc-conv-item:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.cc-conv-item:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.cc-conv-item:nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
+.cc-conv-item:nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+
+/* ==========================================================================
+ * §5 列表与卡片（管理页）
+ * --------------------------------------------------------------------------
+ * 两类动效分开：
+ *   入场 —— 淡入 + 上浮，卡片刻度大一点（8px），行只 4px（一行一行浮起来太吵）。
+ *   hover —— **只给「信息卡」抬升**；普通列表行保持 app.css 的「只变底色」约定
+ *            （行是密集点击区，抬升会让鼠标追着元素跑）。
+ * ========================================================================== */
+
+/* ---- 5.1 卡片入场 ---- */
+.cc-agent-card,
+.cc-data-card,
+.cc-look-card,
+.cc-quick__card,
+.cc-profile-card,
+.cc-about-card,
+.cc-vercard {
+  animation: cc-fade-up var(--dur-4) var(--ease-out) backwards;
+}
+
+/* 同屏多张卡：前 6 张错峰，之后同步（避免长列表末尾要等半秒才出现） */
+.cc-agent-card:nth-child(2),
+.cc-data-card:nth-child(2),
+.cc-look-card:nth-child(2),
+.cc-quick__card:nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+
+.cc-agent-card:nth-child(3),
+.cc-data-card:nth-child(3),
+.cc-look-card:nth-child(3),
+.cc-quick__card:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+
+.cc-agent-card:nth-child(4),
+.cc-data-card:nth-child(4),
+.cc-look-card:nth-child(4),
+.cc-quick__card:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+
+.cc-agent-card:nth-child(5),
+.cc-data-card:nth-child(5),
+.cc-look-card:nth-child(5),
+.cc-quick__card:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+
+.cc-agent-card:nth-child(6),
+.cc-data-card:nth-child(6),
+.cc-look-card:nth-child(6),
+.cc-quick__card:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+
+/* ---- 5.2 卡片 hover 抬升 ---- */
+/* 这几张都是「一屏 N 个的信息卡」，抬升能明确指向当前鼠标所在卡片。
+ * 重写 transition：app.css 里这几处只声明了 border-color / box-shadow，
+ * 不补 transform 会瞬跳。 */
+.cc-agent-card,
+.cc-data-card,
+.cc-look-card,
+.cc-quick__card {
+  transition:
+    transform var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out);
+}
+.cc-agent-card:hover,
+.cc-data-card:hover,
+.cc-look-card:hover,
+.cc-quick__card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* 快捷指令卡里的图标：hover 时轻轻「点头」，让整张卡有回应 */
+.cc-quick__icon {
+  transition: transform var(--dur-2) var(--ease-spring);
+}
+.cc-quick__card:hover .cc-quick__icon {
+  transform: scale(1.08) rotate(-4deg);
+}
+
+/* ---- 5.3 列表行入场（技能 / MCP / 定时任务 / 经验 / 数据库 / 文件 / 云文件 /
+ *         P2P / 模型 / 日志 / 用户 / 设置项）----
+ * 一律只淡入：行高小、密度大，加位移会让整页「抖一下」。 */
+.cc-skill-row,
+.cc-mcp-row,
+.cc-sched-row,
+.cc-lesson-row,
+.cc-db-row,
+.cc-file-row,
+.cc-cloud-row,
+.cc-p2p-row,
+.cc-prov-row,
+.cc-log-row,
+.cc-user-row,
+.cc-set-item,
+.cc-task-item,
+.cc-cluster-row {
+  animation: cc-fade-in var(--dur-2) var(--ease-out) backwards;
+}
+
+/* ==========================================================================
+ * §6 消息流
+ * --------------------------------------------------------------------------
+ * ！聊天消息项（.cc-msg-me / .cc-msg-ai）故意不加位移入场动画。
+ *   消息列表是「窗口化」渲染（utils/virtual-list 只保留尾部一段）：
+ *   上滑加载更早历史时会在头部插入节点、滚动到顶还会移除尾部节点，
+ *   位移动画会随插拔反复重播，配合滚动锚点校正就变成可见的「跳动」。
+ *   经典版（frontend/）在 .message-item 上也有同样的注释与结论 —— 保持一致。
+ *   所以这里的动画全部给到**消息内部**一次性展开的小孩件上。
+ * ========================================================================== */
+
+/* ---- 6.1 技能命中标签：本轮真正跑过技能时弹出 ---- */
+.cc-skill-hit {
+  animation: cc-tag-pop var(--dur-3) var(--ease-spring) backwards;
+}
+
+/* ---- 6.2 折叠体展开（display:none → block 时自动重播一次） ---- */
+.cc-proc__body.is-open {
+  animation: cc-rise-in var(--dur-2) var(--ease-out) backwards;
+}
+.cc-tool-card__body.is-open {
+  animation: cc-rise-in var(--dur-2) var(--ease-out) backwards;
+}
+
+/* ---- 6.3 工具卡「运行中」：状态字呼吸 + 边框微亮 ---- */
+.cc-tool-card__state.is-running {
+  animation: cc-soft-pulse 1.5s var(--ease-in-out) infinite;
+}
+
+/* ---- 6.4 审批 / 询问卡片停靠区 ----
+ * `.cc-approval-dock` 由 v-if 控制（有新回执才挂载），所以整块挂动画即可，
+ * 每次「任务暂停等你回执」都会自然滑入一次。 */
+.cc-approval-dock {
+  animation: cc-dock-in var(--dur-3) var(--ease-out) backwards;
+}
+
+/* ---- 6.5 中断横幅：从上方落下 ---- */
+.cc-banner {
+  animation: cc-fade-down var(--dur-3) var(--ease-out) backwards;
+}
+
+/* ---- 6.6 上滑加载更早历史：提示文字呼吸 ---- */
+.cc-stream__window-loading {
+  animation: cc-soft-pulse 1.4s var(--ease-in-out) infinite;
+}
+
+/* ---- 6.7 任务看板条目 / P2P 消息 ----
+ * 这两处都是「按需挂载、量不大」的列表（任务看板 v-if 展开、P2P 会话不做窗口化），
+ * 所以可以放心给入场动画；与 §6 开头说的「聊天消息」不同。 */
+.cc-taskpop__item,
+.cc-p2p-msg {
+  animation: cc-rise-in var(--dur-2) var(--ease-out) backwards;
+}
+.cc-p2p-sys {
+  animation: cc-fade-in var(--dur-2) var(--ease-out) backwards;
+}
+
+/* ==========================================================================
+ * §7 输入区
+ * ========================================================================== */
+
+/* 附件 chip：粘贴 / 选择后弹出 */
+.cc-attach {
+  animation: cc-pop-in var(--dur-2) var(--ease-spring) backwards;
+}
+
+/* 提示词优化状态条：从输入框上方长出 */
+.cc-opt-bar {
+  animation: cc-fade-down var(--dur-2) var(--ease-out) backwards;
+}
+
+/* 发送 / 圆形工具按钮的按下反馈（见 §10 统一处理，这里只补各自的特例） */
+.cc-send-btn {
+  transition:
+    background var(--dur-2) var(--ease-out),
+    transform var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out);
+}
+
+/* ==========================================================================
+ * §8 浮层：下拉 / 弹层 / 灯箱
+ * --------------------------------------------------------------------------
+ * 这些浮层都是 `display:none → display:flex/block`（.is-open）切换，
+ * 所以 animation 会在每次打开时重播 —— 不用 JS、不用 Vue Transition。
+ * ========================================================================== */
+.cc-agentpick__pop.is-open,
+.cc-attach-menu.is-open,
+.cc-conv-menu.is-open {
+  animation: cc-pop-in var(--dur-2) var(--ease-out) backwards;
+  transform-origin: top center;
+}
+/* 任务面板 / 子 Agent 面板：模板用 v-if 挂载（每次打开都是新节点），
+ * 所以直接挂动画即可，不需要 .is-open 状态类。
+ * 二者都是「贴底向上弹」，原点放 bottom center 更自然。 */
+.cc-taskpop,
+.cc-subagentpop {
+  animation: cc-fade-up var(--dur-2) var(--ease-out) backwards;
+  transform-origin: bottom center;
+}
+
+/* 图片灯箱：整层淡入（内部图片自己有缩放拖拽逻辑，不再叠加动画） */
+.cc-lb {
+  animation: cc-fade-in var(--dur-2) var(--ease-out) backwards;
+}
+.cc-lb__img {
+  animation: cc-pop-in var(--dur-3) var(--ease-out) backwards;
+}
+
+/* ==========================================================================
+ * §9 反馈与加载
+ * ========================================================================== */
+
+/* 空状态：logo 缓慢浮动 + 光晕呼吸（旧版 heroBounce / orbFloat 的克制版） */
+.cc-empty__logo {
+  animation: cc-float 4s var(--ease-in-out) infinite, cc-glow 4s var(--ease-in-out) infinite;
+}
+
+/* Toast / Confirm 的图标弹一下（外层进出场由 app.css 的 Transition 负责） */
+.cc-toast__icon,
+.cc-confirm__icon {
+  animation: cc-pop-in var(--dur-3) var(--ease-spring) backwards;
+}
+
+/* ---- 9.1 进度类 ---- */
+/* 版本下载进度：给填充条叠一层流光，避免「卡住了」的错觉 */
+.cc-vercard__progress-fill {
+  position: relative;
+  overflow: hidden;
+}
+.cc-vercard__progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, .45) 50%,
+    transparent 100%
+  );
+  background-size: 160% 100%;
+  animation: cc-shimmer 1.6s linear infinite;
+  pointer-events: none;
+}
+
+/* 模型额度进度：只让填充条带轻微呼吸，不做流光（这条例是「静态额度」，不是任务） */
+.cc-prov-quota__fill {
+  animation: cc-soft-pulse 2.4s var(--ease-in-out) infinite;
+}
+
+/* 说明：`cc-bar-slide`（不确定进度条从左扫到右）暂时没有消费方 ——
+ * 目前工具调用用的是「状态字呼吸 + 边框微亮」（§6.3），
+ * 保留 keyframes 作为后续「长任务进度」的复用资产，挂载时记得加在
+ * 宽度约 40% 的绝对定位内层上（参考经典版 .tool-loading-bar-inner）。 */
+
+/* ==========================================================================
+ * §10 微交互（全站统一手感）
+ * --------------------------------------------------------------------------
+ * 按下缩放只做「按钮类」，不动列表行与卡片（后者靠 hover 抬升表达）。
+ * 120ms 是刻意压得比 hover 更短：按下必须比抬起更「跟手」。
+ * ========================================================================== */
+.cc-btn,
+.cc-icon-btn,
+.cc-text-btn,
+.cc-round-btn,
+.cc-send-btn,
+.cc-toast__close,
+.cc-approval button {
+  transition:
+    background-color var(--dur-2) var(--ease-out),
+    color var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+.cc-btn:active:not(:disabled),
+.cc-icon-btn:active:not(:disabled),
+.cc-text-btn:active:not(:disabled),
+.cc-round-btn:active:not(:disabled),
+.cc-send-btn:active:not(:disabled) {
+  transform: scale(.96);
+}
+
+/* 图标按钮 hover 时图标轻微放大：只有 1.06，起到「指向」作用又不晃眼 */
+.cc-icon-btn .cc-i {
+  transition: transform var(--dur-2) var(--ease-out);
+}
+.cc-icon-btn:hover .cc-i {
+  transform: scale(1.08);
+}
+
+/* 开关滑块：用 spring 缓动，拨动时有一点「咔哒」的手感（比线性更像实体开关） */
+.cc-switch::after {
+  transition: transform var(--dur-2) var(--ease-spring);
+}
+
+/* 分段控件 / 标签页切换：新选中的那一格淡入，避免「啪」地跳色 */
+.cc-seg button.is-active {
+  animation: cc-fade-in var(--dur-1) var(--ease-out) backwards;
+}
+
+/* ==========================================================================
+ * §12 可复用工具类 —— 组件里直接加 class 即可，不必再写 CSS
+ * --------------------------------------------------------------------------
+ * 用法示例：
+ *   <div class="cc-anim-up">…</div>            // 上浮淡入（卡片、面板）
+ *   <span class="cc-anim-pop">…</span>         // 弹出（气泡、徽标）
+ *   <li class="cc-anim-fade">…</li>            // 纯淡入（列表行）
+ *   <div class="cc-anim-stagger">…</div>       // 容器：子元素自动错峰（前 8 个）
+ * 注意：cc-anim-stagger 的子元素会继承 §2 的 keyframes，因此**不要**同时给子元素
+ * 指定别的 animation，否则后者会被覆盖。
+ * ========================================================================== */
+.cc-anim-fade { animation: cc-fade-in var(--dur-2) var(--ease-out) backwards; }
+.cc-anim-up { animation: cc-fade-up var(--dur-4) var(--ease-out) backwards; }
+.cc-anim-down { animation: cc-fade-down var(--dur-3) var(--ease-out) backwards; }
+.cc-anim-pop { animation: cc-pop-in var(--dur-3) var(--ease-spring) backwards; }
+.cc-anim-rise { animation: cc-rise-in var(--dur-2) var(--ease-out) backwards; }
+
+.cc-anim-stagger > * { animation: cc-fade-up var(--dur-4) var(--ease-out) backwards; }
+.cc-anim-stagger > :nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+.cc-anim-stagger > :nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.cc-anim-stagger > :nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.cc-anim-stagger > :nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.cc-anim-stagger > :nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.cc-anim-stagger > :nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
+.cc-anim-stagger > :nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+
+/* ==========================================================================
+ * §11 降级：系统「减少动态效果」/ 手动开关
+ * --------------------------------------------------------------------------
+ * 两个入口：
+ *   1) 系统偏好 prefers-reduced-motion（Windows「显示动画」关掉、macOS 辅助功能）
+ *   2) html[data-motion="reduced"]：留给外观设置页以后做「动画开关」，现在写这个
+ *      属性就能全局降级，不必改组件。
+ * 做法统一为「把时长压到 0.01ms」而不是 animation:none：
+ * 保留 animationend 事件与最终态（loading 转圈会转完一圈停住，而不是消失）。
+ * ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html[data-motion="reduced"] *,
+html[data-motion="reduced"] *::before,
+html[data-motion="reduced"] *::after {
+  animation-duration: .01ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+  scroll-behavior: auto !important;
+}

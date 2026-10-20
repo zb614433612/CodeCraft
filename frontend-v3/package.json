@@ -1,7 +1,7 @@
 {
   "name": "codecraft-vue3",
   "private": true,
-  "version": "3.0.5",
+  "version": "3.0.6",
   "type": "module",
   "description": "CodeCraft 桌面端前端（v3 骨架，逐层迁移自 v2）",
   "scripts": {

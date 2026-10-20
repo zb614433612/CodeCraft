@@ -4,7 +4,9 @@
  * 命名规范：cc- 前缀 + BEM 简化（block / block__element / block--modifier）
  * 依赖：tokens.css（必须先引入）
  * 原则：
- *   1) 列表项 hover 只允许背景/颜色变化，禁止 border / shadow / transform；
+ *   1) 列表行 hover 只允许背景 / 颜色变化；「信息卡」可抬升（由 motion.css §5.2 统一声明）。
+ *      本文件**不写任何 @keyframes 与入场 animation** —— 全站动效集中在 assets/motion.css，
+ *      改手感（时长 / 缓动 / 错峰）只改那一个文件；
  *   2) 阴影只用于浮层与弹层，常规容器一律 1px 描边；
  *   3) 图标统一 16px、stroke: currentColor；
  *   4) 交互元素最小点击区 28×28。
@@ -580,13 +582,7 @@ html.cc-electron .cc-login { padding-top: 32px; }
   background: var(--warn);
   animation: cc-pending-pulse 1.6s ease-in-out infinite;
 }
-@keyframes cc-pending-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .45); }
-  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .cc-conv__pending { animation: none; }
-}
+/* keyframes cc-pending-pulse 与 reduced-motion 降级统一在 assets/motion.css（§2.2 / §11） */
 .cc-conv__more {
   width: 20px;
   height: 20px;
@@ -1042,9 +1038,18 @@ html.cc-electron .cc-login { padding-top: 32px; }
   font-family: var(--font-chat);
   font-size: var(--fs-chat);
   line-height: var(--lh-chat);
+  /* 用户输入是「要读清」的内容：浅紫底上用主文字色，不跟随 AI 正文的白灰层次 */
+  color: var(--text-1);
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 用户消息若带 markdown（重新生成 / 粘贴格式化文本），同样不给它降灰 */
+.cc-msg-me__bubble .cc-md,
+.cc-msg-me__bubble .cc-md strong,
+.cc-msg-me__bubble .cc-md h1,
+.cc-msg-me__bubble .cc-md h2,
+.cc-msg-me__bubble .cc-md h3,
+.cc-msg-me__bubble .cc-md h4 { color: var(--text-1); }
 /*
  * 用户头像：与助手头像同为 22px 方，视觉上左右对称。
  * 后端可能返回 emoji / 单字（此时直接显示文本）或图片 URL（<img> 填充）。
@@ -1079,6 +1084,16 @@ html.cc-electron .cc-login { padding-top: 32px; }
   font-size: var(--fs-sm);
   color: var(--text-3);
 }
+/*
+  Agent 名字：消息头里最该被读到的信息，比模型标签 / 时间戳高一档明度 + 600。
+  以前整行统一 --text-3，「编码助手」和「生成中…」一样淡，扫一眼分不清谁是发送方。
+*/
+.cc-msg-ai__name {
+  color: var(--text-2);
+  font-weight: 600;
+}
+/* 生成中状态：比占位文字（--text-4）可读，但不抢名字与正文的注意力 */
+.cc-msg-ai__status { color: var(--text-3); }
 .cc-msg-ai__avatar {
   width: 22px;
   height: 22px;
@@ -1104,26 +1119,32 @@ html.cc-electron .cc-login { padding-top: 32px; }
   font-family: var(--font-chat);
   font-size: var(--fs-chat);
   line-height: var(--lh-chat);
-  color: var(--text-1);
+  /*
+    正文底色（不是纯白）：经典版 .message-text 用的是 --text-2，标题/加粗才用 --text-1。
+    层级关系：正文「白灰」→ 标题/加粗「近白」→ 代码/链接「主色」，这样长回复才有重点。
+    结构与内层 .cc-md 保持一致，纯文本兜底（未经 markdown）也得到同样的灰度。
+  */
+  color: var(--text-2);
   word-break: break-word;
   /* v3 已接 markdown 渲染：换行由块级元素（p / li / pre）自己表达，
      这里若保留 pre-wrap 会把 markdown 源码里的缩进与空行原样显示出来。
      纯文本兜底场景由 ChatMessage 转成 <p> 输出，同样不需要 pre-wrap。 */
   white-space: normal;
 }
-.cc-msg-ai__body p { margin: 0 0 var(--sp-3); }
+.cc-msg-ai__body p { margin: 0 0 var(--sp-2); }
 .cc-msg-ai__body p:last-child { margin-bottom: 0; }
 .cc-msg-ai__body h3 {
   margin: var(--sp-4) 0 var(--sp-2);
   font-size: var(--fs-lg);
   font-weight: 700;
+  color: var(--text-1);
   letter-spacing: -.1px;
 }
 .cc-msg-ai__body h3:first-child { margin-top: 0; }
 .cc-msg-ai__body ul,
-.cc-msg-ai__body ol { margin: var(--sp-2) 0 var(--sp-3); padding-left: 1.35em; }
+.cc-msg-ai__body ol { margin: var(--sp-2) 0 var(--sp-2); padding-left: 1.35em; }
 .cc-msg-ai__body li { margin: 5px 0; }
-.cc-msg-ai__body li::marker { color: var(--text-3); }
+.cc-msg-ai__body li::marker { color: var(--text-2); }
 .cc-msg-ai__body code {
   font-family: var(--mono);
   font-size: 12.5px;
@@ -1200,7 +1221,7 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
   background: var(--accent);
   animation: cc-blink 1s steps(1) infinite;
 }
-@keyframes cc-blink { 50% { opacity: 0; } }
+/* keyframes cc-blink 定义在 assets/motion.css（§2.2） */
 
 /* ============================ 8. 过程折叠 ============================ */
 .cc-proc { display: flex; align-items: center; gap: var(--sp-2); }
@@ -1569,15 +1590,7 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
   overscroll-behavior: contain;
   border-radius: var(--r-lg);
 }
-@keyframes cc-dock-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
-}
-@keyframes cc-dock-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 45%, transparent); }
-  70% { box-shadow: 0 0 0 7px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
-}
+/* keyframes cc-dock-in / cc-dock-pulse 统一在 assets/motion.css（§2.4） */
 
 /* 中断横幅 */
 .cc-banner {
@@ -5014,21 +5027,9 @@ html.cc-electron .cc-toast-host { top: 44px; }
 }
 .cc-prompt__error { margin: 6px 0 0; font-size: 12px; color: var(--danger); }
 
-/* 加载态旋转（Toast 的 loading 图标与 Confirm 的确认按钮共用） */
-@keyframes cc-spin { to { transform: rotate(360deg); } }
+/* 加载态旋转（Toast 的 loading 图标与 Confirm 的确认按钮共用）
+ * keyframes cc-spin 与「减少动态效果」降级统一在 assets/motion.css（§2.2 / §11） */
 .cc-spin { animation: cc-spin .9s linear infinite; }
-
-/* 尊重系统「减少动态效果」偏好 */
-@media (prefers-reduced-motion: reduce) {
-  .cc-toast-enter-active,
-  .cc-toast-leave-active,
-  .cc-toast-move,
-  .cc-confirm-enter-active,
-  .cc-confirm-leave-active,
-  .cc-confirm-enter-active .cc-confirm,
-  .cc-confirm-leave-active .cc-confirm { transition: none; }
-  .cc-spin { animation: none; }
-}
 
 /* ============================ 34. 角色性格配置（characterProfile） ============================ */
 /* 用途：智能体抽屉内的可折叠子区块，录入会注入系统提示词的角色设定。
@@ -5137,8 +5138,7 @@ html.cc-electron .cc-toast-host { top: 44px; }
 .cc-dirpick.is-open { display: grid; animation: cc-dirpick-in .16s ease both; }
 .cc-dirpick.is-open .cc-dirpick__panel { animation: cc-dirpick-panel-in .16s ease both; }
 
-@keyframes cc-dirpick-in { from { opacity: 0; } }
-@keyframes cc-dirpick-panel-in { from { opacity: 0; transform: scale(.97); } }
+/* keyframes cc-dirpick-in / cc-dirpick-panel-in 定义在 assets/motion.css（§2.4） */
 
 .cc-dirpick__mask { position: absolute; inset: 0; background: var(--overlay); }
 
@@ -5697,7 +5697,13 @@ html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
   font-family: var(--font-chat);
   font-size: var(--fs-chat);
   line-height: var(--lh-chat);
-  color: var(--text-1);
+  /*
+    文字层次对齐经典版（frontend/src/views/CodeAssistantView.vue）：
+      · 正文用 --text-2（暗色 #A9A6BF = 白灰），读长段落时「不抢位置」；
+      · 标题 / 加粗 / 表头用 --text-1（暗色 #E8E6F2 = 接近纯白），一眼能看出重点。
+    以前这里写死 --text-1，导致标题和正文一个颜色，整段回复糊成一片、抓不住结构。
+  */
+  color: var(--text-2);
 }
 .cc-md > :first-child { margin-top: 0; }
 .cc-md > :last-child { margin-bottom: 0; }
@@ -5708,6 +5714,8 @@ html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
 .cc-md h5,
 .cc-md h6 {
   margin: var(--sp-4) 0 var(--sp-2);
+  /* 标题比正文亮一档：正文白灰、标题近白，层次靠「明度差」而不是只靠字号 */
+  color: var(--text-1);
   font-weight: 700;
   line-height: 1.35;
   letter-spacing: -.1px;
@@ -5718,21 +5726,27 @@ html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
 .cc-md h4,
 .cc-md h5,
 .cc-md h6 { font-size: var(--fs-md); }
-.cc-md p { margin: 0 0 var(--sp-3); }
+/* 段落间距比原来（12px）收紧一档：经典版是 6px，长回复里段落太散会显得又空又慢 */
+.cc-md p { margin: 0 0 var(--sp-2); }
 .cc-md ul,
-.cc-md ol { margin: var(--sp-2) 0 var(--sp-3); padding-left: 1.4em; }
+.cc-md ol { margin: var(--sp-2) 0 var(--sp-2); padding-left: 1.4em; }
 .cc-md li { margin: 4px 0; }
 .cc-md li > ul,
 .cc-md li > ol { margin: 4px 0; }
-.cc-md li::marker { color: var(--text-3); }
-.cc-md strong { font-weight: 700; }
-.cc-md em { font-style: italic; }
+/* 列表符号跟正文同级，不再单独压暗（否则一列项目符号颜色比内容的还深） */
+.cc-md li::marker { color: var(--text-2); }
+.cc-md strong { font-weight: 700; color: var(--text-1); }
+.cc-md em { font-style: italic; color: var(--text-1); }
 .cc-md del { color: var(--text-3); }
 .cc-md hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .cc-md a {
   color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px solid var(--accent-ring);
+  /*
+    下划线用主色 30% 混合：accent-ring 只有 10% 透明度，在深色底上肉眼几乎看不到，
+    链接与正文长得一样（只能靠颜色猜）。30% 保留「可点击」提示又不至于像分隔线。
+  */
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   transition: border-color var(--tr), color var(--tr);
 }
 .cc-md a:hover { border-bottom-color: var(--accent); }
@@ -5740,12 +5754,19 @@ html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
 .cc-md blockquote {
   margin: var(--sp-3) 0;
   padding: var(--sp-2) var(--sp-4);
-  border-left: 3px solid var(--border-strong);
+  /*
+    竖线改用主色的半透明混合：原来用 --border-strong，在深色底上几乎看不见，
+    引用块只剩一块略深的底 —— 经典版是实色主色竖线，引用一眼可辨。
+    55% 主色 + 45% 描边，既有存在感又不至于比正文还抢眼。
+  */
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border-strong));
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
   background: var(--card-2);
   color: var(--text-2);
 }
 .cc-md blockquote p:last-child { margin-bottom: 0; }
+/* 引用块内加粗同样是「重点」：跟随标题提亮，避免整块一律灰掉 */
+.cc-md blockquote strong { color: var(--text-1); }
 
 /* 行内代码（代码块内的 code 由 .cc-code__pre 覆盖，不受影响） */
 .cc-md code {
@@ -5753,11 +5774,19 @@ html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
   font-size: 12.5px;
   padding: 1.5px 5px;
   border-radius: var(--r-xs);
+  /*
+    对齐经典版：只留底色，不加 1px 描边。
+    正文 14px 里夹一个带边框的 12.5px 小块会显得「碎」，旧版 p code 也是纯底 + 4px 圆角。
+    暗色下 card-2 与卡片底对比太弱，改用 border-strong（更亮一档）保证看得见。
+  */
   background: var(--card-2);
-  border: 1px solid var(--border);
+  border: none;
   color: var(--accent-dk);
 }
-html[data-theme="dark"] .cc-md code { color: #b7a6ff; }
+html[data-theme="dark"] .cc-md code {
+  background: var(--border-strong);
+  color: #b7a6ff;
+}
 
 /* ---- 表格 ---- */
 .cc-md .cc-md-table {
@@ -5777,9 +5806,14 @@ html[data-theme="dark"] .cc-md code { color: #b7a6ff; }
 }
 .cc-md .cc-md-table th {
   background: var(--card-2);
-  font-weight: 600;
-  color: var(--text-2);
+  /*
+    表头是「结构信息」：用近白色 + 700，与白灰正文（td 继承 --text-2）拉开层次。
+    之前表头是 --text-2 + 600，和单元格几乎同色，一眼看过去不知道哪行是表头。
+  */
+  color: var(--text-1);
+  font-weight: 700;
   white-space: nowrap;
+  border-bottom: 1px solid var(--border-strong);
 }
 .cc-md .cc-md-table tr:nth-child(even) td { background: color-mix(in srgb, var(--card-2) 55%, transparent); }
 
@@ -6707,10 +6741,7 @@ html:not([data-theme='dark']) .cc-xterm__screen { background: #fafafb; }
   box-shadow: 0 0 0 3px var(--accent-ring);
   animation: cc-pulse 1.4s ease-in-out infinite;
 }
-@keyframes cc-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: .45; transform: scale(.82); }
-}
+/* keyframes cc-pulse 定义在 assets/motion.css（§2.2） */
 .cc-runbar__text { color: var(--text-2); font-weight: 500; }
 .cc-runbar__text.is-idle { color: var(--text-4); font-weight: 400; }
 /*
@@ -8637,10 +8668,7 @@ body.cc-split-drag-v * { cursor: row-resize !important; user-select: none !impor
 }
 .cc-p2p-agent__dot:nth-child(2) { animation-delay: .2s; }
 .cc-p2p-agent__dot:nth-child(3) { animation-delay: .4s; }
-@keyframes cc-p2p-blink {
-  0%, 80%, 100% { opacity: .25; }
-  40% { opacity: 1; }
-}
+/* keyframes cc-p2p-blink 定义在 assets/motion.css（§2.2） */
 /* 回复正文走全局 .cc-md 排版，这里只压一下首尾间距 */
 .cc-p2p-agent__md { font-size: var(--fs-sm); }
 .cc-p2p-agent__md > :first-child { margin-top: 0; }

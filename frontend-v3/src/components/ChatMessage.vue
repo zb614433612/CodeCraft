@@ -73,9 +73,10 @@
         <img v-if="aiAvatarIsImage" :src="aiAvatarRaw" :alt="message.agentName || 'AI'" />
         <template v-else>{{ aiAvatarText }}</template>
       </span>
-      <span>{{ message.agentName || '编码助手' }}</span>
+      <!-- 名字给类比内联样式更好维护：主文字色 + 600，模型标签仍走 accent，一眼分得清「谁」和「用哪个模型」 -->
+      <span class="cc-msg-ai__name">{{ message.agentName || '编码助手' }}</span>
       <span v-if="message.model" class="cc-tag cc-tag--accent">{{ message.model }}</span>
-      <span v-if="message.streaming" style="color: var(--text-4)">生成中…</span>
+      <span v-if="message.streaming" class="cc-msg-ai__status">生成中…</span>
     </div>
 
     <!--
@@ -398,8 +399,17 @@ const hitSkills = computed(() =>
       const name = (raw || '')
         .replace(/^\s*[>*\-\s]+/, '')
         .replace(/\*+/g, '')
+        .replace(/^[:：`'"]\s*/, '')
+        .replace(/\s*[`'"]$/, '')
         .trim()
       if (!name) return ''
+      /*
+        展示层最后一道闸门：占位符 / 文件名一律不渲染。
+        历史消息里可能残留过「误把示例文本当命中」的数据（解析逻辑已修，但旧数据不会自动消失），
+        与其让用户看到「命中技能：xxx」这种看不懂的胶囊，不如直接不显示。
+      */
+      if (/^x{2,}$/i.test(name) || /^(技能名|示例|name|skill)$/i.test(name)) return ''
+      if (/\.(ts|tsx|js|cjs|mjs|vue|java|kt|md|json|ya?ml|css|scss|html|xml|py|go|rs|sh|bat)$/i.test(name)) return ''
       // 后端拿不到技能名时只回传 "#12"：补成「技能 #12」，否则用户不知道这是什么
       return /^#\d+$/.test(name) ? `技能 ${name}` : name
     })

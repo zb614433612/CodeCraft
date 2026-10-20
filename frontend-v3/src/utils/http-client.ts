@@ -60,6 +60,20 @@ const LOGIN_TIMEOUT = 20_000
 const TOKEN_KEY = 'codecraft.token'
 
 /**
+ * localStorage：token 已被判废的标记。
+ *
+ * <p><b>为什么需要这个标记</b>：{@link getStoredToken} 在自身没有 token 时会回退读经典版（v2）
+ * 持久化的 `user` 键（见 {@link readLegacyToken}）。两版共用 http://localhost:8084 这个 origin，
+ * localStorage 是共享的 —— 只清 `codecraft.token` 的话，下一次 `hasToken()` 立刻又会从经典版
+ * 读到同一个已失效的 token，路由守卫就认为「仍然登录」，把用户从 /login 弹回首页。
+ * 表现正是：**提示了「登录已过期」，但页面永远退不回登录页**。</p>
+ *
+ * <p>写 1 表示「当前设备上的 token 已经确定失效，不要再做任何兜底」；
+ * 用户重新登录成功时（{@link setAuthToken} 收到非空 token）自动清除。</p>
+ */
+const TOKEN_REVOKED_KEY = 'codecraft.token.revoked'
+
+/**
  * localStorage：经典版（v2）pinia user store 的持久化键。
  *
  * <p>v2 的 user store 用 `persist: true`，默认键名就是 `user`，state 里躺着 `token`。
@@ -93,12 +107,43 @@ function toFullUrl(url: string): string {
 // ==================== token 管理 ====================
 
 /**
+ * 内存中的「token 已判废」标记（与 localStorage 标记同步，避免每次读盘）。
+ *
+ * <p>一旦为 true，{@link getStoredToken} 会直接返回空串，连经典版兜底也不读 ——
+ * 否则清完 token 的下一次调用又会把旧 token 读回来，路由守卫随即把人从登录页弹走。</p>
+ */
+let revokedToken = false
+
+/** 读取本地判废标记（localStorage 不可用时按未判废处理） */
+function readRevokedFlag(): boolean {
+  try {
+    return localStorage.getItem(TOKEN_REVOKED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 当前设备上的 token 是否已被判定失效（401 / 主动退出后为 true）。
+ *
+ * <p>登录成功会清除该标记；调用方一般不需要关心，路由守卫与 http-client 内部已消费。</p>
+ */
+export function isTokenRevoked(): boolean {
+  if (!revokedToken) revokedToken = readRevokedFlag()
+  return revokedToken
+}
+
+/**
  * 读取经典版（v2）持久化的 token。
  *
  * <p>仅作兜底：拆 JSON 失败、字段缺失、类型不对一律返回空串，
  * 不能让一段脏数据把整个应用的启动流程卡死。</p>
+ *
+ * <p>token 已被判废时直接返回空串：经典版那份同样属于「后端已不认」的旧 token，
+ * 继续读它只会让 401 → 清 token → 守卫又看到 token → 回首页 的死循环成立。</p>
  */
 function readLegacyToken(): string {
+  if (isTokenRevoked()) return ''
   try {
     const raw = localStorage.getItem(LEGACY_USER_KEY)
     if (!raw) return ''
@@ -118,6 +163,11 @@ function readLegacyToken(): string {
  * 请求成功后就等同已登录；若该 token 已过期，401 会正常把人带到登录页。</p>
  */
 export function getStoredToken(): string {
+  // 已判废：无论哪里还留着旧 token 都不能再用（否则守卫会把用户从登录页弹回去）
+  if (isTokenRevoked()) {
+    memoryToken = ''
+    return ''
+  }
   if (memoryToken) return memoryToken
   try {
     memoryToken = localStorage.getItem(TOKEN_KEY) || ''
@@ -133,17 +183,35 @@ export function getStoredToken(): string {
 /** 写入 token */
 export function setAuthToken(token: string): void {
   memoryToken = token || ''
+  // 拿到新 token = 重新登录成功：解除判废标记，恢复经典版兜底能力
+  if (token) revokedToken = false
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, token)
-    else localStorage.removeItem(TOKEN_KEY)
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token)
+      localStorage.removeItem(TOKEN_REVOKED_KEY)
+    } else {
+      localStorage.removeItem(TOKEN_KEY)
+    }
   } catch {
     // localStorage 不可用（隐私模式 / file://）时仅保留内存 token
   }
 }
 
-/** 清除 token（不动凭据，下次请求会自动重新登录） */
+/**
+ * 清除 token，并把当前设备标记为「token 已判废」。
+ *
+ * <p>标记不是「顺手加的」：只清 `codecraft.token` 时，{@link getStoredToken} 会立刻
+ * 从经典版 `user` 键把旧 token 兜底读回来 —— 于是「清 token → 守卫看到 token →
+ * 弹回首页 → 请求又 401 → 再清」可以无限循环，用户永远停在业务页。</p>
+ */
 export function clearAuthToken(): void {
   setAuthToken('')
+  revokedToken = true
+  try {
+    localStorage.setItem(TOKEN_REVOKED_KEY, '1')
+  } catch {
+    // 存储不可用时仅内存标记生效
+  }
 }
 
 /** 读取自动登录凭据（localStorage 可覆盖默认值） */
@@ -255,9 +323,25 @@ export function hasToken(): boolean {
   return !!getStoredToken()
 }
 
-/** 触发未授权回调；回调内部异常不应影响调用方原本的错误处理 */
+/** 上一次真正触发未授权跳转的时间戳（用于 401 风暴去重） */
+let lastUnauthorizedAt = 0
+
+/** 并发 401 去重窗口（毫秒） */
+const UNAUTHORIZED_DEDUPE_MS = 800
+
+/**
+ * 触发未授权回调；回调内部异常不应影响调用方原本的错误处理。
+ *
+ * <p>一次切页 / 一轮刷新往往会并发打出 5~10 个接口，token 失效时它们会同时 401。
+ * 全部转成 `router.replace` 会互相打断（后一次导航取消前一次），日志里满是
+ * NavigationFailure。这里做 800ms 去重：只让第一次真正跳转，其余直接丢弃 ——
+ * token 已经清掉，后续请求本来也过不去。</p>
+ */
 function fireUnauthorized(reason: string): void {
   if (!unauthorizedHandler) return
+  const now = Date.now()
+  if (now - lastUnauthorizedAt < UNAUTHORIZED_DEDUPE_MS) return
+  lastUnauthorizedAt = now
   try {
     unauthorizedHandler(reason)
   } catch {
@@ -278,6 +362,20 @@ function fireUnauthorized(reason: string): void {
  */
 export function notifyUnauthorized(reason = '登录已过期'): void {
   clearAuthToken()
+  /*
+    极端兜底：router 的回调理论上在 main.ts 里 `app.use(router)` 之前就注册了
+    （router/index.ts 模块顶层），但 HMR、单测、或某些懒加载时序下可能还没注册。
+    这时如果什么都不做，用户会看到「登录已过期」却停在原地 —— 这正是本次要修的观感。
+    直接改 hash 是唯一不依赖 router 实例的跳转方式，hash 路由下与 router.push 等价。
+  */
+  if (!unauthorizedHandler) {
+    try {
+      if (!window.location.hash.startsWith('#/login')) window.location.hash = '#/login'
+    } catch {
+      // 非浏览器环境（SSR / 单测）忽略
+    }
+    return
+  }
   fireUnauthorized(reason)
 }
 

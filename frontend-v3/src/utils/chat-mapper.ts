@@ -161,8 +161,19 @@ export function toChatMessages(
       技能命中回放：刷新页面 / 切换会话后，summaries 那条实时信号已经没了，
       只能从工具输出原文里反解「【技能详情】xxx (ID:n)」。
       用未截断的 content：tools[].detail 有 4000 字上限，标记可能正好被切掉。
+
+      ★ 必须先按工具名过滤：历史里绝大多数工具输出都不是 skill 调用，
+      而 file_explorer 读源码时会把「【技能详情】xxx (ID:n)」这类示例文本带进结果，
+      全量扫描会把占位符 xxx 当成命中，历史消息标签就变成「命中技能：xxx」。
+      toolName 是旧数据可能为空 —— 保留它，让解析函数内部的「行首 + 白名单」兜底。
     */
-    const hitSkills = collectSkillHits(toolResults.map(tr => tr.content))
+    const skillTexts = toolResults
+      .filter(tr => {
+        const name = (tr.toolName || '').trim().toLowerCase()
+        return !name || name === 'skill'
+      })
+      .map(tr => tr.content)
+    const hitSkills = collectSkillHits(skillTexts)
 
     const content = typeof group.content === 'string' ? group.content : ''
     const isUser = group.role === 'user'

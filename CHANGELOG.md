@@ -5,6 +5,56 @@
 
 ---
 
+## [3.0.6] - 2026-10-20
+
+> 稳定版：把三个「坏起来很难受」的缺陷修掉（登录过期却不跳登录页、技能命中标签显示字面 `xxx`、聊天正文层次感缺失），
+> 并新增全站统一动效层 `motion.css`，让 v3 的动效回到旧版水准且可集中调参。纯前端改动，无后端逻辑与数据库变更。
+
+### 🔐 登录过期不跳登录页（修复）
+
+- **真因是两层叠加**：① `getStoredToken()` 在自身 token 为空时会回退读经典版（v2）的 `localStorage.user.token` —— 两版共用同一 `origin`（`http://localhost:8084`），`clearAuthToken()` 只清了 `codecraft.token`，路由守卫 `hasToken()` 又读到旧 token，把用户从 `/login` 弹回 `/chat`，形成死循环；② `router.replace()` 在并发导航被取消时是 **resolve 一个 `NavigationFailure`** 而非 reject，原来的 `.catch()` 根本接不到。
+- **判废标记**：`http-client.ts` 新增 `codecraft.token.revoked` 标记与内存副本 `revokedToken`，`clearAuthToken()` 写入、`setAuthToken(非空)` 清除；`getStoredToken()` / `readLegacyToken()` 一旦判废直接返回空串，彻底斩断跨版本兜底读取。标记写 `localStorage` 而非仅内存，刷新页面后依然生效。
+- **导航兜底**：`router/index.ts` 的未授权回调改为 `router.replace(target).then(failure => { if (failure) fallback() }).catch(fallback)`，`fallback()` 直接改 `window.location.hash`；`notifyUnauthorized()` 在 handler 尚未注册时也走 hash 兜底。另加 800ms 去重，避免并发 401 连发多次跳转。
+- **主动触发**：`App.vue` 的 `consumeChatStream` catch 命中 `HTTP 401` / `登录已过期` 时主动调用 `notifyUnauthorized()`，不再只是静默中断。
+
+### 🏷 技能命中标签显示字面 xxx（修复）
+
+- **真因**：`parseSkillHitFromToolOutput()` 对所有工具输出无条件扫正则，而本项目源码、文档里到处是示例文本 `【技能详情】xxx (ID:12)`。AI 读源码 / 文档时被误判成真实命中，标签就显示成了 `xxx`。
+- **四道闸门**：① 新增 `isPlausibleSkillName()` 白名单校验，挡掉 `xxx` / `技能名` / `示例` / 文件名 / 路径 / 代码片段，放行 `#数字` 形式；② `parseSkillHitFromToolOutput` 改用行首锚定正则 `LINE_RE`（`^【技能详情】...$`，兼容全角括号与截断），不再全文任意位置命中；③ 调用侧先按 `tr.toolName` 过滤（为空或 `skill` 才解析）；④ 展示层 `ChatMessage.vue` 再兜底过滤一次。
+- **配套**：`parseSkillHitsFromSummaries` 同样加白名单校验；`chat-mapper.ts` 的 `skillTexts` 先按工具名过滤再 `collectSkillHits`。
+
+### 🎨 聊天正文层次感对齐旧版
+
+- `.cc-md` 正文 `color` 由 `--text-1` 改为 `--text-2`，`h1`~`h6`、`strong`、`em` 提亮到 `--text-1`，恢复旧版「标题近白、正文白灰」的层次。
+- 段落间距 `--sp-3` → `--sp-2`，`li::marker` 由 `--text-3` 提到 `--text-2`；引用块左边框改为 accent 55% 混合色，引用内 `strong` 提亮。
+- 表格表头 `color: --text-1` + `font-weight: 700` + `--border-strong` 下边框；行内 `code` 去掉 1px 边框，暗色下底色 `--border-strong`、文字 `#b7a6ff`。
+- 用户气泡正文改 `--text-1`，并新增 `.cc-msg-me__bubble .cc-md / strong / h1..h4` 全量提亮；新增 `.cc-msg-ai__name`（`--text-2` / 600）与 `.cc-msg-ai__status`（`--text-3`），替换 `ChatMessage.vue` 里原先的内联 style。
+
+### ✨ 全站动效统一层（新增 motion.css）
+
+- 旧版 `frontend/` 有 28+ 个 `@keyframes`，v3 改造前只有 9 个且散落在 `app.css` 6 个章节，几乎没有页面切换、浮层弹出、卡片入场、hover 反馈。
+- 新增 `frontend-v3/assets/motion.css`（约 575 行）作为**全站动画唯一真相源**：§1 动效 Token（`--dur-1..4` = 120/200/260/340ms、`--ease-out` / `--ease-in-out` / `--ease-spring`、`--stagger-step: 26ms`）；§2 22 个统一 `cc-` 前缀的 keyframes 库；§12 一组可复用工具类 `.cc-anim-fade / up / down / pop / rise` 与 `.cc-anim-stagger`（容器级自动错峰前 8 项）。
+- `app.css` 原有 9 个 `@keyframes` 全部迁入 `motion.css`（原位置留指针注释），`app.css` 现在 `@keyframes` 数量为 0；两处分散的 `prefers-reduced-motion` 降级块合并到 `motion.css §11`。引入顺序：`tokens.css` → `app.css` → `motion.css`。
+- **已挂载**：路由页面淡入上浮 8px（`.cc-chat` 仅淡入不位移，内含 fixed 抽屉避免错位）；侧栏 `grid-template-columns` 260ms 平滑收放；一级导航左滑进、会话列表淡入上浮且前 8 项错峰 26ms；管理页 7 类卡片入场 + 前 6 张错峰 + hover 抬升 2px；12 类列表行淡入；技能命中标签回弹；思考折叠体 / 工具卡展开体 4px 上浮；审批停靠区滑入；附件菜单 / 优化状态条 / 6 处下拉浮层 / 任务面板 / 子 Agent 面板缩放弹出（按触发方向设 `transform-origin`）；灯箱、空状态 logo 浮动 + 主色光晕、下载进度条流光、按钮按下 `scale(.96)`、开关 spring 缓动。
+- **刻意不加**：聊天消息项位移动画（虚拟滚动下消息项被复用时动画会反复重播、视觉错位，沿用旧版结论）；列表行 hover 抬升（密集列表视觉噪点）。
+- **降级双入口**：`prefers-reduced-motion` 与 `html[data-motion="reduced"]` 统一把时长压到 0.01ms，为后续外观页开关预留钩子。
+- **收益**：调手感只需改 `motion.css §1` 的 6 个 token，不必再翻 `app.css` 55 个 section。
+
+### 🔢 版本号同步
+
+- 后端：`3.0.5` → `3.0.6`（`pom.xml`，产物 `code-craft-3.0.6.jar`）
+- 经典版前端：`3.0.5` → `3.0.6`（`frontend/package.json` + lock）
+- v3 前端：`3.0.5` → `3.0.6`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.6` / `code-craft-3.0.6.jar`
+- MCP Server 握手版本：`3.0.5` → `3.0.6`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例统一到 v3.0.6
+
+### ⬆️ 升级说明
+
+- 本版**无后端逻辑变更、无数据库结构变更**，全部为 v3 前端（Vue / CSS）修复与动效增强：覆盖安装后重载窗口（`Ctrl+R`）即可生效。
+- 动效若觉得过快 / 过慢，改 `frontend-v3/assets/motion.css` 顶部 §1 的 `--dur-*` 与 `--stagger-step` 即可全局生效。
+- 系统「减少动态效果」偏好已自动尊重；也可手动给 `<html>` 加 `data-motion="reduced"` 全局关闭动画。
+
 ## [3.0.5] - 2026-10-20
 
 > 细节打磨版：把上一版遗留的四项「看着别扭、点不开」的界面问题逐个修掉 ——

@@ -5,6 +5,59 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.6] - 2026-10-20
+
+> Stability release: three defects that hurt the most when they break (expired login that never
+> returns to the sign-in page, the skill-hit badge rendering a literal `xxx`, and the missing visual
+> hierarchy in chat text) are fixed, plus a new site-wide animation layer `motion.css` brings v3
+> motion up to the classic frontend's level with a single place to tune it.
+> Frontend-only; no backend logic or database changes.
+
+### 🔐 Expired login did not return to the sign-in page (fix)
+
+- **Two stacked root causes**: ① when its own token was empty, `getStoredToken()` fell back to reading the classic (v2) frontend's `localStorage.user.token` — both frontends share the same `origin` (`http://localhost:8084`), so `clearAuthToken()` only wiped `codecraft.token` while the router guard `hasToken()` picked the legacy token back up and bounced the user from `/login` to `/chat`, creating an infinite loop; ② when a concurrent navigation is cancelled, `router.replace()` **resolves with a `NavigationFailure`** instead of rejecting, so the old `.catch()` never fired.
+- **Revocation marker**: `http-client.ts` gains a `codecraft.token.revoked` flag plus the in-memory `revokedToken` copy, written by `clearAuthToken()` and cleared by `setAuthToken(non-empty)`; `getStoredToken()` / `readLegacyToken()` return an empty string while revoked, cutting off the cross-version fallback entirely. The flag lives in `localStorage` rather than memory only, so it survives a page reload.
+- **Navigation fallback**: the unauthorized handler in `router/index.ts` now uses `router.replace(target).then(failure => { if (failure) fallback() }).catch(fallback)`, where `fallback()` sets `window.location.hash` directly; `notifyUnauthorized()` also falls back to the hash when no handler is registered yet. An 800ms de-duplication window prevents a burst of concurrent 401s from firing multiple redirects.
+- **Proactive trigger**: the `consumeChatStream` catch block in `App.vue` now calls `notifyUnauthorized()` when it matches `HTTP 401` / `登录已过期`, instead of silently aborting.
+
+### 🏷 Skill-hit badge rendered a literal xxx (fix)
+
+- **Root cause**: `parseSkillHitFromToolOutput()` scanned the regex against every tool output unconditionally, while this project's own source code and docs are full of the sample text `【技能详情】xxx (ID:12)`. When the AI read those files, the sample was misread as a real skill hit and the badge rendered `xxx`.
+- **Four gates**: ① a new `isPlausibleSkillName()` whitelist check rejects `xxx` / `技能名` / `示例` / file names / paths / code fragments while allowing the `#123` form; ② `parseSkillHitFromToolOutput` switches to the line-anchored `LINE_RE` (`^【技能详情】...$`, tolerating full-width parentheses and truncation) so it no longer matches anywhere in the text; ③ the call site pre-filters by `tr.toolName` (only empty or `skill`); ④ `ChatMessage.vue` applies one last filter at render time.
+- **Supporting changes**: `parseSkillHitsFromSummaries` runs the same whitelist check; `chat-mapper.ts` filters `skillTexts` by tool name before `collectSkillHits`.
+
+### 🎨 Chat text hierarchy aligned with the classic frontend
+
+- `.cc-md` body `color` moves from `--text-1` to `--text-2`, while `h1`–`h6`, `strong` and `em` are brightened to `--text-1`, restoring the classic "near-white headings, off-white body" hierarchy.
+- Paragraph spacing `--sp-3` → `--sp-2`, `li::marker` lifted from `--text-3` to `--text-2`; blockquote's left border becomes a 55% accent mix and `strong` inside quotes is brightened.
+- Table headers get `color: --text-1` + `font-weight: 700` + a `--border-strong` bottom border; inline `code` drops its 1px border and, in dark mode, uses a `--border-strong` background with `#b7a6ff` text.
+- User bubble text becomes `--text-1`, with new `.cc-msg-me__bubble .cc-md / strong / h1..h4` overrides; new `.cc-msg-ai__name` (`--text-2` / 600) and `.cc-msg-ai__status` (`--text-3`) replace the inline styles previously hardcoded in `ChatMessage.vue`.
+
+### ✨ Site-wide animation layer (new motion.css)
+
+- The classic `frontend/` carries 28+ `@keyframes`; before this change v3 had only 9, scattered across 6 sections of `app.css`, with essentially no page transitions, popover entrances, card entrances or hover feedback.
+- New `frontend-v3/assets/motion.css` (~575 lines) is now the **single source of truth for animation**: §1 motion tokens (`--dur-1..4` = 120/200/260/340ms, `--ease-out` / `--ease-in-out` / `--ease-spring`, `--stagger-step: 26ms`); §2 a keyframe library of 22 entries, all `cc-` prefixed; §12 reusable utility classes `.cc-anim-fade / up / down / pop / rise` and `.cc-anim-stagger` (auto-staggers the first 8 children of a container).
+- All 9 existing `@keyframes` in `app.css` moved into `motion.css` (pointer comments left behind), so `app.css` now contains zero `@keyframes`; the two scattered `prefers-reduced-motion` blocks were merged into `motion.css §11`. Import order: `tokens.css` → `app.css` → `motion.css`.
+- **Wired up**: route pages fade + rise 8px (`.cc-chat` fades only, since it hosts fixed drawers that would misalign); the sidebar's `grid-template-columns` animates over 260ms; primary nav slides in from the left while the conversation list fades up with the first 8 items staggered 26ms apart; 7 admin card families fade in with the first 6 staggered and lift 2px on hover; 12 list-row families fade in; the skill-hit badge pops; thinking/tool-card expanders rise 4px; the approval dock slides in; the attachment menu, optimize status bar, 6 dropdowns, task popover and sub-agent panel scale in (with `transform-origin` following the trigger direction); plus the lightbox, empty-state logo float with accent glow, download progress shimmer, `scale(.96)` button press and spring-eased switches.
+- **Deliberately omitted**: positional animation on chat messages (with virtual scrolling, reused message nodes replay the entrance and visibly misalign — same conclusion as the classic frontend) and row hover lift (visual noise in dense lists).
+- **Two reduction entry points**: `prefers-reduced-motion` and `html[data-motion="reduced"]` both collapse durations to 0.01ms, leaving a hook for a future appearance-page toggle.
+- **Payoff**: tuning the feel means editing the 6 tokens in `motion.css §1`, no longer hunting through 55 sections of `app.css`.
+
+### 🔢 Version sync
+
+- Backend: `3.0.5` → `3.0.6` (`pom.xml`, artifact `code-craft-3.0.6.jar`)
+- Classic frontend: `3.0.5` → `3.0.6` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.5` → `3.0.6` (`frontend-v3/package.json` + lock)
+- Electron: version and `extraResources` jar path → `3.0.6` / `code-craft-3.0.6.jar`
+- MCP Server handshake version: `3.0.5` → `3.0.6` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) headers, DEV_QUICKREF / RELEASE_CHECKLIST(_EN) build commands and the FAQ version example are unified at v3.0.6
+
+### ⬆️ Upgrade notes
+
+- This release has **no backend logic changes and no database schema changes**; everything is v3 frontend (Vue / CSS) fixes and motion enhancement — install over the previous version and reload the window (`Ctrl+R`).
+- To make motion faster or slower, edit `--dur-*` and `--stagger-step` in §1 at the top of `frontend-v3/assets/motion.css`; the change applies globally.
+- The OS "reduce motion" preference is respected automatically; you can also add `data-motion="reduced"` to `<html>` to disable animation entirely.
+
 ## [3.0.5] - 2026-10-20
 
 > Polish release: four leftover UI annoyances from the previous version are gone —
