@@ -219,11 +219,21 @@ function isImagePath(p: string): boolean {
   return IMAGE_EXT_RE.test(p.split(/[?#]/)[0])
 }
 
-/** 是否为可识别的本地文件路径（含路径分隔符 + 扩展名，且非 URL） */
-function isLocalFilePath(p: string): boolean {
+/**
+ * 是否为可识别的本地文件路径（含路径分隔符 + 扩展名，且非 URL）。
+ *
+ * @param allowBareName 是否接受「纯文件名」（如 LLM 常写的 `[CodeCraftMcpServer.java](CodeCraftMcpServer.java)`）。
+ *   这类链接不含 `/`、`\`，旧逻辑会当成普通外链，点击后浏览器按相对 URL 导航 → 404 / 白屏。
+ *   开启后必须命中扩展名白名单，避免把 `example.com` 这种真域名误判成本地文件。
+ */
+function isLocalFilePath(p: string, allowBareName = false): boolean {
   if (!p || p.length > 600) return false
   if (p.includes('://')) return false
-  return /[\\/]/.test(p) && /\.[A-Za-z0-9]{1,10}$/.test(p)
+  const path = p.split(/[?#]/)[0]
+  if (/[\\/]/.test(path) && /\.[A-Za-z0-9]{1,10}$/.test(path)) return true
+  if (!allowBareName) return false
+  const bare = /^([^\s/\\]+)\.([A-Za-z0-9]{1,10})$/.exec(path)
+  return !!bare && FILE_EXT_STRICT_RE.test(bare[2])
 }
 
 /** 已知可预览扩展名（纯文本里识别路径用，必须含路径分隔符，避免误伤普通单词） */
@@ -329,7 +339,7 @@ function applyLocalPathLinks(instance: MarkdownIt): void {
   instance.renderer.rules.image = function (tokens, idx, options, _env, self) {
     const token = tokens[idx]
     const src = token.attrGet('src') || ''
-    if (isLocalFilePath(src)) {
+    if (isLocalFilePath(src, true)) {
       const alt = token.attrGet('alt') || ''
       const name = alt || src.split(/[\\/]/).pop() || src
       const kind: 'file' | 'image' = isImagePath(src) ? 'image' : 'file'
@@ -354,7 +364,7 @@ function applyLocalPathLinks(instance: MarkdownIt): void {
       const cls = token.attrGet('class') || (kind === 'image' ? 'cc-media-chip' : 'cc-file-link')
       return `<a class="${escapeAttr(cls)}" data-cc-path="${escapeAttr(ccPath)}" data-cc-kind="${escapeAttr(kind)}" title="点击预览：${escapeAttr(ccPath)}">`
     }
-    if (isLocalFilePath(href)) {
+    if (isLocalFilePath(href, true)) {
       const kind: 'file' | 'image' = isImagePath(href) ? 'image' : 'file'
       const cls = kind === 'image' ? 'cc-media-chip' : 'cc-file-link'
       return `<a class="${cls}" data-cc-path="${escapeAttr(href)}" data-cc-kind="${kind}" title="点击预览：${escapeAttr(href)}">`

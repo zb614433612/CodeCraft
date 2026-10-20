@@ -562,6 +562,8 @@ const CHAT_PAGE_ROUNDS = 5
 const chatViewRef = ref<{
   getDraft?: () => string
   setDraft?: (value: string) => void
+  /** 回填优化结果并记录撤销快照（快照由 ChatView 持有，草稿再变即失效） */
+  applyOptimizedDraft?: (before: string, result: string) => void
 } | null>(null)
 const chatFileInput = ref<HTMLInputElement | null>(null)
 
@@ -688,7 +690,14 @@ function setApproval(key: string, payload: ApprovalPayload | null) {
 
 /** 覆盖某个会话的消息数组（重新生成 / 全量刷新用） */
 function setConvMessages(key: string, list: ChatMessageModel[]) {
-  messagesMap.value[key] = list
+  // 历史消息里的技能命中可能只有 "#12"（后端查名失败时的兜底）：
+  // 若技能表已经在内存里，这里顺手把编号换成名字，切会话/刷新后也能显示技能名。
+  messagesMap.value[key] = withSkillNames(list)
+  // 历史回放没有实时流可依赖：只要看到 "#id" 就补一次技能表，否则永远只能是编号
+  if (!Object.keys(skillNameMap.value).length
+    && list.some(m => m.hitSkills?.some(n => /^#\d+$/.test(n)))) {
+    void ensureSkillNameMap()
+  }
 }
 
 /** 删除某个会话的全部分片状态（会话被删 / 草稿废弃时调用） */
@@ -889,6 +898,84 @@ const chatFilePickerOpen = ref(false)
 /** 附件区已有的文件资产 id：选择器里置灰去重，避免同一个文件挂两遍 */
 const chatAttachedIds = computed(() => attachments.value.filter(a => a.fileAssetId).map(a => a.fileAssetId!))
 
+/* ------------------------------------------------------------------ *
+ * 技能命中名补齐（#id → 真实技能名）
+ * ------------------------------------------------------------------
+ * 后端 buildSkillHitSummary 在「技能查名失败」时只回传 "#12"（见 DeepSeekServiceImpl），
+ * 前端标签就会变成一个没有语义的编号 —— 用户看到的就是「没显示技能名称」。
+ * 这里懒加载一次技能表把编号映射回名字；拿不到（未登录 / 接口失败）就保持原样，
+ * 由 ChatMessage 统一渲染成「技能 #12」，不影响聊天主流程。
+ */
+const skillNameMap = ref<Record<string, string>>({})
+let skillNameLoading = false
+/** 接口失败后不再重试（避免每条命中都打一次失败请求）；技能表本身是可选增强 */
+let skillNameFailed = false
+
+/** 懒加载技能表并建立 `#id → name` 映射（只会真正请求一次） */
+async function ensureSkillNameMap() {
+  if (skillNameLoading || skillNameFailed || Object.keys(skillNameMap.value).length) return
+  const uid = currentUserId.value
+  if (!uid) return
+  skillNameLoading = true
+  try {
+    const list = (await listSkills(uid)).data || []
+    const map: Record<string, string> = {}
+    for (const item of list) {
+      if (item.id != null && item.name) map[`#${item.id}`] = item.name
+    }
+    skillNameMap.value = map
+  } catch {
+    /* 静默：标签继续显示「技能 #12」，不打断聊天 */
+    skillNameFailed = true
+  } finally {
+    skillNameLoading = false
+  }
+}
+
+/** 命中名映射：已加载技能表就替换，未命中映射的原样返回 */
+function mapSkillHitNames(names: string[]): string[] {
+  const map = skillNameMap.value
+  return names.map(n => map[n] || n)
+}
+
+/**
+ * 给一组消息套上技能名映射（技能表未加载时原样返回，调用方据此判断是否有变化）。
+ * 返回同一个数组引用 = 没有任何消息需要改，避免无意义的整表替换。
+ */
+function withSkillNames(list: ChatMessageModel[]): ChatMessageModel[] {
+  const map = skillNameMap.value
+  if (!Object.keys(map).length) return list
+  let changed = false
+  const next = list.map(msg => {
+    if (!msg.hitSkills?.length) return msg
+    const mapped = msg.hitSkills.map(n => map[n] || n)
+    if (mapped.every((v, i) => v === msg.hitSkills![i])) return msg
+    changed = true
+    return { ...msg, hitSkills: mapped }
+  })
+  return changed ? next : list
+}
+
+/**
+ * 追加技能命中（替代裸 mergeSkillHits 调用）。
+ * 含 `#id` 时顺手触发技能表懒加载，加载完成后由下方 watch 回填。
+ */
+function appendSkillHits(message: ChatMessageModel, names: string[]) {
+  if (!names.length) return
+  message.hitSkills = mergeSkillHits(message.hitSkills, mapSkillHitNames(names))
+  if (names.some(n => /^#\d+$/.test(n))) void ensureSkillNameMap()
+}
+
+/** 技能表就绪后，把消息里残留的 "#12" 换成真实名字（只改真正有变化的消息对象） */
+watch(skillNameMap, map => {
+  if (!Object.keys(map).length) return
+  for (const key of Object.keys(messagesMap.value)) {
+    const list = messagesMap.value[key]
+    const next = withSkillNames(list)
+    if (next !== list) messagesMap.value = { ...messagesMap.value, [key]: next }
+  }
+})
+
 /** 哪些会话正在流式生成（后台流也计入：侧栏圆点与 composer 状态都读它） */
 const streamingMap = ref<Record<string, boolean>>({})
 /** 当前会话是否在生成中 */
@@ -994,6 +1081,18 @@ const chatLoadingMore = ref(false)
  * 「发送失败」在空态里显示成「聊天记录加载失败」，语义完全错位。</p>
  */
 const chatLoadError = ref('')
+
+/**
+ * 提示词优化（✨）的进行中标记。
+ *
+ * <p>为什么要显式持有：`/api/prompt/optimize` 是同步等 LLM 返回的接口
+ * （后端 15s 超时、前端 30s 兜底），没有这个标记时按钮只是「点了没反应」，
+ * 用户会连点好几次，每次都在后端排一个 LLM 请求。</p>
+ *
+ * <p>撤销快照不放在这里：它要跟着草稿走（用户改一个字就该失效），而草稿是
+ * ChatView 内部状态。挂在 App 上会让每次输入都触发整个 App 重渲染，长会话下代价太大。</p>
+ */
+const optimizingPrompt = ref(false)
 
 /**
  * 待回执的 ask_user uuid（按会话 key）。
@@ -2508,7 +2607,7 @@ async function consumeChatStream(
             */
             const skillHit = parseSkillHitFromToolOutput(toolContent)
             if (skillHit) {
-              assistant.hitSkills = mergeSkillHits(assistant.hitSkills, [skillHit])
+              appendSkillHits(assistant, [skillHit])
             }
           }
           // 工具事件低频（每次工具调用一条），这里刷一次折叠标题没有性能压力
@@ -2553,7 +2652,7 @@ async function consumeChatStream(
         */
         const skillHits = parseSkillHitsFromSummaries(summaries)
         if (skillHits.length) {
-          assistant.hitSkills = mergeSkillHits(assistant.hitSkills, skillHits)
+          appendSkillHits(assistant, skillHits)
         }
         /*
          * 出现 agent 工具调用 → 可能正在 fork 子Agent，立刻拉一次子Agent列表。
@@ -3133,23 +3232,107 @@ async function onPaste(ev: ClipboardEvent) {
   for (const file of plainFiles) await uploadChatAttachment(file)
 }
 
-/** AI 优化提示词：读取 Composer 草稿 → 调接口 → 回填 */
+/**
+ * 提示词优化的输入上限（字符）。
+ *
+ * <p>后端 `PromptOptimizeService` 用 `max_tokens=500` 输出，输入过长时优化结果会被
+ * 截断成一小段（信息反而丢失）；超过这个长度直接引导用户拆段，而不是让他等 10 秒
+ * 拿到一个更差的版本。</p>
+ */
+const OPTIMIZE_MAX_INPUT = 6000
+
+/**
+ * AI 优化提示词：读取 Composer 草稿 → 调接口 → 回填。
+ *
+ * <p>接口是同步等 LLM 返回（通常 3~10 秒，后端 15s 超时 / 前端 30s 兜底），
+ * 所以这里必须给足反馈：按钮转圈 + 输入区状态条 + 常驻 toast 计时，
+ * 成功/失败/无变化/被打断四种结局分别提示，不再统一说「没有得到更好的表述」。</p>
+ */
 async function onOptimize() {
+  if (optimizingPrompt.value) {
+    toast.info('AI 正在优化中，请稍候…')
+    return
+  }
+
   const draft = chatViewRef.value?.getDraft?.() ?? ''
   if (!draft.trim()) {
     toast.info('先输入一点内容，再让 AI 优化提示词')
     return
   }
+  // 超长草稿优化结果会被 max_tokens=500 截断，反而丢信息；先劝用户拆段
+  if (draft.length > OPTIMIZE_MAX_INPUT) {
+    toast.warning('内容太长，不适合整段优化', {
+      description: `当前 ${draft.length} 字，建议拆成 ${Math.ceil(draft.length / OPTIMIZE_MAX_INPUT)} 段分别优化`
+    })
+    return
+  }
+
+  const originKey = activeConversationId.value
+  optimizingPrompt.value = true
+  const toastId = toast.loading('AI 正在优化提示词…', {
+    description: `原文 ${draft.length} 字 · 通常 3–10 秒`
+  })
+
   try {
-    const optimized = await optimizePrompt(draft)
-    if (!optimized || optimized === draft) {
-      toast.info('没有得到更好的表述，保持原样')
+    const result = await optimizePrompt(draft)
+    const seconds = ((result.elapsedMs ?? 0) / 1000).toFixed(1)
+
+    if (!result.ok) {
+      toast.update(toastId, {
+        type: 'error',
+        message: '提示词优化失败',
+        description: `${result.error ?? '请稍后重试'}（${seconds}s）`,
+        duration: 6000
+      })
       return
     }
-    chatViewRef.value?.setDraft?.(optimized)
-    toast.success('提示词已优化')
+
+    if (!result.optimized || result.optimized === draft.trim()) {
+      toast.update(toastId, {
+        type: 'info',
+        message: '提示词已经足够清晰，保持原样',
+        description: `耗时 ${seconds}s`,
+        duration: 3200
+      })
+      return
+    }
+
+    if (activeConversationId.value !== originKey) {
+      toast.update(toastId, {
+        type: 'warning',
+        message: '已切换会话，优化结果未回填',
+        description: '回到原会话重新点击 ✨ 即可'
+      })
+      return
+    }
+
+    // 等待期间用户自己改了草稿：以用户输入为准，不覆盖
+    const latest = chatViewRef.value?.getDraft?.() ?? ''
+    if (latest !== draft) {
+      toast.update(toastId, {
+        type: 'warning',
+        message: '输入内容已变化，优化结果未覆盖',
+        description: '确认无误后请重新点击 ✨'
+      })
+      return
+    }
+
+    chatViewRef.value?.applyOptimizedDraft?.(draft, result.optimized)
+    toast.update(toastId, {
+      type: 'success',
+      message: `提示词已优化（${seconds}s）`,
+      description: `${draft.length} 字 → ${result.optimized.length} 字${result.model ? ` · ${result.model}` : ''}`,
+      duration: 3200
+    })
   } catch (err) {
-    toast.error('优化失败', { description: readErrorMessage(err, '请稍后重试') })
+    toast.update(toastId, {
+      type: 'error',
+      message: '提示词优化失败',
+      description: readErrorMessage(err, '请稍后重试'),
+      duration: 6000
+    })
+  } finally {
+    optimizingPrompt.value = false
   }
 }
 
@@ -5860,6 +6043,8 @@ const pageView = computed((): PageBinding => {
           loading: chatLoading,
           loadingMore: chatLoadingMore,
           loadError: chatLoadError,
+          // 提示词优化进行中：Composer 的 ✨ 按钮转圈 + 输入区状态条（优化是同步等 LLM）
+          optimizingPrompt,
           // 会话列表依赖「当前 Agent」，必须先有 Agent 列表；Provider 列表用于模型下拉
           load: () => {
             if (!agentList.value.length && !agentLoading.value) {

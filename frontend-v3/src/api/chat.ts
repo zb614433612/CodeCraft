@@ -1,5 +1,5 @@
 import type { ApiResponse } from '@/store/user'
-import { getAuthHeaders, authFetch } from '@/utils/http-client'
+import { getAuthHeaders, authFetch, notifyUnauthorized } from '@/utils/http-client'
 import { readSseStream } from '@/utils/sse-client'
 import type { StreamChatEvent } from '@/utils/sse-client'
 
@@ -310,26 +310,117 @@ export async function supplementRequest(conversationId: number, message: string)
 // ===== 提示词优化 =====
 
 /**
- * 使用 LLM 优化用户消息，使其更清晰明确
- * @param message 原始用户消息
- * @returns 优化后的消息，失败时返回原始消息
+ * 提示词优化结果。
+ *
+ * <p>为什么不再「失败就返回原文」：调用方无法区分「模型认为原文已经够好」和
+ * 「接口 500 / 超时 / 没配模型」，只能统一提示「没有得到更好的表述」，
+ * 用户点了按钮等十几秒却看到一句无关的话。这里把成功/失败与原因分开返回。</p>
  */
-export async function optimizePrompt(message: string): Promise<string> {
+export interface OptimizePromptResult {
+  /** 是否拿到了可用的优化结果 */
+  ok: boolean
+  /** 优化后的文本；失败时回落为原文，便于调用方无脑回填 */
+  optimized: string
+  /** 失败原因（ok=false 时非空） */
+  error?: string
+  /** 本次耗时（毫秒，用于「AI 优化完成 · 3.2s」这类反馈） */
+  elapsedMs: number
+  /** 后端实际使用的模型（便于排查是哪个模型拖慢/截断） */
+  model?: string
+}
+
+/**
+ * 前端兜底超时（毫秒）。
+ *
+ * <p>后端 PromptOptimizeService 内部超时 15s，但 provider 侧连接池卡住、
+ * 网关不返回时前端 fetch 会一直挂着 —— 按钮转了半分钟用户只会以为页面死了。
+ * 这里给 30s 兜底（后端 15s + 传输余量），到点主动 abort 并给出可读提示。</p>
+ */
+const OPTIMIZE_TIMEOUT = 30_000
+
+/** 读取后端错误体里的可读信息（兼容裸 Map 与 ApiResponse 两种返回） */
+function readOptimizeError(data: unknown): string {
+  if (!data || typeof data !== 'object') return ''
+  const record = data as Record<string, unknown>
+  const candidate = record.error ?? record.message ?? record.msg
+  return typeof candidate === 'string' ? candidate.trim() : ''
+}
+
+/**
+ * 使用 LLM 优化用户消息，使其更清晰明确。
+ *
+ * <p>该接口返回的是**裸结构**（`{ success, optimized, error }`，没有 code/data 包装），
+ * 所以不能走 http-client 的 `request()`（它会按 `code === 200` 校验并抛错），
+ * 这里保留裸 fetch，但补齐三件事：401 跳登录、超时中断、失败原因透传。</p>
+ *
+ * @param message 原始用户消息
+ */
+export async function optimizePrompt(message: string): Promise<OptimizePromptResult> {
+  const startedAt = Date.now()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), OPTIMIZE_TIMEOUT)
+
   try {
     const authHeader = await getAuthHeaders()
 
     const response = await fetch('/api/prompt/optimize', {
       method: 'POST',
       headers: { ...authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message })
+      body: JSON.stringify({ message }),
+      signal: controller.signal
     })
-    const data = await response.json()
-    if (data.success && data.optimized) {
-      return data.optimized
+
+    // token 失效：与 sse-client 保持一致，清 token 并跳登录，而不是静默「优化失败」
+    if (response.status === 401) {
+      notifyUnauthorized('登录已过期，请重新登录')
+      return { ok: false, optimized: message, error: '登录已过期，请重新登录', elapsedMs: Date.now() - startedAt }
     }
-    return message
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        optimized: message,
+        error: `优化接口返回 HTTP ${response.status}`,
+        elapsedMs: Date.now() - startedAt
+      }
+    }
+
+    const data: unknown = await response.json()
+    const record = (data ?? {}) as Record<string, unknown>
+    const optimized = typeof record.optimized === 'string' ? record.optimized.trim() : ''
+
+    if (record.success === true && optimized) {
+      return {
+        ok: true,
+        optimized,
+        elapsedMs: typeof record.elapsedMs === 'number' ? record.elapsedMs : Date.now() - startedAt,
+        model: typeof record.model === 'string' ? record.model : undefined
+      }
+    }
+
+    return {
+      ok: false,
+      optimized: message,
+      error: readOptimizeError(data) || '模型没有返回可用结果，请重试',
+      elapsedMs: Date.now() - startedAt,
+      model: typeof record.model === 'string' ? record.model : undefined
+    }
   } catch (e) {
-    console.warn('提示词优化失败:', e)
-    return message
+    const aborted = e instanceof DOMException && e.name === 'AbortError'
+    let error: string
+    if (aborted) {
+      error = `优化超时（${OPTIMIZE_TIMEOUT / 1000} 秒未响应），请稍后重试`
+    } else if (e instanceof SyntaxError) {
+      // 老版本后端没有该接口时，静态资源回退会返回 index.html —— 直接说「接口坏了」比抛 JSON 解析错更好懂
+      error = '优化接口返回了非 JSON 响应，后端服务可能版本过旧，请更新后重启'
+    } else if (e instanceof TypeError && /fetch|network/i.test(e.message)) {
+      error = '网络连接失败，请确认后端服务已启动'
+    } else {
+      error = e instanceof Error ? e.message || '未知错误' : '未知错误'
+    }
+    console.warn('提示词优化失败:', error)
+    return { ok: false, optimized: message, error, elapsedMs: Date.now() - startedAt }
+  } finally {
+    clearTimeout(timer)
   }
 }

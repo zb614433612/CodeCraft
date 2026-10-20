@@ -26,6 +26,7 @@
     <WorkspaceFileView
       v-else-if="tab.kind === 'file'"
       :path="tab.payload.path || ''"
+      :root="root"
       @dirty="$emit('dirty', { id: tab.id, dirty: $event })"
     />
 
@@ -67,6 +68,7 @@ import WorkspaceDiffView from './WorkspaceDiffView.vue'
 import GitChangePanel from './GitChangePanel.vue'
 import WebFrame from './WebFrame.vue'
 import { getProjectFileBlobUrl } from '../api/project'
+import { describeMissingFile, resolveFileTarget } from '../utils/file-path'
 import { openLightbox } from '../utils/lightbox'
 import type { TabKind, WorkspacePayload, WorkspaceTab } from '../store/workspace'
 
@@ -121,7 +123,13 @@ async function loadImage() {
   releaseImage()
   imageError.value = ''
   try {
-    objectUrl = await getProjectFileBlobUrl(path)
+    // 与文件标签一致：相对路径先按工作目录解析，否则后端会按 jar 目录拼路径
+    const target = await resolveFileTarget(path, props.root || '')
+    if (!target.found) {
+      imageError.value = describeMissingFile(target.raw || path, props.root || '', target.candidates)
+      return
+    }
+    objectUrl = await getProjectFileBlobUrl(target.path)
     imageUrl.value = objectUrl
   } catch (err) {
     imageError.value = err instanceof Error ? err.message : '图片加载失败'

@@ -5,6 +5,81 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.4] - 2026-10-20
+
+> Experience-fix release: we chased two long-standing annoyances down to their roots —
+> "a new version is detected but the app still offers to install the old package" and
+> "file links in replies do nothing when clicked". Prompt optimization gained loading feedback
+> and undo, approval / clarification cards are now docked so long conversations can't push them
+> out of view, clarification questions can be answered by clicking 1./2./3. options, skill tags
+> show the real skill name, and the release workflow now embeds the actual change list.
+> Version numbers are unified at 3.0.4; no database schema changes.
+
+### 🔄 Auto-update: no more installing the wrong package
+
+- **Main-process guard**: new `invalidateStaleDownload(targetVersion)` — after `checkForUpdates()` finds the latest version (and before `publicState()` is emitted) `downloadState.version` is compared with the latest version; a mismatch drops the download state and broadcasts via `emitDownloadState()`. Previously `downloadState` survived across checks, so after downloading 3.0.1 and then releasing 3.0.2 the "Install" button still pointed at the old package.
+- **Restore gate on startup**: `initUpdateManager()` used to restore "downloaded" merely because the file existed; it now also requires `compareVersion(latestInfo.version, app.getVersion()) > 0` and a matching file size.
+- **Check before install**: `installDownloaded()` gained a version gate — if the local package version differs from the latest, it throws "please download again" instead of installing a stale build.
+- **Frontend second line of defence**: `VersionCard` adds `versionFromFileName()` (regex `/(\d+\.\d+\.\d+)/`, so `.exe` is not mistaken for a prerelease suffix), `downloadVersion` and `staleDownload`; the button reads "Re-download vX" and a hint explains the version mismatch.
+
+### 🔗 File links could not be opened (fixed)
+
+- **Root cause**: workspace tabs passed the **relative path** from the message straight to `GET /api/project/read`; the backend resolves it against `user.dir` (the jar directory under Electron), so it read something else entirely. The legacy `openLocalFileTab` used to build an absolute path first and fall back to `/api/project/resolve` suffix matching — that layer was lost during the v3 migration.
+- **New `utils/file-path.ts`**: `normalizeFsPath` / `isAbsoluteFsPath` / `joinFsPath` / `absolutizePath` / `resolveFileTarget` / `describeMissingFile`. `resolveFileTarget()` returns `{ raw, path, found, candidates, viaResolve }`: join with the working directory first, then fall back to the backend resolve endpoint and surface the candidate list.
+- **Resolve on click**: `ChatView.onStreamClick` is now async and resolves the target before handing it to `workspace.openTab` / `openFilePreview`; `openFilePreview` accepts `(target: string | ResolvedFileTarget, kind)`. Resolving at click time (instead of inside the tag) prevents the same file opening as two tabs when referenced once relatively and once absolutely (`tabKeyOf` keys on `payload.path`).
+- **Workspace views**: `WorkspaceFileView` gained a `root` prop plus `resolvedPath` and uses the resolved path for both reads and writes; `WorkspaceTabView` forwards `:root="root"` and resolves in `loadImage` too.
+- **Bare file names**: `markdown.ts` `isLocalFilePath(p, allowBareName = false)` now recognises plain file names (via `FILE_EXT_STRICT_RE`) only for explicit links / images (`allowBareName=true`); inline text scanning still requires a path separator so ordinary prose is not mistaken for a path.
+- **Readable errors**: failures now report connection of "working directory + candidate paths + backend message"; `.cc-wsv__state-text` / `.cc-fileview__state.is-error` in `app.css` use `white-space: pre-line; word-break: break-all` so long paths are no longer truncated.
+
+### ✨ Prompt optimization: loading feedback and undo
+
+- **Request layer**: `optimizePrompt` in `api/chat.ts` now returns `OptimizePromptResult { ok, optimized, error, elapsedMs, model }` instead of silently falling back to the original text; a 30 s `AbortController` backstop (backend timeout 15 s plus transport margin); 401 goes through `notifyUnauthorized`; errors distinguish "non-JSON response (backend too old)", "network down" and "timeout".
+- **Loading feedback**: the ✨ button becomes a spinning ring (`aria-busy`) and is disabled against double clicks; a status bar above the textarea shows "AI is optimizing your prompt · Ns elapsed" (ticks every second, stops at 60 s); the textarea is `readonly` and sending is blocked while optimizing (`readonly` rather than `disabled`, so colours stay normal).
+- **Undo**: `ChatView` keeps an `optimizeUndo` snapshot; `optimizeUndoAvailable` is true only while the draft still equals the optimized result; `applyOptimizedDraft()` / `undoOptimize()` are exposed via `defineExpose`; sending or switching conversations clears the snapshot so undo cannot leak across sessions.
+- **Outcome granularity**: `App.vue` `onOptimize` was rewritten with re-entry protection and four toast states (`toast.loading` → success / error / info / warning), reporting elapsed time and character count; it skips overwriting when the conversation changed or the draft was edited; drafts over `OPTIMIZE_MAX_INPUT = 6000` are rejected with a hint to split the text (the model's `max_tokens` cannot hold it, and waiting 10 s only yields a truncated, worse result).
+- **Backend**: `PromptOptimizeService` adds an `OptimizeResult` record with granular failure reasons (missing template / no provider / timeout / empty result / call exception); `MAX_TOKENS` raised 500 → 800 (the default model may be a reasoning model, where 500 tokens are easily consumed by thinking and content comes back empty); `PromptOptimizeController` now emits a `LinkedHashMap` (`Map.of` rejects nulls) while keeping the bare JSON shape compatible with the classic frontend.
+
+### 📌 Approval / clarification cards are docked in place
+
+- The card used to be inline at the end of the message list — in long conversations you had to scroll all the way down to notice that "the AI stopped and is waiting for you". It now lives outside the message stream in a fixed `.cc-approval-dock` above the composer: `flex: 0 1 auto` + `min-height: 0` + `overflow: hidden` so it can shrink on small windows without pushing the composer off screen.
+- The dock header shows "waiting for authorization / waiting for your answer / waiting for your confirmation" depending on `askType`, with a pulse indicator; the body scrolls internally at `max-height: min(46vh, 460px)` so long diffs remain readable.
+- A new `watch(() => props.approval)` scrolls to the latest message only when the user was already at the bottom (never interrupting someone reading history), plus a "back to latest" button.
+
+### 🗂 Answer clarification questions by clicking a direction
+
+- New `utils/ask-options.ts`: `parseAskOptions(markdown)` parses `1. / 2. / 1、/ (1)`, `A.` and `-` style list items from the question, stripping fenced code blocks, normalising literal `\n` and removing markdown decorations.
+- **Mis-detection guards**: at least 2 items, at most 6, average length ≤ 90 characters and raw block ≤ 400 characters — otherwise it falls back to the plain textarea.
+- The clarification branch of `ChatApproval` renders option buttons; one click answers with the original numbering (`${mark}. ${plain}`), with a `picking` flag preventing duplicate submissions.
+- The backend `AskClarificationTool` parameter description now insists that multiple directions be listed as `1./2./3.` lines — zero protocol change on the frontend, just better hit rate.
+
+### 🎯 Skill hits show the real skill name
+
+- Tag text changed from `🎯 {name}` to `🎯 命中技能：{name}`; `hitSkills` are cleaned before display (strip `**` and leading markers, turn bare IDs like `#12` into "技能 #12", de-duplicate).
+- `utils/skill-hit.ts`: new `cleanSkillName()`; the `parseSkillHitsFromSummaries` regex changed from `(.+)$` to `/🎯\s*命中技能\s*[:：]?\s*\*{0,2}\s*([^\n]+)/` — summaries ending with `\n\n` previously made the whole match fail, which is exactly why the tag showed `XXX`.
+- `App.vue` adds `skillNameMap` / `ensureSkillNameMap()`: lazily fetches the skill list once to build a `#id → name` map (no retry on failure), `setConvMessages()` applies `withSkillNames()`, and `watch(skillNameMap)` backfills already-rendered history. Unresolved IDs render as "技能 #12" instead of a bare number.
+
+### 📝 Release workflow: Release notes now include the change list
+
+- The body in `.github/workflows/release.yml` used to be a hard-coded template with download instructions and the macOS note only — **it never contained the actual changes** (that is why the Release page looked like it had "no release notes"). The create-release job now checks out the repo and extracts the current version's section from `CHANGELOG.md` with `awk`, appending it to the Release body; if extraction fails it falls back to the CHANGELOG link.
+- Also fixed the Windows asset name in the body: it said `CodeCraft-Setup-x.y.z.exe` while the real asset is `CodeCraft.Setup.x.y.z.exe`.
+
+### 🧾 Version bump
+
+- Backend: `3.0.3` → `3.0.4` (`pom.xml`, artifact `code-craft-3.0.4.jar`)
+- Classic frontend: `3.0.3` → `3.0.4` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.3` → `3.0.4` (`frontend-v3/package.json` + lock)
+- Electron: version and `extraResources` jar path → `3.0.4` / `code-craft-3.0.4.jar`
+- MCP Server handshake version: `3.0.3` → `3.0.4` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) headers, DEV_QUICKREF / RELEASE_CHECKLIST(_EN) build commands and the FAQ version example are unified at v3.0.4
+
+### ⚠️ Upgrade notes
+
+- **No database schema changes**, but there are backend changes (prompt-optimization response shape, clarification prompt) — **install the new package over the old one**; replacing only the frontend static files is not enough.
+- The auto-update fix in the main process only takes effect with a new package: the main process of 3.0.3 and earlier still has the old logic and may still offer a stale installer if one is lying around — installing 3.0.4 restores correct behaviour.
+- File-link resolution relies on `GET /api/project/read` and `/api/project/resolve`; the working directory follows the current settings (conversation override > agent work dir > global setting). If a link still fails, please report the candidate paths shown in the error.
+
+---
+
 ## [3.0.3] - 2026-10-20
 
 > Stability release: finds and fixes the real culprit behind "expanding long reasoning freezes the app"

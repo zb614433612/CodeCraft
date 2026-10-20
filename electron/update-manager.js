@@ -243,6 +243,13 @@ async function checkForUpdates (force) {
     lastCheckedAt = Date.now()
     cache = { checkedAt: lastCheckedAt, release: latestInfo }
     saveJson(cacheFile(), cache)
+    /*
+      检测结果可能已经翻篇（3.0.2 的包 + 3.0.3 的 Release）：
+      先把本地不匹配的下载态作废，再返回结果。
+      顺序不能反 —— buildResult 会把 pendingAsset 切成新版本的资产，
+      留着旧的 done 状态就会让界面显示「安装 3.0.2」。
+    */
+    invalidateStaleDownload(latestInfo.version)
     return buildResult(latestInfo)
   } finally {
     checking = false
@@ -263,6 +270,42 @@ function broadcast (channel, payload) {
 
 function emitDownloadState () {
   broadcast('update:download-progress', { ...downloadState })
+}
+
+/**
+ * 作废「已下载但版本对不上」的安装包。
+ *
+ * <p>为什么必须由主进程做：`downloadState` 是跨检查保留的（用户先下过 3.0.2，
+ * 之后仓库发了 3.0.3），而检测更新只更新 `latestInfo`、不会碰下载状态 ——
+ * 界面于是把 3.0.2 的包当成「最新版安装包」，按钮写着「安装更新」，
+ * 点下去装的其实还是用户已经装着的旧版本。</p>
+ *
+ * <p>前端 3.0.3 起会按版本号比对兜底，但**旧前端（3.0.2 及以前）没有任何版本比对**，
+ * 完全依赖这里把状态清干净；主进程与渲染进程各修一层，才不会出现
+ * 「升级到新版之后仍然复发」。</p>
+ *
+ * @param {string} targetVersion 当前检测到的最新版本
+ * @returns {boolean} 是否发生了作废
+ */
+function invalidateStaleDownload (targetVersion) {
+  if (downloadState.status !== 'done') return false
+  const target = normalizeVersion(targetVersion || '')
+  const cached = normalizeVersion(downloadState.version || '')
+  // 版本号缺失（老状态）也按「对不上」处理：宁可让用户重下，也不要把旧包装上去
+  if (target && cached && target === cached) return false
+  console.log('[update] 本地安装包与最新版本不一致，已作废:', cached || '(unknown)', '→', target || '(unknown)')
+  downloadState = {
+    status: 'idle',
+    percent: 0,
+    received: 0,
+    total: 0,
+    filePath: '',
+    fileName: '',
+    version: '',
+    error: ''
+  }
+  emitDownloadState()
+  return true
 }
 
 function downloadOnce (url, filePath, expectedSize) {
@@ -450,6 +493,19 @@ function backupBeforeUpgrade () {
 // ==================== 安装 ====================
 
 async function installDownloaded (opts) {
+  if (downloadState.status !== 'done') {
+    throw new Error('安装包尚未下载完成，请先下载更新')
+  }
+  /*
+    再守一道版本闸门：前端（3.0.3 起）已经按版本号决定显示「下载」还是「安装」，
+    但旧前端不做比对、用户也可能在旧界面上点下去 ——
+    这里直接拒绝，避免「以为在升级、实际把旧版本又装了一遍」。
+  */
+  const latestVersion = normalizeVersion(latestInfo ? latestInfo.version : '')
+  const localVersion = normalizeVersion(downloadState.version || '')
+  if (latestInfo && latestVersion && localVersion !== latestVersion) {
+    throw new Error(`本地安装包为 v${localVersion || '未知'}，最新版本是 v${latestVersion}，请重新下载`)
+  }
   const filePath = downloadState.filePath
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error('安装包不存在，请先下载')
@@ -498,11 +554,18 @@ async function installDownloaded (opts) {
 // ==================== 状态 / IPC ====================
 
 function publicState () {
+  /*
+    惰性校正：启动时是拿缓存里的 latestInfo 预填「已下载」态的，
+    缓存可能已经翻篇（上次检查到 3.0.2、期间发布了 3.0.3）。
+    每次取状态前先对齐一次版本号，避免旧包一直被渲染成「可安装」。
+  */
+  if (latestInfo) invalidateStaleDownload(latestInfo.version)
+  const latest = latestInfo ? buildResult(latestInfo) : null
   return {
     currentVersion: app.getVersion(),
     platform: process.platform,
     arch: process.arch,
-    latest: latestInfo ? buildResult(latestInfo) : null,
+    latest,
     download: { ...downloadState },
     settings: { ...settings },
     lastCheckedAt
@@ -605,10 +668,18 @@ function initUpdateManager (options) {
   if (cache && cache.release) {
     latestInfo = cache.release
     lastCheckedAt = cache.checkedAt || 0
-    // 预填落库的下载完成态（用户重启后仍可点「安装」）
+    /*
+      预填「已下载」态必须同时满足两个条件：
+        1) 缓存里的版本确实比当前安装版本新 —— 否则那个包就是「当前版本的安装器」，
+           显示成「可安装更新」毫无意义，还会挡住真正的新版本下载按钮；
+        2) 磁盘上的文件名与大小和缓存资产完全一致 —— 复用之前先确认没被删 / 没下坏。
+      旧实现只校验文件存在，于是用户从 3.0.1 升到 3.0.2 后，temp 里残留的
+      CodeCraft-Setup_3.0.2.exe 会让界面一直停留在「安装 3.0.2」。
+    */
     try {
+      const hasNewer = compareVersion(latestInfo.version, app.getVersion()) > 0
       const dir = downloadDir()
-      const asset = pickAsset(latestInfo.assets || [])
+      const asset = hasNewer ? pickAsset(latestInfo.assets || []) : null
       if (asset) {
         const filePath = path.join(dir, asset.name)
         if (fs.existsSync(filePath) && asset.size > 0 && fs.statSync(filePath).size === asset.size) {

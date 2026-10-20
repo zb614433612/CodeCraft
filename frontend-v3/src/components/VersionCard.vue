@@ -126,7 +126,7 @@
           @click="onDownload"
         >
           <svg class="cc-i cc-i--sm"><use href="#i-disk" /></svg>
-          下载更新{{ assetText ? '（' + assetText + '）' : '' }}
+          {{ staleDownload ? `重新下载 v${normalizeVersion(latest?.latestVersion)}` : '下载更新' }}{{ assetText ? '（' + assetText + '）' : '' }}
         </button>
         <template v-else>
           <button class="cc-btn cc-btn--primary" :disabled="busy" @click="onInstall">
@@ -137,7 +137,7 @@
             <svg class="cc-i cc-i--sm"><use href="#i-file" /></svg>已下载：{{ download.fileName || '安装包' }}
           </button>
         </template>
-        <span class="cc-vercard__hint">{{ installAction.hint }}</span>
+        <span class="cc-vercard__hint">{{ staleDownload ? staleDownloadText : installAction.hint }}</span>
       </div>
 
       <div v-if="download.status === 'error'" class="cc-vercard__alert" role="alert">
@@ -246,18 +246,50 @@ function normalizeVersion (value?: string | null): string {
 }
 
 /**
+ * 从安装包文件名里抠出版本号，作为 `download.version` 的兜底。
+ *
+ * <p>为什么需要：`download.version` 是主进程较新版本才写入的字段，
+ * 老状态 / 老主进程可能为空；而文件名一定存在（`CodeCraft-Setup_3.0.2.exe`、
+ * `CodeCraft-3.0.3-arm64.dmg`）。只信 version 字段会出现「明明是 3.0.2 的包，
+ * 却因为版本号缺失被判定为可安装」或反之的误判。</p>
+ */
+function versionFromFileName (name?: string): string {
+  // 只取三段数字版本：`CodeCraft.Setup.3.0.2.exe` 里的 `.exe` 不能被当成预发布后缀
+  const m = /(\d+\.\d+\.\d+)/.exec(String(name || ''))
+  return m ? m[1] : ''
+}
+
+/** 本地已下载安装包的真实版本（先信主进程字段，再退回文件名） */
+const downloadVersion = computed(
+  () => normalizeVersion(download.version) || versionFromFileName(download.fileName)
+)
+
+/**
  * 已下载的安装包是否**正是**当前检测到的新版本。
  *
  * <p>必须比对版本号，不能只看 `status === 'done'`：主进程会把上一次下载完成的状态
- * 一并返回（用户先下过 3.0.1，后来发布了 3.0.2），此时界面会把「安装 3.0.1」
- * 摆在最前面 —— 用户以为在装新版本，实际装的是旧包。
- * `download.version` 为空（老版本主进程没回该字段）时按「不匹配」处理，宁可让用户重下。</p>
+ * 一并返回（用户先下过 3.0.2，后来发布了 3.0.3），此时界面会把「安装 3.0.2」
+ * 摆在最前面 —— 用户以为在装新版本，实际装的是旧包。</p>
  */
 const downloadReady = computed(() => {
   if (download.status !== 'done') return false
-  const downloaded = normalizeVersion(download.version)
+  const downloaded = downloadVersion.value
   const target = normalizeVersion(latest.value?.latestVersion)
   return !!downloaded && !!target && downloaded === target
+})
+
+/** 已下载但版本对不上：给出「需要重新下载」的显式提示，而不是静默藏掉按钮 */
+const staleDownload = computed(() => {
+  if (download.status !== 'done' || downloadReady.value) return false
+  const downloaded = downloadVersion.value
+  const target = normalizeVersion(latest.value?.latestVersion)
+  return !!downloaded && !!target && downloaded !== target
+})
+
+const staleDownloadText = computed(() => {
+  const downloaded = downloadVersion.value
+  const target = normalizeVersion(latest.value?.latestVersion)
+  return `本地已下载 v${downloaded || '未知'} 安装包，与最新版本 v${target || '未知'} 不一致，可点「重新下载」获取新版本`
 })
 const progressPercent = computed(() => Math.min(100, Math.max(0, Math.round(download.percent || 0))))
 
@@ -332,9 +364,9 @@ async function onCheck () {
         否则用户看到的是「安装 v3.0.1」（旧包），点下去装的也不是刚检测到的新版本。
       */
       const target = normalizeVersion(result.latestVersion)
-      const downloaded = normalizeVersion(download.version)
-      const staleDownload = download.status === 'done' && !!downloaded && downloaded !== target
-      if (staleDownload) {
+      const downloaded = downloadVersion.value
+      const isStale = download.status === 'done' && !!downloaded && downloaded !== target
+      if (isStale) {
         download.status = 'idle'
         download.percent = 0
         download.received = 0

@@ -203,21 +203,6 @@
             @expand="onMessageExpand"
           />
 
-          <!-- 工具审批 / 询问（有 pending ask_user 时展示） -->
-          <ChatApproval
-            v-if="approval"
-            :title="approval.title"
-            :description="approval.description"
-            :command="approval.command"
-            :from="approval.from"
-            :ask-type="approval.askType"
-            @approve="$emit('approve')"
-            @approve-all="$emit('approve-all')"
-            @reject="$emit('reject')"
-            @answer="$emit('answer', $event)"
-            @continue="$emit('continue', $event)"
-          />
-
           <!--
             任务清单不再内联在消息流末尾：
             内联面板需要滚到最底部才看得到（长会话里几乎不可达），已移到输入区上方的
@@ -232,6 +217,54 @@
         回到最新
       </button>
     </div>
+
+    <!--
+      待回执区（工具授权 / 用户询问 / 迭代确认）
+      ----------------------------------------------------------------------------
+      卡片原先内联在消息列表末尾：长会话里 AI 的最后一条输出在下方几屏之外，
+      用户根本看不到「任务已暂停、在等你回执」，只能自己往下滚才发现（表现为「弹窗在下面」）。
+      现在固定在「消息区 ↔ 输入区」之间：无论滚到哪儿都在同一位置可见；
+      容器限高 + 内部滚动，内容再长也不会把阅读区挤没。
+      新回执到达时：用户本就在底部附近 → 自动贴底看上下文；正在翻历史 → 不打断，
+      由右上角「回到最新上下文」提供出口。
+    -->
+    <section
+      v-if="approval"
+      class="cc-approval-dock"
+      :class="`is-${approval.askType || 'permission'}`"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="cc-approval-dock__bar">
+        <span class="cc-approval-dock__pulse" />
+        <span class="cc-approval-dock__label">{{ approvalDockLabel }}</span>
+        <span class="cc-approval-dock__hint">任务已暂停，需要你的回执</span>
+        <button
+          v-if="!atBottom"
+          class="cc-approval-dock__jump"
+          type="button"
+          title="滚动到消息流底部，查看 AI 最后一条输出"
+          @click="scrollToBottom(true)"
+        >
+          回到最新上下文
+          <svg class="cc-i cc-i--sm"><use href="#i-chev" /></svg>
+        </button>
+      </div>
+      <div class="cc-approval-dock__body">
+        <ChatApproval
+          :title="approval.title"
+          :description="approval.description"
+          :command="approval.command"
+          :from="approval.from"
+          :ask-type="approval.askType"
+          @approve="$emit('approve')"
+          @approve-all="$emit('approve-all')"
+          @reject="$emit('reject')"
+          @answer="$emit('answer', $event)"
+          @continue="$emit('continue', $event)"
+        />
+      </div>
+    </section>
 
     <!--
       运行状态栏（对齐旧项目底部工具条）
@@ -457,11 +490,14 @@
       :context-tokens="conversation.stats?.contextTokens"
       :context-mode="conversation.contextMode"
       :balance="conversation.balance"
+      :optimizing="optimizingPrompt"
+      :undo-available="optimizeUndoAvailable"
       @send="onSend"
       @stop="$emit('stop')"
       @attach="$emit('attach')"
       @attach-history="$emit('attach-history')"
       @optimize="$emit('optimize')"
+      @undo-optimize="undoOptimize"
       @select-model="$emit('select-model')"
       @remove-attachment="$emit('remove-attachment', $event)"
       @paste="$emit('paste', $event)"
@@ -552,7 +588,8 @@ import type { DelegateCall, SubAgentRun } from '../utils/agent-event'
 import { formatDuration, subAgentStats } from '../utils/agent-event'
 /* F08：消息列表窗口化（尾部窗口 + 顶部占位块） */
 import { useTailWindow } from '../utils/virtual-list'
-import { readProjectFile, resolveProjectFilePath, getProjectFileBlobUrl } from '../api/project'
+import { readProjectFile, getProjectFileBlobUrl } from '../api/project'
+import { describeMissingFile, resolveFileTarget, type ResolvedFileTarget } from '../utils/file-path'
 
 export interface ConversationDetail {
   id: string
@@ -674,6 +711,13 @@ const props = withDefaults(
     /** 聊天记录加载失败原因：非空时展示错误条 + 重试按钮，而不是误导性的空态 */
     loadError?: string
     /**
+     * 提示词优化进行中（由父级持有：只有父级知道请求状态）。
+     *
+     * <p>优化是一次同步等待 LLM 返回的请求（3~10 秒），Composer 需要据此把 ✨ 按钮
+     * 换成旋转图标、锁住输入框并打出「AI 正在优化…」，否则用户以为点了没反应。</p>
+     */
+    optimizingPrompt?: boolean
+    /**
      * 进入页面时的数据加载（由 App.vue 的 PAGE_BINDINGS 注入）
      * 页面随路由真实挂载，所以在这里调一次即可；重复进页由父级的「已加载 / 加载中 / 已失败」跳过
      */
@@ -702,7 +746,8 @@ const props = withDefaults(
     isAdmin: false,
     loading: false,
     loadingMore: false,
-    loadError: ''
+    loadError: '',
+    optimizingPrompt: false
   }
 )
 
@@ -777,6 +822,46 @@ const showProviderGuide = computed(
 )
 
 const draft = ref('')
+
+/**
+ * 提示词优化的撤销快照（`before` = 优化前原文，`result` = 回填后的文本）。
+ *
+ * <p>放在 ChatView 而不是 App：撤销是否可用取决于「草稿有没有被用户改过」，
+ * 而草稿是这里的内部状态。挂在 App 上会让每次输入都触发整个 App 重渲染。</p>
+ */
+const optimizeUndo = ref<{ before: string; result: string } | null>(null)
+
+/** 草稿仍是优化结果时才提供撤销，避免用户改完字点撤销把新输入覆盖掉 */
+const optimizeUndoAvailable = computed(
+  () => !!optimizeUndo.value && draft.value === optimizeUndo.value.result
+)
+
+/** 回填优化结果并记录撤销快照（由父级在请求成功后调用） */
+function applyOptimizedDraft(before: string, result: string) {
+  optimizeUndo.value = { before, result }
+  draft.value = result
+}
+
+/** 撤销：回到优化前原文；快照只用一次 */
+function undoOptimize() {
+  const snap = optimizeUndo.value
+  if (!snap) return
+  // 双保险：computed 已保证按钮只在草稿等于结果时出现，这里再校验一次
+  if (draft.value !== snap.result) {
+    optimizeUndo.value = null
+    return
+  }
+  draft.value = snap.before
+  optimizeUndo.value = null
+}
+
+/** 切会话后旧快照立刻作废：否则「撤销」会把上个会话的原文填进当前输入框 */
+watch(
+  () => props.conversation.id,
+  () => {
+    optimizeUndo.value = null
+  }
+)
 const streamRef = ref<HTMLElement | null>(null)
 const composerRef = ref<InstanceType<typeof ChatComposer> | null>(null)
 
@@ -861,6 +946,8 @@ function onSend() {
   if (!text) return
   emit('send', text)
   draft.value = ''
+  // 发送后草稿清空，优化撤销入口没有意义了，顺手释放快照
+  optimizeUndo.value = null
 }
 
 /* ============================ 滚动：贴底 / 一键到底 ============================ */
@@ -916,6 +1003,32 @@ async function scrollToBottom(smooth = false) {
   }
   settle(0)
 }
+
+/* ---------- 待回执区（审批 / 询问固定停靠） ---------- */
+
+/** 停靠条标题：按 askType 区分「等你授权 / 等你回答 / 等你决定」 */
+const approvalDockLabel = computed(() => {
+  switch (props.approval?.askType) {
+    case 'clarification':
+      return 'AI 在等你回答问题'
+    case 'iteration_confirm':
+      return 'AI 在等你确认是否继续'
+    default:
+      return '有工具操作在等你授权'
+  }
+})
+
+/**
+ * 新回执到达：用户本就在底部附近时补一次贴底，方便对照 AI 最后一条输出；
+ * 正在翻历史则不打断（卡片已固定可见），由停靠条上的「回到最新上下文」提供出口。
+ */
+watch(
+  () => props.approval,
+  val => {
+    if (!val) return
+    if (atBottom.value) void scrollToBottom(true)
+  }
+)
 
 /**
  * 流式增长时是否应该贴底。
@@ -1389,52 +1502,30 @@ function closeFilePreview() {
   filePreview.value = null
 }
 
-function isAbsolutePath(p: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/')
-}
-
-/** 拼接项目根与相对路径（沿用根路径的分隔符风格） */
-function joinFsPath(root: string, rel: string): string {
-  const sep = root.includes('\\') ? '\\' : '/'
-  return `${root.replace(/[\\/]+$/, '')}${sep}${rel.replace(/^[\\/]+/, '')}`
-}
-
 /**
- * 把消息里的路径解析成可直接读取的路径。
- * 相对路径先走后端 `/project/resolve` 按后缀匹配（LLM 常省略前缀），取第一个候选。
+ * 打开右侧抽屉预览。
  *
- * `found=false` 表示相对路径在项目内没有匹配到文件 —— 调用方据此给出明确提示，
- * 而不是拼一个不存在的绝对路径去读（后端会返回 Spring 错误页，前端只会看到空白）。
+ * <p>`target` 允许传「点击时已经解析好的结果」：工作区标签与抽屉共用同一次
+ * `/project/resolve`，避免一次点击发两次请求；错误提示也能带上原始路径。</p>
  */
-async function resolveTargetPath(raw: string): Promise<{ path: string; found: boolean }> {
-  if (isAbsolutePath(raw)) return { path: raw, found: true }
-  const root = props.projectRoot || ''
-  if (!root) return { path: raw, found: true }
-  try {
-    const res = await resolveProjectFilePath(root, raw)
-    const candidate = (res.data || [])[0]
-    if (candidate) return { path: joinFsPath(root, candidate), found: true }
-    return { path: joinFsPath(root, raw), found: false }
-  } catch {
-    return { path: joinFsPath(root, raw), found: false }
-  }
-}
-
-async function openFilePreview(rawPath: string, kind: 'file' | 'image') {
+async function openFilePreview(target: string | ResolvedFileTarget, kind: 'file' | 'image') {
   // 文件预览占用「文件」标签页：即使当前停在 Git/终端也要切过来
   drawerTab.value = 'files'
   drawerOpen.value = true
 
   releasePreviewUrl()
   const seq = ++previewSeq
+  const rawPath = typeof target === 'string' ? target : target.raw
   filePreview.value = { path: rawPath, loading: true, error: '', content: '', imageUrl: '' }
 
   try {
-    const resolved = await resolveTargetPath(rawPath)
+    const resolved = typeof target === 'string'
+      ? await resolveFileTarget(target, props.projectRoot || '')
+      : target
     if (seq !== previewSeq) return
     filePreview.value.path = resolved.path
     if (!resolved.found) {
-      throw new Error(`未找到该文件（当前工作目录：${props.projectRoot || '未设置'}）`)
+      throw new Error(describeMissingFile(rawPath, props.projectRoot || '', resolved.candidates))
     }
 
     if (kind === 'image') {
@@ -1451,7 +1542,10 @@ async function openFilePreview(rawPath: string, kind: 'file' | 'image') {
       // 后端异常（如文件不存在）会返回 Spring 默认错误页（无 code/message 字段），
       // 这里必须显式校验，否则会静默显示空白。
       if (res?.code !== 200 || typeof res.data !== 'string') {
-        throw new Error('文件读取失败：文件不存在或无法访问')
+        throw new Error(
+          `${describeMissingFile(rawPath, props.projectRoot || '', resolved.candidates)}\n` +
+          `后端返回：${res?.message || '文件不存在或无法访问'}`
+        )
       }
       filePreview.value.content = res.data
     }
@@ -1466,8 +1560,13 @@ async function openFilePreview(rawPath: string, kind: 'file' | 'image') {
 /**
  * 消息区点击委托：只接管带 `data-cc-path` 的链接（由 utils/markdown 生成）。
  * 普通外链有 target=_blank，不在这里处理。
+ *
+ * <p>解析必须发生在**点击时、开标签之前**：工作区标签以 `payload.path` 做去重 key，
+ * 直接塞相对路径会与文件树打开的同一文件形成两个标签，且标签内读取时后端会按
+ * 进程 user.dir 拼路径（Electron 下是 jar 目录）→ 表现为「点了没反应 / 打不开」。
+ * 旧版（frontend/CodeAssistantView.vue）能点开相对路径靠的就是「先拼绝对路径再读」。</p>
  */
-function onStreamClick(event: MouseEvent) {
+async function onStreamClick(event: MouseEvent) {
   const target = event.target as Element | null
   const anchor = target?.closest('[data-cc-path]') as HTMLElement | null
   if (!anchor) return
@@ -1476,16 +1575,21 @@ function onStreamClick(event: MouseEvent) {
   const path = anchor.dataset.ccPath || ''
   if (!path) return
   const kind = (anchor.dataset.ccKind as 'file' | 'image') || 'file'
+
+  const resolved = await resolveFileTarget(path, props.projectRoot || '')
+
   /*
    * 工作区模式：开成标签而不是抽屉里的只读预览。
    * 文件标签自带编辑器与保存，图片标签可点开大图 —— 比预览更进一步，
    * 也符合「点一次路径 = 打开这个文件」的直觉。
+   * 未找到时也开标签：标签内会显示工作目录 / 候选 / 重试按钮，
+   * 比「点了什么都不发生」更容易定位问题。
    */
   if (settings.workspaceMode) {
-    workspace.openTab(kind === 'image' ? 'image' : 'file', { path })
+    workspace.openTab(kind === 'image' ? 'image' : 'file', { path: resolved.path })
     return
   }
-  void openFilePreview(path, kind)
+  void openFilePreview(resolved, kind)
 }
 
 onBeforeUnmount(() => {
@@ -1496,10 +1600,12 @@ defineExpose({
   focusComposer: () => composerRef.value?.focus(),
   /** 读取输入框草稿（AI 优化提示词需要） */
   getDraft: () => draft.value,
-  /** 回填输入框草稿（优化结果 / 重新生成场景） */
+  /** 回填输入框草稿（重新生成等场景；不记录优化撤销快照） */
   setDraft: (text: string) => {
     draft.value = text
-  }
+  },
+  /** 回填 AI 优化结果，并记录一份可撤销快照（草稿再被编辑即失效） */
+  applyOptimizedDraft
 })
 
 /**

@@ -30,11 +30,14 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import CodeEditor from './CodeEditor.vue'
 import { readProjectFile, writeProjectFile } from '../api/project'
+import { describeMissingFile, resolveFileTarget } from '../utils/file-path'
 import { toast } from '../utils/toast'
 
 const props = defineProps<{
-  /** 文件绝对路径 */
+  /** 文件路径：允许是 AI 输出里的相对路径，内部按工作目录解析成绝对路径后再读写 */
   path: string
+  /** 当前 Agent 工作目录（解析相对路径的基准，与文件树 / 终端一致） */
+  root?: string
 }>()
 
 const emit = defineEmits<{ (e: 'dirty', value: boolean): void }>()
@@ -45,6 +48,8 @@ const content = ref('')
 /** 读取到的原始内容：与 content 不同即为「未保存」 */
 const original = ref('')
 const saving = ref(false)
+/** 解析后的真实路径（读 / 写都用它，避免相对路径被后端按 user.dir 拼接） */
+const resolvedPath = ref('')
 
 const dirty = computed(() => content.value !== original.value)
 
@@ -56,11 +61,22 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await readProjectFile(props.path)
+    /*
+      与旧版 openLocalFileTab 一致：先拼绝对路径再读。
+      后端 /api/project/read 对相对路径是用后端进程 user.dir 拼的，
+      Electron 桌面端那是 jar 所在目录 —— 直接从消息里拿相对路径去读必然失败。
+    */
+    const target = await resolveFileTarget(props.path, props.root || '')
+    resolvedPath.value = target.path
+    if (!target.found) {
+      error.value = describeMissingFile(target.raw || props.path, props.root || '', target.candidates)
+      return
+    }
+    const res = await readProjectFile(target.path)
     const text = typeof res.data === 'string' ? res.data : ''
     // 后端读取失败时返回 Spring 默认错误页或空串，统一按「读不到」处理
     if (!text && res.code !== 200) {
-      error.value = res.message || '文件内容为空或不可读取'
+      error.value = `${describeMissingFile(target.raw || props.path, props.root || '', target.candidates)}\n后端返回：${res.message || '文件内容为空或不可读取'}`
       return
     }
     content.value = text
@@ -74,11 +90,12 @@ async function load() {
 
 async function save() {
   if (saving.value) return
+  const target = resolvedPath.value || props.path
   saving.value = true
   try {
-    await writeProjectFile(props.path, content.value)
+    await writeProjectFile(target, content.value)
     original.value = content.value
-    toast.success('已保存', { description: props.path })
+    toast.success('已保存', { description: target })
   } catch (err) {
     toast.error('保存失败', { description: err instanceof Error ? err.message : '请稍后重试' })
   } finally {
@@ -86,5 +103,5 @@ async function save() {
   }
 }
 
-watch(() => props.path, load, { immediate: true })
+watch(() => [props.path, props.root], load, { immediate: true })
 </script>

@@ -38,6 +38,28 @@
         </span>
       </div>
 
+      <!-- 优化状态条：优化是同步等 LLM 返回（3~10 秒，最长 30 秒兜底），
+           不给反馈的话用户只会觉得「点了没反应」，于是连点好几次打爆接口。
+           优化中显示旋转图标 + 已耗时；完成后同一位置变成「撤销」入口。 -->
+      <div v-if="optimizing || undoAvailable" class="cc-opt-bar" :class="{ 'is-done': !optimizing }">
+        <template v-if="optimizing">
+          <span class="cc-opt-spinner" aria-hidden="true" />
+          <span class="cc-opt-bar__text">
+            AI 正在优化提示词<template v-if="optimizeElapsed > 0"> · 已等待 {{ optimizeElapsed }}s</template>
+          </span>
+          <span class="cc-opt-bar__tip">通常 3–10 秒</span>
+        </template>
+        <template v-else>
+          <span class="cc-opt-bar__text">✨ 提示词已优化</span>
+          <button
+            type="button"
+            class="cc-opt-bar__undo"
+            title="还原为优化前的提示词"
+            @click="$emit('undo-optimize')"
+          >撤销</button>
+        </template>
+      </div>
+
       <!-- 输入框：任务运行中整框禁用（与旧版 hasRunningTask 行为一致）。
            只禁发送不禁输入会让用户白打一段字，最后发现发不出去；要追加需求走上方「💡 补充需求」。 -->
       <div class="cc-composer__box">
@@ -47,6 +69,7 @@
           :rows="rows"
           :placeholder="effectivePlaceholder"
           :disabled="disabled || running"
+          :readonly="optimizing"
           @input="onInput"
           @keydown.enter.exact.prevent="onEnter"
           @paste="$emit('paste', $event)"
@@ -75,11 +98,17 @@
             </div>
           </div>
           <button
-            class="cc-round-btn"
-            title="AI 优化提示词"
-            :disabled="disabled || running"
+            class="cc-round-btn cc-round-btn--opt"
+            :class="{ 'is-loading': optimizing }"
+            :title="optimizing ? 'AI 正在优化提示词，请稍候…' : 'AI 优化提示词'"
+            :aria-label="optimizing ? 'AI 正在优化提示词' : 'AI 优化提示词'"
+            :aria-busy="optimizing ? 'true' : 'false'"
+            :disabled="disabled || running || optimizing"
             @click="$emit('optimize')"
-          >✨</button>
+          >
+            <span v-if="optimizing" class="cc-opt-spinner" aria-hidden="true" />
+            <template v-else>✨</template>
+          </button>
 
           <div class="cc-composer__right">
             <button class="cc-model-btn" @click="$emit('select-model')">
@@ -137,6 +166,13 @@ const props = withDefaults(
     /** 任务运行中：显示停止按钮并禁用输入 */
     running?: boolean
     disabled?: boolean
+    /**
+     * 提示词优化进行中：✨ 按钮换成旋转图标、整框 readonly、
+     * 输入框上方出现「AI 正在优化…」状态条（含已等待秒数）。
+     */
+    optimizing?: boolean
+    /** 优化已完成且草稿仍是优化结果：状态条右侧给「撤销」入口 */
+    undoAvailable?: boolean
     contextTokens?: string
     balance?: string
     /** 上下文模式：full / compact（compact 时底部加「⚡ 精简」徽章并说明口径） */
@@ -151,6 +187,8 @@ const props = withDefaults(
     attachments: () => [],
     running: false,
     disabled: false,
+    optimizing: false,
+    undoAvailable: false,
     contextTokens: '',
     balance: '',
     contextMode: 'full',
@@ -164,6 +202,8 @@ const emit = defineEmits<{
   (e: 'send'): void
   (e: 'stop'): void
   (e: 'optimize'): void
+  /** 还原为优化前的草稿（状态条上的「撤销」） */
+  (e: 'undo-optimize'): void
   /** 上传新文件（打开系统文件选择框） */
   (e: 'attach'): void
   /** 从文件库挑已有文件（引用历史文件，不重复上传） */
@@ -215,14 +255,51 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onDocKeydown)
+  stopOptimizeTimer()
 })
 
 const canSend = computed(() => {
   if (props.running || props.disabled) return false
+  // 优化中禁止发送：此刻草稿马上会被回填，发出去的就是将被替换的旧文案
+  if (props.optimizing) return false
   return props.modelValue.trim().length > 0 || props.attachments.length > 0
 })
 
-/** 是否处于精简上下文模式（底部给徽章 + 换 tooltip 口径说明） */
+/**
+ * 优化已等待秒数。
+ *
+ * <p>优化是一次同步等待 LLM 返回（后端 15s 超时、前端 30s 兜底），
+ * 只转个圈用户没法判断「在跑」还是「卡死」。这里每秒 +1 打出量化进度，
+ * 一般 3~10 秒就会出结果。</p>
+ */
+const optimizeElapsed = ref(0)
+let optimizeTimer: ReturnType<typeof setInterval> | undefined
+
+function stopOptimizeTimer() {
+  if (optimizeTimer !== undefined) {
+    clearInterval(optimizeTimer)
+    optimizeTimer = undefined
+  }
+}
+
+watch(
+  () => props.optimizing,
+  active => {
+    stopOptimizeTimer()
+    optimizeElapsed.value = 0
+    if (!active) return
+    optimizeTimer = setInterval(() => {
+      // 到 60s 停止累加：此时前端兜底超时早已触发，继续跳数字只会让人以为彻底卡住
+      if (optimizeElapsed.value >= 60) {
+        stopOptimizeTimer()
+        return
+      }
+      optimizeElapsed.value += 1
+    }, 1000)
+  },
+  { immediate: true }
+)
+
 const compactMode = computed(() => props.contextMode === 'compact')
 
 const contextTitle = computed(() =>
@@ -240,6 +317,7 @@ const compactTip = '精简模式：历史轮次的思考过程已移除、工具
 const effectivePlaceholder = computed(() => {
   if (props.running) return '当前会话正在执行任务：如需追加要求点上方「💡 补充需求」，或先停止生成'
   if (props.disabled) return '当前不可输入'
+  if (props.optimizing) return 'AI 正在优化提示词，完成后会自动回填…'
   return props.placeholder
 })
 

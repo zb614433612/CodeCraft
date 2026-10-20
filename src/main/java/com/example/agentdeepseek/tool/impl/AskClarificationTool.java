@@ -43,6 +43,10 @@ public class AskClarificationTool implements Tool {
         return "向用户提问以澄清需求或征求意见。\n"
                 + "【适用场景】需求模糊（如「帮我改一下那个页面」）、信息不足（如缺少文件路径或配置项）、多个可选方案需要用户决策时\n"
                 + "【使用方式】将问题写入 question 参数，调用后等待用户回复再继续；一次只问一个核心问题，避免一次抛出多个问题\n"
+                + "【选项格式】当存在多个可选方向时（通常 2~5 个），**必须**用 `1.` `2.` `3.` 逐行列出每个方向，"
+                + "每项写成「一句话方案 + 关键差异/代价」；最后再补一句「请选择一个继续」。"
+                + "客户端会把编号项自动渲染成可点击按钮，用户点一下即可回复；"
+                + "不写编号时用户只能手打，交互成本明显更高。\n"
                 + "【注意】本工具不执行实际操作，仅用于获取用户补充说明或确认决策";
     }
 
@@ -56,8 +60,9 @@ public class AskClarificationTool implements Tool {
         ObjectNode question = objectMapper.createObjectNode();
         question.put("type", "string");
         question.put("description", "【必填】向用户提出的问题，支持 markdown 格式（可使用换行、列表、**粗体**、`代码` 等）。"
-                + " 示例：\"当前有3个API方案：\\n1. RESTful - 简单通用\\n2. GraphQL - 灵活查询\\n3. WebSocket - 实时通信\\n\\n请选择一个继续实现\"。"
-                + " 建议用选项编号让用户直接回复数字更高效");
+                + " 有多个可选方向时，必须用 `1.` `2.` `3.` 编号逐行列出（每项「方案 + 一句话差异/代价」），"
+                + " 客户端会把这些编号项渲染成可点击按钮，用户点一下就能回复。"
+                + " 示例：\"当前有3个API方案：\\n1. RESTful - 简单通用\\n2. GraphQL - 灵活查询\\n3. WebSocket - 实时通信\\n\\n请选择一个继续实现\"。");
         properties.set("question", question);
 
         parameters.set("properties", properties);

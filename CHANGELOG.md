@@ -5,6 +5,78 @@
 
 ---
 
+## [3.0.4] - 2026-10-20
+
+> 体验修复版：把「检测到新版本却提示安装旧包」和「回复里的文件链接点了没反应」两个老大难挖到根上，
+> 给提示词优化补上加载反馈与撤销，审批 / 询问卡片改为固定停靠不再被长会话顶出视野，
+> 询问支持直接点选 1./2./3. 方向，技能标签显示真实技能名，
+> 发版流程的 Release 正文改为自动带上本版变更。版本号统一到 3.0.4，无数据库结构变更。
+
+### 🔄 自动更新：彻底修掉「装旧包」
+
+- **主进程兜底**：新增 `invalidateStaleDownload(targetVersion)`，`checkForUpdates()` 检测到最新版本后、以及 `publicState()` 输出前核对 `downloadState.version`，与最新版本不一致即作废并 `emitDownloadState()` 广播。此前 `downloadState` 跨检查保留，先下过 3.0.1 再发布 3.0.2 时，「安装」按钮仍指向旧包。
+- **启动恢复加闸门**：`initUpdateManager()` 原先只判断「安装包文件存在」就恢复「已下载」，现在必须同时满足 `compareVersion(latestInfo.version, app.getVersion()) > 0` 且文件大小匹配。
+- **安装前再校验**：`installDownloaded()` 增加版本闸门，本地包版本与最新版本不一致时直接抛错「请重新下载」，宁可让用户重下也不装错包。
+- **前端双保险**：`VersionCard` 新增 `versionFromFileName()`（正则 `/(\d+\.\d+\.\d+)/`，避免把 `.exe` 当成预发布后缀）、`downloadVersion`、`staleDownload`，按钮文案改为「重新下载 vX」，并在下方提示版本不一致。
+
+### 🔗 文件链接打不开（修复）
+
+- **根因**：v3 工作区标签把消息里的**相对路径**原样传给 `GET /api/project/read`，后端按 `user.dir`（Electron 下为 jar 所在目录）拼接，读到的自然不是用户期望的文件；旧版 `openLocalFileTab` 是「先拼绝对路径 + 失败后走 `/api/project/resolve` 后缀匹配兜底」，v3 迁移时丢了这一层。
+- **新增 `utils/file-path.ts`**：`normalizeFsPath` / `isAbsoluteFsPath` / `joinFsPath` / `absolutizePath` / `resolveFileTarget` / `describeMissingFile`。`resolveFileTarget()` 返回 `{ raw, path, found, candidates, viaResolve }`，先按工作目录拼绝对路径，读不到再走后端 resolve 兜底并回传候选列表。
+- **点击时解析**：`ChatView.onStreamClick` 改为 async，先解析再把结果交给 `workspace.openTab` / `openFilePreview`；`openFilePreview` 签名放宽为 `(target: string | ResolvedFileTarget, kind)`。解析放在点击时而非标签内部，避免同一文件的相对 / 绝对路径开成两个标签（`tabKeyOf` 以 `payload.path` 为 key）。
+- **工作区视图**：`WorkspaceFileView` 新增 `root` prop 与 `resolvedPath`，读写都用解析后的路径；`WorkspaceTabView` 透传 `:root="root"`，图片 `loadImage` 同样解析。
+- **纯文件名链接**：`markdown.ts` 的 `isLocalFilePath(p, allowBareName = false)` 支持识别纯文件名（命中 `FILE_EXT_STRICT_RE`），仅在显式链接 / 图片场景放开（`allowBareName=true`），正文扫描仍要求含路径分隔符，避免误伤普通文字。
+- **错误可读**：读取失败的提示带上「工作目录 + 候选路径 + 后端原始 message」；`app.css` 的 `.cc-wsv__state-text` / `.cc-fileview__state.is-error` 加 `white-space: pre-line; word-break: break-all`，长路径不再被截成一行。
+
+### ✨ 提示词优化：加载反馈 + 可撤销
+
+- **前端请求层**：`api/chat.ts` 的 `optimizePrompt` 返回结构化 `OptimizePromptResult { ok, optimized, error, elapsedMs, model }`，不再静默回落原文；加 30 秒 `AbortController` 兜底（后端 15 秒 + 传输余量）；401 走 `notifyUnauthorized` 跳登录；区分「非 JSON 响应（后端版本过旧）/ 网络断开 / 超时」三类文案。
+- **加载反馈**：✨ 按钮变旋转圆环 spinner（`aria-busy`）并禁用防连点；输入框上方新增状态条「AI 正在优化提示词 · 已等待 Ns」，每秒 +1、60 秒停止累加；优化期间 textarea 用 `readonly` 且禁止发送（用 `readonly` 而非 `disabled`，保留正常配色）。
+- **可撤销**：`ChatView` 持有 `optimizeUndo` 快照，`optimizeUndoAvailable` 仅在「当前草稿仍等于优化结果」时为真；`applyOptimizedDraft()` / `undoOptimize()` 通过 `defineExpose` 暴露；发送或切换会话即清空快照，避免把旧会话的撤销串到新会话。
+- **结局细分**：`App.vue` 的 `onOptimize` 重写为防重入 + `toast.loading` → success / error / info / warning 四态，带耗时与字数统计；检测到会话已切换或草稿被改动就不覆盖；草稿超过 `OPTIMIZE_MAX_INPUT = 6000` 直接引导拆段（模型 `max_tokens` 装不下，等 10 秒只会拿到被截断的更差结果）。
+- **后端**：`PromptOptimizeService` 新增 `OptimizeResult` record，失败原因细分（模板缺失 / 无 Provider / 超时 / 空结果 / 调用异常）；`MAX_TOKENS` 500 → 800（默认模型可能是推理模型，500 容易被思考 token 吃满导致 content 为空）；`PromptOptimizeController` 改用 `LinkedHashMap` 输出（`Map.of` 不允许 null 值），保持裸结构向后兼容旧前端。
+
+### 📌 审批 / 询问卡片固定停靠
+
+- 卡片原先内联在消息列表末尾，长会话里要一路下拉才能看到 —— 等于「AI 停了在等你，你却不知道」。改为从消息流移出，固定在输入框上方的 `.cc-approval-dock`：`flex: 0 1 auto` + `min-height: 0` + `overflow: hidden`，小窗口下可收缩，不顶掉输入框。
+- 停靠条按 `askType` 显示「等你授权 / 等你回答 / 等你确认继续」并带脉冲指示；卡片主体 `max-height: min(46vh, 460px)` 内部滚动，长 diff 也能看全。
+- 新增 `watch(() => props.approval)`：用户本来就在底部时自动滚到最新（不打断正在翻历史的人），并提供「回到最新上下文」按钮。
+
+### 🗂 询问支持直接点选方向
+
+- 新增 `utils/ask-options.ts`：`parseAskOptions(markdown)` 从问题文本解析 `1. / 2. / 1、/ (1)`、`A.`、`-` 三类编号项，剔除围栏代码块、归一化字面量 `\n`、去掉 markdown 装饰。
+- **误判防护**：至少 2 项、最多 6 项、平均长度 ≤90 字、原始块 ≤400 字才启用；解析失败自动退化为原来的文本框。
+- `ChatApproval` 的 clarification 分支新增选项按钮区，点一下即以原编号作答（`${mark}. ${plain}`），`picking` 防重复提交。
+- 后端 `AskClarificationTool` 的问题参数说明强化：多方向时必须用 `1./2./3.` 编号逐行列出 —— 前端零协议变更，只提升命中率。
+
+### 🎯 技能命中显示真实技能名
+
+- 标签文案由 `🎯 {name}` 改为 `🎯 命中技能：{name}`；`hitSkills` 展示前清洗 `**`、前导符号，`#12` 这类裸 ID 转成「技能 #12」并去重。
+- `utils/skill-hit.ts`：新增 `cleanSkillName()`；`parseSkillHitsFromSummaries` 的正则由 `(.+)$` 改为 `/🎯\s*命中技能\s*[:：]?\s*\*{0,2}\s*([^\n]+)/` —— 原来摘要尾部带 `\n\n` 会导致整条匹配失败，这正是「标签只显示 XXX」的直接原因。
+- `App.vue` 新增 `skillNameMap` / `ensureSkillNameMap()`：按需拉一次技能列表建立 `#id → name` 映射（失败不重试），`setConvMessages()` 套用 `withSkillNames()`，`watch(skillNameMap)` 回填已渲染的历史消息；映射不到时显示「技能 #12」而非裸数字。
+
+### 📝 发版流程：Release 正文自动带变更
+
+- `.github/workflows/release.yml` 的 Release 正文此前是写死的模板，只有下载说明和 macOS 提示，**不含本版实际改动**（Release 页面看起来「没有更新说明」就是这里）。现在 create-release 阶段 checkout 代码并用 `awk` 从 `CHANGELOG.md` 抽取当前版本段落拼进正文；抽取失败时回退为指向 CHANGELOG 的链接。
+- 顺手修掉 Windows 安装包文件名写错的问题：正文写的是 `CodeCraft-Setup-x.y.z.exe`，实际资产是 `CodeCraft.Setup.x.y.z.exe`。
+
+### 🧾 版本号同步
+
+- 后端：`3.0.3` → `3.0.4`（`pom.xml`，产物 `code-craft-3.0.4.jar`）
+- 经典版前端：`3.0.3` → `3.0.4`（`frontend/package.json` + lock）
+- v3 前端：`3.0.3` → `3.0.4`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.4` / `code-craft-3.0.4.jar`
+- MCP Server 握手版本：`3.0.3` → `3.0.4`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例统一到 v3.0.4
+
+### ⚠️ 升级说明
+
+- 此版本**无数据库结构变更**，但有后端改动（提示词优化返回结构、询问提示词），需**覆盖安装**新包；仅替换前端静态文件不够。
+- 自动更新的主进程修复必须随安装包更新才生效：3.0.3 及更早版本的主进程仍是旧逻辑，若本地躺着一个旧安装包，仍可能提示安装旧包 —— 升级到 3.0.4 后恢复正常。
+- 文件链接解析依赖后端 `/api/project/read` 与 `/api/project/resolve`，工作目录以当前设置为准（会话覆盖 > Agent 工作目录 > 全局设置）；若链接仍打不开，请把提示里的候选路径一起反馈。
+
+---
+
 ## [3.0.3] - 2026-10-20
 
 > 稳定性修复版：定位并解决「展开长思考直接卡死」的真凶（markdown 本地路径识别正则的 O(n²) 回溯），

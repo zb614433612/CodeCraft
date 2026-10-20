@@ -301,6 +301,10 @@ jobs:
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
+      # 必须 checkout 才能读取 CHANGELOG.md 生成本版变更摘要
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
       - name: 提取版本号
         id: version
         run: |
@@ -319,38 +323,77 @@ jobs:
           echo "=== 所有产物 ==="
           find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) -exec ls -lh {} \;
 
+      - name: 生成 Release 说明（下载指引 + 本版变更）
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          SECTION="$RUNNER_TEMP/changelog-section.md"
+
+          # 从 CHANGELOG.md 提取形如 "## [x.y.z]" 的段落：跳过标题行，遇到下一个版本标题即停止。
+          # 抽不到时（例如 CHANGELOG 忘记写）不中断发布，退化为指向 CHANGELOG 的链接。
+          awk -v ver="$VER" '
+            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > "$SECTION" 2>/dev/null || true
+
+          # 注意：heredoc 用 <<EOF（需要展开 $VER），因此正文里的反引号与 $ 需转义
+          cat > "$NOTES" <<EOF
+          ## 🚀 CodeCraft v$VER
+
+          ### 📥 下载
+          - **Windows**：下载 \`CodeCraft.Setup.$VER.exe\` 双击安装
+          - **macOS（Apple Silicon / M 系列芯片）**：下载 \`CodeCraft-$VER-arm64.dmg\`，拖入 Applications，**首次打开请右键 → 打开**（见下方说明）
+          - **macOS（Intel 芯片）**：下载 \`CodeCraft-$VER-x64.dmg\`，拖入 Applications，**首次打开请右键 → 打开**（见下方说明）
+          - **Linux**：下载 \`.AppImage\` 或 \`.deb\`
+
+          ### 🍎 macOS 用户必读
+          由于未使用 Apple 付费开发者证书（\$99/年），首次打开时会提示「无法验证开发者」。
+          请按以下步骤操作：
+          1. 将 \`CodeCraft.app\` 拖入 \`Applications\` 文件夹
+          2. **右键（或 Control+点击）→ 打开**
+          3. 在弹出的对话框中点击「打开」
+          4. 之后再打开只需双击即可
+
+          或者终端执行：
+          \`\`\`
+          xattr -cr /Applications/CodeCraft.app
+          \`\`\`
+
+          ### 💡 说明
+          - 安装包自带 JRE 运行环境，无需安装 Java
+          - 首次使用请在「配置」页面添加 LLM Provider（支持 DeepSeek/OpenAI/Anthropic/Ollama/MiMo 等）
+          - 支持 Intel 和 Apple Silicon (M1/M2/M3) Mac
+          EOF
+
+          if [ -s "$SECTION" ]; then
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "### 🆕 本版变更"
+              echo ""
+              cat "$SECTION"
+            } >> "$NOTES"
+            echo "✅ 已从 CHANGELOG.md 提取 v$VER 变更段落（$(wc -l < "$SECTION") 行）"
+          else
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "> 📝 未在 CHANGELOG.md 中找到 v$VER 条目，完整变更见 [CHANGELOG.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/master/CHANGELOG.md)"
+            } >> "$NOTES"
+            echo "⚠️ 未提取到 v$VER 变更段落，已回退为 CHANGELOG 链接"
+          fi
+
+          echo "===== Release 说明预览 ====="
+          cat "$NOTES"
+
       - name: 创建 GitHub Release 并上传产物
         uses: softprops/action-gh-release@v2
         with:
           name: "CodeCraft v${{ steps.version.outputs.version }}"
-          body: |
-            ## 🚀 CodeCraft v${{ steps.version.outputs.version }}
-
-            ### 📥 下载
-            - **Windows**：下载 `CodeCraft-Setup-${{ steps.version.outputs.version }}.exe` 双击安装
-            - **macOS（Apple Silicon / M 系列芯片）**：下载 `CodeCraft-${{ steps.version.outputs.version }}-arm64.dmg`，拖入 Applications，**首次打开请右键 → 打开**（见下方说明）
-            - **macOS（Intel 芯片）**：下载 `CodeCraft-${{ steps.version.outputs.version }}-x64.dmg`，拖入 Applications，**首次打开请右键 → 打开**（见下方说明）
-            - **Linux**：下载 `.AppImage` 或 `.deb`
-
-            ### 🍎 macOS 用户必读
-            由于未使用 Apple 付费开发者证书（$99/年），首次打开时会提示「无法验证开发者」。
-            请按以下步骤操作：
-            1. 将 `CodeCraft.app` 拖入 `Applications` 文件夹
-            2. **右键（或 Control+点击）→ 打开**
-            3. 在弹出的对话框中点击「打开」
-            4. 之后再打开只需双击即可
-
-            或者终端执行：
-            ```
-            xattr -cr /Applications/CodeCraft.app
-            ```
-
-            ### 💡 说明
-            - 安装包自带 JRE 运行环境，无需安装 Java
-              - 首次使用请在「配置」页面添加 LLM Provider（支持 DeepSeek/OpenAI/Anthropic/Ollama/MiMo 等）
-            - 支持 Intel 和 Apple Silicon (M1/M2/M3) Mac
-
-            > 📝 完整变更见 [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/master/CHANGELOG.md)
+          body_path: ${{ runner.temp }}/release-notes.md
           files: |
             windows-installer/CodeCraft*Setup*.exe
             macos-installer-*/*.dmg

@@ -1419,6 +1419,156 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
 }
 .cc-approval__input::placeholder { color: var(--text-4); }
 
+/* ---- 询问卡片的「快捷选项」----
+ * LLM 通常用 1./2./3. 列出可选方向，这里渲染成可点按钮（解析见 utils/ask-options）。
+ * 按钮用等宽编号 + 正文明细两列：编号对齐后扫视成本最低，长选项整段换行不溢出。 */
+.cc-approval__options { margin-bottom: var(--sp-3); }
+.cc-approval__options-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.cc-approval__options-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.cc-approval__options-title .cc-i { transform: rotate(90deg); }
+.cc-approval__options-sub { color: var(--text-4); }
+.cc-approval__options-body { display: flex; flex-direction: column; gap: 6px; }
+.cc-approval__option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-1);
+  font-size: 13px;
+  line-height: 1.55;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color var(--tr), background var(--tr);
+}
+.cc-approval__option:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-lt);
+}
+.cc-approval__option:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.cc-approval__option:disabled { opacity: .55; cursor: default; }
+.cc-approval__option-mark {
+  flex: none;
+  min-width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-xs);
+  background: var(--accent-lt);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+.cc-approval__option-text { flex: 1; min-width: 0; word-break: break-word; }
+
+/* ---- 待回执停靠区（审批 / 询问）----
+ * 卡片原先内联在消息列表末尾：长会话里 AI 的最后一条输出在下方几屏之外，
+ * 用户看不到「任务已暂停」，表现为「弹窗跑到下面去了」。
+ * 现在固定在消息区与输入区之间：任何滚动位置都可见；限高 + 内部滚动，
+ * 内容再长（diff / 代码块）也不会把阅读区挤没。 */
+.cc-approval-dock {
+  /* flex 0 1 auto：空间不足时允许收缩（内部滚动），避免把小窗口的输入区挤出可视区 */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  padding: var(--sp-3) var(--sp-6) var(--sp-2);
+  border-top: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  background: linear-gradient(180deg, transparent, var(--warn-lt));
+  animation: cc-dock-in .18s ease-out;
+}
+/* 「提问」用主色、「迭代确认」用警示色：与卡片标题的语义保持一致 */
+.cc-approval-dock.is-clarification {
+  border-top-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  background: linear-gradient(180deg, transparent, var(--accent-lt));
+}
+.cc-approval-dock__bar {
+  max-width: var(--content-max);
+  margin: 0 auto var(--sp-2);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  min-width: 0;
+}
+.cc-approval-dock__pulse {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 45%, transparent);
+  animation: cc-dock-pulse 1.6s ease-out infinite;
+}
+.cc-approval-dock.is-clarification .cc-approval-dock__pulse { background: var(--accent); }
+.cc-approval-dock__label { font-weight: 600; color: var(--text-1); }
+.cc-approval-dock__hint {
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-approval-dock__jump {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--tr), color var(--tr);
+}
+.cc-approval-dock__jump:hover { background: var(--card-2); color: var(--text-1); }
+.cc-approval-dock__jump .cc-i { transform: rotate(90deg); }
+.cc-approval-dock__body {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  max-height: min(46vh, 460px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--r-lg);
+}
+@keyframes cc-dock-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes cc-dock-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 45%, transparent); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
 /* 中断横幅 */
 .cc-banner {
   display: flex;
@@ -1673,6 +1823,57 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
 /* 输入框禁用（任务运行中）：文字降饱和并显示禁止光标；占位文案由组件给出原因说明 */
 .cc-composer__box textarea:disabled { color: var(--text-3); cursor: not-allowed; }
 .cc-composer__box textarea:disabled::placeholder { color: var(--text-4); }
+
+/* ---------- 提示词优化（✨）：进行中 / 已完成 ---------- */
+/* 优化是同步等 LLM 返回（3~10 秒），没有可见反馈时用户会以为按钮没反应 */
+.cc-round-btn--opt.is-loading:disabled {
+  /* 覆盖通用禁用态的 .38 透明度：loading 需要「正在干活」的清晰观感 */
+  opacity: 1;
+  background: var(--accent-lt);
+  color: var(--accent);
+}
+
+.cc-opt-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-lt);
+  border-top-color: var(--accent);
+  animation: cc-spin .8s linear infinite;
+}
+
+/* 状态条：优化中 / 已优化共用一条，避免出现/消失时输入框上下跳动 */
+.cc-opt-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin: 0 0 6px;
+  padding: 2px 10px;
+  border-radius: var(--r-sm);
+  background: var(--accent-lt);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+}
+.cc-opt-bar.is-done { background: var(--card-2); color: var(--text-2); }
+.cc-opt-bar__text { display: inline-flex; align-items: center; gap: 6px; }
+.cc-opt-bar__tip { margin-left: auto; color: var(--text-3); }
+.cc-opt-bar__undo {
+  margin-left: auto;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  transition: background var(--tr), color var(--tr), border-color var(--tr);
+}
+.cc-opt-bar__undo:hover { background: var(--card-2); color: var(--text-1); border-color: var(--border-strong); }
+
+/* 优化中锁定输入框：用 readonly 而非 disabled，保留正常配色，且不误导「不能输入」 */
+.cc-composer__box textarea[readonly] { cursor: progress; }
 
 
 .cc-model-btn {
@@ -5892,7 +6093,7 @@ html[data-theme="dark"] .cc-code .hljs-bullet { color: #ffa657; }
   white-space: nowrap;
 }
 .cc-fileview__state { padding: var(--sp-4); text-align: center; font-size: var(--fs-sm); color: var(--text-4); }
-.cc-fileview__state.is-error { color: var(--danger); }
+.cc-fileview__state.is-error { color: var(--danger); white-space: pre-line; word-break: break-all; }
 .cc-fileview__img { max-width: 100%; border-radius: var(--r-sm); border: 1px solid var(--border); }
 .cc-fileview__code {
   flex: 1;
@@ -8042,7 +8243,7 @@ body.cc-split-drag-v * { cursor: row-resize !important; user-select: none !impor
 }
 .cc-wsv__state.is-error { color: var(--danger); }
 .cc-wsv__state.is-hint { color: var(--text-3); }
-.cc-wsv__state-text { max-width: 380px; line-height: 1.6; }
+.cc-wsv__state-text { max-width: 380px; line-height: 1.6; white-space: pre-line; word-break: break-all; }
 
 .cc-wimg { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: var(--sp-4); overflow: auto; }
 .cc-wimg__btn { display: block; border-radius: var(--r-sm); cursor: zoom-in; }
@@ -9351,6 +9552,10 @@ body.cc-split-drag-v * { cursor: row-resize !important; user-select: none !impor
   .cc-mpk__row { grid-template-columns: 1fr; }
   /* 聊天页运行状态栏：与输入区左右对齐（窄屏 padding 收窄），任务浮层不超出视口 */
   .cc-runwrap { padding: 0 var(--sp-4); }
+  /* 待回执停靠区：窄屏同样收窄边距，并压低高度上限（否则一屏几乎只剩卡片） */
+  .cc-approval-dock { padding: var(--sp-2) var(--sp-4); }
+  .cc-approval-dock__body { max-height: min(52vh, 420px); }
+  .cc-approval-dock__hint { display: none; }
   .cc-taskpop { left: var(--sp-4); right: var(--sp-4); width: auto; }
   /* 子Agent浮层同任务浮层：窄屏撑满、贴边对齐 */
   .cc-subagentpop { left: var(--sp-4); right: var(--sp-4); width: auto; max-height: 70vh; }

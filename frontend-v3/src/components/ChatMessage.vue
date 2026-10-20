@@ -100,7 +100,7 @@
           :key="name"
           class="cc-skill-hit"
           :title="`本次已执行的技能：${hitSkills.join('、')}`"
-        >🎯 {{ name }}</span>
+        >🎯 命中技能：{{ name }}</span>
       </div>
       <!--
         思考区是独立滚动容器（max-height 320px）：它内部自己贴底，
@@ -381,8 +381,30 @@ const emit = defineEmits<{
  */
 const procOpen = ref(false)
 
-/** 技能命中列表（父级解析好直接传，本组件只负责展示） */
-const hitSkills = computed(() => props.message.hitSkills ?? [])
+/**
+ * 技能命中列表（父级解析好直接传，本组件只负责展示）。
+ *
+ * <p>这里再做一层**展示清洗**，因为后端摘要有两处会退化成「看不出是哪个技能」：</p>
+ * <ul>
+ *   <li>技能已被删除 / 查名失败时，摘要里只有 `#12` 这种 ID 兜底 ——
+ *       直接渲染成「🎯 命中技能：#12」，补上「技能」二字才读得懂；</li>
+ *   <li>摘要体可能带 `**` 加粗或尾部空白 —— 在标签上显示成星号非常刺眼。</li>
+ * </ul>
+ * <p>清洗后为空的名字直接丢弃：宁可少一个标签，也不要在界面上留一个只有图标的空胶囊。</p>
+ */
+const hitSkills = computed(() =>
+  (props.message.hitSkills ?? [])
+    .map(raw => {
+      const name = (raw || '')
+        .replace(/^\s*[>*\-\s]+/, '')
+        .replace(/\*+/g, '')
+        .trim()
+      if (!name) return ''
+      // 后端拿不到技能名时只回传 "#12"：补成「技能 #12」，否则用户不知道这是什么
+      return /^#\d+$/.test(name) ? `技能 ${name}` : name
+    })
+    .filter((name, index, arr) => name && arr.indexOf(name) === index)
+)
 
 /* ---------------- 用户消息附件 ---------------- */
 
