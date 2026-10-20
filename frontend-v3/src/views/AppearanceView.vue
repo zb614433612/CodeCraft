@@ -98,11 +98,11 @@
           </div>
           <div class="cc-look-range">
             <span class="cc-look-range__label">界面密度</span>
-            <select v-model="density" class="cc-select" style="flex: 1">
+            <select class="cc-select" style="flex: 1" :value="uiDensity" @change="onDensityChange">
               <option value="comfortable">舒适（默认）</option>
               <option value="compact">紧凑</option>
             </select>
-            <span class="cc-look-range__val">—</span>
+            <span class="cc-look-range__val">{{ uiDensity === 'compact' ? '紧凑' : '舒适' }}</span>
           </div>
           <!--
             P4：右侧面板形态开关。
@@ -192,6 +192,9 @@ import { computed, ref, onMounted } from 'vue'
 /** 主题三态（与旧前端 store/settings.ts 的 ThemeMode 一致） */
 export type ThemeMode = 'light' | 'dark' | 'auto'
 
+/** 界面密度（与 store/settings.ts 的 UiDensity 同构；本页只做展示与回传，不直连 store） */
+export type UiDensity = 'comfortable' | 'compact'
+
 const props = withDefaults(
   defineProps<{
     theme?: ThemeMode
@@ -207,6 +210,8 @@ const props = withDefaults(
     uploading?: boolean
     /** 右侧面板形态：true = 多标签工作区，false = 传统抽屉（P4） */
     workspaceMode?: boolean
+    /** 界面密度：comfortable = 默认，compact = 收紧间距（存 settingsStore 并写 <html data-density>） */
+    uiDensity?: UiDensity
     /**
      * 进入页面时的数据加载（由 App.vue 的 PAGE_BINDINGS 注入）
      * 页面随路由真实挂载，所以在这里调一次即可；重复进页由父级的「已加载 / 加载中 / 已失败」跳过
@@ -220,7 +225,8 @@ const props = withDefaults(
     bgBlur: 0,
     windowOpacity: 1,
     uploading: false,
-    workspaceMode: true
+    workspaceMode: true,
+    uiDensity: 'comfortable'
   }
 )
 
@@ -230,6 +236,7 @@ const emit = defineEmits<{
   (e: 'update:bgBlur', value: number): void
   (e: 'update:windowOpacity', value: number): void
   (e: 'update:workspaceMode', value: boolean): void
+  (e: 'update:uiDensity', value: UiDensity): void
   (e: 'upload-bg', file: File): void
   (e: 'remove-bg'): void
   (e: 'reset'): void
@@ -242,8 +249,6 @@ const THEME_OPTIONS: Array<{ label: string; value: ThemeMode }> = [
 ]
 
 const fileRef = ref<HTMLInputElement | null>(null)
-/** 界面密度为纯本地偏好，不涉及后端与持久化字段（旧 store 未定义，故只做演示） */
-const density = ref<'comfortable' | 'compact'>('comfortable')
 
 const opacityPercent = computed(() => Math.round((props.bgOpacity ?? 0.5) * 100))
 const windowOpacityPercent = computed(() => Math.round((props.windowOpacity ?? 1) * 100))
@@ -290,6 +295,17 @@ function onWindowOpacityInput(event: Event) {
 function onPanelModeChange(event: Event) {
   const value = (event.target as HTMLSelectElement).value
   emit('update:workspaceMode', value === 'workspace')
+}
+
+/**
+ * 界面密度切换。
+ *
+ * <p>值回传父级写入 settingsStore（persist），再由 AppShell 写到 `<html data-density>`；
+ * tokens.css 末尾按该属性收紧 --sp-* 与顶栏高度 —— 选完立刻见效（此前只是个不落地的本地 ref）。</p>
+ */
+function onDensityChange(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  emit('update:uiDensity', value === 'compact' ? 'compact' : 'comfortable')
 }
 
 /**

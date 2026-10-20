@@ -223,25 +223,29 @@ html.cc-sidebar-collapsed .cc-titlebar { grid-template-columns: var(--sidebar-w-
   background: var(--card);
   backdrop-filter: blur(16px) saturate(1.08);
 }
-/* 有壁纸时改用量与外壳一致的半透明档位（74% / 62%，与 37.2 节同口径）。
+/* 左段 = 侧栏层：有壁纸时用与 .cc-sidebar 一致的 74% 卡色（见 37.2 节）。
  * 必须用 --card-solid：此刻 --card 本身已被改写成半透明，再 mix 一次算不出目标值。 */
 html.cc-has-bg .cc-titlebar__side { background: color-mix(in srgb, var(--card-solid) 74%, transparent); }
-/* 右段要叠**两层**才和页面顶部完全同色：
- *   下层 = .cc-chat__main / .cc-page-scroll 的阅读纸面（--bg-solid 40%）
- *   上层 = .cc-header 的 62% 卡色
- * 少了下层会比 header 亮一档（实测 y=31 与 y=33 差 12 个亮度值），顶部仍像贴上的一条。
- * background-color 垫下层、background-image（纯色渐变）压上层，顺序与页面一致。 */
+/* 右段要与页面顶部**同色**，必须复刻页面那两层叠加（见 37.2）：
+ *   下层 = .cc-main 的 --bg（深色 50% / 亮色 40%）
+ *   上层 = .cc-chat__main / .cc-page-scroll 的阅读纸面（深色 40% / 亮色 30%）
+ * 只画一层会算出偏亮或偏暗的值：单层 40% 比页面亮一档，单层 70% 又会被壁纸亮部拉偏。
+ * 用 background-color 垫下层、background-image（纯色渐变）压上层，顺序与真实 DOM 一致。 */
 html.cc-has-bg .cc-titlebar__main {
-  background-color: color-mix(in srgb, var(--bg-solid) 40%, transparent);
+  background-color: color-mix(in srgb, var(--bg-solid) 50%, transparent);
   background-image: linear-gradient(
-    color-mix(in srgb, var(--card-solid) 62%, transparent),
-    color-mix(in srgb, var(--card-solid) 62%, transparent)
+    color-mix(in srgb, var(--bg-solid) 40%, transparent),
+    color-mix(in srgb, var(--bg-solid) 40%, transparent)
   );
 }
-/* 亮色主题的纸面更薄（与 37.2 的 30% 变体对齐），否则顶部会偏白。
+/* 亮色主题：两层都减薄（与 37.1 / 37.2 的亮色档位一一对应）。
  * 必须限定在 has-bg 下：没有壁纸时右段要用 --card 实色，否则会透出窗口底色。 */
 html.cc-has-bg:not([data-theme="dark"]) .cc-titlebar__main {
-  background-color: color-mix(in srgb, var(--bg-solid) 30%, transparent);
+  background-color: color-mix(in srgb, var(--bg-solid) 40%, transparent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--bg-solid) 30%, transparent),
+    color-mix(in srgb, var(--bg-solid) 30%, transparent)
+  );
 }
 /* 登录页不套 AppShell（没有侧栏，也就没有左右分层）：整条用页面底色，避免两段拼色 */
 .cc-titlebar.is-plain { grid-template-columns: 1fr; }
@@ -1127,6 +1131,35 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
   color: var(--text-2);
 }
 .cc-proc__body.is-open { display: block; }
+/* 「渲染完整思考」：超长推理的显式二次加载入口（默认只渲染尾部 6 万字，见 ChatMessage） */
+.cc-proc__more {
+  display: inline-block;
+  margin: var(--sp-1) 0 0 var(--sp-2);
+  padding: 4px 9px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  color: var(--accent);
+  background: var(--accent-lt);
+  transition: background var(--tr), color var(--tr);
+}
+.cc-proc__more:hover { background: var(--card-2); color: var(--text-1); }
+
+/* 技能命中标签：标识「本轮真正执行过的技能」（skill action=load），与思考按钮同一行。
+ * 用胶囊 + 主色淡底，和 `.cc-tag` 区分开：这里表达的是「发生过的事件」而不是静态属性。 */
+.cc-skill-hit {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  padding: 2px 8px;
+  border-radius: var(--r-full);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-lt);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cc-proc__item { margin: 5px 0; display: flex; gap: var(--sp-2); align-items: baseline; }
 .cc-proc__tag {
   flex: none;
@@ -5185,9 +5218,17 @@ html:not([data-theme="dark"]) .cc-shell.has-bg {
   backdrop-filter: blur(16px) saturate(1.08);
 }
 
+/* 顶栏（含「文件 / Git / 终端」工具组那条）在有壁纸时不再单独上色。
+ *
+ * 为什么：深色主题下 --card-solid(#1A1925) 比 --bg-solid(#121117) 更暗，62% 卡色
+ * 叠在 40% 纸面上合成后，比主区纸面暗一档（实测亮度差约 40%）—— 顶部看起来像
+ * 「贴上去的一条深色横带」，与正文区割裂；亮色主题下又偏实，同样有断层感。
+ * 现在直接复用 .cc-chat__main 那层纸面（header 就在它里面，天然同色），
+ * 层级改由 border-bottom 的细线表达；消息区是独立滚动容器，不会滚到顶栏下面，
+ * 因此不需要背景色遮挡。 */
 .cc-shell.has-bg .cc-header {
-  background: color-mix(in srgb, var(--card-solid) 62%, transparent);
-  backdrop-filter: blur(16px) saturate(1.08);
+  background: transparent;
+  backdrop-filter: none;
 }
 
 /* 内容区垫一层「阅读纸面」（全站统一口径）：
@@ -6098,6 +6139,26 @@ html[data-theme="dark"] .cc-code .hljs-bullet { color: #ffa657; }
 .cc-git__mini-btn:disabled { opacity: .45; cursor: not-allowed; }
 .cc-git__mini-current { flex: none; font-size: 10.5px; color: var(--accent); }
 .cc-git__mini-empty { padding: 4px 2px 6px; font-size: 11px; color: var(--text-4); }
+.cc-git__mini-empty.is-error { color: var(--danger); }
+
+/* 提交历史行：短哈希（等宽、主色）+ 提交信息（单行省略），整行点击复制完整哈希 */
+.cc-git__log-row { cursor: pointer; }
+.cc-git__log-hash {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+.cc-git__log-msg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.cc-git__log-more { align-self: flex-start; margin-top: 4px; }
 
 /* 图标旋转（刷新 / 获取中） */
 .is-spin { animation: cc-spin 1s linear infinite; }

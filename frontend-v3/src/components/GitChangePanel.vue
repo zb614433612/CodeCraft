@@ -213,6 +213,40 @@
               </template>
             </div>
           </div>
+
+          <!--
+            提交历史：后端 `GET /api/git/log` 只回 `git log --oneline` 的原始文本，
+            这里解析成「短哈希 + 提交信息」两列；点击整行复制完整哈希（没有 commit 详情接口，
+            复制是当前最有用的动作）。「加载更多」每次 +20 条。
+          -->
+          <div class="cc-git__section">
+            <button class="cc-git__section-head" @click="toggleSection('log')">
+              <svg class="cc-i cc-i--sm cc-git__caret" :class="{ 'is-open': sectionOpen.log }"><use href="#i-chev" /></svg>
+              <svg class="cc-i cc-i--sm"><use href="#i-clock" /></svg>
+              <span class="cc-git__section-title">提交历史</span>
+              <span v-if="sectionOpen.log" class="cc-git__section-count">{{ logEntries.length }}</span>
+            </button>
+            <div v-show="sectionOpen.log" class="cc-git__section-body">
+              <div v-if="logLoading && !logEntries.length" class="cc-git__mini-empty">加载中…</div>
+              <div v-else-if="logError" class="cc-git__mini-empty is-error">{{ logError }}</div>
+              <div v-else-if="!logEntries.length" class="cc-git__mini-empty">暂无提交记录</div>
+              <template v-else>
+                <div
+                  v-for="entry in logEntries"
+                  :key="entry.hash"
+                  class="cc-git__mini-row cc-git__log-row"
+                  :title="`${entry.hash}\n${entry.message || '(无提交信息)'}\n点击复制完整哈希`"
+                  @click="copyCommitHash(entry)"
+                >
+                  <span class="cc-git__log-hash">{{ entry.short }}</span>
+                  <span class="cc-git__log-msg">{{ entry.message || '(无提交信息)' }}</span>
+                </div>
+                <button class="cc-git__mini-btn cc-git__log-more" :disabled="logLoading" @click="loadMoreLog">
+                  {{ logLoading ? '加载中…' : '加载更多' }}
+                </button>
+              </template>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -261,6 +295,7 @@ import {
   gitTagCreate,
   gitTagDelete,
   gitTagPush,
+  getGitLog,
   type GitChange,
   type GitStatusResult,
   type GitOperationResult
@@ -335,6 +370,8 @@ async function refresh() {
     if (sectionOpen.branch) void loadBranches()
     if (sectionOpen.tag) void loadTags()
     if (sectionOpen.stash) void loadStashes()
+    // 提交 / 拉取 / 回滚都会改变提交历史，展开着就一起刷新
+    if (sectionOpen.log) void loadLog()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '读取 Git 状态失败'
     status.value = null
@@ -528,6 +565,12 @@ async function commit() {
     if (actionError('提交失败', res)) return
     commitMessage.value = ''
     closeDiff()
+    /*
+      提交成功后自动展开「提交历史」：刚提交完最想确认的就是「这条提交进去了吗」，
+      而历史区默认收起，不自动展开等于让用户再点两下才看得到。
+      refresh() 内部会顺带 loadLog()（见其中的 sectionOpen.log 分支）。
+    */
+    sectionOpen.log = true
     await refresh()
     toast.success('已提交', { description: message })
   } catch (err) {
@@ -562,8 +605,13 @@ async function doSync(kind: 'pull' | 'push' | 'fetch') {
 
 /* ---------------- 折叠区 ---------------- */
 
-type SectionKey = 'stash' | 'branch' | 'tag'
-const sectionOpen = reactive<Record<SectionKey, boolean>>({ stash: false, branch: false, tag: false })
+type SectionKey = 'stash' | 'branch' | 'tag' | 'log'
+const sectionOpen = reactive<Record<SectionKey, boolean>>({
+  stash: false,
+  branch: false,
+  tag: false,
+  log: false
+})
 
 function toggleSection(key: SectionKey) {
   // 分支入口在顶栏，其余在折叠区；统一走这里，展开时才拉数据
@@ -573,6 +621,83 @@ function toggleSection(key: SectionKey) {
   if (key === 'stash') void loadStashes()
   if (key === 'branch') void loadBranches()
   if (key === 'tag') void loadTags()
+  if (key === 'log') void loadLog()
+}
+
+/* ---------------- 提交历史 ---------------- */
+
+/** 一条提交（从 `git log --oneline` 的一行解析而来） */
+interface GitLogEntry {
+  /** 完整哈希（40 位，点击行时复制它） */
+  hash: string
+  /** 短哈希（前 7 位，列表展示） */
+  short: string
+  /** 提交主题（第一行信息） */
+  message: string
+}
+
+const logEntries = ref<GitLogEntry[]>([])
+const logLoading = ref(false)
+const logError = ref('')
+/** 当前请求条数：点「加载更多」每次 +20（后端按 maxCount 截断，没有分页游标） */
+const logLimit = ref(20)
+
+/**
+ * 解析 `git log --oneline` 的输出。
+ *
+ * <p>格式是 `<hash> <subject>`，hash 后可能带 ` (HEAD -> main)` 之类的装饰（取决于
+ * git 配置的 decorate 策略），所以只按**第一个空格**切分：前半段当哈希，
+ * 后面的整体当提交信息 —— 装饰会保留在信息里，但比丢弃整行要好。</p>
+ */
+function parseGitLog(text: string): GitLogEntry[] {
+  return text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const spaceAt = line.indexOf(' ')
+      const hash = spaceAt === -1 ? line : line.slice(0, spaceAt)
+      const message = spaceAt === -1 ? '' : line.slice(spaceAt + 1).trim()
+      return { hash, short: hash.slice(0, 7), message }
+    })
+}
+
+async function loadLog() {
+  if (!props.root) return
+  logLoading.value = true
+  logError.value = ''
+  try {
+    const res = await getGitLog(props.root, logLimit.value)
+    if (!res.success) {
+      logError.value = res.error || '读取提交历史失败'
+      logEntries.value = []
+      return
+    }
+    logEntries.value = parseGitLog(res.log || '')
+  } catch (err) {
+    logError.value = err instanceof Error ? err.message : '读取提交历史失败'
+    logEntries.value = []
+  } finally {
+    logLoading.value = false
+  }
+}
+
+/** 加载更多：扩大 maxCount 后整段重拉（`--oneline` 没有游标接口，重拉最省心） */
+function loadMoreLog() {
+  if (logLoading.value) return
+  logLimit.value += 20
+  void loadLog()
+}
+
+/** 点击提交行：复制完整哈希（面板里没有 commit 详情接口，复制是最实用的动作） */
+async function copyCommitHash(entry: GitLogEntry) {
+  try {
+    await navigator.clipboard.writeText(entry.hash)
+    toast.success('已复制提交哈希', { description: entry.short })
+  } catch {
+    // 非安全上下文（http 访问）或权限被拒时 clipboard 会抛错，退回提示让用户手抄
+    toast.warning('复制失败，请手动复制', { description: entry.hash })
+  }
 }
 
 /* ---------------- 储藏栈 ---------------- */

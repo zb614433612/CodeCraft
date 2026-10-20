@@ -25,6 +25,8 @@ import { processMessageGroups } from '../api/conversation'
 import type { MessageResponse } from '../api/conversation'
 import { renderMarkdown } from './markdown'
 import { clipToolDetail } from './tool-render'
+/* 技能命中回放：与实时流共用同一套解析（skill load 的工具输出固定带「【技能详情】xxx (ID:n)」） */
+import { collectSkillHits } from './skill-hit'
 
 /** ask_user SSE 事件载荷（与 sse-client 的联合类型成员一致，此处独立声明避免循环依赖） */
 export interface AskUserEventData {
@@ -137,11 +139,22 @@ export function toChatMessages(
     // 思考与工具调用彻底分离：process 只放思考全文（工具在 tools 区独立展示）
     // 思考不截断 —— 折叠区默认收起，用户主动展开就是要看完整推理过程；
     // 展示高度由 CSS 的 max-height + overflow 控制，不会撑爆消息流。
-    // html：思考同样是 markdown（含 ```diff 改动、代码块、列表），历史消息一次性渲染，
-    //       避免 ChatMessage 里对长文本重复跑 renderMarkdown。
-    const process: ProcessItem[] = thinking
-      ? [{ tag: '思考', text: thinking, html: renderMarkdown(thinking) }]
-      : []
+    /*
+      ★ 思考的 HTML 改为**懒渲染**（这里只留原文）。
+      以前在映射阶段对每条消息都跑一次 renderMarkdown(thinking)：一条长思考动辄几万字，
+      一页会话十几条就是几十万字 markdown，同步解析直接把主线程占满 ——
+      表现就是「点开老会话卡死好几秒、滚动发涩」。
+      现在交给 ChatMessage 在用户展开时按需渲染（`processHtml` 内有按原文的缓存），
+      折叠态连 DOM 都不创建；与经典版「思考折叠 + 点击才渲染」完全一致。
+    */
+    const process: ProcessItem[] = thinking ? [{ tag: '思考', text: thinking }] : []
+
+    /*
+      技能命中回放：刷新页面 / 切换会话后，summaries 那条实时信号已经没了，
+      只能从工具输出原文里反解「【技能详情】xxx (ID:n)」。
+      用未截断的 content：tools[].detail 有 4000 字上限，标记可能正好被切掉。
+    */
+    const hitSkills = collectSkillHits(toolResults.map(tr => tr.content))
 
     const content = typeof group.content === 'string' ? group.content : ''
     const isUser = group.role === 'user'
@@ -161,6 +174,8 @@ export function toChatMessages(
       agentAvatar: isUser ? undefined : agent?.avatar || undefined,
       process: process.length ? process : undefined,
       processLabel: thinking ? `思考 ${thinking.length} 字` : undefined,
+      // 技能命中（回放）：ChatMessage 在思考区横栏显示「🎯 xxx」
+      hitSkills: hitSkills.length ? hitSkills : undefined,
       tools: tools.length ? tools : undefined,
       // 任务清单快照（历史回放用）：App.vue restoreTasksFromMessages 优先取它
       taskSnapshot,

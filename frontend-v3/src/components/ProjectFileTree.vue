@@ -97,7 +97,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import { getDirChildren, readProjectFile, writeProjectFile, type DirectoryEntry } from '../api/project'
 import { toast } from '../utils/toast'
 import { confirm } from '../utils/confirm'
@@ -117,6 +117,15 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{ (e: 'open-file', path: string): void }>()
+
+/**
+ * 上层（App.vue）注入的「把目录应用为会话 / Agent 工作目录」回调。
+ *
+ * <p>本组件只管浏览：切完目录后把选择交给上层决定（上层会弹确认框，让用户选
+ * 「设为工作目录」或「仅浏览」）。没有上层 provide（组件独立使用）时拿不到，
+ * 自动退化为「只切本面板浏览范围」的旧行为。</p>
+ */
+const applyWorkDir = inject<((path: string) => Promise<boolean>) | null>('ccApplyWorkDir', null)
 
 interface TreeRow extends DirectoryEntry {
   level: number
@@ -199,6 +208,12 @@ async function onPickRoot(path: string) {
   localRoot.value = path
   // 根目录已变，旧缓存与展开状态全部失效
   refresh()
+  /*
+    再把选择交给上层：它知道当前 Agent 是谁，能把这目录写进会话工作目录（并通过确认框
+    让用户选「设为工作目录」或「仅浏览」）。以前只改 localRoot，导致「切了工作目录，
+    AI / Git / 终端还是老地方」—— 这正是用户报的那个 bug。
+  */
+  if (applyWorkDir && path !== props.root) void applyWorkDir(path)
 }
 
 /** 回到当前 Agent 的工作目录 */

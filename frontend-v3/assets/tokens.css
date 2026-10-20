@@ -136,3 +136,24 @@ html[data-theme="dark"] {
   --shadow-md: 0 4px 12px rgba(0, 0, 0, .45);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, .55);
 }
+
+/* ============================ 界面密度（html[data-density]） ============================
+ * 外观设置页的「界面密度」下拉：comfortable（默认）不重复声明，全部沿用 :root 的值；
+ * compact 在这里统一收紧间距与顶栏高度。
+ *
+ * 为什么改 token 而不是给每个组件写一套 .compact 变体：全站 300+ 处 padding / gap 都走
+ * --sp-*，在 <html> 上重定义一次就全量生效，后续新增组件也自动跟随。
+ * 只收间距、不动字号：字号会改变每行字数与代码块换行，属于另一个维度的偏好。
+ * 属性由 AppShell 写到 <html>（浮层 Teleport 到 body，只有 html 级选择器能覆盖到）。
+ */
+html[data-density="compact"] {
+  --sp-1: 3px;
+  --sp-2: 6px;
+  --sp-3: 9px;
+  --sp-4: 12px;
+  --sp-5: 15px;
+  --sp-6: 18px;
+  --sp-8: 24px;
+  --header-h: 48px;
+  --drawer-w: 320px;
+}

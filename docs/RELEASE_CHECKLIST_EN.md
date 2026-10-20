@@ -8,8 +8,8 @@
 ## Pre-Release Checks
 
 > 🚀 **Recommended**: Use one-click build scripts to automatically complete Steps 1-3:
-> - Windows: `scripts\build.bat v3.0.1`
-> - Mac/Linux: `./scripts/build.sh v3.0.1`
+> - Windows: `scripts\build.bat v3.0.2`
+> - Mac/Linux: `./scripts/build.sh v3.0.2`
 >
 > Below are manual steps for scenarios requiring fine-grained control.
 

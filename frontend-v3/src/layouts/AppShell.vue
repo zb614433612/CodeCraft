@@ -152,6 +152,33 @@ function syncChromeFlags() {
   el.classList.toggle('cc-has-bg', Boolean(settings.bgImageUrl))
 }
 
+/**
+ * 界面密度 → `<html data-density>`。
+ *
+ * <p>为什么落在 `<html>` 而不是 `.cc-shell`：密度要影响抽屉 / 弹窗（它们 Teleport 到 body），
+ * 那些节点不在 shell 子树里，只有 html 上的属性才能同时覆盖到。</p>
+ */
+function syncDensity() {
+  if (typeof document === 'undefined') return
+  document.documentElement.setAttribute(
+    'data-density',
+    settings.uiDensity === 'compact' ? 'compact' : 'comfortable'
+  )
+}
+
+/**
+ * 窗口整体透明度 → Electron 主进程。
+ *
+ * <p>v3 之前外观页的滑块只改 store 里的数字，从没调用过 electronAPI，
+ * 于是「整体透明度」怎么拖窗口都不变（经典版是即时生效的）。
+ * 浏览器环境没有 electronAPI，函数体自然短路，不影响网页版。</p>
+ */
+function syncWindowOpacity() {
+  const api = (window as unknown as { electronAPI?: { setWindowOpacity?: (v: number) => void } })
+    .electronAPI
+  api?.setWindowOpacity?.(settings.windowOpacity)
+}
+
 watch(collapsed, value => {
   try {
     localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0')
@@ -162,9 +189,14 @@ watch(collapsed, value => {
 })
 
 watch(() => settings.bgImageUrl, syncChromeFlags)
+/* 界面密度 / 窗口透明度：改完立刻生效（都落在外观设置页的滑块 / 下拉里） */
+watch(() => settings.uiDensity, syncDensity)
+watch(() => settings.windowOpacity, syncWindowOpacity)
 
 // setup 阶段先同步一次：否则首帧顶部左段宽度与透明度会用默认值，出现一次可见跳变
 syncChromeFlags()
+syncDensity()
+syncWindowOpacity()
 
 /** 系统外观是否为深色：theme === 'auto' 时用它决定实际明暗 */
 const systemDark = ref(false)
@@ -175,9 +207,19 @@ const isDark = computed(
   () => settings.theme === 'dark' || (settings.theme === 'auto' && systemDark.value)
 )
 
-/** 把主题写到 <html data-theme>；颜色 token 在 tokens.css 里按该属性切换 */
+/**
+ * 把主题写到 `<html data-theme>`（颜色 token 在 tokens.css 里按该属性切换）。
+ *
+ * <p>同时通知 Electron 主进程：窗口控制按钮（titleBarOverlay）的符号色与原生菜单主题
+ * 跟着切换。经典版的 App.vue 一直有这个调用，v3 漏了这步 —— 表现是「页面切了深色，
+ * 右上角最小化/关闭按钮还是深灰色的浅色配色」，看起来像主题只生效了一半。</p>
+ */
 function syncTheme() {
-  document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
+  const dark = isDark.value
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+  const api = (window as unknown as { electronAPI?: { setTheme?: (mode: string) => void } })
+    .electronAPI
+  api?.setTheme?.(dark ? 'dark' : 'light')
 }
 
 /**
@@ -222,6 +264,8 @@ onBeforeUnmount(() => {
   // 这两个类名若留在 <html> 上，登录页顶部会误用「折叠宽度 / 半透明档位」。
   if (typeof document !== 'undefined') {
     document.documentElement.classList.remove('cc-sidebar-collapsed', 'cc-has-bg')
+    // 登录页没有密度概念，属性留在 <html> 上会让登录表单跟着变紧凑
+    document.documentElement.removeAttribute('data-density')
   }
 })
 </script>

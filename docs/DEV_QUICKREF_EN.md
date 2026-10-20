@@ -20,10 +20,10 @@ After startup visit: **http://localhost:8084**
 
 ```bash
 # Windows
-scripts\build.bat v3.0.1
+scripts\build.bat v3.0.2
 
 # Mac / Linux
-./scripts/build.sh v3.0.1
+./scripts/build.sh v3.0.2
 ```
 
 ---

@@ -43,6 +43,14 @@ export interface ThinkingModes {
 // 主题模式
 export type ThemeMode = 'light' | 'dark' | 'auto'
 
+/**
+ * 界面密度
+ *
+ * <p>comfortable = 默认间距；compact = 收紧 --sp-* 与顶栏高度，给长会话多挤几行内容。
+ * 纯本地偏好，由 AppShell 写到 `<html data-density>`，样式见 tokens.css 末尾的覆盖块。</p>
+ */
+export type UiDensity = 'comfortable' | 'compact'
+
 export const useSettingsStore = defineStore('settings', () => {
   // 各助手的执行模式，默认 manual
   const executionModes = ref<ExecutionModes>({
@@ -89,6 +97,15 @@ export const useSettingsStore = defineStore('settings', () => {
    * 默认工作区：新能力默认可见，不满意可在「外观设置」或工作区头部一键切回。
    */
   const workspaceMode = ref(true)
+
+  /**
+   * 界面密度（v3 补全）
+   *
+   * <p>此前外观设置页里这个下拉只有一个本地 ref，既不入 store 也不落到 DOM，
+   * 选了「紧凑」没有任何反应 —— 属于「假设置」。现在纳入 store 持久化，
+   * 由 AppShell 写 `<html data-density>`，tokens.css 按该属性覆盖间距变量。</p>
+   */
+  const uiDensity = ref<UiDensity>('comfortable')
 
   // 切换右侧面板形态
   function setWorkspaceMode(value: boolean) {
@@ -156,12 +173,13 @@ export const useSettingsStore = defineStore('settings', () => {
     theme.value = mode
   }
 
-  // 恢复外观默认（背景图 / 背景不透明度 / 模糊 / 窗口整体透明度）
+  // 恢复外观默认（背景图 / 背景不透明度 / 模糊 / 窗口整体透明度 / 界面密度）
   function resetAppearance() {
     bgImageUrl.value = ''
     bgOpacity.value = 0.5
     bgBlur.value = 0
     windowOpacity.value = 1
+    uiDensity.value = 'comfortable'
   }
 
   return {
@@ -172,6 +190,7 @@ export const useSettingsStore = defineStore('settings', () => {
     projectRoot,
     contextMode,
     workspaceMode,
+    uiDensity,
     // 外观
     bgImageUrl,
     bgOpacity,

@@ -45,32 +45,60 @@
       <span v-if="message.streaming" style="color: var(--text-4)">生成中…</span>
     </div>
 
-    <!-- 思考过程：只承载思考文本，工具输出已移出（见下方工具调用区） -->
-    <template v-if="message.process && message.process.length">
+    <!--
+      思考过程 + 技能命中：思考区只承载思考文本，工具输出已移出（见下方工具调用区）。
+
+      技能命中标签与思考按钮同一行（与经典版 thinking-header 的布局一致）：
+      没有思考过程、只执行了技能时也能看到「🎯 命中技能」，不会被 v-if 一起吞掉。
+    -->
+    <template v-if="hasProcess || hitSkills.length">
       <div class="cc-proc">
-        <button class="cc-proc__btn" :class="{ 'is-open': procOpen }" @click="toggleProcess">
+        <button
+          v-if="hasProcess"
+          class="cc-proc__btn"
+          :class="{ 'is-open': procOpen }"
+          @click="toggleProcess"
+        >
           <svg class="cc-i cc-i--sm cc-proc__caret"><use href="#i-chev" /></svg>
           {{ processLabel }}
         </button>
+        <span
+          v-for="name in hitSkills"
+          :key="name"
+          class="cc-skill-hit"
+          :title="`本次已执行的技能：${hitSkills.join('、')}`"
+        >🎯 {{ name }}</span>
       </div>
       <!--
         思考区是独立滚动容器（max-height 320px）：它内部自己贴底，
         与整个消息流的贴底是两套独立逻辑（外层由 ChatView 的 follow 负责）。
         wrap 只做定位基准，让「回到最新思考」按钮悬浮在思考区右下角。
+
+        ★ v-if="procOpen"：折叠态**完全不进 DOM**。
+        以前是「内容常驻 DOM + CSS display:none」：一条几万字的思考虽然看不见，
+        却已经跑完 markdown 并挂了几千个节点 —— 十几个这样的历史消息就能让切会话卡死。
+        经典版（CodeAssistantView）也是 `v-if="getThinkingVisible(id)"`，这里对齐。
       -->
-      <div class="cc-proc__wrap">
+      <div v-if="procOpen" class="cc-proc__wrap">
         <div
           ref="procBodyEl"
           class="cc-proc__body"
           :class="{ 'is-open': procOpen }"
           @scroll.passive="onProcScroll"
         >
-          <div v-for="(p, i) in message.process" :key="i" class="cc-proc__item">
-            <span v-if="message.process.length > 1 || p.tag !== '思考'" class="cc-proc__tag">{{ p.tag }}</span>
+          <div v-for="(p, i) in visibleProcess" :key="i" class="cc-proc__item">
+            <span v-if="visibleProcess.length > 1 || p.tag !== '思考'" class="cc-proc__tag">{{ p.tag }}</span>
             <!-- 思考过程同样是 markdown：代码块 / ```diff 改动红绿 / 列表 / 表格都要正常渲染 -->
             <div class="cc-md cc-proc__text" v-html="processHtml(p)" />
           </div>
         </div>
+        <!--
+          超长思考的二次渲染门槛：默认只渲染尾部 6 万字（见 PROC_RENDER_LIMIT），
+          更早的内容等用户主动点这一下 —— 展开一条 50 万字的推理不该同步卡住主线程。
+        -->
+        <button v-if="procTruncated" class="cc-proc__more" type="button" @click="renderFullProcess">
+          渲染完整思考（共 {{ processCharCount.toLocaleString() }} 字）
+        </button>
         <!-- 用户上滑查看更早思考时出现；点一下恢复自动跟随（对齐旧项目 think-scroll-btn） -->
         <button
           v-if="procOpen && procShowJump"
@@ -203,6 +231,13 @@ export interface ChatMessageModel {
   process?: ProcessItem[]
   /** 过程折叠标题，如「思考 1234 字」 */
   processLabel?: string
+  /**
+   * 技能命中（本次真正执行过 skill action=load 的技能名，去重）。
+   *
+   * <p>数据来源两条：实时流看 `tool_call_start.summaries` 的「🎯 命中技能：xxx」；
+   * 历史回放看工具输出里的「【技能详情】xxx (ID:n)」（解析逻辑统一在 utils/skill-hit.ts）。</p>
+   */
+  hitSkills?: string[]
   tools?: ToolCallItem[]
   /**
    * 轮次 id（后端 turn_id，只有 user 消息落库时有值，assistant 继承前一条 user 的）。
@@ -280,6 +315,71 @@ const emit = defineEmits<{
  * 思考折叠默认收起（信息密度优先）；展开时通知父级恢复跟随
  */
 const procOpen = ref(false)
+
+/** 技能命中列表（父级解析好直接传，本组件只负责展示） */
+const hitSkills = computed(() => props.message.hitSkills ?? [])
+
+/** 是否有思考过程：决定要不要渲染折叠按钮与展开区（只有技能命中时只显示标签行） */
+const hasProcess = computed(() => (props.message.process?.length ?? 0) > 0)
+
+/* ---------------- 超长思考的渲染保护 ---------------- */
+/**
+ * 单条思考默认最多渲染多少字符（6 万）。
+ *
+ * <p>为什么需要：markdown 解析 + 代码高亮都是同步 CPU 活，一条几十万字的推理
+ * 一次性渲染能让主线程卡住数秒；而用户真正想看的往往只是「最近在想什么」。
+ * 超过该上限时先渲染尾部，更早的部分由用户点「渲染完整思考」显式加载
+ * （一次性、可预期，不会在切会话时被动触发）。</p>
+ */
+const PROC_RENDER_LIMIT = 60000
+
+/** 用户是否已要求渲染完整思考（默认 false：只渲染尾部 PROC_RENDER_LIMIT 字） */
+const procFullRender = ref(false)
+
+/** 思考总字数：折叠标题与「渲染完整思考」按钮都用它 */
+const processCharCount = computed(() =>
+  (props.message.process ?? []).reduce((n, p) => n + (p.text?.length ?? 0), 0)
+)
+
+/** 当前是否存在被省略的更早内容 */
+const procTruncated = computed(
+  () => !procFullRender.value && processCharCount.value > PROC_RENDER_LIMIT
+)
+
+/**
+ * 实际参与渲染的思考条目（尾部优先）。
+ *
+ * <p>从最后一条往前累计字符预算：整条放得下就原样渲染；放不下就只取尾巴，
+ * 并在开头插一行说明。返回条目会清空预渲染 `html`（那是按原文生成的，截断后不能复用）。</p>
+ */
+const visibleProcess = computed<ProcessItem[]>(() => {
+  const list = props.message.process ?? []
+  if (procFullRender.value) return list
+  let budget = PROC_RENDER_LIMIT
+  const out: ProcessItem[] = []
+  for (let i = list.length - 1; i >= 0 && budget > 0; i--) {
+    const p = list[i]
+    const text = p.text || ''
+    if (text.length <= budget) {
+      out.unshift(p)
+      budget -= text.length
+      continue
+    }
+    const omitted = text.length - budget
+    out.unshift({
+      ...p,
+      text: `（更早的 ${omitted.toLocaleString()} 字已省略，点下方「渲染完整思考」查看）\n\n` + text.slice(-budget),
+      html: ''
+    })
+    budget = 0
+  }
+  return out
+})
+
+/** 用户显式要求渲染完整思考（一次性开销，之后不再截断） */
+function renderFullProcess() {
+  procFullRender.value = true
+}
 
 /* ---------------- 思考区内部滚动：始终贴底，除非用户主动上滑 ---------------- */
 /**

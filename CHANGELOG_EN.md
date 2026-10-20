@@ -5,6 +5,63 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.2] - 2026-10-20
+
+> Fix release: a batch of v3 chat-page defects (disjointed top-bar colours, stale balance,
+> working-directory switch having no effect, page freeze on very long reasoning) plus two
+> features that only the classic UI had — "skill hit" badges and the Git commit-history panel.
+> The Provider-switch semantics are also corrected. Version numbers are unified at 3.0.2;
+> no backend API or schema changes.
+
+### 🔧 v3 chat page fixes
+
+- **Balance refreshes after every turn**: it used to be queried only when entering the chat page or switching Provider, so the number never moved after a reply. `onSend`'s `finally` now forces a refresh (including background sessions and manual stops); a failed query keeps the last successful value instead of blanking it.
+- **Working-directory switch now really applies**: switching folders in the file tree used to change only that panel's `localRoot`, while chat requests kept the old `workDir`. It now asks:
+  - "Set as working directory" → writes a session-level override + `settingsStore.projectRoot`, then `PUT /agent-configs/{id}/runtime` and reloads the agent list — AI file operations, Git, terminal and relative-path resolution all follow;
+  - "Browse only" → only the file-tree scope changes.
+  - `chatProjectRoot` priority is now "session override > agent config > persisted `settingsStore.projectRoot`", matching the classic UI.
+- **Top bar and main area share one colour**: under a wallpaper, `.cc-header` (the row holding Files / Git / Terminal) drops its 62% card tint and simply reuses the main column's paper surface; the Electron 32px title-bar right segment mirrors the page's two layers (`--bg-solid` 50% + paper 40%). Previously the 62% card layer composited ~30% darker than the main area in dark mode, leaving a disjointed dark band at the top.
+- **Settings that never took effect now do**:
+  - window opacity is wired to `electronAPI.setWindowOpacity` (it used to change a store number only);
+  - UI density is written to `<html data-density>` and overrides `--sp-*` / `--header-h` in `tokens.css` (it used to be a demo-only local ref);
+  - switching the theme now also calls `electronAPI.setTheme`, so the native window-button colours follow.
+- **Provider-switch semantics corrected**: `providerCode` is written back only when the user actually changed the binding. Previously even an "execution mode only" apply pinned "follow default Provider" to a concrete code.
+
+### ⚡ Chat-history loading (no more freezes on long reasoning)
+
+- **Lazy rendering of historical reasoning**: `chat-mapper` no longer runs `renderMarkdown(thinking)` for every message (tens of thousands of characters × a dozen messages = hundreds of thousands parsed synchronously — the main cause of "opening an old session freezes"). Only the raw text is kept and `ChatMessage` renders it on demand with a per-text cache.
+- **Zero DOM while collapsed**: the reasoning block switched from "content always in the DOM + CSS `display:none`" to `v-if="procOpen"`, matching the classic `getThinkingVisible` behaviour, so thousands of hidden nodes are no longer attached.
+- **Segmented rendering for very long reasoning**: a single block renders only the last 60k characters by default; earlier content is loaded explicitly via a "Render full reasoning (N chars)" button. During streaming, blocks over 30k characters skip per-frame rendering; on completion, blocks over 120k skip the full render (avoiding the multi-second highlight.js cost).
+- **Context-token estimate cache**: per-message estimates are cached by "message id + content-length fingerprint", so paging / switching sessions only recomputes changed messages instead of walking every loaded message again.
+
+### 🎯 New: skill hit badges
+
+- The reasoning row of an assistant message shows `🎯 skill name` pills for skills that were **actually executed** in this turn (only `skill action=load` counts, not "matched in the skill catalogue"); the badge still shows when there is no reasoning text at all.
+- Two data channels: the `🎯 命中技能: xxx` summary in `tool_call_start.summaries` (primary) and `【技能详情】xxx (ID:n)` inside the tool output (fallback).
+- **History replay**: after a refresh or session switch the same information is re-derived from the raw tool output, so older sessions keep showing their skills.
+- Parsing lives in the new `frontend-v3/src/utils/skill-hit.ts`, shared by the live stream and history replay.
+
+### 📜 New: Git commit-history panel
+
+- A new "Commit history" section in the Git panel's collapsible area parses the `git log --oneline` text returned by `GET /api/git/log` into "short hash (monospace, accent) + subject".
+- Clicking a row copies the full 40-character hash; "Load more" adds 20 entries per click; after a successful commit the section **auto-expands and refreshes** so the new commit is immediately visible; panel refreshes (commit / pull / rollback) also update it while expanded.
+
+### 🧾 Version bumps
+
+- Backend: `3.0.1` → `3.0.2` (`pom.xml`, artifact `code-craft-3.0.2.jar`)
+- Classic frontend: `3.0.1` → `3.0.2` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.1` → `3.0.2` (`frontend-v3/package.json` + lock)
+- Electron: version and `extraResources` jar path → `3.0.2` / `code-craft-3.0.2.jar`
+- MCP Server handshake version: `3.0.1` → `3.0.2` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) headers, DEV_QUICKREF / RELEASE_CHECKLIST(_EN) build commands, and the FAQ version example are unified at v3.0.2
+
+### ⚠️ Upgrade notes
+
+- **No backend API or database changes** — replacing the installer is enough; users on 3.0.1 can install over it directly.
+- Frontend changes ship with the package: the desktop app loads the `v3-static/` build inside the jar, so a plain page refresh may not pick them up.
+
+---
+
 ## [3.0.1] - 2026-10-19
 
 > Patch release: the v3 frontend's wallpaper now actually shows through **across the whole UI**

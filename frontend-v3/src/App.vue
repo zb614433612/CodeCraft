@@ -137,7 +137,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, isRef, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, isRef, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from './layouts/AppShell.vue'
 import ToastHost from './components/ToastHost.vue'
@@ -261,6 +261,12 @@ import {
 import type { AskUserEventData } from './utils/chat-mapper'
 import type { ProcessItem, ToolCallItem } from './components/ChatMessage.vue'
 import { renderMarkdown, renderMarkdownLight } from './utils/markdown'
+/* 技能命中解析：实时流（tool_call_start.summaries / 工具输出）与历史回放共用同一套规则 */
+import {
+  mergeSkillHits,
+  parseSkillHitFromToolOutput,
+  parseSkillHitsFromSummaries
+} from './utils/skill-hit'
 /* 工具输出截断：保头也保尾（尾部带 [TOOL_RESULT] 增删行数与 ---TASK_JSON--- 任务清单） */
 import { clipToolDetail } from './utils/tool-render'
 import { estimateTokenCount } from './utils/tokenCalculator'
@@ -1005,8 +1011,70 @@ function chatAgentName(): string {
  * 消息里本地路径的解析基准：当前 Agent 的工作目录。
  * 相对路径（如 `src/utils/markdown.ts`）经后端 `/project/resolve` 按后缀匹配，
  * 命中后与这个根目录拼成绝对路径再读取。
+ *
+ * <p>优先级：<b>会话级覆盖</b>（用户在文件树里切的目录）＞ Agent 配置 ＞ settingsStore 的
+ * 持久化兜底。旧版（frontend/）里 `settingsStore.projectRoot` 就是这条链路的兜底，
+ * v3 之前只读 Agent 配置，等于把「切了目录却没用上」写死在了实现里。</p>
  */
-const chatProjectRoot = computed(() => currentAgent.value?.workDir || '')
+const chatProjectRootOverride = ref('')
+const chatProjectRoot = computed(
+  () => chatProjectRootOverride.value || currentAgent.value?.workDir || settings.projectRoot || ''
+)
+
+/**
+ * 把文件树里选中的目录应用为「当前会话的工作目录」。
+ *
+ * <p>为什么需要这个函数：ProjectFileTree 的目录切换原先只改面板自己的浏览根
+ * （注释写的是「不改 Agent 配置」），于是聊天请求 / Git / 终端仍旧用旧 workDir，
+ * 用户看到的现象就是「切换工作目录没生效」。这里补上后半段链路：</p>
+ * <ol>
+ *   <li>先写会话级覆盖 —— 无论后端写回成功与否，本次会话立刻按新目录工作；</li>
+ *   <li>再尽力写回 Agent 配置（对齐经典版 `saveRuntime()`），成功后由 Agent 接管，
+ *       清掉覆盖避免两套真相互相漂移；</li>
+ *   <li>用户选「仅浏览」时返回 false，文件树保留自己的浏览根，不改任何配置。</li>
+ * </ol>
+ */
+async function applyWorkspaceRoot(path: string): Promise<boolean> {
+  const next = path.trim()
+  if (!next) return false
+  if (next === chatProjectRoot.value) return true
+
+  const agentId = currentAgentId.value
+  if (agentId && next !== (currentAgent.value?.workDir || '')) {
+    const ok = await confirm({
+      title: '把该目录设为工作目录？',
+      content: `设为工作目录后，AI 的文件操作、Git 变更与终端都会以「${next}」为根；\n选「仅浏览」则只切换文件树的浏览范围。`,
+      okText: '设为工作目录',
+      cancelText: '仅浏览'
+    })
+    if (!ok) return false
+  }
+
+  chatProjectRootOverride.value = next
+  settings.projectRoot = next
+
+  if (agentId) {
+    try {
+      await updateAgentRuntime(agentId, { workDir: next })
+      await loadAgents()
+      // 写回成功：Agent 已是新值，清掉会话覆盖（否则切换 Agent 时会残留旧目录）
+      chatProjectRootOverride.value = ''
+    } catch (err) {
+      toast.warning('已应用于本次会话，但未能写回智能体配置', {
+        description: readErrorMessage(err, '可稍后在「智能体」页手动保存工作目录')
+      })
+    }
+  }
+  return true
+}
+
+/* 文件树等深层组件通过 inject 取这个回调：它们不该知道自己挂在哪个 Agent 下 */
+provide('ccApplyWorkDir', applyWorkspaceRoot)
+
+/** 切换 Agent：会话级工作目录覆盖立即失效（新 Agent 有自己的 workDir） */
+watch(currentAgentId, () => {
+  chatProjectRootOverride.value = ''
+})
 
 /** 当前 Agent 头像：聊天页助手消息的兜底（消息自身记录 agentAvatar 时优先用它） */
 const agentAvatar = computed(() => currentAgent.value?.avatar || '')
@@ -1203,6 +1271,50 @@ const chatContextTokens = computed(() => contextTokensMap.value[activeConversati
  *
  * @param key 会话 key，默认当前会话（后台流收尾时传它自己的 key）
  */
+/**
+ * 单条消息的 token 估算缓存。
+ *
+ * <p>为什么需要：翻页加载 / 切会话时 refreshContextTokens 会把**全部已加载消息**
+ * （含几万字的思考全文）重新遍历一遍。翻到第 10 页时这就是几十 MB 字符的重复扫描，
+ * 每翻一页都卡一下。这里用「消息 id + 内容指纹」做缓存：内容没变就直接取上次结果，
+ * 只有流式追加过的消息才会重算。</p>
+ *
+ * <p>指纹只取长度与条目数（O(1) 读数，不复制字符串），精度足够区分内容变化；
+ * 估算值本身只用于界面展示，偶发同长度改写导致的偏差可以接受。</p>
+ */
+const msgTokenCache = new Map<string, { fp: string; tokens: number }>()
+
+/** 单条消息进入上下文的 token 估算（口径见 refreshContextTokens） */
+function estimateMessageTokens(
+  msg: ChatMessageModel,
+  compact: boolean,
+  isHistoryRound: boolean
+): number {
+  const processChars = (msg.process ?? []).reduce((n, p) => n + (p.text?.length ?? 0), 0)
+  const toolChars = (msg.tools ?? []).reduce(
+    (n, t) => n + (t.detail?.length ?? 0) + (t.summary?.length ?? 0),
+    0
+  )
+  const fp = `${compact ? 'c' : 'f'}:${isHistoryRound ? 'h' : 'n'}:${msg.content?.length ?? 0}:${processChars}:${toolChars}:${msg.tools?.length ?? 0}`
+  const hit = msgTokenCache.get(msg.id)
+  if (hit && hit.fp === fp) return hit.tokens
+
+  let tokens = estimateTokenCount(msg.content || '')
+  if (!isHistoryRound) {
+    // 本轮或全量模式：思考与工具明细都进上下文
+    for (const part of msg.process ?? []) tokens += estimateTokenCount(part.text || '')
+    for (const tool of msg.tools ?? []) tokens += estimateTokenCount(tool.detail || tool.summary || '')
+  } else {
+    // 历史轮次：思考被移除，工具只留一条摘要（后端按 tool 消息整条降级）
+    tokens += (msg.tools?.length ?? 0) * 30
+  }
+
+  // 上限只是防极端长会话把缓存撑爆（id 不复用，清空后重算即可）
+  if (msgTokenCache.size > 4000) msgTokenCache.clear()
+  msgTokenCache.set(msg.id, { fp, tokens })
+  return tokens
+}
+
 function refreshContextTokens(key = activeConversationId.value) {
   if (!key) return
   const list = messagesMap.value[key] ?? []
@@ -1219,16 +1331,8 @@ function refreshContextTokens(key = activeConversationId.value) {
   }
   let total = 0
   for (let i = 0; i < list.length; i++) {
-    const msg = list[i]
-    total += estimateTokenCount(msg.content || '')
-    // 本轮或全量模式：思考与工具明细都进上下文
-    if (!compact || i >= lastUserIdx) {
-      for (const part of msg.process ?? []) total += estimateTokenCount(part.text || '')
-      for (const tool of msg.tools ?? []) total += estimateTokenCount(tool.detail || tool.summary || '')
-    } else {
-      // 历史轮次：思考被移除，工具只留一条摘要（后端按 tool 消息整条降级）
-      total += (msg.tools?.length ?? 0) * 30
-    }
+    const isHistoryRound = compact && i < lastUserIdx
+    total += estimateMessageTokens(list[i], compact, isHistoryRound)
   }
   contextTokensMap.value = { ...contextTokensMap.value, [key]: total }
 }
@@ -1288,9 +1392,11 @@ async function loadChatBalance(force = false) {
         })
       : ''
   } catch {
-    // 静默失败：标记已尝试，避免同一 Provider 反复请求
+    /*
+      静默失败：只记录「这个 Provider 已经查过」，不清空上一次成功的数据。
+      网络抖动 / 后端临时不可用不该让余额从界面上凭空消失（经典版同样是「失败保留上一次值」）。
+    */
     chatBalanceCode.value = code
-    chatBalanceText.value = ''
   }
 }
 
@@ -2178,17 +2284,44 @@ async function consumeChatStream(
   const contentRender = makeThrottle(() => {
     assistant.contentHtml = renderMarkdownLight(assistant.content)
   })
+  /**
+   * 流式期间思考超过这个字数就不再逐帧渲染。
+   *
+   * <p>折叠态根本看不到思考区，每 80ms 把几万字重跑一遍 markdown 只会把主线程占满
+   * （表现是「AI 一思考打字就卡、滚动掉帧」）。清空 html 是关键：ChatMessage 的
+   * processHtml 优先用 html，留着旧的会显示成过期内容；清空后展开时按 text 懒渲染
+   * （且自带 6 万字分段，见 PROC_RENDER_LIMIT）。</p>
+   */
+  const STREAM_PROCESS_RENDER_LIMIT = 30000
   const processRender = makeThrottle(() => {
-    thinkingItem().html = renderMarkdownLight(thinking)
+    const item = thinkingItem()
+    if (thinking.length > STREAM_PROCESS_RENDER_LIMIT) {
+      item.html = ''
+      return
+    }
+    item.html = renderMarkdownLight(thinking)
   })
 
-  /** 收尾：正文与思考都用完整版渲染一次（补齐代码高亮 / diff 着色） */
+  /**
+   * 收尾：正文与思考都用完整版渲染一次（补齐代码高亮 / diff 着色）。
+   *
+   * <p>超长思考例外：完整版要跑 highlight.js，几万行代码块是秒级同步开销，
+   * 而这份 HTML 在折叠态根本不会被展示（ChatMessage 的 v-if 不渲染）。
+   * 超过阈值就只做轻量渲染；用户真展开时由 ChatMessage 按需渲染（并自带 6 万字分段）。</p>
+   */
+  const FLUSH_RENDER_LIMIT = 120000
   const flushAllRender = () => {
     contentRender.cancel()
     processRender.cancel()
-    assistant.contentHtml = assistant.content ? renderMarkdown(assistant.content) : ''
+    assistant.contentHtml = assistant.content
+      ? assistant.content.length > FLUSH_RENDER_LIMIT
+        ? renderMarkdownLight(assistant.content)
+        : renderMarkdown(assistant.content)
+      : ''
     const item = processList.find(p => p.tag === '思考')
-    if (item) item.html = renderMarkdown(item.text)
+    if (!item) return
+    // 超长思考连收尾渲染也跳过：折叠态用不到这份 HTML，展开时由 ChatMessage 按需渲染（含 6 万字分段）
+    item.html = item.text.length > FLUSH_RENDER_LIMIT ? '' : renderMarkdown(item.text)
   }
 
   try {
@@ -2243,6 +2376,15 @@ async function consumeChatStream(
             // task_manager 输出尾部附带结构化任务清单（按会话隔离写入）
             const taskItems = parseTaskManagerOutput(toolContent)
             if (taskItems) setSessionTasks(taskItems, key)
+            /*
+              技能命中（兜底通道）：summaries 通道缺失时，从技能加载结果反解。
+              `skill(action=load)` 的固定输出形如「【技能详情】xxx (ID:12)」，
+              与经典版同一套正则；命中后挂在消息上，由 ChatMessage 显示 🎯 标签。
+            */
+            const skillHit = parseSkillHitFromToolOutput(toolContent)
+            if (skillHit) {
+              assistant.hitSkills = mergeSkillHits(assistant.hitSkills, [skillHit])
+            }
           }
         } else {
           thinking += data
@@ -2274,6 +2416,15 @@ async function consumeChatStream(
         names.forEach((name, index) => {
           tools.push({ name, summary: summaries[index] || '', state: 'running' })
         })
+        /*
+          技能命中（主通道）：后端在 `skill(action=load)` 时生成「🎯 命中技能：xxx」摘要，
+          随 tool_call_start.summaries 一起下发 —— 到这里才代表 LLM 真的选中并执行了该技能。
+          （技能目录是全量注入的，「匹配到」不等于「用过」，所以只认这条信号。）
+        */
+        const skillHits = parseSkillHitsFromSummaries(summaries)
+        if (skillHits.length) {
+          assistant.hitSkills = mergeSkillHits(assistant.hitSkills, skillHits)
+        }
         /*
          * 出现 agent 工具调用 → 可能正在 fork 子Agent，立刻拉一次子Agent列表。
          * tool_call_start 只给工具名、不给参数（无法区分 fork / collect / inspect），
@@ -2423,7 +2574,7 @@ async function onSend(text: string) {
         sessionId,
         {
           executionMode: chatExecutionMode.value,
-          projectRoot: currentAgent.value?.workDir || undefined,
+          projectRoot: chatProjectRoot.value || undefined,
           model: chatModel.value || undefined,
           thinkingMode: chatThinkingMode.value || undefined,
           agentConfigId: currentAgentId.value || undefined,
@@ -2470,6 +2621,12 @@ async function onSend(text: string) {
         if (again) void matchSnapshotsForMessages(again, finalKey)
       }, 1500)
     }
+    /*
+      每轮结束都重查一次余额：这一轮调用已经消耗了额度，不刷新的话输入区右下角永远停在上一次的数字。
+      对齐经典版（流结束 + 后台任务结束两处都调 refreshBalance）。
+      必须 force：Provider code 没变，非强制会被 loadChatBalance 里的「同一 Provider 已查过」挡掉。
+    */
+    void loadChatBalance(true)
     // 新会话首轮结束后侧栏需要出现该会话 → 刷新列表
     if (wasNewSession && convId) await loadConversations()
     // 后台完成：用户已经切到别的会话，补一句提示（主动停止的不提示）
@@ -2871,13 +3028,26 @@ async function onChatModelApply(payload: {
     toast.info('已切换（当前未绑定智能体，仅本次会话生效）')
     return
   }
+
+  /*
+    Provider 只在用户**确实改了绑定**时才写回。
+
+    否则「跟随默认 Provider」（Agent.providerCode 为空）会被一次「只改执行模式」的应用
+    固化成某个具体 code —— 之后在「模型配置」页换默认 Provider 时这个 Agent 不再跟随，
+    属于静默的语义漂移（onSend 里对请求参数已经做过同样的区分）。
+  */
+  const providerChanged =
+    (payload.providerCode || '') !== (currentAgent.value?.providerCode || '')
+
   try {
     await updateAgentRuntime(id, {
       modelName: payload.model,
       thinkingMode: payload.thinkingMode,
       executionMode: payload.executionMode,
-      // providerCode 必须单独写：AgentConfigServiceImpl.update() 不处理该字段，只有 updateRuntime() 处理
-      providerCode: payload.providerCode || ''
+      ...(providerChanged
+        ? // providerCode 必须单独写：AgentConfigServiceImpl.update() 不处理该字段，只有 updateRuntime() 处理
+          { providerCode: payload.providerCode || '' }
+        : {})
     })
     toast.success(
       contextChanged ? '模型与运行模式已更新，上下文改为' + (nextContext === 'compact' ? '精简' : '全量') : '模型与运行模式已更新'
@@ -5908,11 +6078,16 @@ const pageView = computed((): PageBinding => {
           windowOpacity: appearanceWindowOpacity,
           uploading: appearanceUploading,
           /* P4：右侧面板形态（工作区 / 抽屉），与 settingsStore 双向同步 */
-          workspaceMode: settings.workspaceMode
+          workspaceMode: settings.workspaceMode,
+          /* 界面密度：store 是唯一真相源，AppShell 据此写 <html data-density> */
+          uiDensity: settings.uiDensity
         },
         on: {
           'update:theme': onLookThemeChange,
           'update:workspaceMode': (value: boolean) => settings.setWorkspaceMode(value),
+          'update:uiDensity': (value: string) => {
+            settings.uiDensity = value === 'compact' ? 'compact' : 'comfortable'
+          },
           'update:bg-opacity': (value: number) => {
             appearanceBgOpacity.value = value
           },
