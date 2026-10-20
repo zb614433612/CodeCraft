@@ -23,8 +23,16 @@ import { normalizeDepends, normalizePriority, normalizeStatus } from './task-lis
 import type { ApprovalPayload } from '../views/ChatView.vue'
 import { processMessageGroups } from '../api/conversation'
 import type { MessageResponse } from '../api/conversation'
-import { renderMarkdown } from './markdown'
+import { renderMarkdown, renderMarkdownLight } from './markdown'
 import { clipToolDetail } from './tool-render'
+
+/**
+ * 历史消息正文的代码高亮上限：超过就只渲染 markdown 结构、跳过 highlight.js。
+ *
+ * <p>完整版高亮是同步 CPU 活；一页会话里几条超长回复叠加，会让「切会话」明显卡顿。
+ * 结构（段落/列表/表格/代码块）仍然完整，只是少了代码配色。</p>
+ */
+const HISTORY_HIGHLIGHT_LIMIT = 20000
 /* 技能命中回放：与实时流共用同一套解析（skill load 的工具输出固定带「【技能详情】xxx (ID:n)」） */
 import { collectSkillHits } from './skill-hit'
 
@@ -166,8 +174,16 @@ export function toChatMessages(
       id: String(group.id),
       role: isUser ? 'user' : 'assistant',
       content,
-      // 历史消息一次性渲染完整 markdown（含代码高亮）；用户消息保持纯文本气泡
-      contentHtml: isUser ? undefined : renderMarkdown(content),
+      /*
+        历史消息一次性渲染 markdown；用户消息保持纯文本气泡。
+        超过 2 万字改走轻量版（跳过代码高亮）：完整版是同步秒级开销，
+        几条超长回复叠加会让「切会话」明显卡顿。
+      */
+      contentHtml: isUser
+        ? undefined
+        : content.length > HISTORY_HIGHLIGHT_LIMIT
+          ? renderMarkdownLight(content)
+          : renderMarkdown(content),
       model: isUser ? undefined : model,
       // Agent 身份落到消息上：否则刷新/切回会话后，消息头会从「圆圆」退化成兜底的「编码助手」
       agentName: isUser ? undefined : agent?.name || undefined,

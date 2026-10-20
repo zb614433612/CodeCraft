@@ -259,7 +259,7 @@ import {
   abbreviate
 } from './utils/chat-mapper'
 import type { AskUserEventData } from './utils/chat-mapper'
-import type { ProcessItem, ToolCallItem } from './components/ChatMessage.vue'
+import type { ProcessItem, ToolCallItem, MessageFileAsset } from './components/ChatMessage.vue'
 import { renderMarkdown, renderMarkdownLight } from './utils/markdown'
 /* 技能命中解析：实时流（tool_call_start.summaries / 工具输出）与历史回放共用同一套规则 */
 import {
@@ -318,6 +318,8 @@ import type { DbConnectionConfig, DbConnectionVO } from './api/db-connection'
 /* ---- L4 逐页接线：文件资产（分页列表 + 上传 + 重命名 + 删除 + 云端清理） ---- */
 import {
   listFileAssetsPaged,
+  /* 消息附件历史回显：按 conversationId + withRefs 拉引用，再按 messageId 映射到气泡 */
+  listFileAssets,
   uploadFileAsset,
   renameFileAsset,
   deleteFileAsset,
@@ -972,10 +974,26 @@ const staleTaskKeys = ref<Record<string, boolean>>({})
 /** 当前会话是否为遗留运行标记 */
 const staleTask = computed(() => !!staleTaskKeys.value[activeConversationId.value])
 
-/** 历史消息分页游标：本页最早一条消息 id */
-const chatCursor = ref<number | null>(null)
-const chatHasMore = ref(false)
+/**
+ * 历史消息分页状态（按会话 key 隔离）。
+ *
+ * <p>原先是全局单例：快速切换会话时，A 会话的旧请求晚返回会把游标写成 A 的，
+ * 而界面已经在 B 会话上 —— 于是「上滑加载更早」用错游标（拿到空页或重复页）。
+ * 改成按 key 存，读取时取当前会话那一份。</p>
+ */
+const cursorMap = ref<Record<string, number | null>>({})
+const hasMoreMap = ref<Record<string, boolean>>({})
+/** 当前会话的分页游标：本页最早一条消息 id */
+const chatCursor = computed(() => cursorMap.value[activeConversationId.value] ?? null)
+const chatHasMore = computed(() => hasMoreMap.value[activeConversationId.value] ?? false)
 const chatLoadingMore = ref(false)
+/**
+ * 聊天记录加载失败原因（**只**用于分页加载）。
+ *
+ * <p>不要复用 chatError：那个承载「发送失败 / 任务中断」，直接复用会让
+ * 「发送失败」在空态里显示成「聊天记录加载失败」，语义完全错位。</p>
+ */
+const chatLoadError = ref('')
 
 /**
  * 待回执的 ask_user uuid（按会话 key）。
@@ -1491,7 +1509,7 @@ async function loadConversationMessages(conversationId: string, before?: number 
   if (!convId || Number.isNaN(convId)) return
   const key = String(conversationId)
   chatLoading.value = true
-  chatError.value = ''
+  chatLoadError.value = ''
   try {
     const res = await getConversationMessagesPage(convId, before ?? null, CHAT_PAGE_ROUNDS)
     const page = res.data
@@ -1506,8 +1524,8 @@ async function loadConversationMessages(conversationId: string, before?: number 
     } else {
       setConvMessages(key, mapped)
     }
-    chatHasMore.value = !!page.hasMore
-    chatCursor.value = page.nextBeforeId ?? null
+    hasMoreMap.value = { ...hasMoreMap.value, [key]: !!page.hasMore }
+    cursorMap.value = { ...cursorMap.value, [key]: page.nextBeforeId ?? null }
     // 任务清单没有独立存储：从刚加载的消息里回溯最近一次 task_manager 输出
     restoreTasksFromMessages(convId, key)
     // 上下文估算随消息变化，加载完重算一次（正文 + 思考 + 工具返回）
@@ -1516,10 +1534,99 @@ async function loadConversationMessages(conversationId: string, before?: number 
     void matchSnapshotsForMessages(convId, key)
     // 子Agent（F05）：历史会话也要能看到 fork 出来的子Agent，读库一次即可
     void loadSubAgents(key)
+    // 消息附件回显（图片缩略图 / 文档 chip）：与消息分开拉，失败不影响正文
+    void loadMessageFileRefs(key, convId)
   } catch (err) {
-    chatError.value = readErrorMessage(err, '聊天记录加载失败')
+    const message = readErrorMessage(err, '聊天记录加载失败')
+    chatLoadError.value = message
+    /*
+      分页加载（before 非空）失败时列表里已经有内容，空态里的错误条不会显示，
+      这里补一条 toast 明确告诉用户「更早的历史没拉到」，而不是静默失败。
+    */
+    if (before) toast.error('加载更早的聊天记录失败', { description: message })
   } finally {
     chatLoading.value = false
+  }
+}
+
+/**
+ * 消息附件历史回显（图片缩略图 / 文档 chip）。
+ *
+ * <p>后端把「文件 ↔ 消息」的关系存在 `file_reference` 表里，`GET /api/files?conversationId=X&withRefs=true`
+ * 会把每个资产的 references（含 messageId）一起返回。这里按 messageId 分组挂到对应消息上；
+ * 图片再用**带鉴权的 blob URL** 异步补缩略图（`<img src>` 无法携带 Authorization 头）。</p>
+ *
+ * <p>幂等：已有 fileAssets 的消息直接跳过；加载更多 / 重新进入会话重复调用没有副作用。
+ * 失败静默 —— 附件回显只是气泡的补充信息，不该阻塞正文展示。</p>
+ */
+async function loadMessageFileRefs(key: string, conversationId: number) {
+  if (!key || !conversationId) return
+  const list = messagesMap.value[key]
+  if (!list?.length) return
+  try {
+    const res = await listFileAssets({ conversationId, withRefs: true, limit: 200 })
+    const assets = res.data ?? []
+    if (!assets.length) return
+
+    // messageId → 该消息引用的资产（同一资产可能被多条消息引用）
+    const byMessage = new Map<number, MessageFileAsset[]>()
+    for (const asset of assets) {
+      const kind: MessageFileAsset['kind'] = (asset.mimeType || '').startsWith('image/')
+        ? 'image'
+        : 'doc'
+      for (const ref of asset.references ?? []) {
+        if (!ref.messageId) continue
+        const bundle: MessageFileAsset = {
+          id: asset.id,
+          filename: asset.filename,
+          displayName: asset.displayName,
+          mimeType: asset.mimeType,
+          size: asset.size,
+          kind
+        }
+        const bucket = byMessage.get(ref.messageId)
+        if (bucket) {
+          if (!bucket.some(item => item.id === bundle.id)) bucket.push(bundle)
+        } else {
+          byMessage.set(ref.messageId, [bundle])
+        }
+      }
+    }
+    if (!byMessage.size) return
+
+    let changed = false
+    for (const msg of list) {
+      if (msg.role !== 'user' || msg.fileAssets?.length) continue
+      const mid = Number(msg.id)
+      if (!Number.isFinite(mid)) continue
+      const bucket = byMessage.get(mid)
+      if (!bucket?.length) continue
+      msg.fileAssets = bucket
+      changed = true
+    }
+    if (!changed) return
+    // 消息数组整体替换，确保 ChatMessage 重新渲染出附件区
+    messagesMap.value[key] = [...list]
+
+    // 图片缩略图：带鉴权 blob URL（api 层有缓存，重复调用不会重复请求）
+    const images = list.flatMap(m =>
+      (m.fileAssets ?? []).filter(asset => asset.kind === 'image' && asset.id > 0)
+    )
+    for (const asset of images) {
+      if (asset.previewUrl) continue
+      getFilePreviewBlobUrl(asset.id)
+        .then(url => {
+          asset.previewUrl = url
+          // 嵌套字段变更不在数组替换的监听范围内，再触发一次刷新
+          const cur = messagesMap.value[key]
+          if (cur) messagesMap.value[key] = [...cur]
+        })
+        .catch(() => {
+          /* 缩略图失败：保留占位图，不影响文件名与正文 */
+        })
+    }
+  } catch {
+    /* 静默：附件回显失败不阻塞聊天主流程 */
   }
 }
 
@@ -1852,11 +1959,16 @@ async function onSelectConversation(id: string) {
   attachments.value = []
   chatError.value = ''
   chatChangesOpen.value = false
-  // 任务清单按会话隔离：tasks 是 computed，跟着 activeConversationId 走
-  chatCursor.value = null
-  chatHasMore.value = false
-  // 该会话正在本页后台跑流：内存里就是最新态，用 DB 覆盖反而会丢正在写的增量
-  if (streamingMap.value[id] || streamAborts.has(id)) return
+  // 分页游标 / 是否还有历史按会话 key 存（见 cursorMap / hasMoreMap），切会话不必重置
+  chatLoadError.value = ''
+  /*
+    该会话正在本页后台跑流：内存里就是最新态，用 DB 覆盖反而会丢正在写的增量。
+    但**内存里一条消息都没有**时必须照常加载基线（典型场景：刚重载页面、后台流刚建立、
+    或某次加载失败留下了空数组）—— 否则消息区会一直空白，
+    用户看到的就是「点了会话没加载」，而且连重试入口都没有。
+  */
+  const hasCachedMessages = (messagesMap.value[id]?.length ?? 0) > 0
+  if (hasCachedMessages && (streamingMap.value[id] || streamAborts.has(id))) return
   await loadConversationMessages(id)
   void checkChatActiveTask(Number(id))
   // 改动统计与消息分开拉：快照接口慢且不影响首屏渲染
@@ -2185,11 +2297,10 @@ function onNewChat() {
     dropConversationState(current)
   }
   activeConversationId.value = `${DRAFT_PREFIX}${Date.now()}`
-  // 新会话没有 id，tasks / 审批 / 改动 / 上下文都由新 key 派生为空，无需逐个清
+  // 新会话没有 id，tasks / 审批 / 改动 / 分页状态都由新 key 派生为空，无需逐个清
   attachments.value = []
-  chatCursor.value = null
-  chatHasMore.value = false
   chatError.value = ''
+  chatLoadError.value = ''
   chatChangesOpen.value = false
 }
 
@@ -2241,7 +2352,7 @@ async function consumeChatStream(
    *   - 流式期间用「轻量版」渲染（跳过 highlight.js），最多每 80ms 一次；
    *   - 收尾时用完整版渲染一次，补齐代码高亮 / diff 红绿着色。
    */
-  function makeThrottle(render: () => void) {
+  function makeThrottle(render: () => void, interval = 80) {
     let lastAt = 0
     let timer: ReturnType<typeof setTimeout> | null = null
     const run = () => {
@@ -2252,7 +2363,7 @@ async function consumeChatStream(
     return {
       schedule() {
         const elapsed = Date.now() - lastAt
-        if (elapsed >= 80) {
+        if (elapsed >= interval) {
           if (timer) {
             clearTimeout(timer)
             timer = null
@@ -2261,7 +2372,7 @@ async function consumeChatStream(
           return
         }
         if (timer) return
-        timer = setTimeout(run, 80 - elapsed)
+        timer = setTimeout(run, interval - elapsed)
       },
       cancel() {
         if (timer) {
@@ -2293,23 +2404,37 @@ async function consumeChatStream(
    * （且自带 6 万字分段，见 PROC_RENDER_LIMIT）。</p>
    */
   const STREAM_PROCESS_RENDER_LIMIT = 30000
+  /*
+    思考区的更新节拍：300ms（正文仍 80ms）。
+
+    为什么要比正文慢这么多：正文是不断追加的短文本，用户能感知「打字」；
+    而思考区一旦展开，每更新一次 html 都会让浏览器销毁并重建整棵子树
+    （几万字符 → 上千节点），80ms 一次 = 每秒 12 次全量重建，页面必然无响应。
+    降到 300ms 后仍能保持「思考在推进」的观感，但单次重建的间隔足够浏览器喘息。
+
+    text 与折叠标题也一起放进节流器：它们原先每个 SSE chunk 都写，
+    会让「展开态」以事件频率（一条长思考可达上万次）触发组件重渲染。
+  */
   const processRender = makeThrottle(() => {
     const item = thinkingItem()
+    item.text = thinking
+    refreshLabel()
     if (thinking.length > STREAM_PROCESS_RENDER_LIMIT) {
       item.html = ''
       return
     }
     item.html = renderMarkdownLight(thinking)
-  })
+  }, 300)
 
   /**
    * 收尾：正文与思考都用完整版渲染一次（补齐代码高亮 / diff 着色）。
    *
-   * <p>超长思考例外：完整版要跑 highlight.js，几万行代码块是秒级同步开销，
+   * <p>超长内容例外：完整版要跑 highlight.js，几万行代码块是秒级同步开销，
    * 而这份 HTML 在折叠态根本不会被展示（ChatMessage 的 v-if 不渲染）。
-   * 超过阈值就只做轻量渲染；用户真展开时由 ChatMessage 按需渲染（并自带 6 万字分段）。</p>
+   * 阈值从 12 万字降到 2 万字：实测 12 万字的完整渲染仍会让收尾那一下明显卡顿，
+   * 而 2 万字以上用户真正在意的往往是结构而不是配色。</p>
    */
-  const FLUSH_RENDER_LIMIT = 120000
+  const FLUSH_RENDER_LIMIT = 20000
   const flushAllRender = () => {
     contentRender.cancel()
     processRender.cancel()
@@ -2386,15 +2511,20 @@ async function consumeChatStream(
               assistant.hitSkills = mergeSkillHits(assistant.hitSkills, [skillHit])
             }
           }
+          // 工具事件低频（每次工具调用一条），这里刷一次折叠标题没有性能压力
+          refreshLabel()
         } else {
           thinking += data
-          // 存全文（不截断）：折叠态只显示标题，展开即看完整推理过程
-          // html 交给节流器写（流式轻量版，收尾补完整版），避免逐字重渲染整段 markdown
-          thinkingItem().text = thinking
+          /*
+            存全文（不截断）：折叠态只显示标题，展开即看完整推理过程。
+
+            text / html / 折叠标题**都**交给 processRender 节流写入（300ms）：
+            原先 text 与 refreshLabel 是每个 SSE chunk 都写，一条几万字的思考会产生
+            上万次响应式更新；展开态每次都要重建整棵思考区 DOM —— 页面直接无响应。
+          */
           processRender.schedule()
           lastType = 'thinking'
         }
-        refreshLabel()
         continue
       }
 
@@ -2482,6 +2612,13 @@ async function consumeChatStream(
   } catch (err: any) {
     const message = err?.message || '发送失败'
     if (message !== '__USER_ABORT__') {
+      /*
+        token 失效：SSE 层已清 token 并跳登录页（见 utils/sse-client 的 401 分支）。
+        这里再弹一条「发送失败」只会在登录页上留一块红字 —— ToastHost 挂在根组件，
+        不随路由切换消失，所以直接跳过提示。
+      */
+      // consumeChatStream 约定返回会话 key（调用方用它收尾），这里提前退出也要带上
+      if (message.includes('HTTP 401') || message.includes('登录已过期')) return key
       if (activeConversationId.value === key) chatError.value = message
       if (!assistant.content) assistant.content = message
       toast.error('发送失败', { description: abbreviate(message, 200) })
@@ -2535,8 +2672,41 @@ async function onSend(text: string) {
    */
   const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
+  /*
+    本轮附件挂到用户消息上（气泡内展示图片缩略图 / 文档 chip）。
+
+    必须在 `attachments.value = []` **之前**取快照，否则附件区清空后就没处可取了。
+    · 图片：uploadChatImage 已写入 fileAssetId，previewUrl 是本地 objectURL，可直接展示；
+    · 文档：走旧临时通道时只有 attachmentId、没有 file_asset id → id 记 0，
+      仍展示文件名（点击时提示「旧版临时通道，已无法下载」）。
+  */
+  const sentFileAssets: MessageFileAsset[] = attachments.value
+    .map<MessageFileAsset | null>(a => {
+      if (a.fileAssetId) {
+        return {
+          id: a.fileAssetId,
+          filename: a.name,
+          displayName: a.name,
+          mimeType: a.isImage ? 'image/*' : undefined,
+          kind: a.isImage ? 'image' : 'doc',
+          previewUrl: a.previewUrl
+        }
+      }
+      if (a.attachmentId) {
+        return { id: 0, filename: a.name, displayName: a.name, kind: 'doc' }
+      }
+      return null
+    })
+    .filter((asset): asset is MessageFileAsset => asset !== null)
+
   const list = convMessages(key)
-  list.push({ id: `u-${Date.now()}`, role: 'user', content, turnId })
+  list.push({
+    id: `u-${Date.now()}`,
+    role: 'user',
+    content,
+    turnId,
+    fileAssets: sentFileAssets.length ? sentFileAssets : undefined
+  })
   attachments.value = []
   // 新一轮任务从空白开始：清掉本会话上一轮的清单（其余会话的清单不受影响）
   clearSessionTasks(key)
@@ -3172,6 +3342,20 @@ async function onChatLoadMore() {
   } finally {
     chatLoadingMore.value = false
   }
+}
+
+/**
+ * 聊天记录加载失败后的「重试」。
+ *
+ * <p>重试前把该会话的分页状态清掉：失败的那一页可能已经把游标写坏了（比如拿到空页），
+ * 继续用旧游标重试只会再失败一次。</p>
+ */
+async function onChatReload() {
+  const key = activeConversationId.value
+  if (!key) return
+  hasMoreMap.value = { ...hasMoreMap.value, [key]: false }
+  cursorMap.value = { ...cursorMap.value, [key]: null }
+  await loadConversationMessages(key)
 }
 
 /**
@@ -5667,6 +5851,15 @@ const pageView = computed((): PageBinding => {
           providerError,
           // 引导页「去配置」按钮是否需要管理员权限（Provider 读写接口都 checkAdmin）
           isAdmin,
+          /*
+            聊天记录加载态：切换会话 / 上滑加载更早时的反馈。
+
+            不传的话 ChatView 只能看到空的 messages，于是落到「开始新对话」空态 ——
+            分页请求还在路上（或已失败），用户观感就是「点了会话没加载 / 聊天记录丢了」。
+          */
+          loading: chatLoading,
+          loadingMore: chatLoadingMore,
+          loadError: chatLoadError,
           // 会话列表依赖「当前 Agent」，必须先有 Agent 列表；Provider 列表用于模型下拉
           load: () => {
             if (!agentList.value.length && !agentLoading.value) {
@@ -5704,6 +5897,8 @@ const pageView = computed((): PageBinding => {
           regenerate: onRegenerate,
           rollback: onRollbackMessage,
           'load-more': onChatLoadMore,
+          // 聊天记录加载失败后点「重试」：清掉坏游标重新拉首页
+          reload: onChatReload,
           'open-changes': onChatOpenChanges,
           supplement: onChatSupplement,
           'switch-background': onSwitchBackground,

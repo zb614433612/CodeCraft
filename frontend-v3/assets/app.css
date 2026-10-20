@@ -935,6 +935,16 @@ html.cc-electron .cc-login { padding-top: 32px; }
   background: var(--accent-lt);
   color: var(--accent);
 }
+/* 上滑加载更早历史时的占位：请求在途必须给明确反馈，
+ * 否则用户滚到顶之后只会觉得「没反应」（旧实现完全没有 loading 指示）。 */
+.cc-stream__window-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+}
 
 /* 会话概览条（轻量一行，不做卡片） */
 .cc-overview {
@@ -952,6 +962,76 @@ html.cc-electron .cc-login { padding-top: 32px; }
 
 /* 用户消息：浅紫气泡，右对齐；气泡右侧跟头像（与助手消息头像对称） */
 .cc-msg-me { display: flex; justify-content: flex-end; align-items: flex-start; gap: var(--sp-2); }
+/* 气泡 + 附件的纵向容器：宽度上限落在这一层，附件行与气泡右对齐 */
+.cc-msg-me__col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 72%;
+  min-width: 0;
+}
+.cc-msg-me__col .cc-msg-me__bubble { max-width: 100%; }
+
+/* 用户消息附件：图片 48×48 缩略图（点击开灯箱）、文档 chip（点击下载） */
+.cc-msg-me__files {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.cc-msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.cc-msg-file.is-image {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  transition: border-color var(--tr);
+}
+.cc-msg-file.is-image:hover { border-color: var(--accent); }
+.cc-msg-file.is-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cc-msg-file__ph {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  opacity: .6;
+}
+.cc-msg-file.is-doc {
+  max-width: 240px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--card);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  transition: border-color var(--tr), color var(--tr), background var(--tr);
+}
+.cc-msg-file.is-doc:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-lt);
+}
+.cc-msg-file__icon { flex: none; }
+.cc-msg-file__name {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-msg-file__size { flex: none; color: var(--text-4); }
 .cc-msg-me__bubble {
   max-width: 72%;
   padding: 11px var(--sp-4);
@@ -1051,21 +1131,33 @@ html.cc-electron .cc-login { padding-top: 32px; }
 }
 html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
 /*
-  操作区显隐：**不要**对整组设 opacity:0。
-  整组透明会把「回滚改动」一起藏起来 —— 用户翻到那一轮也看不到按钮，
-  实测表现就是「回滚按钮不见了」。这里改为只让中性图标按钮（复制 / 重新生成）
-  参与 hover 渐显，「回滚改动」胶囊常驻可见（它是最重要的破坏性操作入口）。
+  操作区显隐：三个按钮统一「鼠标悬停才显示」（复制 / 重新生成 / 回滚改动）。
+
+  历史：早期担心整组透明会把回滚按钮一起藏起来，所以让回滚胶囊常驻；
+  实际用下来常驻的红色胶囊在每条 AI 回复下面都很扎眼，视觉噪音远大于可见性收益。
+  现在统一 hover 渐显；键盘用户用 :focus-within 兜住，触屏设备（hover:none）仍然常显。
 */
 .cc-msg-ai__actions {
   display: flex;
   align-items: center;
   gap: 2px;
 }
-.cc-msg-ai__actions > .cc-icon-btn {
+.cc-msg-ai__actions > .cc-icon-btn,
+.cc-msg-ai__actions > .cc-msg-ai__rollback {
   opacity: 0;
-  transition: opacity var(--tr);
+  transition: opacity var(--tr), color var(--tr), border-color var(--tr), background var(--tr);
 }
-.cc-msg-ai:hover .cc-msg-ai__actions > .cc-icon-btn { opacity: 1; }
+.cc-msg-ai:hover .cc-msg-ai__actions > .cc-icon-btn,
+.cc-msg-ai:hover .cc-msg-ai__actions > .cc-msg-ai__rollback,
+.cc-msg-ai:focus-within .cc-msg-ai__actions > .cc-icon-btn,
+.cc-msg-ai:focus-within .cc-msg-ai__actions > .cc-msg-ai__rollback {
+  opacity: 1;
+}
+/* 触屏 / 无 hover 环境：没有「鼠标指过去」这个动作，按钮必须常显 */
+@media (hover: none) {
+  .cc-msg-ai__actions > .cc-icon-btn,
+  .cc-msg-ai__actions > .cc-msg-ai__rollback { opacity: 1; }
+}
 
 /*
   回滚本轮改动（与复制 / 重新生成同一排）
@@ -1791,6 +1883,24 @@ body.cc-resizing { user-select: none; }
   text-align: center;
 }
 .cc-empty__composer { width: 100%; max-width: 720px; }
+
+/* 加载中 / 加载失败态：复用空态的居中布局，但不显示快捷指令与输入框 */
+.cc-empty--state {
+  gap: var(--sp-3);
+  color: var(--text-3);
+}
+.cc-empty--state .cc-empty__sub { margin: 0; }
+
+/* 通用小转圈（加载中）：纯 CSS 实现，不为一个特效引组件库 */
+.cc-loading-dot {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: cc-spin .8s linear infinite;
+}
 .cc-quick {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

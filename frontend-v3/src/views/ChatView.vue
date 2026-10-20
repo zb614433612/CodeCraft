@@ -74,6 +74,23 @@
     @refresh="$emit('refresh-providers')"
   />
 
+  <!--
+    ============ 加载中 / 加载失败 ============
+    这两块必须放在「空状态」之前：切换会话时分页请求还没回来，messages 是空的，
+    若直接落到空态，用户看到的是「开始新对话」——观感就是「点了会话没加载」。
+    加载失败更不能装成空会话，否则用户会以为聊天记录丢了。
+  -->
+  <div v-else-if="loading" class="cc-empty cc-empty--state">
+    <span class="cc-loading-dot" />
+    <p class="cc-empty__sub">正在加载聊天记录…</p>
+  </div>
+  <div v-else-if="loadError" class="cc-empty cc-empty--state">
+    <svg class="cc-i" style="width: 26px; height: 26px; color: var(--danger)"><use href="#i-alert" /></svg>
+    <div class="cc-empty__title" style="font-size: var(--fs-lg)">聊天记录加载失败</div>
+    <p class="cc-empty__sub">{{ loadError }}</p>
+    <button class="cc-btn cc-btn--primary" @click="$emit('reload')">重试</button>
+  </div>
+
   <!-- ============ 空状态 ============ -->
   <div v-else-if="isEmpty" class="cc-empty">
     <div class="cc-empty__logo">C</div>
@@ -155,8 +172,18 @@
             窗口化占位块（F08）：只渲染最近 windowSize 条消息，更早的收进这一行。
             滚到顶或点它会多放一段（不重新请求后端）；后端已无更多历史时提示可一直展开到最早。
           -->
-          <div v-if="hiddenCount" class="cc-stream__window">
-            <button class="cc-stream__window-btn" :title="`已加载的更早消息还有 ${hiddenCount} 条`" @click="showEarlier">
+          <div v-if="loadingMore || hiddenCount" class="cc-stream__window">
+            <!-- 后端分页请求进行中：必须给出明确反馈，否则用户以为滚到顶没反应 -->
+            <div v-if="loadingMore" class="cc-stream__window-loading">
+              <span class="cc-loading-dot" />
+              正在加载更早的聊天记录…
+            </div>
+            <button
+              v-else
+              class="cc-stream__window-btn"
+              :title="`已加载的更早消息还有 ${hiddenCount} 条`"
+              @click="showEarlier"
+            >
               <svg class="cc-i cc-i--sm" style="transform: rotate(-90deg)"><use href="#i-chev" /></svg>
               上方还有 {{ hiddenCount }} 条消息 · 点击展开
             </button>
@@ -636,6 +663,17 @@ const props = withDefaults(
     /** 是否管理员：决定引导页的「去配置」能否点击（Provider 读写接口都要 checkAdmin） */
     isAdmin?: boolean
     /**
+     * 聊天记录加载态（首次进入 / 切换会话时由父级控制）。
+     *
+     * <p>没有这个 prop 时，切换会话后会先闪一下「开始新对话」的空态（分页请求还没回来），
+     * 用户看到的就是「点了会话没加载」。</p>
+     */
+    loading?: boolean
+    /** 更早历史正在加载（滚动到顶部触发）：顶部占位块换成「正在加载更早的聊天记录…」 */
+    loadingMore?: boolean
+    /** 聊天记录加载失败原因：非空时展示错误条 + 重试按钮，而不是误导性的空态 */
+    loadError?: string
+    /**
      * 进入页面时的数据加载（由 App.vue 的 PAGE_BINDINGS 注入）
      * 页面随路由真实挂载，所以在这里调一次即可；重复进页由父级的「已加载 / 加载中 / 已失败」跳过
      */
@@ -661,7 +699,10 @@ const props = withDefaults(
     providers: () => [],
     providerLoading: false,
     providerError: '',
-    isAdmin: false
+    isAdmin: false,
+    loading: false,
+    loadingMore: false,
+    loadError: ''
   }
 )
 
@@ -687,6 +728,8 @@ const emit = defineEmits<{
   (e: 'rollback', msg: ChatMessageModel): void
   /** 滚动到消息顶部（加载更早历史） */
   (e: 'load-more'): void
+  /** 聊天记录加载失败后点「重试」：由父级重新拉当前会话 */
+  (e: 'reload'): void
   /** 点击概览条的「N 个文件改动」或状态栏的「改动」：打开改动/回滚面板 */
   (e: 'open-changes'): void
   /** 生成过程中补充需求：注入正在执行的 ToolLoop 下一轮迭代 */
@@ -910,6 +953,14 @@ let lastTailId = ''
 let lastTailSig = ''
 let lastCount = 0
 
+/**
+ * 加载更早历史前的滚动快照（后端分页的位置补偿用）。
+ *
+ * <p>声明必须放在上面那个 watch 之前：watch 回调里会读它，
+ * 若声明在下文（onScroll 附近）会命中 TDZ（Cannot access before initialization）。</p>
+ */
+let prependAnchor: { scrollHeight: number; scrollTop: number } | null = null
+
 watch(
   () => {
     const last = props.messages[props.messages.length - 1]
@@ -931,8 +982,32 @@ watch(
     lastTailId = cur.id
     lastTailSig = sig
     lastCount = cur.count
-    // 头部插入历史消息时不贴底，否则用户会被拽到最新一条
-    if (prependedOnly) return
+    /*
+      头部插入历史消息（后端分页 / 本地窗口展开）时不贴底，否则用户会被拽到最新一条。
+
+      后端分页这条路径还必须把视口钉回原位置：新消息插在前面会让内容整体下移，
+      不补偿的话用户翻到的那条记录直接跑掉（表现为「加载完就跳到别处」）。
+      本地窗口展开（showEarlier）自己做了补偿，此时 prependAnchor 为 null，直接返回即可。
+    */
+    if (prependedOnly) {
+      if (prependAnchor) {
+        const anchor = prependAnchor
+        prependAnchor = null
+        await nextTick()
+        const el = streamRef.value
+        if (el) {
+          el.scrollTop = Math.max(0, el.scrollHeight - anchor.scrollHeight + anchor.scrollTop)
+          // markdown / 代码高亮会在下一帧继续撑高，再校正一次（只在仍偏离锚点时才补，避免抖动）
+          requestAnimationFrame(() => {
+            const cur = streamRef.value
+            if (!cur) return
+            const target = cur.scrollHeight - anchor.scrollHeight + anchor.scrollTop
+            if (Math.abs(cur.scrollTop - target) > 2) cur.scrollTop = Math.max(0, target)
+          })
+        }
+      }
+      return
+    }
     // 新增消息（发消息 / 打开会话）总是贴底；
     // 同一条消息的流式增长（正文 / 思考 / 工具）只在跟随态贴底 —— 上滑查历史时不再被拽回
     if (newMessage) await scrollToBottom()
@@ -1036,8 +1111,32 @@ async function showEarlier() {
   follow.value = false
   expandWindow()
   await nextTick()
-  if (el) el.scrollTop = Math.max(0, el.scrollHeight - distanceFromBottom)
+  if (el) {
+    el.scrollTop = Math.max(0, el.scrollHeight - distanceFromBottom)
+    /*
+      markdown / 代码高亮会在下一帧继续把内容撑高，只补偿一次仍会差几十像素，
+      用户看到的就是「展开后位置偏了一点」。这里再对齐一帧（只在确实偏离时补）。
+    */
+    requestAnimationFrame(() => {
+      const cur = streamRef.value
+      if (!cur) return
+      const target = Math.max(0, cur.scrollHeight - distanceFromBottom)
+      if (Math.abs(cur.scrollTop - target) > 2) cur.scrollTop = target
+    })
+  }
   expandingWindow = false
+}
+
+/**
+ * 向后端要更早的历史。
+ *
+ * <p>先记录滚动锚点（scrollHeight / scrollTop），数据到达后由上面那个 watch
+ * 用高度差回算 scrollTop，把视口钉回用户正在看的那条消息上。</p>
+ */
+function requestMore() {
+  const el = streamRef.value
+  if (el) prependAnchor = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+  emit('load-more')
 }
 
 /** 滚动到顶部时请求更早历史；同时同步「是否在底部 / 是否跟随」 */
@@ -1049,7 +1148,7 @@ function onScroll() {
   // 先展开本地窗口（已加载但被窗口挡住的更早消息），本地放完了再向后端要更早的历史。
   // 反过来会导致「明明还有内容在内存里，却先发一次网络请求」。
   if (hiddenCount.value > 0) void showEarlier()
-  else emit('load-more')
+  else requestMore()
 }
 
 /**

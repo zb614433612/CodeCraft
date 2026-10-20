@@ -230,12 +230,35 @@ function isLocalFilePath(p: string): boolean {
 const PATH_EXT =
   'java|kt|kts|groovy|xml|yml|yaml|properties|json|json5|js|mjs|cjs|ts|tsx|jsx|vue|css|less|scss|sass|html|htm|md|markdown|txt|log|sql|py|rb|go|rs|c|cc|cpp|cxx|h|hpp|cs|php|swift|sh|bash|zsh|bat|cmd|ps1|gradle|toml|ini|conf|cfg|env|png|jpe?g|gif|webp|bmp|svg|ico|pdf|docx?|xlsx?|pptx?|csv|zip|tar|gz|jar|war|mp4|mp3|wav|mov'
 
-/** 纯文本路径正则 */
-const PATH_RE = new RegExp(
-  '(?:[A-Za-z]:[\\\\/]|\\.{1,2}[\\\\/]|/)?[^\\s<>"\'`|*?\\n]*[\\\\/][^\\s<>"\'`|*?\\n]*\\.(?:' +
+/**
+ * 纯文本路径**候选片段**：连续的非空白字符（路径本身不可能含空白）。
+ *
+ * <h3>为什么不再用「一条大正则全局扫描」</h3>
+ * 旧实现把
+ * `(?:盘符|./|/)?[^...]*[\\/][^...]*\.(ext)`（`[^...]` 排除空白但长度不限）
+ * 直接套 `g` 标志在整段文本上 exec。遇到**一整段没有斜杠的长文本**时，
+ * 每个起点都会一路扫到串尾才发现没有 `[\\/]` —— 典型的 O(n²) 回溯。
+ *
+ * 实测（Node 20，纯中文无换行）：
+ *   2 千字 51ms / 8 千字 774ms / 1.6 万字 2721ms / 3.2 万字 10697ms
+ *
+ * 而「思考过程」恰好就是这种形状（模型往往吐一整段无换行的推理），
+ * 展开思考 = 同步跑一次 markdown → 主线程被锁死几十秒，
+ * 表现就是「点展开直接卡死、整页无响应」（不是渐变卡顿）。
+ *
+ * 现在改成：先按空白切词（O(n)），只对含 `\` / `/` 的短片段跑锚定正则。
+ */
+const PATH_CANDIDATE_RE = /[^\s<>"'`|*?]+/g
+
+/**
+ * 单片段路径正则：`^` 锚定（每条候选只尝试一次，不跨片段回溯），
+ * 不加 `$` —— 尾部标点（如句号「。」）不属于路径，语义与旧版一致。
+ */
+const PATH_WORD_RE = new RegExp(
+  '^(?:[A-Za-z]:[\\\\/]|\\.{1,2}[\\\\/]|/)?[^\\s<>"\'`|*?\\n]*[\\\\/][^\\s<>"\'`|*?\\n]*\\.(?:' +
     PATH_EXT +
     ')(?![\\w])',
-  'gi'
+  'i'
 )
 
 /** 文件扩展名白名单精确校验（识别 linkify 误判的「纯文件名」，如 README.md） */
@@ -259,14 +282,24 @@ function matchLinkifiedFileName(url: string): string | null {
 function splitTextByFilePath(text: string): Array<{ text: string; path?: string; kind?: 'file' | 'image' }> {
   const segs: Array<{ text: string; path?: string; kind?: 'file' | 'image' }> = []
   let last = 0
-  PATH_RE.lastIndex = 0
+  PATH_CANDIDATE_RE.lastIndex = 0
   let m: RegExpExecArray | null
-  while ((m = PATH_RE.exec(text)) !== null) {
-    const p = m[0]
+  while ((m = PATH_CANDIDATE_RE.exec(text)) !== null) {
+    const word = m[0]
+    /*
+      两道 O(len) 预检，缺一不可：
+      1) 没有路径分隔符的片段不可能是路径 —— 旧实现正是在这种片段上退化成 O(n²)；
+      2) 单片段正则只对短候选跑（isLocalFilePath 内部还有 600 字符上限）。
+    */
+    if (!/[\\/]/.test(word)) continue
+    const hit = PATH_WORD_RE.exec(word)
+    if (!hit) continue
+    const p = hit[0]
     if (!isLocalFilePath(p)) continue
-    if (m.index > last) segs.push({ text: text.slice(last, m.index) })
+    const start = m.index + hit.index
+    if (start > last) segs.push({ text: text.slice(last, start) })
     segs.push({ text: p, path: p, kind: isImagePath(p) ? 'image' : 'file' })
-    last = m.index + p.length
+    last = start + p.length
   }
   if (last < text.length) segs.push({ text: text.slice(last) })
   return segs.length ? segs : [{ text }]

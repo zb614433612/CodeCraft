@@ -266,6 +266,22 @@ function fireUnauthorized(reason: string): void {
 }
 
 /**
+ * 供**非 request / authFetch 通道**（SSE、原生 fetch）主动上报「未授权」。
+ *
+ * <p>SSE 必须直连 fetch 才能拿到 ReadableStream，绕过了 request 里的统一 401 处理；
+ * 由调用方在拿到 401 后调用本函数，行为与 request 内部保持一致：
+ * 清 token → 触发 router 注册的回调 → 跳登录页。</p>
+ *
+ * <p>历史坑：v3 早期没有 /login 路由，SSE 401 只清了 token 就结束，
+ * 于是「页面开着、后端重启导致 token 失效」时，用户发消息只会看到一句
+ * 「SSE请求失败，状态码: 401」，既不退出也不提示重新登录。</p>
+ */
+export function notifyUnauthorized(reason = '登录已过期'): void {
+  clearAuthToken()
+  fireUnauthorized(reason)
+}
+
+/**
  * 显式登录：随机码 → {@code MD5(MD5(明文) + 随机码)} → 换取 token。
  *
  * <p>成功后 token 已写入 localStorage；返回完整登录响应（含 userId / nickname / role）。</p>

@@ -5,6 +5,63 @@
 
 ---
 
+## [3.0.3] - 2026-10-20
+
+> 稳定性修复版：定位并解决「展开长思考直接卡死」的真凶（markdown 本地路径识别正则的 O(n²) 回溯），
+> 补齐聊天记录分页加载的加载中 / 失败 / 滚动锚点反馈，登录态失效改为直接跳登录页，
+> 用户消息补上附件气泡，并修掉自动更新「装错旧包」的版本比对缺陷。
+> 版本号统一到 3.0.3，无后端接口与数据结构变更。
+
+### ⚡ 长思考展开卡死（真因修复：正则回溯）
+
+上一版把卡死归因于「渲染频率过高」，只加了节流与长度上限 —— 治标。本轮定位到真凶并彻底修掉：
+
+- **真因**：`utils/markdown.ts` 的本地路径识别正则 `PATH_RE` 用 `[^...]*[\\/]` 匹配「任意长度前缀 + 斜杠」，遇到**一整段没有斜杠的长文本**（大段中文思考几乎不出现路径）会在每个位置反复回溯，退化成 O(n²)。实测纯中文文本：2 千字 51ms、8 千字 774ms、1.6 万字 2721ms、3.2 万字 **10697ms**，6 万字约 40 秒 —— 这就是「一点展开就死」的观感来源。
+- **为什么只在展开时炸**：历史思考默认懒渲染（`p.html` 为空），展开瞬间才走 `processHtml` 同步跑 markdown + 路径识别，卡顿全部集中在点击展开那一刻。
+- **修复**：改为两段式线性匹配 —— `PATH_CANDIDATE_RE` 按空白切词（O(n)），再用 `^` 锚定的 `PATH_WORD_RE` 校验单个片段；`splitTextByFilePath` 增加「不含 `\` 或 `/` 直接跳过」预检。修复后 3.2 万字 **1ms**、16 万字 5ms、7.6 万字含 6000 条路径 46ms；10 组行为一致性用例（Windows 绝对路径 / 相对路径 / 多路径同行 / URL 排除 / 纯文件名不误判 / 尾部标点）全部通过。
+- **高亮降级**：`highlight.js` 是同步 CPU 活（3000 行 Java 实测 328ms），新增 2 万字阈值 —— 思考区 `PROC_HIGHLIGHT_LIMIT`、历史正文 `HISTORY_HIGHLIGHT_LIMIT` 超限即跳过高亮；流式渲染上限 `FLUSH_RENDER_LIMIT` 由 12 万字收紧到 2 万字。
+- 上一版的优化继续保留：历史思考懒渲染、折叠态零 DOM（`v-if`）、流式 1.5 万字 / 单条 6 万字分段、Token 估算按消息指纹缓存。
+
+### 🐞 聊天记录分页加载
+
+- **加载态与失败态**：`ChatView` 新增 `loading` / `loadingMore` / `loadError` 三个 prop。切换会话时不再先闪一下「开始新对话」空态（分页请求未返回，被误判成空会话）；加载失败也不再伪装成空会话，改为错误图标 + 原因 + 「重试」按钮（`reload` 事件）。
+- **顶部加载反馈**：滚动到顶触发的更早历史请求，占位块由「上方还有 N 条消息」换成「正在加载更早的聊天记录…」，不再出现「滚到顶没反应」。
+- **滚动锚点补偿**：`requestMore()` 先记录 `scrollHeight` / `scrollTop`，数据到达后在 `nextTick` 用高度差回算 `scrollTop`，把视口钉回用户正在看的那条消息；再用 `requestAnimationFrame` 二次校正（markdown / 代码高亮会在下一帧继续撑高，只补一次会偏几十像素）。本地窗口展开 `showEarlier()` 同样补第二帧，且仅在偏离 >2px 时修正，避免抖动。`prependAnchor` 声明提前到 watch 之前，规避 TDZ 报错。
+- 分页游标按会话隔离（`cursorMap` / `hasMoreMap`），快速切会话时旧请求不再覆盖新会话游标；`chatLoadError` 与 `chatError` 拆开，前者专用于分页失败，后者承载发送失败 / 任务中断。
+
+### 🔐 登录态失效直接跳登录
+
+- `utils/http-client.ts` 新增 `notifyUnauthorized(reason)`：清 token 并触发路由注册的未授权回调，统一跳登录页。
+- `utils/sse-client.ts` 的 401 分支原先只 `clearAuthToken()`（界面停在原地、后续请求继续 401），改为调用 `notifyUnauthorized('登录已过期，请重新登录')`。
+- `App.vue` 的流式消费 `catch` 识别到 `HTTP 401` / `登录已过期` 时直接返回，不再额外弹「发送失败」，避免登录页上残留红色错误提示。
+
+### 📎 用户消息附件展示
+
+- 用户气泡新增附件区：图片显示 48×48 缩略图（点击开灯箱放大），文档显示文件 chip（点击下载；`id=0` 的旧临时通道附件给出「无法下载」提示）。
+- `ChatMessage` 导出 `MessageFileAsset` 类型，`ChatMessageModel` 增加 `fileAssets`；`App.vue` 新增 `loadMessageFileRefs()` —— 走 `GET /api/files?conversationId=X&withRefs=true`，按 `file_reference.messageId` 分组挂到对应消息，图片再异步取 `preview` blob 补缩略图；发送时直接挂载本轮附件，无需等下一次刷新。
+
+### 🔄 自动更新：安装包版本比对
+
+- `VersionCard` 的 `downloadReady` 不再只看 `status === 'done'`，改为比对「已下载包版本 === 检测到的最新版本」（比较前去掉 `v` 前缀）。
+- 检测到新版本时若本地躺着**另一个版本**的安装包，直接作废下载状态并提示「发现新版本，需要重新下载」。修掉「先下过 3.0.1、之后发布 3.0.2，界面却把『安装 3.0.1』摆在最前面」的坑。
+- 老版本主进程不回 `download.version` 时按「不匹配」处理，宁可让用户重下，也不装错包。
+
+### 🧾 版本号同步
+
+- 后端：`3.0.2` → `3.0.3`（`pom.xml`，产物 `code-craft-3.0.3.jar`）
+- 经典版前端：`3.0.2` → `3.0.3`（`frontend/package.json` + lock）
+- v3 前端：`3.0.2` → `3.0.3`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.3` / `code-craft-3.0.3.jar`
+- MCP Server 握手版本：`3.0.2` → `3.0.3`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例统一到 v3.0.3
+
+### ⚠️ 升级说明
+
+- 此版本**无后端接口与数据库结构变更**，替换安装包即可；已装 3.0.2 的用户可直接覆盖安装。
+- 卡死修复与附件展示都是前端改动，需随包更新：桌面端加载的是 jar 内 `v3-static/` 构建产物，仅刷新页面不一定生效。
+
+---
+
 ## [3.0.2] - 2026-10-20
 
 > 修复版：集中处理 v3 聊天页的一批体验缺陷（顶部配色割裂、余额不刷新、切换工作目录无效、

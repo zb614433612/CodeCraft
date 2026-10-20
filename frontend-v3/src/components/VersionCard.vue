@@ -240,7 +240,25 @@ const versionMismatch = computed(
 )
 const lastCheckedText = computed(() => (lastCheckedAt.value ? formatReleaseTime(new Date(lastCheckedAt.value).toISOString()) : ''))
 const downloading = computed(() => download.status === 'downloading')
-const downloadReady = computed(() => download.status === 'done')
+/** 版本号规范化：主进程 / Release 可能带 `v` 前缀，比较前统一去掉 */
+function normalizeVersion (value?: string | null): string {
+  return String(value || '').trim().replace(/^v/i, '')
+}
+
+/**
+ * 已下载的安装包是否**正是**当前检测到的新版本。
+ *
+ * <p>必须比对版本号，不能只看 `status === 'done'`：主进程会把上一次下载完成的状态
+ * 一并返回（用户先下过 3.0.1，后来发布了 3.0.2），此时界面会把「安装 3.0.1」
+ * 摆在最前面 —— 用户以为在装新版本，实际装的是旧包。
+ * `download.version` 为空（老版本主进程没回该字段）时按「不匹配」处理，宁可让用户重下。</p>
+ */
+const downloadReady = computed(() => {
+  if (download.status !== 'done') return false
+  const downloaded = normalizeVersion(download.version)
+  const target = normalizeVersion(latest.value?.latestVersion)
+  return !!downloaded && !!target && downloaded === target
+})
 const progressPercent = computed(() => Math.min(100, Math.max(0, Math.round(download.percent || 0))))
 
 function applyDownload (next: UpdateDownloadState) {
@@ -308,7 +326,29 @@ async function onCheck () {
     lastCheckedAt.value = result.checkedAt || Date.now()
     checked.value = true
     if (result.hasUpdate) {
-      toast.success(`发现新版本 v${result.latestVersion}`)
+      /*
+        检测到新版本：本地若躺着**另一个版本**的安装包，直接把它作废，
+        让「下载更新」按钮重新出现。
+        否则用户看到的是「安装 v3.0.1」（旧包），点下去装的也不是刚检测到的新版本。
+      */
+      const target = normalizeVersion(result.latestVersion)
+      const downloaded = normalizeVersion(download.version)
+      const staleDownload = download.status === 'done' && !!downloaded && downloaded !== target
+      if (staleDownload) {
+        download.status = 'idle'
+        download.percent = 0
+        download.received = 0
+        download.total = 0
+        download.filePath = ''
+        download.fileName = ''
+        download.version = ''
+        download.error = ''
+        toast.info('发现新版本，需要重新下载', {
+          description: `本地已有 v${downloaded} 安装包，当前最新是 v${target}`
+        })
+      } else {
+        toast.success(`发现新版本 v${result.latestVersion}`)
+      }
     } else {
       toast.success('已是最新版本')
     }

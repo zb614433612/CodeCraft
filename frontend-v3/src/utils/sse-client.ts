@@ -1,4 +1,4 @@
-import { clearAuthToken, getAuthHeaders } from './http-client'
+import { getAuthHeaders, notifyUnauthorized } from './http-client'
 
 // ============================================================
 // 流式聊天响应的事件类型
@@ -291,9 +291,15 @@ export async function* readSseStream(
 
   if (!response.ok) {
     if (response.status === 401) {
-      // v3 已砍掉登录页（隐形登录 + 无 /login 路由）：这里只清 token，交由调用方提示，
-      // 原实现在此处 router.push('/login')，在无该路由时会跳到未匹配地址。
-      clearAuthToken()
+      /*
+        token 失效（后端重启最常见的后果：TokenStore 是内存缓存，不是 Redis）。
+
+        走统一未授权出口：清 token + 触发 router 注册的回调 → 跳 /login。
+        早期这里的注释写的是「v3 没有 /login 路由，所以只清 token」——
+        那是 L19 补齐显式登录之前的旧前提；现在继续只清 token，
+        用户会卡在一个「发消息只报 401、又退不出去」的页面里。
+      */
+      notifyUnauthorized('登录已过期，请重新登录')
     }
     // ★ 尝试读取错误响应体，提取后端返回的具体错误信息
     //   （如「没有可用的 LLM Provider，请先在 LLM管理 页面配置一个 Provider」），

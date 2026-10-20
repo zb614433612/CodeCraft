@@ -24,9 +24,42 @@
     破坏性操作会先出预览 + 二次确认（逻辑在 App.vue 的 onRollbackMessage）。
 -->
 <template>
-  <!-- 用户消息：气泡右对齐 + 右侧头像（与助手消息的头像位置对称） -->
+  <!--
+    用户消息：气泡右对齐 + 右侧头像（与助手消息的头像位置对称）。
+
+    ★ 附件（图片 / 文档）渲染在气泡内上方：发送时由 App.vue 直接挂到消息上（不必等刷新），
+    历史消息由 loadMessageFileRefs 按 file_reference 回填。
+    以前用户发的图片 / 文件在气泡里完全看不出来，只剩一句文本（甚至空气泡）。
+  -->
   <div v-if="message.role === 'user'" class="cc-msg-me">
-    <div class="cc-msg-me__bubble">{{ message.content }}</div>
+    <div class="cc-msg-me__col">
+      <div v-if="message.fileAssets?.length" class="cc-msg-me__files">
+        <template v-for="asset in message.fileAssets" :key="`${asset.kind}-${asset.id || asset.filename}`">
+          <!-- 图片：48×48 缩略图，点击打开灯箱 -->
+          <button
+            v-if="asset.kind === 'image'"
+            class="cc-msg-file is-image"
+            :title="assetDisplayName(asset)"
+            @click="previewMessageImage(asset)"
+          >
+            <img v-if="asset.previewUrl" :src="asset.previewUrl" :alt="asset.filename" />
+            <span v-else class="cc-msg-file__ph">🖼️</span>
+          </button>
+          <!-- 文档：图标 + 文件名 + 大小，点击下载（旧临时通道无法下载时给出提示） -->
+          <button
+            v-else
+            class="cc-msg-file is-doc"
+            :title="assetDisplayName(asset)"
+            @click="downloadMessageAsset(asset)"
+          >
+            <span class="cc-msg-file__icon">{{ assetDocIcon(asset) }}</span>
+            <span class="cc-msg-file__name">{{ assetDisplayName(asset) }}</span>
+            <span v-if="asset.size" class="cc-msg-file__size">{{ assetSizeText(asset.size) }}</span>
+          </button>
+        </template>
+      </div>
+      <div v-if="message.content" class="cc-msg-me__bubble">{{ message.content }}</div>
+    </div>
     <span class="cc-msg-me__avatar" :title="userName || '我'">
       <img v-if="userAvatarIsImage" :src="userAvatar" :alt="userName || '我'" />
       <template v-else>{{ userAvatarText }}</template>
@@ -196,6 +229,16 @@ import { renderMarkdown, renderMarkdownLight } from '../utils/markdown'
 import { isImageAvatar, avatarFallback } from '../utils/avatar'
 import { toolHeadline } from '../utils/tool-render'
 import type { TaskItem } from '../utils/task-list'
+/* 用户消息附件：图片点开灯箱、文档走 blob 下载（<a href> 无法带鉴权头） */
+import { openLightbox } from '../utils/lightbox'
+import { toast } from '../utils/toast'
+import {
+  downloadFileAsset,
+  docTypeIcon,
+  docTypeOf,
+  fileAssetDisplayName,
+  formatAssetSize
+} from '../api/file-asset'
 import ToolResultCard from './ToolResultCard.vue'
 
 export interface ProcessItem {
@@ -218,6 +261,26 @@ export interface ToolCallItem {
   state?: 'done' | 'running' | 'failed'
 }
 
+/**
+ * 消息气泡里展示的文件（图片 → 缩略图；文档 → 图标 chip）。
+ *
+ * <p>数据来源两条：本轮发送直接取输入区附件（`App.vue` 的 `attachments`）；
+ * 历史回显由 `loadMessageFileRefs` 用 `GET /api/files?conversationId=X&withRefs=true`
+ * 拿文件名/类型，再按 `file_reference.messageId` 映射到具体消息。</p>
+ */
+export interface MessageFileAsset {
+  /** file_asset 主键（旧版临时通道的文档为 0：只能展示，不能下载/预览） */
+  id: number
+  filename: string
+  displayName?: string
+  mimeType?: string
+  size?: number
+  /** image=图片（渲染缩略图）/ doc=文档（渲染图标 + 文件名） */
+  kind: 'image' | 'doc'
+  /** 图片缩略图 blob URL（异步填充；文档不填） */
+  previewUrl?: string
+}
+
 export interface ChatMessageModel {
   id: string
   role: 'user' | 'assistant'
@@ -238,6 +301,8 @@ export interface ChatMessageModel {
    * 历史回放看工具输出里的「【技能详情】xxx (ID:n)」（解析逻辑统一在 utils/skill-hit.ts）。</p>
    */
   hitSkills?: string[]
+  /** 用户消息附带的文件资产（图片缩略图 / 文档 chip；发送时与历史回显共用同一结构） */
+  fileAssets?: MessageFileAsset[]
   tools?: ToolCallItem[]
   /**
    * 轮次 id（后端 turn_id，只有 user 消息落库时有值，assistant 继承前一条 user 的）。
@@ -319,6 +384,49 @@ const procOpen = ref(false)
 /** 技能命中列表（父级解析好直接传，本组件只负责展示） */
 const hitSkills = computed(() => props.message.hitSkills ?? [])
 
+/* ---------------- 用户消息附件 ---------------- */
+
+/** 附件显示名：优先 displayName，其次 filename */
+function assetDisplayName(asset: MessageFileAsset): string {
+  return fileAssetDisplayName({
+    id: asset.id,
+    filename: asset.filename,
+    displayName: asset.displayName
+  })
+}
+
+/** 文档图标（pdf / word / excel / text） */
+function assetDocIcon(asset: MessageFileAsset): string {
+  return docTypeIcon(docTypeOf(asset.filename, asset.mimeType))
+}
+
+/** 附件大小文案（仅文档展示；0/未知时不显示） */
+function assetSizeText(size?: number): string {
+  return size && size > 0 ? formatAssetSize(size) : ''
+}
+
+/** 点击图片：打开灯箱（blob URL 已在发送时或历史回显阶段准备好） */
+function previewMessageImage(asset: MessageFileAsset) {
+  if (!asset.previewUrl) {
+    toast.info('缩略图还未加载完成，请稍后再试')
+    return
+  }
+  openLightbox([{ src: asset.previewUrl, name: assetDisplayName(asset) }])
+}
+
+/** 点击文档：走鉴权 blob 下载（旧临时通道没有 file_asset id，只能提示） */
+async function downloadMessageAsset(asset: MessageFileAsset) {
+  if (!asset.id) {
+    toast.info('该附件来自旧版临时通道，已无法下载', { description: asset.filename })
+    return
+  }
+  try {
+    await downloadFileAsset(asset.id, assetDisplayName(asset))
+  } catch (err) {
+    toast.error('下载失败', { description: err instanceof Error ? err.message : '请稍后重试' })
+  }
+}
+
 /** 是否有思考过程：决定要不要渲染折叠按钮与展开区（只有技能命中时只显示标签行） */
 const hasProcess = computed(() => (props.message.process?.length ?? 0) > 0)
 
@@ -333,7 +441,21 @@ const hasProcess = computed(() => (props.message.process?.length ?? 0) > 0)
  */
 const PROC_RENDER_LIMIT = 60000
 
-/** 用户是否已要求渲染完整思考（默认 false：只渲染尾部 PROC_RENDER_LIMIT 字） */
+/**
+ * 流式期间的单次渲染上限（1.5 万字）。
+ *
+ * <p>流式时思考区每更新一次 html，浏览器都要重建整棵子树；把上限从 6 万降到 1.5 万，
+ * 单次重建成本能压到几十毫秒级。收尾（streaming=false）后自动回到 6 万字。
+ * 用户仍可点「渲染完整思考」一次性看到全文。</p>
+ */
+const STREAM_PROC_RENDER_LIMIT = 15000
+
+/** 当前生效的渲染上限：流式更激进，历史/收尾更宽松 */
+const procRenderLimit = computed(() =>
+  props.message.streaming ? STREAM_PROC_RENDER_LIMIT : PROC_RENDER_LIMIT
+)
+
+/** 用户是否已要求渲染完整思考（默认 false：只渲染尾部 procRenderLimit 字） */
 const procFullRender = ref(false)
 
 /** 思考总字数：折叠标题与「渲染完整思考」按钮都用它 */
@@ -343,7 +465,7 @@ const processCharCount = computed(() =>
 
 /** 当前是否存在被省略的更早内容 */
 const procTruncated = computed(
-  () => !procFullRender.value && processCharCount.value > PROC_RENDER_LIMIT
+  () => !procFullRender.value && processCharCount.value > procRenderLimit.value
 )
 
 /**
@@ -355,7 +477,10 @@ const procTruncated = computed(
 const visibleProcess = computed<ProcessItem[]>(() => {
   const list = props.message.process ?? []
   if (procFullRender.value) return list
-  let budget = PROC_RENDER_LIMIT
+  const limit = procRenderLimit.value
+  // 未超限时直接返回原数组引用：computed 命中时 Vue 不会重建 v-for 列表，DOM diff 也更轻
+  if (processCharCount.value <= limit) return list
+  let budget = limit
   const out: ProcessItem[] = []
   for (let i = list.length - 1; i >= 0 && budget > 0; i--) {
     const p = list[i]
@@ -502,7 +627,9 @@ const toolsLabel = computed(() => {
  */
 const renderedContent = computed(() => {
   if (props.message.contentHtml) return props.message.contentHtml
-  return renderMarkdown(props.message.content || '')
+  // 兜底路径同样区分流式：流式期间跳过代码高亮（最贵的一步），避免每次重渲染都跑一遍
+  const raw = props.message.content || ''
+  return props.message.streaming ? renderMarkdownLight(raw) : renderMarkdown(raw)
 })
 
 /**
@@ -513,14 +640,27 @@ const renderedContent = computed(() => {
  */
 const procHtmlCache = new Map<string, string>()
 
+/**
+ * 超过这个长度不再跑代码高亮。
+ *
+ * <p>highlight.js 是**纯同步 CPU 活**：几千行代码块在高亮上是秒级开销，
+ * 而主线程在这期间完全无法响应。思考过程又常常是大段代码/JSON 的堆叠，
+ * 所以宁可少一层配色，也不能让「点展开」变成几秒到几十秒的白屏。</p>
+ */
+const PROC_HIGHLIGHT_LIMIT = 20000
+
 function processHtml(p: ProcessItem): string {
   if (p.html) return p.html
   const raw = p.text || ''
   if (!raw) return ''
   const hit = procHtmlCache.get(raw)
   if (hit !== undefined) return hit
-  // 流式期间跳过代码高亮（最贵的一步），收尾后父级会给完整版 html
-  const html = props.message.streaming ? renderMarkdownLight(raw) : renderMarkdown(raw)
+  /*
+    流式期间 & 超长历史思考都走轻量版（跳过代码高亮）：
+    前者是为了降低每帧重建成本，后者是为了避免「展开那一下」把主线程锁死。
+  */
+  const heavy = !props.message.streaming && raw.length <= PROC_HIGHLIGHT_LIMIT
+  const html = heavy ? renderMarkdown(raw) : renderMarkdownLight(raw)
   if (procHtmlCache.size > 20) procHtmlCache.clear()
   procHtmlCache.set(raw, html)
   return html

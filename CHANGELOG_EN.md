@@ -5,6 +5,64 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.3] - 2026-10-20
+
+> Stability release: finds and fixes the real culprit behind "expanding long reasoning freezes the app"
+> (O(n²) backtracking in the markdown local-path regex), adds proper loading / error / scroll-anchor
+> feedback to paginated chat history, redirects to the login page when the session expires, renders
+> attachments on user messages, and fixes the auto-updater installing a stale package.
+> Version numbers are unified at 3.0.3; no backend API or schema changes.
+
+### ⚡ Long reasoning freeze (root cause: regex backtracking)
+
+The previous release blamed "too frequent rendering" and only added throttling plus length caps — a band-aid. This release pins down the real culprit and removes it:
+
+- **Root cause**: the local-path detector in `utils/markdown.ts` used `PATH_RE` with `[^...]*[\\/]` — "any-length prefix + a slash". On a **long single run of text with no slash at all** (typical for long Chinese reasoning, which rarely contains paths) it backtracks at every position and degrades to O(n²). Measured on plain Chinese text: 2k chars 51ms, 8k chars 774ms, 16k chars 2721ms, 32k chars **10697ms**, and ~40s for 60k chars — exactly the "click to expand and it dies" feeling.
+- **Why only expansion froze**: historical reasoning is lazily rendered (`p.html` stays empty), so the markdown + path pass ran synchronously inside `processHtml` the moment you expanded, concentrating all the cost in that single click.
+- **Fix**: two-stage linear matching — `PATH_CANDIDATE_RE` splits on whitespace (O(n)), then a `^`-anchored `PATH_WORD_RE` validates each token; `splitTextByFilePath` also short-circuits when the text contains neither `\` nor `/`. After the fix: 32k chars **1ms**, 160k chars 5ms, 76k chars with 6000 paths 46ms. All 10 behaviour-parity cases pass (Windows absolute paths, relative paths, multiple paths per line, URL exclusion, bare filenames not misdetected, trailing punctuation).
+- **Highlight fallback**: `highlight.js` is synchronous CPU work (328ms for 3000 lines of Java), so a 20k-char threshold was added — `PROC_HIGHLIGHT_LIMIT` for reasoning, `HISTORY_HIGHLIGHT_LIMIT` for historical message bodies. The streaming render cap `FLUSH_RENDER_LIMIT` dropped from 120k to 20k chars.
+- Previous optimisations are kept: lazy rendering of historical reasoning, zero DOM when collapsed (`v-if`), 15k streaming / 60k per-message chunking, and token estimation cached per message fingerprint.
+
+### 🐞 Paginated chat history
+
+- **Loading and error states**: `ChatView` gains `loading` / `loadingMore` / `loadError` props. Switching conversations no longer flashes the "start a new chat" empty state while the page request is still in flight; a failed load no longer pretends to be an empty conversation — it shows an error icon, the reason, and a **Retry** button (`reload` event).
+- **Top-of-list feedback**: the placeholder shown when scrolling to the top now switches to "Loading earlier messages…" while the request is running, instead of appearing unresponsive.
+- **Scroll-anchor compensation**: `requestMore()` records `scrollHeight` / `scrollTop`; when data arrives, `nextTick` recomputes `scrollTop` from the height delta to pin the viewport to the message the user was reading, then `requestAnimationFrame` corrects once more (markdown and highlighting keep growing the content on the next frame). Local window expansion (`showEarlier()`) also corrects a second frame, and only when the offset exceeds 2px, to avoid jitter. `prependAnchor` was moved above the watcher to avoid a TDZ error.
+- Pagination cursors are now per-conversation (`cursorMap` / `hasMoreMap`), so a slow request from a previous conversation can no longer overwrite the new one; `chatLoadError` is separate from `chatError` (pagination failure vs. send failure / interrupted task).
+
+### 🔐 Session expiry redirects to login
+
+- `utils/http-client.ts` gains `notifyUnauthorized(reason)`: clears the token and fires the router-registered unauthorized callback so the app navigates to the login page.
+- The 401 branch in `utils/sse-client.ts` used to only call `clearAuthToken()` (UI stayed put, subsequent requests kept failing); it now calls `notifyUnauthorized('Login expired, please sign in again')`.
+- `App.vue`'s stream-consumer `catch` returns early on `HTTP 401` / "login expired" instead of also showing a "send failed" toast, so no red error text lingers on the login page.
+
+### 📎 Attachments on user messages
+
+- The user bubble now renders attachments: images as 48×48 thumbnails (click to open the lightbox), documents as file chips (click to download; legacy attachments with `id=0` show a "cannot download" hint).
+- `ChatMessage` exports a `MessageFileAsset` type and `ChatMessageModel` gains `fileAssets`; `App.vue` adds `loadMessageFileRefs()` — it calls `GET /api/files?conversationId=X&withRefs=true`, groups files by `file_reference.messageId`, attaches them to the matching messages, and lazily fetches `preview` blobs for image thumbnails. Attachments just sent are attached immediately without waiting for a refresh.
+
+### 🔄 Auto-update: installer version check
+
+- `VersionCard`'s `downloadReady` no longer relies on `status === 'done'` alone; it compares the downloaded package version with the detected latest version (leading `v` stripped).
+- If a package for **another version** is already on disk when a new release is detected, the download state is invalidated and the UI asks the user to download again. This fixes "downloaded 3.0.1 earlier, 3.0.2 is now out, but the button still offers Install 3.0.1".
+- When an older main process does not report `download.version`, the state is treated as mismatched — better to re-download than to install the wrong package.
+
+### 🧾 Version sync
+
+- Backend: `3.0.2` → `3.0.3` (`pom.xml`, artifact `code-craft-3.0.3.jar`)
+- Classic frontend: `3.0.2` → `3.0.3` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.2` → `3.0.3` (`frontend-v3/package.json` + lock)
+- Electron: version and `extraResources` jar path → `3.0.3` / `code-craft-3.0.3.jar`
+- MCP Server handshake version: `3.0.2` → `3.0.3` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) headers, DEV_QUICKREF / RELEASE_CHECKLIST(_EN) build commands, and the FAQ version example are unified at v3.0.3
+
+### ⚠️ Upgrade notes
+
+- **No backend API or database schema changes**; just replace the installer. Users on 3.0.2 can install over it directly.
+- The freeze fix and attachment rendering are frontend-only and must ship with the package: the desktop app loads `v3-static/` from inside the jar, so a page refresh alone may not pick them up.
+
+---
+
 ## [3.0.2] - 2026-10-20
 
 > Fix release: a batch of v3 chat-page defects (disjointed top-bar colours, stale balance,
