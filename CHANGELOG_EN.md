@@ -5,6 +5,49 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.5] - 2026-10-20
+
+> Polish release: four leftover UI annoyances from the previous version are gone —
+> the conversation "⋯" menu finally opens (including when a window background image is set),
+> the approval / clarification dock is no longer tinted yellow, the dark-mode stop button is
+> no longer a glaring pure white, and chat text is back to the same font, size and line height
+> as the classic frontend. Frontend-only; no backend logic or database changes.
+
+### 🖱 Conversation "⋯" menu could not be opened (fix)
+
+- **Two stacked causes**: (1) with a window background image enabled, `backdrop-filter` on `.cc-shell.has-bg .cc-sidebar` makes `position: fixed` descendants use the sidebar as their containing block, so the menu was positioned wrong and clipped; (2) conversations at the bottom of the list opened the menu below the viewport.
+- **Single instance + Teleport**: instead of one menu per conversation, the list now shares a single menu rendered through `<Teleport to="body">`, escaping the sidebar's `filter` / `backdrop-filter` containing block. A per-item Teleport was rejected because it would mount one container for every one of hundreds of conversations.
+- **Viewport flip and clamping**: `toggleConvMenu` measures with `CONV_MENU_W = 132` / `CONV_MENU_H = 118`, flips upwards when space runs out and clamps horizontally at the viewport edges; a `window resize` listener mounted in `onMounted` closes the menu so it never floats away from its row.
+
+### 🎨 Approval / clarification dock: yellow tint removed
+
+- `.cc-approval-dock` background changed from `linear-gradient(..., var(--warn-lt))` to `transparent`, `border-top` switched to `var(--border)`; `.is-clarification` follows with the same neutral treatment.
+- Semantic colour is kept inside the card (`.cc-approval`) and the pulsing dot: the dock no longer washes the conversation area in yellow, while permission vs. clarification stays visually distinct.
+
+### 🌙 Dark-mode stop button is no longer pure white
+
+- `.cc-stop-btn` gained a `border` and a transition; a new `html[data-theme="dark"] .cc-stop-btn` override sets `background: var(--card-2)`, `color: var(--text-1)` and `border-color: var(--border-strong)`, while hover still switches to `--danger`.
+- The stop icon in `ChatComposer.vue` changed from `stroke: #fff` to `stroke: currentColor`, following the button text colour instead of a hard-coded white block in dark mode.
+
+### ✍ Chat typography aligned with the classic frontend
+
+- `tokens.css` gained `--font-chat` / `--fs-chat: 14px` / `--lh-chat: 1.75` (`Avenir, Helvetica, Arial, "Microsoft YaHei", "PingFang SC", sans-serif`), applied to `.cc-msg-ai__body` / `.cc-msg-me__bubble` / `.cc-md` (previously 14.5px / 1.78).
+- Scoped to the message area only — the global `--font` / `--fs-md` are untouched so admin tables and forms keep their readability; the thinking block `.cc-proc__text.cc-md` stays at 12.5px thanks to its more specific selector, while inheriting the unified font family.
+
+### 🔢 Version bump
+
+- Backend: `3.0.4` → `3.0.5` (`pom.xml`, artifact `code-craft-3.0.5.jar`)
+- Classic frontend: `3.0.4` → `3.0.5` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.4` → `3.0.5` (`frontend-v3/package.json` + lock)
+- Electron: version and `extraResources` jar path → `3.0.5` / `code-craft-3.0.5.jar`
+- MCP Server handshake version: `3.0.4` → `3.0.5` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) headers, DEV_QUICKREF / RELEASE_CHECKLIST(_EN) build commands and the FAQ version example are unified at v3.0.5
+
+### ⬆️ Upgrade notes
+
+- **No backend logic changes, no database schema changes** — every fix is frontend styling / interaction: install over the old version and reload the window.
+- If the sidebar menu still refuses to open, make sure the old process is fully exited (tray included) before launching, so Electron does not reuse cached static assets.
+
 ## [3.0.4] - 2026-10-20
 
 > Experience-fix release: we chased two long-standing annoyances down to their roots —

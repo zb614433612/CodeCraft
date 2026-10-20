@@ -84,6 +84,15 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 
+  /* 聊天正文专用字体栈 / 字号 / 行高：对齐 v2 经典版。
+   * 旧版 #app 声明的是 `Avenir, Helvetica, Arial, sans-serif`，消息正文 `.message-text`
+   * 为 14px / 1.75 —— 长段落读起来比 14.5px / 1.78 更紧凑（同样 900px 宽一行能多放两三个字，
+   * 中文换行更顺）。这里显式补上中文兜底，避免不同机器 fallback 到宋体。
+   * 只作用于消息区：管理页表格、表单仍用 --font / --fs-md，14.5px 下控件文字更清晰。 */
+  --font-chat: Avenir, Helvetica, Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
+  --fs-chat: 14px;
+  --lh-chat: 1.75;
+
   --fs-xs: 11.5px;   /* 极弱信息：时间戳、上下文 token */
   --fs-sm: 12.5px;   /* 辅助信息：meta、折叠行 */
   --fs-base: 14px;   /* 正文基准 */

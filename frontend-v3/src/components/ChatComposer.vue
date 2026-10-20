@@ -115,9 +115,11 @@
               {{ model }}<span class="cc-model-btn__ver">▾</span>
             </button>
 
-            <!-- 生成中显示停止，否则显示发送 -->
+            <!-- 生成中显示停止，否则显示发送
+                 图标用 currentColor 而不是写死 #fff：暗色主题下按钮是深灰块 + 浅色图标，
+                 写死白色会在深色底上发亮、与按钮文字色脱节（配色见 app.css .cc-stop-btn） -->
             <button v-if="running" class="cc-stop-btn" title="停止生成" @click="$emit('stop')">
-              <svg class="cc-i cc-i--sm" style="stroke: #fff"><use href="#i-stop" /></svg>
+              <svg class="cc-i cc-i--sm" style="stroke: currentColor"><use href="#i-stop" /></svg>
             </button>
             <button v-else class="cc-send-btn" title="发送" :disabled="!canSend" @click="onSend">
               <svg class="cc-i cc-i--sm" style="stroke: #fff"><use href="#i-send" /></svg>

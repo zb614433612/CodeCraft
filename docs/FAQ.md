@@ -240,7 +240,7 @@ npm install
 1. **桌面客户端**：左下角头像 → 个人信息上方菜单，或「设置 → 版本与更新」（路由 `/about`）；
 2. **浏览器**：打开 `http://localhost:8084/v3/#/about`（经典版在「系统设置」）；
 3. **命令行**：`GET /api/system/version`（登录后）返回
-   `{"name":"CodeCraft","version":"3.0.4","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
+   `{"name":"CodeCraft","version":"3.0.5","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
 
 **为什么有两个版本号**：
 | 显示项 | 来源 | 什么时候会不一致 |

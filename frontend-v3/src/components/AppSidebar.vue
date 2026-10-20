@@ -104,22 +104,6 @@
               <svg class="cc-i cc-i--sm"><use href="#i-more" /></svg>
             </button>
           </div>
-
-          <!-- 会话操作菜单：重命名 / 导出 / 删除（fixed 定位，不受滚动容器裁剪） -->
-          <div class="cc-conv-menu" :class="{ 'is-open': convMenuId === conv.id }" :style="convMenuStyle">
-            <button type="button" class="cc-conv-menu__item" @click.stop="onRenameConv(conv.id)">
-              <svg class="cc-i cc-i--sm"><use href="#i-brush" /></svg>
-              重命名
-            </button>
-            <button type="button" class="cc-conv-menu__item" @click.stop="onExportConv(conv.id)">
-              <svg class="cc-i cc-i--sm"><use href="#i-disk" /></svg>
-              导出 Markdown
-            </button>
-            <button type="button" class="cc-conv-menu__item is-danger" @click.stop="onDeleteConv(conv.id)">
-              <svg class="cc-i cc-i--sm"><use href="#i-trash" /></svg>
-              删除
-            </button>
-          </div>
         </div>
       </template>
 
@@ -183,6 +167,38 @@
         </div>
       </div>
     </div>
+
+    <!--
+      会话操作菜单（重命名 / 导出 / 删除）
+      --------------------------------------------------------------------------
+      全列表共用一个实例 + Teleport 到 body，而不是每条会话项里各挂一份。
+
+      为什么必须 Teleport：
+        「外观设置 → 窗口背景图」开启后 `.cc-shell.has-bg .cc-sidebar` 会带
+        backdrop-filter —— 该属性会把侧栏变成 fixed 后代的 containing block，
+        于是菜单按视口算出来的 top/right 全被当成「相对侧栏」的偏移，整块跑到
+        侧栏左侧之外并被裁掉；用户看到的现象就是「三个点能展开，但重命名/删除点不到」。
+        挂到 body 后坐标回到纯视口坐标，不受任何祖先的 backdrop-filter / overflow 影响。
+
+      单例（v-if + convMenuId）而不是逐项 Teleport：会话可能上百条，
+      每条挂一个 Teleport 容器纯属浪费；同一时刻本来就只允许展开一个。
+    -->
+    <Teleport to="body">
+      <div v-if="convMenuId" class="cc-conv-menu is-open" :style="convMenuStyle" @click.stop>
+        <button type="button" class="cc-conv-menu__item" @click.stop="onRenameConv(convMenuId)">
+          <svg class="cc-i cc-i--sm"><use href="#i-brush" /></svg>
+          重命名
+        </button>
+        <button type="button" class="cc-conv-menu__item" @click.stop="onExportConv(convMenuId)">
+          <svg class="cc-i cc-i--sm"><use href="#i-disk" /></svg>
+          导出 Markdown
+        </button>
+        <button type="button" class="cc-conv-menu__item is-danger" @click.stop="onDeleteConv(convMenuId)">
+          <svg class="cc-i cc-i--sm"><use href="#i-trash" /></svg>
+          删除
+        </button>
+      </div>
+    </Teleport>
 
   </aside>
 </template>
@@ -292,6 +308,13 @@ const convMenuStyle = computed(() => ({
   right: `${convMenuPos.value.right}px`
 }))
 
+/**
+ * 会话操作菜单的估算尺寸（与 app.css 里 `.cc-conv-menu` 的 min-width / 3 项高度对齐）。
+ * 只用于「向下展开会不会掉出视口」的判断，取略大的值即可，不必精确测量。
+ */
+const CONV_MENU_W = 132
+const CONV_MENU_H = 118
+
 function toggleConvMenu(id: string, event?: MouseEvent) {
   if (convMenuId.value === id) {
     convMenuId.value = ''
@@ -300,10 +323,18 @@ function toggleConvMenu(id: string, event?: MouseEvent) {
   const button = (event?.currentTarget as HTMLElement | null) ?? null
   if (button) {
     const rect = button.getBoundingClientRect()
-    convMenuPos.value = {
-      top: rect.bottom + 4,
-      right: Math.max(8, window.innerWidth - rect.right)
-    }
+    /*
+     * right = 视口右缘到按钮右缘的距离（菜单右边缘对齐按钮）。
+     * 再夹一道：窗口很窄时菜单可能被推到视口左侧之外，这时改成贴左 8px；
+     * 列表最后几条会话靠近窗口底部，向下展开会被视口截断 —— 翻到按钮上方。
+     */
+    const right = Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - CONV_MENU_W - 8))
+    const below = rect.bottom + 4
+    const top =
+      below + CONV_MENU_H > window.innerHeight - 8
+        ? Math.max(8, rect.top - 4 - CONV_MENU_H)
+        : below
+    convMenuPos.value = { top, right }
   }
   convMenuId.value = id
 }
@@ -419,10 +450,13 @@ function onDocumentKeydown(event: KeyboardEvent) {
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
   document.addEventListener('keydown', onDocumentKeydown)
+  // 菜单坐标是「打开那一刻」算的视口坐标：窗口一改尺寸就对不上按钮了，直接收起更稳
+  window.addEventListener('resize', closeConvMenu)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick)
   document.removeEventListener('keydown', onDocumentKeydown)
+  window.removeEventListener('resize', closeConvMenu)
 })
 </script>

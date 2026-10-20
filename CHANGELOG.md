@@ -5,6 +5,48 @@
 
 ---
 
+## [3.0.5] - 2026-10-20
+
+> 细节打磨版：把上一版遗留的四项「看着别扭、点不开」的界面问题逐个修掉 ——
+> 会话列表「⋯」菜单终于能点开（含开了窗口背景图的情况），
+> 审批 / 询问停靠区不再整行泛黄，暗色模式下停止按钮不再是刺眼纯白，
+> 聊天正文换回与旧版一致的字体、字号与行高。纯前端改动，无后端逻辑与数据库变更。
+
+### 🖱 会话「⋯」菜单点不开（修复）
+
+- **两个叠加原因**：① 开启「窗口背景图」后 `.cc-shell.has-bg .cc-sidebar` 的 `backdrop-filter` 会让 `position: fixed` 的后代以侧栏为包含块，菜单坐标错乱后被裁掉；② 列表底部的会话向下展开时会超出视口。
+- **单例 + Teleport**：菜单从「每个会话各挂一份」改为整个列表共用一个实例，并用 `<Teleport to="body">` 挂到 `body`，彻底脱离侧栏的 `filter` / `backdrop-filter` 包含块。之所以不做逐项 Teleport，是为了避免上百条会话各挂一个容器。
+- **视口翻转与边界夹取**：`toggleConvMenu` 按 `CONV_MENU_W = 132` / `CONV_MENU_H = 118` 计算，空间不足时向上翻转，左右越界自动夹取；`onMounted` 监听 `window resize` 自动收起，避免菜单悬空留在原地。
+
+### 🎨 审批 / 询问停靠区去黄
+
+- `.cc-approval-dock` 背景由 `linear-gradient(..., var(--warn-lt))` 改为 `transparent`，`border-top` 改为 `var(--border)`；`.is-clarification` 同步改为中性色。
+- 语义色收进卡片内部（`.cc-approval`）与脉冲圆点：整条停靠栏不再泛黄压住对话区，权限 / 询问的区别仍一眼可辨。
+
+### 🌙 暗色模式下停止按钮不再是纯白
+
+- `.cc-stop-btn` 补上 `border` 与过渡；新增 `html[data-theme="dark"] .cc-stop-btn` 覆盖（`background: var(--card-2)`、`color: var(--text-1)`、`border-color: var(--border-strong)`），hover 仍切 `--danger`。
+- `ChatComposer.vue` 的停止图标 `stroke: #fff` 改为 `stroke: currentColor`，跟随按钮文字色，暗色下不再是硬编码白块。
+
+### ✍ 聊天字体对齐旧版
+
+- `tokens.css` 新增 `--font-chat` / `--fs-chat: 14px` / `--lh-chat: 1.75`（`Avenir, Helvetica, Arial, "Microsoft YaHei", "PingFang SC", sans-serif`），`.cc-msg-ai__body` / `.cc-msg-me__bubble` / `.cc-md` 三处改用该 token（原为 14.5px / 1.78）。
+- 改动只作用于消息区，不动全站 `--font` / `--fs-md`，避免影响管理页表格与表单的可读性；思考区 `.cc-proc__text.cc-md` 因选择器更具体仍保持 12.5px，字体族跟随统一。
+
+### 🔢 版本号同步
+
+- 后端：`3.0.4` → `3.0.5`（`pom.xml`，产物 `code-craft-3.0.5.jar`）
+- 经典版前端：`3.0.4` → `3.0.5`（`frontend/package.json` + lock）
+- v3 前端：`3.0.4` → `3.0.5`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.5` / `code-craft-3.0.5.jar`
+- MCP Server 握手版本：`3.0.4` → `3.0.5`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例统一到 v3.0.5
+
+### ⬆️ 升级说明
+
+- 本版**无后端逻辑变更、无数据库结构变更**，全部为前端样式与交互修复：覆盖安装后重载窗口即可生效。
+- 若侧栏菜单仍点不开，请确认旧进程已完全退出（含托盘）后再启动，避免 Electron 复用旧的静态资源缓存。
+
 ## [3.0.4] - 2026-10-20
 
 > 体验修复版：把「检测到新版本却提示安装旧包」和「回复里的文件链接点了没反应」两个老大难挖到根上，

@@ -1038,8 +1038,10 @@ html.cc-electron .cc-login { padding-top: 32px; }
   border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
   background: var(--accent-soft);
   border: 1px solid rgba(124, 92, 252, .14);
-  font-size: var(--fs-md);
-  line-height: var(--lh-loose);
+  /* 与 AI 消息共用聊天正文 token：一问一答字号/字体族一致，视觉上像同一个人排的版 */
+  font-family: var(--font-chat);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1098,8 +1100,10 @@ html.cc-electron .cc-login { padding-top: 32px; }
   display: block;
 }
 .cc-msg-ai__body {
-  font-size: var(--fs-md);
-  line-height: var(--lh-loose);
+  /* 字体族 / 字号 / 行高走「聊天正文」专用 token，与 v2 经典版消息区一致（见 tokens.css） */
+  font-family: var(--font-chat);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
   color: var(--text-1);
   word-break: break-word;
   /* v3 已接 markdown 渲染：换行由块级元素（p / li / pre）自己表达，
@@ -1497,14 +1501,20 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
   overflow: hidden;
   position: relative;
   padding: var(--sp-3) var(--sp-6) var(--sp-2);
-  border-top: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
-  background: linear-gradient(180deg, transparent, var(--warn-lt));
+  border-top: 1px solid var(--border);
+  /*
+   * 停靠条本身不上色。
+   * 这里原先铺的是 `linear-gradient(180deg, transparent, var(--warn-lt))`
+   * （提问用 --accent-lt）—— 结果整条停靠区从边到边泛黄/泛紫，看起来像「整个输入区以上都被染了」，
+   * 而真正承载语义的是里面的卡片（.cc-approval 自带黄边 + 淡黄渐变）。
+   * 现在只保留一条中性分隔线，语义色全部收进卡片内部。
+   */
+  background: transparent;
   animation: cc-dock-in .18s ease-out;
 }
-/* 「提问」用主色、「迭代确认」用警示色：与卡片标题的语义保持一致 */
+/* 「提问」与「迭代确认」的区分改由卡片内的小圆点/图标承担，停靠条不再分色 */
 .cc-approval-dock.is-clarification {
-  border-top-color: color-mix(in srgb, var(--accent) 32%, transparent);
-  background: linear-gradient(180deg, transparent, var(--accent-lt));
+  border-top-color: var(--border);
 }
 .cc-approval-dock__bar {
   max-width: var(--content-max);
@@ -1904,6 +1914,14 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
 }
 .cc-send-btn:hover { background: var(--accent-dk); transform: translateY(-1px); }
 .cc-send-btn:disabled { background: var(--border-strong); box-shadow: none; cursor: not-allowed; transform: none; color: var(--text-3); }
+/*
+ * 停止生成
+ * ----------------------------------------------------------------------------
+ * 亮色下用 --text-1（#1A1A2E）当底色，深色实心块在浅底上很醒目；
+ * 但暗色主题的 --text-1 是 #E8E6F2（浅色文字色），直接拿它当背景就是一颗纯白圆钮 ——
+ * 在深色界面里过于刺眼，也和右侧紫/灰控件不在一个层级。
+ * 所以暗色单独换成「中性深色块 + 描边」，图标颜色跟着 color 走（模板里 stroke: currentColor）。
+ */
 .cc-stop-btn {
   width: 32px;
   height: 32px;
@@ -1912,8 +1930,20 @@ html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
   place-items: center;
   color: #fff;
   background: var(--text-1);
+  border: 1px solid transparent;
+  transition: background var(--tr), border-color var(--tr), color var(--tr);
 }
-.cc-stop-btn:hover { background: var(--danger); }
+.cc-stop-btn:hover { background: var(--danger); border-color: var(--danger); }
+html[data-theme="dark"] .cc-stop-btn {
+  color: var(--text-1);
+  background: var(--card-2);
+  border-color: var(--border-strong);
+}
+html[data-theme="dark"] .cc-stop-btn:hover {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
 
 /* 底部小字（上下文 / 余额） */
 .cc-composer__foot {
@@ -5661,7 +5691,14 @@ html:not([data-theme="dark"]) .cc-shell.has-bg .cc-page-scroll {
 /* ============================ 38. Markdown 正文与聊天增强 ============================ */
 
 /* ---- 正文容器（.cc-md 由 utils/markdown 渲染的 HTML 填充） ---- */
-.cc-md { font-size: var(--fs-md); line-height: var(--lh-loose); color: var(--text-1); }
+.cc-md {
+  /* markdown 渲染出来的 HTML 走「聊天正文」token：字体族与 14px/1.75 都对齐 v2 经典版，
+     否则 .cc-msg-ai__body 上的 14px 会被这里 14.5px 覆盖回去（内层优先）。 */
+  font-family: var(--font-chat);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
+  color: var(--text-1);
+}
 .cc-md > :first-child { margin-top: 0; }
 .cc-md > :last-child { margin-bottom: 0; }
 .cc-md h1,
