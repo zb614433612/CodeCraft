@@ -1,6 +1,7 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.config.DeleteFileConfig;
+import com.example.agentdeepseek.projectcontext.ProjectContextProvider;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
@@ -56,17 +57,21 @@ public class FileWriterTool implements Tool {
     private final Diagnostic diagnostic;
     private final PostEditPipeline postEditPipeline;
     private final DeleteFileConfig deleteFileConfig;
+    /** 项目知识库注入层：写成功后补一句「这个文件属于哪个模块」（只读，不创建目录） */
+    private final ProjectContextProvider projectContextProvider;
 
     public FileWriterTool(ObjectMapper objectMapper,
                           ObjectProvider<Formatter> formatterProvider,
                           ObjectProvider<Diagnostic> diagnosticProvider,
                           PostEditPipeline postEditPipeline,
-                          DeleteFileConfig deleteFileConfig) {
+                          DeleteFileConfig deleteFileConfig,
+                          ProjectContextProvider projectContextProvider) {
         this.objectMapper = objectMapper;
         this.formatter = formatterProvider.getIfAvailable();
         this.diagnostic = diagnosticProvider.getIfAvailable();
         this.postEditPipeline = postEditPipeline;
         this.deleteFileConfig = deleteFileConfig;
+        this.projectContextProvider = projectContextProvider;
     }
 
     // ==================== Tool 接口 ====================
@@ -162,12 +167,53 @@ public class FileWriterTool implements Tool {
                     + "正确示例：{ \"action\": \"write\", \"file_path\": \"Demo.java\", \"content\": \"...\" }\n"
                     + "错误示例：{ \"file_path\": \"Demo.java\", \"content\": \"...\" } ← 缺少 action！";
         }
-        return switch (action) {
+        String result = switch (action) {
             case "write"  -> doWrite(arguments);
             case "edit"   -> doEdit(arguments);
             case "delete" -> doDelete(arguments);
             default -> "❌ 错误：未知的 action '" + action + "'，仅支持 write / edit / delete 三种取值，请改为其中之一。";
         };
+        return appendProjectHint(action, arguments, result);
+    }
+
+    /**
+     * 写类操作成功后，补一条「这个文件属于哪个模块、那个模块负责什么」。
+     *
+     * <p>动机很实在：模型改完一个文件，接着往往去改「它以为的邻居」，
+     * 而真实耦合方可能完全在另一个目录。这条提示把模块归属摆到眼前，约 40 字符。</p>
+     *
+     * <p>只在成功（以 ✅ 开头）且知识库存在时追加：失败输出本身已经很长，
+     * 再叠上下文提示只会把真正的错误埋掉。</p>
+     */
+    private String appendProjectHint(String action, JsonNode arguments, String result) {
+        if (result == null || !result.startsWith("✅")) {
+            return result;
+        }
+        String raw = arguments.path("file_path").asText("");
+        if (raw.isEmpty()) {
+            raw = arguments.path("path").asText("");
+        }
+        if (raw.isEmpty()) {
+            return result;
+        }
+        try {
+            Path root = Paths.get(ProjectRootContext.get()).toAbsolutePath().normalize();
+            Path target = resolvePath(raw).toAbsolutePath().normalize();
+            String rel;
+            try {
+                rel = root.relativize(target).toString().replace('\\', '/');
+            } catch (IllegalArgumentException e) {
+                return result;      // 不在项目根下（例如写到临时目录），没有模块归属可言
+            }
+            if (rel.startsWith("..")) {
+                return result;
+            }
+            String hint = projectContextProvider.fileHint(root.toString(), rel);
+            return (hint == null || hint.isBlank()) ? result : result + "\n【上下文】" + hint;
+        } catch (RuntimeException e) {
+            log.debug("追加文件上下文提示失败: action={}, path={} - {}", action, raw, e.getMessage());
+            return result;
+        }
     }
 
     // ================================================================

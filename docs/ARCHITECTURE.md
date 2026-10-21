@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v3.0.6 | 更新：2026-10-20 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.0.7 | 更新：2026-10-21 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -280,6 +280,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── files/                  # ★文件资产与 Files API 适配（上传/图像理解/引用管理，vision-files-api）
 │   ├── llm/                    # LLM 客户端层：LLMClient 抽象 + 6 个 Provider 实现 + ProviderBalanceService + LLMErrorFormatter（错误友好格式化）+ ToolCallSequenceSanitizer（工具调用序列净化）+ DeepSeekToolsApiClient（DeepSeek 官方搜索/抓取）
 │   └── SkillService / UserService / ConfigService / DataTransferService（备份导出/导入）/ AvatarStore / BackgroundStore / ...
+├── projectcontext/          # 项目知识库（模块划分/符号扫描/地图服务/上下文注入）
 ├── tool/                      # ⚡AI Agent 工具系统
 │   ├── Tool.java              # 工具接口定义
 │   ├── ToolRegistry           # 工具注册中心（单例）
@@ -287,7 +288,7 @@ src/main/java/com/example/agentdeepseek/
 │   ├── ToolInitializer        # 启动时自动初始化所有工具
 │   ├── ExecutionTokenManager  # 工具执行 Token 管理
 │   ├── PermissionContext      # 会话级权限上下文
-│   ├── impl/                  # 27 个工具实现（新命名，一工具多 action）
+│   ├── impl/                  # 29 个工具实现（新命名，一工具多 action）
 │   │   ├── 文件操作: FileExplorerTool (read/glob/grep/tree),
 │   │   │            FileWriterTool (write/edit/delete)
 │   │   ├── 命令执行: CommandTool (exec/start/list/logs/stop)
@@ -297,21 +298,24 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── Agent协作: AgentTool (fork/collect/batch_collect/inspect)
 │   │   ├── 技能管理: SkillTool (create/update/delete/list/report)
 │   │   ├── 经验库:   LessonTool (search/record/complete/feedback/list) ★成长体系
-│   │   ├── 项目管理: ProjectInfoTool
+│   │   ├── 项目管理: ProjectInfoTool, ProjectMapTool (status/bootstrap/read/annotate/rule)
 │   │   ├── 任务管理: TaskManagerTool
 │   │   ├── 交互工具: AskClarificationTool, ChatAttachmentTool, QueryToolHistoryTool
 │   │   ├── 定时任务: ScheduleTaskTool
 │   │   ├── MCP 管理: McpServerManagerTool
 │   │   │   │   ├── 桌面自动化: ScreenCaptureTool (截图/网格刻度/准星标记/放大镜),
 │   │   │            DesktopControlTool (键鼠模拟/批量动作/坐标预检)
+│   │   │   │   ├── 浏览器自动化: BrowserTool (open/navigate/snapshot/click/fill/select/press/hover/
+│   │   │   │   │              scroll/wait/screenshot/console/eval/tab/close/status/list)
 │   │   └── 辅助组件: DeepSeekAnalyzer（非流式 LLM 分析器，评委/子Agent 调用）
 │   ├── desktop/                 # 桌面自动化支持（平台适配/CaptureContext/坐标校验/预检）
+│   ├── browser/                 # 浏览器工具支持（bridge 客户端/快照解析/CDP 转发）
 │   ├── permission/            # 权限控制
 │   │   ├── ToolPermission / ToolPermissionMetadata / ToolPermissionRegistry
 │   │   ├── ToolPermissionLevel (权限档位：SAFE/DATA/HIGH_RISK)
 │   │   ├── ToolExecutionPipeline (三层防护) / SideEffectFreePreflight (预检豁免)
 │   │   ├── PathSecurityChecker (路径越界检查)
-│   │   ├── OperationCategory (操作分类，含 DESKTOP)
+│   │   ├── OperationCategory (操作分类，含 DESKTOP / BROWSER)
 │   │   └── ToolAuditLogger (审计日志)
 │   └── postedit/              # 后处理管线
 │       ├── PostEditPipeline   # 编排 Formatter + Diagnostic
@@ -491,9 +495,11 @@ src/main/java/com/example/agentdeepseek/
 | **消息组装** | Token 估算 + 技能目录注入 + 语言指令 | ContextBuilder | ~900 |
 | **快照系统** | 文件备份、LCS diff、配额管理 | SnapshotService | ~800 |
 | **P2P 协作** | 对等网络、Agent 远程调用、信令 | P2pAgentService | ~5000 (整个p2p包) |
-| **工具系统** | 27 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
+| **工具系统** | 29 个工具注册/执行/权限/后处理 | tool/ 整个包 | ~10000 |
 | **文件资产** | 文件上传/本地存储/Files API 适配/图像理解 | FileAssetService + FilesApiClientManager | ~900 |
 | **桌面自动化** | 截图（网格刻度）/键鼠模拟/坐标预检 | ScreenCaptureTool + DesktopControlTool | ~1500 |
+| **浏览器自动化** | DOM 级网页操作（快照/点击/输入/按键/滚动/截图/控制台/多标签），走 Electron CDP bridge | BrowserTool + BrowserBridgeClient | ~2600 |
+| **项目知识库** | 模块地图 / 符号扫描 / 规则沉淀 / 上下文注入 | ProjectMapService + ProjectContextProvider | ~2400 |
 | **成长体系** | 经验检索/自动捕获/复盘/归一化/弯路提炼 | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |
 | **用户权限** | RBAC、Token 认证、菜单控制 | UserServiceImpl + Filter | ~500 |
 | **定时任务** | Cron/一次性调度、执行追踪 | ScheduleTaskScheduler | ~350 |

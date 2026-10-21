@@ -86,25 +86,35 @@ public class ToolExecutor {
         private final String operationSummary;
         /** M5：工具要求注入 user 消息的文件资产ID列表（桌面截图等写入；null/空表示无注入） */
         private final List<Long> injectUserFileAssetIds;
+        /** M5：注入来源（desktop=桌面截图 / browser=网页截图），决定注入文案措辞 */
+        private final String injectKind;
 
         public ToolCallResult(String toolCallId, String toolName, String content) {
-            this(toolCallId, toolName, content, false, null, null);
+            this(toolCallId, toolName, content, false, null, null, null);
         }
 
         public ToolCallResult(String toolCallId, String toolName, String content,
                               boolean restricted, String operationSummary) {
-            this(toolCallId, toolName, content, restricted, operationSummary, null);
+            this(toolCallId, toolName, content, restricted, operationSummary, null, null);
         }
 
         public ToolCallResult(String toolCallId, String toolName, String content,
                               boolean restricted, String operationSummary,
                               List<Long> injectUserFileAssetIds) {
+            this(toolCallId, toolName, content, restricted, operationSummary,
+                    injectUserFileAssetIds, null);
+        }
+
+        public ToolCallResult(String toolCallId, String toolName, String content,
+                              boolean restricted, String operationSummary,
+                              List<Long> injectUserFileAssetIds, String injectKind) {
             this.toolCallId = toolCallId;
             this.toolName = toolName;
             this.content = content;
             this.restricted = restricted;
             this.operationSummary = operationSummary;
             this.injectUserFileAssetIds = injectUserFileAssetIds;
+            this.injectKind = injectKind;
         }
 
         public String getToolCallId() { return toolCallId; }
@@ -115,6 +125,9 @@ public class ToolExecutor {
 
         /** M5：待注入 user 消息的文件资产ID列表（可能为 null / 空） */
         public List<Long> getInjectUserFileAssetIds() { return injectUserFileAssetIds; }
+
+        /** M5：注入来源（可能为 null，调用方应按 desktop 处理） */
+        public String getInjectKind() { return injectKind; }
 
         /** M5：是否存在待注入的资产ID */
         public boolean hasInjections() {
@@ -291,6 +304,8 @@ public class ToolExecutor {
 
             // M5：读取工具登记的"注入 user 消息"文件资产ID（桌面截图等；读取即清空）
             List<Long> injectUserFileAssetIds = ToolContext.consumeInjectUserFileAssetIds();
+            // 注入来源（desktop / browser）：决定注入文案是「桌面截图 + 坐标协议」还是「网页截图」
+            String injectKind = ToolContext.consumeInjectKind();
 
             // 📝 成长体系：工具不抛异常、直接返回业务错误（如【参数缺失】校验）也捕获失败经验
             if (isBusinessError(result)) {
@@ -304,7 +319,7 @@ public class ToolExecutor {
             }
 
             return new ToolCallResult(toolCallId, toolName, result,
-                    isRestricted, displayArgs, injectUserFileAssetIds);
+                    isRestricted, displayArgs, injectUserFileAssetIds, injectKind);
         } catch (Exception e) {
             // M5：工具异常时丢弃注入登记，避免污染后续工具结果
             ToolContext.clearInjectUserFileAssetIds();

@@ -93,3 +93,9 @@ compile-verify.txt
 ### Local AI tool config (keep local, not in repo) ###
 .claude/
 CLAUDE.md
+
+### AI 项目知识库（.codecraft/，本地会话加速层，不进版本库） ###
+# 由 project_map action=bootstrap 按需生成；自动扫描结果每次重建都会变化，
+# 提交进 Git 只会产生 diff 噪音，且容易出现「A 机器提交的地图与 B 机器的代码不一致」。
+# 需要团队共享的规则请用 project_map action=rule op=list 导出后手工贴到文档。
+.codecraft/

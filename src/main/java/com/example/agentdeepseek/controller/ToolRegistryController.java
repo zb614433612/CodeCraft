@@ -94,6 +94,7 @@ public class ToolRegistryController {
             case COMMUNICATION: return "💬 用户交互";
             case ADMIN:         return "⚙️ 管理操作";
             case DESKTOP:       return "🖥️ 桌面自动化";
+            case BROWSER:       return "🧭 浏览器自动化";
             default:            return category.name();
         }
     }

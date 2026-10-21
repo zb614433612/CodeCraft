@@ -461,7 +461,7 @@ codecraft/
 │   │       ├── service/        # 业务逻辑层
 │   │       │   ├── llm/        # LLM 客户端层（LLMClient + 6 个 Provider 实现）
 │ │   │       │   └── lesson/     # 成长体系（经验库：检索/记录/复盘/归一化）
-│   │       ├── tool/           # AI Agent 工具（27 个工具）
+│   │       ├── tool/           # AI Agent 工具（29 个工具）
 │   │       └── util/           # 工具类
 │   └── main/resources/         # 配置文件和静态资源
 ├── frontend/                   # Vue3 前端源码

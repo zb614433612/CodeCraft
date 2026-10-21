@@ -344,6 +344,8 @@ deepseek:
       - "agent_invoke"
       - "screen_capture"
       - "desktop_control"
+      - "browser"
+      - "project_map"
 
 # ==================== 成长体系（Lesson）配置 ====================
 lesson:
@@ -442,6 +444,97 @@ lesson:
   #   signal-a-result: ["实现不了"]
   #   signal-b-strong: ["改用", "换成"]
   #   signal-b-medium: ["重新实现", "重写"]
+  # P0-2 查询侧同义扩展（跨语言 / 跨说法的召回补齐）
+  # 背景：模糊检索是字面 LIKE 匹配，「端口被占用」永远查不到 Address already in use，
+  # 这类漏召不是排序问题、是词根本不重合，必须从查询侧扩展。
+  # 用人工白名单而非 LLM 生成：要的是「同一查询每次扩展出同一批词」的确定性（可复现、可 A/B）。
+  # key = 查询原文中出现即触发的说法（不区分大小写）；value = 需要补充检索的目标词。
+  # 顺序有意义：词数超 max-words 时，先遍历到的别名优先保留，高频场景写在前面。
+  query-alias:
+    enabled: true
+    # 参与 SQL OR 的词数上限（原有拆词 + 扩展词），防 OR 条件膨胀
+    max-words: 16
+    entries:
+      # ---- 端口 / 进程占用 ----
+      "[端口占用]": ["address already in use", "EADDRINUSE", "port"]
+      "[端口被占]": ["端口占用", "address already in use", "EADDRINUSE"]
+      "[端口冲突]": ["端口占用", "address already in use", "EADDRINUSE"]
+      "[address already in use]": ["端口占用", "端口被占", "port"]
+      "[eaddrinuse]": ["端口占用", "端口被占", "address already in use"]
+      # ---- 依赖缺失 / 类找不到 ----
+      "[缺少依赖]": ["could not resolve dependencies", "missing dependency", "artifact", "NoClassDefFoundError"]
+      "[依赖缺失]": ["缺少依赖", "could not resolve dependencies", "artifact"]
+      "[找不到类]": ["NoClassDefFoundError", "ClassNotFoundException", "缺少依赖"]
+      "[could not resolve]": ["缺少依赖", "依赖缺失", "artifact"]
+      "[nodefclassdeffounderror]": ["找不到类", "缺少依赖", "ClassNotFoundException"]
+      "[classnotfoundexception]": ["找不到类", "缺少依赖", "NoClassDefFoundError"]
+      # ---- 编译失败 / 符号找不到 ----
+      "[编译失败]": ["BUILD FAILURE", "compilation failed", "cannot find symbol", "COMPILE_FAILED"]
+      "[编译不过]": ["编译失败", "BUILD FAILURE", "COMPILE_FAILED"]
+      "[编译报错]": ["编译失败", "BUILD FAILURE", "COMPILE_FAILED"]
+      "[找不到符号]": ["cannot find symbol", "BUILD FAILURE", "编译失败"]
+      "[build failure]": ["编译失败", "编译报错", "COMPILE_FAILED"]
+      "[cannot find symbol]": ["找不到符号", "BUILD FAILURE", "编译失败"]
+      # ---- 命令 / 可执行文件 ----
+      "[命令不存在]": ["command not found", "CMD_NOT_FOUND", "Cannot run program"]
+      "[不是内部或外部命令]": ["command not found", "CMD_NOT_FOUND", "命令不存在"]
+      "[command not found]": ["命令不存在", "不是内部或外部命令", "CMD_NOT_FOUND"]
+      # ---- 权限 ----
+      "[权限不足]": ["permission denied", "access denied", "EACCES", "PERMISSION_DENIED"]
+      "[没有权限]": ["权限不足", "permission denied", "PERMISSION_DENIED"]
+      "[permission denied]": ["权限不足", "没有权限", "PERMISSION_DENIED"]
+      # ---- 网络 / 连接 ----
+      "[连接被拒]": ["connection refused", "ECONNREFUSED", "connect timed out"]
+      "[连接失败]": ["连接被拒", "connection refused", "ECONNREFUSED"]
+      "[connection refused]": ["连接被拒", "连接失败", "ECONNREFUSED"]
+      "[请求超时]": ["timeout", "timed out", "SocketTimeout", "ETIMEDOUT"]
+      "[超时]": ["timeout", "timed out", "SocketTimeout"]
+      "[域名解析]": ["unknown host", "UnknownHost", "NETWORK_UNREACHABLE"]
+      "[unknown host]": ["域名解析", "NETWORK_UNREACHABLE"]
+      # ---- 鉴权 / 登录态 ----
+      "[登录过期]": ["401", "unauthorized", "token", "revoked"]
+      "[token失效]": ["登录过期", "401", "unauthorized", "revoked"]
+      "[认证失败]": ["401", "unauthorized", "登录过期"]
+      "[401]": ["登录过期", "认证失败", "unauthorized"]
+      "[unauthorized]": ["401", "登录过期", "认证失败"]
+      # ---- 文件 / 路径 ----
+      "[文件不存在]": ["no such file", "file not found", "does not exist", "FILE_NOT_FOUND"]
+      "[找不到文件]": ["文件不存在", "no such file", "FILE_NOT_FOUND"]
+      "[no such file]": ["文件不存在", "找不到文件", "FILE_NOT_FOUND"]
+      # ---- 前端 / 运行时表现 ----
+      "[卡死]": ["卡顿", "无响应", "hang", "freeze", "阻塞"]
+      "[卡住]": ["卡死", "卡顿", "无响应", "hang"]
+      "[卡顿]": ["卡死", "无响应", "hang", "freeze"]
+      "[无响应]": ["卡死", "卡顿", "hang", "freeze"]
+      "[白屏]": ["空白", "不渲染", "render", "白屏"]
+      "[不显示]": ["白屏", "不渲染", "空白"]
+      "[乱码]": ["编码", "encoding", "GBK", "mojibake"]
+      # ---- 类型 / 语法 ----
+      "[类型错误]": ["type error", "is not assignable", "TS2"]
+      "[类型不匹配]": ["类型错误", "is not assignable"]
+      "[is not assignable]": ["类型错误", "类型不匹配"]
+      "[sql 语法]": ["bad sql grammar", "syntax error", "SQL_BAD_GRAMMAR"]
+      "[bad sql grammar]": ["SQL 语法", "语法错误", "SQL_BAD_GRAMMAR"]
+      # ---- 资源 / 构建产物 ----
+      "[内存溢出]": ["OutOfMemory", "heap", "OOM"]
+      "[打包失败]": ["build failed", "electron-builder", "AppImage", "dmg"]
+      "[跨域]": ["CORS", "access-control-allow-origin"]
+  # P0-1 检索排序（相关度优先的加权总分）
+  # 旧逻辑的最终排序键是「环境兼容 3 档离散分」（异环境 0 / 通用 1 / 同环境 2），带来两个后果：
+  #   ① 环境兼容一票压过相关度——异环境的同一个坑会排到同环境的弱相关条目之后；
+  #   ② 模糊检索内部算好的「命中词数」排序，在截取 Top-K 前被这次重排完全覆盖，等于白算。
+  # enabled=false 一键回退旧排序（线上回滚 / A/B 对比用）。
+  ranker:
+    enabled: true
+    w-exact-code: 3.0       # 错误码精确命中（强信号，必须压过纯相关度）
+    w-param: 2.0            # 参数一致（强信号：同名参数值必须一致是本系统核心判据）
+    w-relevance: 2.5        # 相关度（主项 = 字段权重 × 候选集 IDF × 覆盖率）
+    w-env: 0.8              # 环境兼容（旧的一票否决降级为加分项，异环境只降权不淘汰）
+    w-effective: 0.5        # 历史有效率（feedback 闭环的后验质量）
+    w-fresh: 0.3            # 新鲜度（旧坑可能已被后续版本修掉，权重低，只用于打破平局）
+    w-hit: 0.2              # 命中量（对数压缩，防老条目靠累计值霸榜）
+    w-project: 0.4          # 本项目沉淀加成（全局池条目仍可被召回，只是略靠后）
+    fresh-scale-days: 240   # 新鲜度衰减尺度（exp(-天数/尺度)，约 166 天半衰期）
 
 # ==================== P2P 远程连接配置 ====================
 p2p:
@@ -491,6 +584,116 @@ codecraft:
       # 工具白名单：空=默认只读工具集；"*"=暴露全部工具（危险，谨慎使用）
       # 默认只读集：file_explorer / git_query / web_search / web_fetch / check_network / project_info
       exposed-tools: []
+
+  # ==================== 项目知识库（.codecraft/） ====================
+  # 设计要点：本功能**不自动创建任何目录**。只有模型显式调用 project_map action=bootstrap 才落盘；
+  # 用户只是让改某个目录下的一个文件时，仓库里不会留下任何痕迹。
+  # 下面所有开关只能「关闭能力」，不能触发创建。
+  project-context:
+    # 总开关：false 时不注入任何内容（请求体与未启用前逐字节一致），工具仍可手动调用
+    enabled: true
+    # 是否把知识库摘要注入每轮请求（代码模式 ≤ budget-bootstrap 字符，文档模式 ≤ budget-doc-list 字符）
+    inject-bootstrap: true
+    # 是否在写类工具成功后追加单文件上下文提示（写哪个模块、模块负责什么）
+    inject-file-hint: true
+    # 是否在 skill action=load 时追加「本项目专属规则」（rules.md 里的 skill.all.* / skill.<技能>.xxx）
+    inject-skill-rules: true
+    # 常驻注入预算（字符，约 650 token）：超预算时先裁模块行，再裁收尾说明
+    # 「模块 + 职责首行」是语义密度最高的部分，所以预算比纯结构摘要高一档
+    budget-bootstrap: 1100
+    # 文档模式注入预算（字符，约 900 token）：索引主体是「一行一篇文档」，条目多但单条信息量低，
+    # 所以单独给一档更高预算（代码模式的模块表条目少、每条信息量大）
+    budget-doc-list: 1500
+    # 文档模式判定阈值：代码文件数 × 本值 < 总文件数 → 判为「纯文档目录」走文档模式
+    # 10 表示代码占比低于 10%；CodeCraft 自身是 84%，纯 md 目录是 0%，两端都能正确落位
+    doc-mode-code-ratio: 10
+    # 单文件上下文提示预算（字符）
+    budget-file-hint: 120
+    # 技能规则片段预算（字符）：按 rules.md 里的先后顺序截断
+    budget-skill-rule: 800
+    # 扫描上限：超过 5000 个文件截断（超大仓库只索引前 5000 个）
+    max-files: 5000
+    # 单文件大小上限（字节）：超出跳过，避免扫压缩产物/大 JSON
+    max-file-size: 524288
+    # 模块划分：文件数 ≤ max(module-min-files, 总文件数 × module-file-ratio) 的目录收为一个模块
+    # 0.04 / 10 是实测值：0.15 时 1030 文件的项目里前端 99 个文件被并成一个大模块，components/views/api 的区分全丢
+    # max-modules 60 是软上限：强制合并会造出 example(1)、main(4) 这种碎片，展示数量交给注入预算自然控制
+    max-modules: 60
+    module-file-ratio: 0.04
+    module-min-files: 10
+    # 单文件扫描行数上限（大文件只看前 N 行）
+    max-scan-lines-per-file: 2000
+    # 单次 read 返回上限（字符）
+    budget-read: 6000
+    # rules.md 活跃条目上限与单条长度上限
+    # 400 字符是刻意的：联动约束（改 A 要同步改 B）一句话写不清，早期限 140 时全被截断
+    max-rules: 60
+    max-rule-length: 400
+    # 模块职责描述（annotate）上限：支持多行联动说明，INDEX 与注入摘要只取首行
+    max-note-length: 600
+    # 建库软闸门：可扫描文件数低于此值时 bootstrap 拒绝执行（除非 force=true）
+    # 8 而不是 20：纯文档仓库 / 需求库 / 单模块运维脚本集往往只有十来个文件
+    bootstrap-min-files: 8
+
+  # ==================== 浏览器自动化（browser 工具）====================
+  # 能力定位：DOM 级网页操作。与 web_fetch（只读正文）、screen_capture/desktop_control
+  # （像素级截图 + 模拟键鼠）形成三层互补。
+  #
+  # 依赖 Electron 主进程的 CDP 转发通道（electron/browser-bridge.js）：
+  # 客户端启动时监听随机回环端口，把 {port, token} 写成 runtime/browser-bridge.json：
+  #   · 打包运行 → <userData>/runtime/（Java 从 -Dapp.userdata 拿到同一目录）
+  #   · 开发运行 → <项目根>/runtime/（Java 依次尝试 -Dapp.userdata、其父目录、user.dir）
+  # Java 侧读到该文件即得连接信息。用浏览器直接开 8084 时该文件不存在，工具会明确提示「需桌面客户端」。
+  #
+  # 注意：窗口数量上限 / 空闲回收时长 / 是否允许下载 三项由 Electron 侧自己持有
+  # （主进程不读 Java 配置），改那里需要动 electron/main.js 的 initBrowserBridge 参数。
+  browser:
+    # 总开关：false 时工具直接返回「已被配置禁用」，不做任何连接尝试
+    enabled: true
+    # 窗口默认是否可见（单次 open 可覆盖；已开窗口可用 action=hide/show 运行时切换）
+    default-show: true
+    # 默认视口尺寸（open 时未显式传 width/height 才生效）
+    viewport-width: 1280
+    viewport-height: 860
+    # 域名白名单：空 = 不限制（默认）。填了即变成「只放行列表中命中项」。
+    # 支持 *.example.com 通配（只匹配子域）；精确域名 example.com 同时放行其子域。
+    # 设计立场：本地 Agent 本来就有 shell 执行 / 文件读写 / 任意 HTTP 请求的能力，
+    # 浏览器的 SSRF 面在这个前提下不构成新增威胁，所以默认全放开，需要时再收紧。
+    allowed-hosts: []
+    # 域名黑名单：优先级高于白名单。适合临时封掉某个有破坏性按钮的站点。
+    blocked-hosts: []
+    # 单次 CDP 请求超时（秒）：navigate 到慢站点时可能等较久，不能设太短
+    bridge-timeout-seconds: 60
+    # 握手文件发现失败后的重试冷却（秒）：避免每次工具调用都去读不存在的文件
+    discover-retry-seconds: 5
+    # snapshot 返回的可交互元素上限（按「视口内优先 + 从上到下」排序后截断）
+    # 60 是经验值：常见页面可见可交互元素 20~60 个，超过这个数量通常意味着
+    # 模型更需要先滚动或缩小范围，而不是一次性看完整页
+    snapshot-max-elements: 60
+    # snapshot 页面正文摘要的字符上限
+    snapshot-text-limit: 1200
+    # 单个元素文案的截断长度
+    snapshot-label-limit: 60
+    # 是否允许在页面内执行任意脚本（eval 动作）。
+    # 默认 false：eval 能绕过本工具的全部安全护栏（读 cookie、以用户身份发请求、改页面状态），
+    # 而绝大多数操作已能用 click / fill / select / press / scroll / wait 完成。
+    allow-script-eval: false
+    # eval 单次执行超时（毫秒）：CDP Runtime.evaluate 的 timeout 参数
+    eval-timeout-ms: 15000
+    # 截图格式：png（无损、体积大）/ jpeg（有损、体积小）
+    screenshot-format: png
+    # jpeg 质量（1~100），仅 screenshot-format=jpeg 时生效
+    screenshot-quality: 80
+    # 截图最长边上限（像素）：超过则等比缩小。bridge 单次响应上限 8MB，
+    # 4K 页面整页 PNG 的 base64 很容易超；缩小对「看清布局」几乎没有影响
+    screenshot-max-edge: 1920
+    # wait 默认超时 / 最大超时（毫秒）：模型传再大也按 max 封顶，防一次调用挂十分钟
+    wait-default-timeout-ms: 10000
+    wait-max-timeout-ms: 60000
+    # scroll 未传 amount 时的默认滚动像素（约 2/3 屏）
+    scroll-default-px: 600
+    # console 单次返回的事件条数上限（保留最近的 N 条）
+    console-max-events: 40
 
 # ==================== P4：LLM 限流与重试配置（多 Agent 并行任务的限流健壮性） ====================
 llm:

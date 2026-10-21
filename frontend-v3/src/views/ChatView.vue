@@ -54,6 +54,65 @@
           <svg class="cc-i cc-i--sm"><use :href="'#' + tool.icon" /></svg>{{ tool.label }}
         </button>
       </div>
+
+      <!--
+        AI 浏览器入口：只在真的开了窗口时出现。
+        「永远显示一个灰按钮」会让人以为功能坏了；没有窗口时什么都不显示才是正确的空状态。
+        点击展开面板，可显示/隐藏窗口、关闭标签 —— 用户不必再翻任务栏找 AI 在操作哪个页面。
+      -->
+      <div v-if="browserTabs.length" class="cc-browser">
+        <button
+          class="cc-browser__btn"
+          :class="{ 'is-on': browserPanelOpen }"
+          :title="`AI 正在操作 ${browserTabs.length} 个浏览器页面`"
+          @click="toggleBrowserPanel"
+        >
+          <svg class="cc-i cc-i--sm"><use href="#i-globe" /></svg>
+          AI 浏览器
+          <span class="cc-browser__count">{{ browserTabs.length }}</span>
+        </button>
+        <div v-if="browserPanelOpen" class="cc-browser__panel">
+          <div class="cc-browser__head">
+            <span>AI 正在浏览</span>
+            <button class="cc-browser__mini" title="刷新状态" @click="$emit('browser-refresh')">
+              <svg class="cc-i cc-i--xs"><use href="#i-refresh" /></svg>
+            </button>
+          </div>
+          <ul class="cc-browser__list">
+            <li v-for="tab in browserTabs" :key="tab.tabId" class="cc-browser__item">
+              <span class="cc-browser__tab">{{ tab.tabId }}</span>
+              <span class="cc-browser__url" :title="tab.pageUrl || '(空白页)'">
+                {{ tab.pageUrl || '(空白页)' }}
+              </span>
+              <span v-if="tab.active" class="cc-browser__badge">当前</span>
+              <span class="cc-browser__ops">
+                <button
+                  class="cc-browser__mini"
+                  :title="tab.visible ? '隐藏窗口' : '显示窗口'"
+                  @click="$emit('browser-show', { tabId: tab.tabId, visible: !tab.visible })"
+                >
+                  <svg class="cc-i cc-i--xs"><use :href="tab.visible ? '#i-moon' : '#i-sun'" /></svg>
+                </button>
+                <button
+                  class="cc-browser__mini is-danger"
+                  title="关闭这个标签"
+                  @click="$emit('browser-close', tab.tabId)"
+                >
+                  <svg class="cc-i cc-i--xs"><use href="#i-close" /></svg>
+                </button>
+              </span>
+            </li>
+          </ul>
+          <div class="cc-browser__foot">
+            <span class="cc-browser__hint">
+              {{ browserAvailable ? '操作由 AI 发起，这里只是查看与收尾' : '浏览器通道当前不可用' }}
+            </span>
+            <button class="cc-browser__mini is-danger" title="关闭全部标签" @click="$emit('browser-close', '')">
+              全部关闭
+            </button>
+          </div>
+        </div>
+      </div>
       <!--
         头部只保留真实可用的工具组按钮。
         此前的「搜索会话 / 更多操作」两个图标按钮没有任何 @click，属纯装饰占位，
@@ -590,6 +649,8 @@ import { formatDuration, subAgentStats } from '../utils/agent-event'
 import { useTailWindow } from '../utils/virtual-list'
 import { readProjectFile, getProjectFileBlobUrl } from '../api/project'
 import { describeMissingFile, resolveFileTarget, type ResolvedFileTarget } from '../utils/file-path'
+/* AI 浏览器标签：状态来自 /api/browser/sessions（后端实时问 Electron bridge） */
+import type { BrowserTab } from '../api/browser'
 
 export interface ConversationDetail {
   id: string
@@ -718,6 +779,16 @@ const props = withDefaults(
      */
     optimizingPrompt?: boolean
     /**
+     * AI 浏览器标签列表（本会话）。
+     *
+     * <p>为什么由父级传入而不是组件自己拉：只有父级知道「什么时候该刷新」——
+     * SSE 里出现 browser 工具调用、用户点显示/关闭之后都要重查。
+     * 组件只负责展示与转发操作。</p>
+     */
+    browserTabs?: BrowserTab[]
+    /** 浏览器通道是否可用（非桌面客户端 / 客户端刚启动为 false，此时隐藏入口） */
+    browserAvailable?: boolean
+    /**
      * 进入页面时的数据加载（由 App.vue 的 PAGE_BINDINGS 注入）
      * 页面随路由真实挂载，所以在这里调一次即可；重复进页由父级的「已加载 / 加载中 / 已失败」跳过
      */
@@ -747,7 +818,9 @@ const props = withDefaults(
     loading: false,
     loadingMore: false,
     loadError: '',
-    optimizingPrompt: false
+    optimizingPrompt: false,
+    browserTabs: () => [],
+    browserAvailable: false
   }
 )
 
@@ -791,6 +864,12 @@ const emit = defineEmits<{
   (e: 'refresh-providers'): void
   /** 子Agent面板里点「前往会话」：切到被委托智能体的会话看明细 */
   (e: 'open-subagent-session', sessionId: number): void
+  /** AI 浏览器：显示 / 隐藏某个标签窗口 */
+  (e: 'browser-show', payload: { tabId: string; visible: boolean }): void
+  /** AI 浏览器：关闭某个标签窗口；tabId 为空表示关闭全部 */
+  (e: 'browser-close', tabId: string): void
+  /** AI 浏览器：手动刷新标签状态 */
+  (e: 'browser-refresh'): void
 }>()
 
 /** 点任务浮层里的其他会话：先收起浮层，再交给父级切会话 */
@@ -822,6 +901,26 @@ const showProviderGuide = computed(
 )
 
 const draft = ref('')
+
+/**
+ * AI 浏览器面板展开态。
+ *
+ * <p>面板是「看一眼 + 收尾」的轻量入口，不做成弹窗：浏览器操作的主体是模型，
+ * 用户多数时候只需要扫一眼地址、必要时把窗口调出来或关掉。</p>
+ */
+const browserPanelOpen = ref(false)
+
+function toggleBrowserPanel() {
+  browserPanelOpen.value = !browserPanelOpen.value
+}
+
+/** 标签全部关闭后自动收起面板，避免留一个指向空列表的浮层 */
+watch(
+  () => props.browserTabs.length,
+  len => {
+    if (len === 0) browserPanelOpen.value = false
+  }
+)
 
 /**
  * 提示词优化的撤销快照（`before` = 优化前原文，`result` = 回填后的文本）。

@@ -1,14 +1,14 @@
 ﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v3.0.6 | Updated: 2026-10-20 | Audience: Developers / AI Collaborators
+> Version: v3.0.7 | Updated: 2026-10-21 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
 
 ## 1. One-Sentence Definition
 
-**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **27 tools** (file read/write, command execution, Git operations, web search, desktop automation, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
+**CodeCraft** is an AI Agent-based desktop intelligent programming assistant. Users communicate programming tasks to AI through a chat interface, and AI automatically invokes **29 tools** (file read/write, command execution, Git operations, web search, desktop automation, etc.) to complete tasks, supporting sub-agent parallel collaboration and dynamic switching between multiple LLM platforms (DeepSeek / OpenAI / Anthropic / Ollama / MiMo / MiniMax, etc.).
 
 ---
 
@@ -274,12 +274,13 @@ src/main/java/com/example/agentdeepseek/
 │ │       │   ├── DetourBlockParser  # 【方案取舍】block parser
 │ │       │   └── ErrorCodeDictionary # Error-code dictionary (yml config)
 │       └── ...
+├── projectcontext/         # Project knowledge base (module map / rules / context injection)
 ├── tool/                      # ⚡AI Agent Tool System
 │   ├── Tool.java              # Tool interface
 │   ├── ToolRegistry           # Tool registry (singleton)
 │   ├── ToolExecutor           # Tool execution engine
 │   ├── ToolInitializer        # Auto-init all tools on startup
-│   ├── impl/                  # 27 tool implementations (new naming, one tool many actions)
+│   ├── impl/                  # 29 tool implementations (new naming, one tool many actions)
 │   │   ├── File: file_explorer, file_writer
 │   │   ├── Command: command
 │   │   ├── Network: web_search, web_fetch, http_request, check_network
@@ -288,14 +289,17 @@ src/main/java/com/example/agentdeepseek/
 │   │   ├── Agent: agent, agent_invoke (Phase 19: invoke/poll/cancel)
 │   │   ├── Skill: skill
 │   │   ├── Lesson: lesson  ★Growth System (search/record/complete/feedback/list)
-│   │   ├── Project: project_info
+│   │   ├── Project: project_info, project_map (status/bootstrap/read/annotate/rule)
 │   │   ├── Task: task_manager
 │   │   ├── Interaction: ask_clarification, chat_attachment, query_tool_history
 │   │   ├── Schedule: schedule_task
 │   │   ├── MCP Manager: mcp_server_manager
 │   │   ├── Desktop: screen_capture, desktop_control (Computer Use)
+│   │   ├── Browser: browser (open/navigate/snapshot/click/fill/select/press/hover/scroll/
+│   │   ├──          wait/screenshot/console/eval/tab/close/status/list)
 │   │   └── History: query_tool_history
 │   ├── desktop/               # Desktop automation (platform adapter/CaptureContext/verify)
+│   ├── browser/               # Browser tool support (bridge client / snapshot parser)
 │   ├── permission/            # Permission control
 │   └── postedit/              # Post-processing pipeline
 ├── log/LogService             # Application-level logging (11KB)
@@ -470,7 +474,9 @@ src/main/java/com/example/agentdeepseek/
 | **Message Assembly** | Token estimation + skill catalog injection + language directives | ContextBuilder | ~900 |
 | **Snapshot System** | File backup, LCS diff, quota management | SnapshotService | ~800 |
 | **P2P Collaboration** | Peer network, agent remote invocation, signaling | P2pAgentService | ~5000 |
-| **Tool System** | 27 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
+| **Tool System** | 29 tools registration/execution/permission/post-edit | tool/ package | ~10000 |
+| **Browser Automation** | DOM-level page ops via Electron CDP bridge (snapshot/click/fill/press/scroll/screenshot/console/multi-tab) | BrowserTool + BrowserBridgeClient | ~2600 |
+| **Project Knowledge Base** | Module map / symbol scan / rule sink / context injection | ProjectMapService + ProjectContextProvider | ~2400 |
 | **File Assets** | Upload/local storage/Files API adapter/vision understanding | FileAssetService + FilesApiClientManager | ~900 |
 | **Desktop Automation** | Screenshot (grid/scale ticks)/mouse & keyboard/coordinate preflight | ScreenCaptureTool + DesktopControlTool | ~1500 |
 | **Growth System** | Retrieval/capture/review/normalization/detour | LessonService + LessonNormalizerService + LessonDetourService | ~4100 |

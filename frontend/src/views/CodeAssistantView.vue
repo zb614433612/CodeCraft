@@ -153,6 +153,44 @@
         <!-- ===== 聊天标签 ===== -->
         <template v-if="activeTab?.type === 'chat'">
           <div class="chat-messages-area" @click="handleMessageLinkClick">
+            <!--
+              AI 浏览器状态条：只在模型真的开了窗口时渲染。
+              没有窗口时什么都不显示 —— 常驻一个空条会让人以为功能坏了。
+              操作主体是模型，这里只是「看一眼 + 收尾」的入口。
+            -->
+            <div v-if="browserTabs.length" class="ai-browser-bar">
+              <span class="ai-browser-bar__icon">🌐</span>
+              <span class="ai-browser-bar__label">AI 浏览器 · {{ browserTabs.length }}</span>
+              <span class="ai-browser-bar__url" :title="activeBrowserTab?.pageUrl || '(空白页)'">
+                {{ activeBrowserTab?.pageUrl || '(空白页)' }}
+              </span>
+              <button class="ai-browser-bar__btn" @click.stop="browserPanelOpen = !browserPanelOpen">
+                {{ browserPanelOpen ? '收起' : '详情' }}
+              </button>
+              <button
+                v-if="activeBrowserTab"
+                class="ai-browser-bar__btn"
+                @click.stop="onBrowserShow(activeBrowserTab)"
+              >{{ activeBrowserTab.visible ? '隐藏窗口' : '显示窗口' }}</button>
+              <button class="ai-browser-bar__btn is-danger" @click.stop="onBrowserClose('')">全部关闭</button>
+            </div>
+            <!-- 展开面板：逐个标签显示 / 隐藏 / 关闭 -->
+            <div v-if="browserTabs.length && browserPanelOpen" class="ai-browser-panel">
+              <div v-for="tab in browserTabs" :key="tab.tabId" class="ai-browser-panel__row">
+                <span class="ai-browser-panel__tab">{{ tab.tabId }}</span>
+                <span class="ai-browser-panel__url" :title="tab.pageUrl || '(空白页)'">
+                  {{ tab.pageUrl || '(空白页)' }}
+                </span>
+                <span v-if="tab.active" class="ai-browser-panel__badge">当前</span>
+                <button class="ai-browser-bar__btn" @click.stop="onBrowserShow(tab)">
+                  {{ tab.visible ? '隐藏' : '显示' }}
+                </button>
+                <button class="ai-browser-bar__btn is-danger" @click.stop="onBrowserClose(tab.tabId)">关闭</button>
+              </div>
+              <div class="ai-browser-panel__hint">
+                {{ browserAvailable ? '操作由 AI 发起，这里只是查看与收尾' : '浏览器通道当前不可用' }}
+              </div>
+            </div>
             <!-- ★ 无 Provider 时：全屏引导界面 -->
             <div v-if="providerOptions.length === 0" class="no-provider-guide">
               <div class="guide-icon">🔌</div>
@@ -1015,6 +1053,9 @@ import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, getConversationMessagesPage, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
 import { streamChat, checkActiveTask, taskStream, cancelTask, supplementRequest, optimizePrompt } from '@/api/chat'
+/* AI 浏览器：窗口状态可视化（后端实时问 Electron bridge，不落库；与 v3 共用同一组接口） */
+import { getBrowserSessions, showBrowserSession, closeBrowserSession } from '@/api/browser'
+import type { BrowserTab } from '@/api/browser'
 import { listAgentConfigs, type AgentConfig } from '@/api/agent-config'
 import { setConfig } from '@/api/config'
 import type { AgentStreamEvent } from '@/utils/sse-client'
@@ -3071,6 +3112,101 @@ const messages = ref<Record<string, ChatMessage[]>>({})
 const currentConversationId = ref<string>('')
 const inputMessage = ref('')
 
+// ===== AI 浏览器：窗口状态可视化 =====
+// 模型在 Electron 主进程里开的是独立窗口：模型看得到（snapshot），用户看不到，
+// 只能翻任务栏猜「AI 是不是在操作什么」。这里把状态拉到聊天区顶部，
+// 随时知道 AI 在浏览哪个页面，也能一键显示 / 隐藏 / 关闭。
+// 数据源 GET /api/browser/sessions：后端实时问 bridge，不落库（窗口是进程级资源）。
+const browserTabs = ref<BrowserTab[]>([])
+const browserAvailable = ref(false)
+const browserPanelOpen = ref(false)
+let browserPollTimer: number | null = null
+/** 轮询间隔：窗口可能被用户手动关掉，4 秒足以让状态自己收敛 */
+const BROWSER_POLL_MS = 4000
+
+/** 当前活跃标签（状态条上展示它的地址） */
+const activeBrowserTab = computed<BrowserTab | null>(
+  () => browserTabs.value.find(t => t.active) ?? browserTabs.value[0] ?? null
+)
+
+function stopBrowserPoll() {
+  if (browserPollTimer !== null) {
+    window.clearInterval(browserPollTimer)
+    browserPollTimer = null
+  }
+}
+
+/** 有标签时才轮询，没有就停 —— 空转请求后端是最容易忽略的浪费 */
+function ensureBrowserPoll() {
+  if (browserPollTimer !== null) return
+  browserPollTimer = window.setInterval(() => {
+    if (!browserTabs.value.length) {
+      stopBrowserPoll()
+      return
+    }
+    void loadBrowserSessions()
+  }, BROWSER_POLL_MS)
+}
+
+/** 拉一次当前会话的浏览器标签；失败静默（这是增强能力，不该在聊天区弹红字） */
+async function loadBrowserSessions() {
+  const key = currentConversationId.value
+  if (!key) {
+    browserTabs.value = []
+    return
+  }
+  try {
+    const res = await getBrowserSessions(key)
+    const data = res?.data
+    if (!data) return
+    browserAvailable.value = !!data.available
+    browserTabs.value = data.tabs ?? []
+    if (browserTabs.value.length) {
+      ensureBrowserPoll()
+    } else {
+      stopBrowserPoll()
+      browserPanelOpen.value = false
+    }
+  } catch {
+    /* 静默：下次工具调用或轮询会重试 */
+  }
+}
+
+/** 显示 / 隐藏某个标签的窗口 */
+async function onBrowserShow(tab: BrowserTab) {
+  const key = currentConversationId.value
+  if (!key) return
+  try {
+    await showBrowserSession({ conversationId: key, tabId: tab.tabId, visible: !tab.visible })
+  } catch {
+    /* 忽略：随后的状态刷新会纠正按钮状态 */
+  }
+  void loadBrowserSessions()
+}
+
+/** 关闭标签；tabId 为空表示关掉本会话全部标签 */
+async function onBrowserClose(tabId: string) {
+  const key = currentConversationId.value
+  if (!key) return
+  try {
+    await closeBrowserSession({ conversationId: key, tabId: tabId || undefined, all: !tabId })
+    message.success(tabId ? '已关闭浏览器标签' : '已关闭全部浏览器标签')
+  } catch (e: any) {
+    message.error(e?.message || '关闭失败')
+  }
+  void loadBrowserSessions()
+}
+
+/**
+ * 工具调用出现 browser 时立即刷新一次标签状态。
+ * 轮询最长要等 4 秒，而「模型刚开了一个网页」正是用户最想马上看到状态的时刻，
+ * 所以这里插队一次，避免状态条迟到。其它工具忽略，不产生请求。
+ */
+function refreshBrowserOnToolCall(tools: string[]) {
+  if (!tools.some(t => t === 'browser')) return
+  void loadBrowserSessions()
+}
+
 // ===== Phase 18 P2：发送/流式状态按会话隔离（Map 化）=====
 // 原全局单值 isSending 会导致：Agent 有后台任务时切过去锁死输入框、后台任务结束误关当前会话锁。
 // 改造：sendingStates 按 conversationId 记录「前台流式」状态（isSending 仅指前台流式）；
@@ -4208,6 +4344,8 @@ const selectConversation = (id: string) => {
   fetchMessages(id)
   // 检查是否有正在运行的后台任务
   checkAndReconnect(id)
+  // 浏览器标签按会话隔离：切会话要立刻换成新会话的状态，不能沿用上一个会话的标签列表
+  void loadBrowserSessions()
   // 命中缓存时 fetchMessages 会直接 return（不触发 isLoadingMessages 变化），这里补一次强制到底。
   // DynamicScroller 带 :key=会话ID 会重建，需等重建后的 DOM 就绪再滚。
   nextTick(() => {
@@ -4266,6 +4404,8 @@ const handleAgentEvent = (event: AgentStreamEvent) => {
     const toolResult = result || ''
     const toolNameVal = tool_name || ''
     maybeShowDesktopPrivacyNotice([toolNameVal])
+    // 子 Agent 也可能开网页，同样插队刷新一次标签状态
+    refreshBrowserOnToolCall([toolNameVal])
     const actionStr = toolNameVal ? extractActionFromToolContent(toolResult, toolNameVal) : ''
     agent.events.push({ type: 'tool_call' as const, toolName: toolNameVal, action: actionStr, filePath: file_path || '', result: toolResult })
     return
@@ -5124,6 +5264,8 @@ const sendMessage = async (textOverride?: string) => {
         const tools = tcData.tools || []
         const summaries = tcData.summaries || []
         maybeShowDesktopPrivacyNotice(tools)
+        // ★ 浏览器标签：模型刚开网页时立刻刷新一次状态条，不等 4 秒轮询
+        refreshBrowserOnToolCall(tools)
         // ★ 技能命中（动态展示）：后端在 skill action=load 时生成「🎯 命中技能」操作摘要，
         //   随 tool_call_start.summaries 一起下发——到此才代表 LLM 真正选中执行该技能
         for (const s of summaries) {
@@ -6734,6 +6876,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   disposeLogXterm()
+  // 清理浏览器标签轮询（组件卸载后继续轮询会持续请求后端，切到别的页面也不停）
+  stopBrowserPoll()
   // 清理拖拽事件
   document.removeEventListener('mousemove', onGlobalDragMove)
   document.removeEventListener('mouseup', onGlobalDragUp)
@@ -7477,6 +7621,112 @@ watch(currentConversationId, (newId) => {
   min-height: 0;
   position: relative;
 }
+
+/* ===== AI 浏览器状态条（多标签可视化） =====
+ * 只在模型真的开了浏览器窗口时出现。操作主体是模型，这里只是「看一眼 + 收尾」。
+ * 普通流布局而非绝对定位：挤在消息区顶部一行，不会遮挡任何消息。
+ */
+.ai-browser-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: rgba(139, 92, 246, 0.06);
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-2, #5c5c78);
+  min-width: 0;
+}
+.ai-browser-bar__icon { flex: none; }
+.ai-browser-bar__label { flex: none; font-weight: 600; }
+.ai-browser-bar__url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3, #999);
+  /* 长 URL 优先保住域名与路径尾部（右侧信息量更大） */
+  direction: rtl;
+  text-align: left;
+}
+.ai-browser-bar__btn {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card, #fff);
+  color: var(--text-2, #5c5c78);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.ai-browser-bar__btn:hover { border-color: var(--accent); color: var(--accent); }
+.ai-browser-bar__btn.is-danger:hover { border-color: #e5484d; color: #e5484d; }
+
+/* 展开面板：逐标签明细，限高内部滚动（标签多时不会把消息区顶走） */
+.ai-browser-panel {
+  flex: none;
+  max-height: 34vh;
+  overflow-y: auto;
+  padding: 6px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card, #fff);
+}
+.ai-browser-panel__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12.5px;
+  border-bottom: 1px dashed var(--border);
+}
+.ai-browser-panel__row:last-of-type { border-bottom: none; }
+.ai-browser-panel__tab {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--accent);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.ai-browser-panel__url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2, #5c5c78);
+  direction: rtl;
+  text-align: left;
+}
+.ai-browser-panel__badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(139, 92, 246, 0.14);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ai-browser-panel__hint {
+  padding-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-4, #aaa);
+}
+
+/* 暗色主题：状态条底色改深，避免大块浅紫发白 */
+[data-theme="dark"] .ai-browser-bar { background: rgba(139, 92, 246, 0.14); }
+[data-theme="dark"] .ai-browser-bar__btn {
+  background: var(--bg-card, #1e1e2e);
+  border-color: var(--border);
+  color: var(--text-2, #a09eb8);
+}
+[data-theme="dark"] .ai-browser-panel { background: var(--bg-card, #1e1e2e); }
+[data-theme="dark"] .ai-browser-panel__tab,
+[data-theme="dark"] .ai-browser-panel__badge { background: rgba(139, 92, 246, 0.22); }
 
 /* ===== 网页标签布局 ===== */
 .web-tab-layout {

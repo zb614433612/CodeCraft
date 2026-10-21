@@ -77,6 +77,7 @@ a { color: var(--accent); text-decoration: none; }
   stroke-linejoin: round;
 }
 .cc-i--sm { width: 14px; height: 14px; }
+.cc-i--xs { width: 12px; height: 12px; }
 .cc-i--lg { width: 20px; height: 20px; }
 
 /* ============================ 2. 通用原子组件 ============================ */
@@ -891,6 +892,127 @@ html.cc-electron .cc-login { padding-top: 32px; }
 }
 .cc-toolgroup__btn:hover { background: var(--card-2); color: var(--text-1); }
 .cc-toolgroup__btn.is-on { background: var(--accent-lt); color: var(--accent); }
+
+/* ---------------- AI 浏览器入口（多标签可视化） ----------------
+ * 只在真的开了浏览器窗口时出现：没有窗口时不占位，避免「灰按钮看着像坏了」。
+ * 面板是轻量浮层而非弹窗 —— 用户多数时候只是扫一眼地址、必要时把窗口调出来或关掉。
+ * 定位相对 .cc-header（header 已是 flex 容器），右对齐贴在按钮下方。
+ */
+.cc-browser { position: relative; display: flex; align-items: center; }
+.cc-browser__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  transition: background var(--tr), color var(--tr);
+}
+.cc-browser__btn:hover { background: var(--card-2); color: var(--text-1); }
+.cc-browser__btn.is-on { background: var(--accent-lt); color: var(--accent); }
+.cc-browser__btn .cc-i { color: var(--accent); }
+.cc-browser__count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+.cc-browser__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 340px;
+  max-width: 74vw;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--card);
+  box-shadow: var(--shadow-md);
+  z-index: 40;
+  /* 从按钮方向长出来，避免「凭空出现在半空」的割裂感 */
+  transform-origin: top right;
+}
+.cc-browser__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+.cc-browser__list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
+.cc-browser__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-sm);
+}
+.cc-browser__item:hover { background: var(--card-2); }
+.cc-browser__tab {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  background: var(--bg-2);
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+}
+.cc-browser__url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  direction: rtl; /* 长 URL 优先保住域名与路径尾部（右侧更有信息量） */
+  text-align: left;
+}
+.cc-browser__badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  background: var(--accent-lt);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.cc-browser__ops { flex: none; display: flex; align-items: center; gap: 2px; }
+.cc-browser__mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  color: var(--text-3);
+  font-size: 11px;
+  transition: background var(--tr), color var(--tr);
+}
+.cc-browser__mini:hover { background: var(--bg-2); color: var(--text-1); }
+.cc-browser__mini.is-danger:hover { background: var(--danger-lt); color: var(--danger); }
+.cc-browser__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  padding: 5px 4px 1px;
+  border-top: 1px solid var(--border);
+}
+.cc-browser__hint { font-size: 11px; color: var(--text-4); }
 
 /* ============================ 7. 消息流 ============================ */
 .cc-stream {

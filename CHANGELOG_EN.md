@@ -5,6 +5,86 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.7] - 2026-10-21
+
+> Capability expansion release: three abilities that make the model materially better at the job ship together —
+> a project knowledge base (the model reads the project structure and team conventions), browser automation
+> (the model actually operates a web page instead of screenshotting and guessing coordinates), and a rebuilt
+> lesson-retrieval pipeline (past pitfalls actually get recalled). Tool count 27 → 29 with two new tools,
+> `project_map` and `browser`; includes backend, Electron main process and both frontends, so a full reinstall
+> plus a backend restart is required.
+
+### 🗺 Project knowledge base .codecraft/ (new)
+
+- **The problem**: in a new project the model has to grep its way in from zero — a dozen tool calls just to learn where the code lives and what each module does — while team conventions (build commands, no-go zones) sit in old conversations and vanish with the session.
+- **Directory contract**: a new `.codecraft/` at the project root with only four kinds of files — `INDEX.md` (module index, for humans), `map/<slug>.md` (module detail: responsibility + representative symbols + dependents), `rules.md` (team conventions as key-value entries) and `.state.json` (machine state: git head, file fingerprints, stale markers, rule hit counts). The whole directory is gitignored — it is a local session accelerator and must not create diff noise.
+- **Dual mode**: when code files are ≥10% of the tree it runs in **code mode** (cluster modules by file-count thresholds, extract representative symbols per module); below that it switches to **document mode** (file list with a heading outline), so a pure requirements / docs directory works too.
+- **Five actions**: `project_map` exposes `status` (did HEAD move, which modules are stale), `bootstrap` (build or incrementally rebuild), `read` (detail by module or keyword), `annotate` (the model writes a one-line responsibility per module) and `rule` (CRUD for team conventions).
+- **Incremental rebuild**: a second `bootstrap` compares file fingerprints first and **writes nothing when nothing changed** (no rewriting of map / INDEX / state, so no meaningless diffs in the repo); when something did change it rebuilds only the stale modules (file-count change, mtime bump, new files, missing detail page), reuses the previous module state and removes detail pages of vanished modules.
+- **Three injection points** (all in `ProjectContextProvider`, read-only, never auto-creates the directory): ① a resident session summary ≤1100 chars (stack + build commands + module table); ② a ≤120-char module hint appended after a successful file write; ③ `skill.*` project-specific rules ≤800 chars appended when a skill is loaded.
+- **Gated rules**: a 16-entry key-prefix whitelist (`build.` / `style.` / `arch.` / `avoid.` / `flow.` / `domain.` / `link.` / `know.` / `risk.` / `test.` / `deploy.` / `ops.` / `req.` / `doc.` / `skill.`), anything else is rejected; ≤400 chars per entry and ≤60 active rules; `update` without `evidence` inherits the previous evidence and keeps the hit count.
+- **Measured** (CodeCraft itself, 718 files): 30 modules, a 669-char resident summary, 2.7s for a full build; document mode turns 4 requirement docs into a list in 253ms. 19/19 verification cases pass (first build, zero-write second build with all mtimes unchanged, one changed file rebuilds one module, annotations survive the incremental rebuild, rule evidence and hit counts preserved, skill-rule budget truncation).
+
+### 🌐 Browser automation browser (new)
+
+- **Filling a capability gap**: `screen_capture` / `desktop_control` are AWT Robot pixel-level tools (screenshot, then guess coordinates) and `web_fetch` / `web_search` only read text. The DOM-level semantic layer was missing, so web interaction meant counting grid cells.
+- **Transport**: a new `electron/browser-bridge.js` (~900 lines) starts an HTTP server bound to `127.0.0.1` only inside the Electron main process and forwards `{method, params}` straight to `webContents.debugger.sendCommand`. **This is the key trade-off**: `webContents.debugger` already *is* a CDP client, so the Java side only needs one HTTP hop and no WebSocket implementation (~300 lines saved); Playwright / Selenium were rejected because they need an extra browser download that conflicts with the 214MB installer budget.
+- **Handshake discovery**: the bridge writes `<userData>/runtime/browser-bridge.json` (port + token + pid), the Java side probes three candidates (`-Dapp.userdata`, its parent directory, project root) and authenticates with `x-cc-token`; `BrowserBridgeClient` forces `NO_PROXY` for loopback (a global proxy otherwise swallows requests to `127.0.0.1`).
+- **19 actions**: `open` / `navigate` / `snapshot` / `click` / `fill` / `select` / `press` / `hover` / `scroll` / `wait` / `screenshot` / `console` / `eval` / `tab` / `show` / `hide` / `close` / `status` / `list`.
+- **`snapshot` is the token saver**: instead of returning HTML it injects a collector script (`resources/browser/snapshot.js`, ~435 lines) that emits compact text filtered down to interactive, visible, semantically labelled elements — typically 20–60 nodes with `e1..eN` refs, an order of magnitude cheaper than a screenshot, and the model never guesses coordinates.
+- **Traversal and degradation**: recursion into open shadow roots (4 levels) and same-origin iframes (3 levels); iframe elements are tagged `[iframe内]` and their coordinates accumulate **dynamically** from `frameElement` at execution time (snapshot-time values miss, because the host scrolls before the click); for cross-origin iframes the iframe itself is emitted as a placeholder element, so `click ref=e5 rx=0.7 ry=0.3` can tap into it proportionally.
+- **Real events instead of simulated assignment**: `click` uses `Input.dispatchMouseEvent` in two phases (`scrollIntoViewIfNeeded` first, falling back to `el.click()`); `fill` runs `focus` + `select` + `Input.insertText` and verifies `value`, falling back to the native setter plus `input` / `change` events; `press` uses `dispatchKeyEvent` rather than `insertText` (the latter fires no keydown, so sites never receive the Enter submit).
+- **Multiple tabs**: each tab is a separate window within the same conversation, sharing one session partition (login state keyed by project root); `/cdp`, `/show`, `/close` and `/events` all accept `tabId`; event cursors are namespaced `conversationId::tabId`, otherwise a new tab's errors get swallowed by the old tab's cursor.
+- **Permissions and safety**: new `OperationCategory.BROWSER` with `@ToolPermission(highRisk = true)` — first approval, then the existing session-level approve-all; `snapshot` / `status` / `list` / `console` / `wait` / `screenshot` and `tab op=list` implement `SideEffectFreePreflight` and skip approval. Five safety rails stay: password values are always emitted as `***`, only http/https is allowed (`file:` would bypass `PathSecurityChecker`), downloads default to deny, `eval` is refused unless explicitly enabled, and everything is audited.
+
+### 🖥 Browser session visibility (both frontends)
+
+- New `BrowserSessionController` with three endpoints: `GET /api/browser/sessions` (tab list + active tab + availability), `POST .../show` (show/hide) and `POST .../close` (one or all); when the bridge is unavailable it reports `available=false` instead of erroring.
+- v3: a globe entry in the chat header (rendered only when tabs exist — a permanent empty button reads as broken) plus a dropdown panel (tab list / show / close / close all).
+- Classic frontend: an `.ai-browser-bar` status strip at the top of the chat area plus an expandable panel, in normal flow so it never covers messages, with dark-theme support.
+- Polling: every 4 seconds, only while the current conversation has tabs, stopping when the count hits zero, skipped on non-`/chat` routes; a `tool_call_start` mentioning `browser` refreshes immediately instead of waiting for the next tick.
+
+### 🔎 Lesson-retrieval rebuild
+
+- **Diagnose before touching**: the whole pipeline (`doSearch` → exact-code / fuzzy recall → param filter → sort → render) was read end to end first, which surfaced four structural defects rather than a list of local tweaks.
+- **Defect 1 — environment compatibility outranked relevance**. `sortByEnvCompat` used environment match (a 3-value discrete score) as the final sort key, so a same-environment but totally unrelated lesson beat a different-environment but highly relevant one. Replaced with a **weighted total**: exact error code 3.0 / params match 2.0 / relevance 2.5 / env compat 0.8 / historical effectiveness 0.5 / same project 0.4 / freshness 0.3 / hit volume 0.2 — env drops from veto to a light bonus.
+- **Defect 2 — five fields weighted equally, no term suppression**. `countMatchedWords` treated symptom / root_cause / solution / keywords / goal identically, so high-frequency words like `失败` / `error` dragged in irrelevant rows. Now **field weight × IDF × coverage**: symptom 3.0 / keywords 2.5 / goal 2.0 / root_cause 1.5 / solution 1.0; IDF is computed over the **candidate set** (usually 1–20 rows, zero extra SQL, suppression on par with corpus-wide IDF).
+- **Defect 3 — no synonym expansion on the query side**. A Chinese symptom never matched an English lesson (`端口占用` vs `address already in use`). Added `QueryAliasExpander` with ~50 hand-curated alias groups in `application.yml`, applied after tokenization; a curated table rather than LLM generation keeps expansion reproducible and A/B-able.
+- **Defect 4 — an exact-code hit short-circuited everything**. One match stopped the search, leaving fewer than Top3 results with no top-up. Now, when exact hits < 3, a fuzzy pass runs on the leading symptom terms and results are merged by id.
+- **Explainability**: `LessonRanker` emits `reasons` and every result carries a why-it-matched line (up to 4 items such as exact error code, 3 symptom terms matched, params aligned) so the model can judge applicability.
+- **Rollback**: setting `lesson.ranker.enabled` / `lesson.query-alias.enabled` to false restores the previous behaviour exactly.
+- **Measured**: on the comparison set the order moved from `[502, 503, 501]` to `[501, 502, 503]`; sorting 20 candidates < 3ms, 200 candidates < 30ms, 20 candidates × 60k-char solutions < 20ms; 30/30 verification cases pass.
+
+### 🧩 Tool registration and prompts
+
+- Tool count 27 → 29: `project_map` (`@ToolPermission(category = READ, isPathSensitive = true)`) and `browser` (`BROWSER` / `highRisk`); `OperationCategory` gains `BROWSER` and `ToolRegistryController` gains the Chinese category label.
+- `application.yml` gains two blocks: `codecraft.project-context.*` (~30 keys: injection budgets, scan limits, module thresholds, injection switches) and `codecraft.browser.*` (host allowlist, viewport, timeouts, screenshot, console event cap).
+- `prompts/code_agent_prompt.txt` gains project-knowledge-base and browser-automation sections plus their tool whitelists; `deepseek.tool-groups` gets `project_map` / `browser`; the lesson section gains the why-it-matched-must-be-read convention.
+- `docs/TOOL_SYSTEM.md` gains 8.6 browser automation, 8.7 project knowledge base and 8.5.4 lesson ranking; `docs/LESSON_GROWTH_OPTIMIZATION.md` gains 5.5.4; README / ARCHITECTURE / MCP_SYSTEM / BUILD_AND_RUN are synced for tool count and directory tree.
+
+### 🩹 Review-stage corrections
+
+- `BrowserBridgeClient.handshakeCandidates()` grows from 2 to 3 candidates (adding the `-Dapp.userdata` parent directory), fixing the dev-mode mismatch where the bridge wrote `<project root>/runtime/` while Java looked in `<target>/runtime/`; packaged mode is unaffected.
+- `ProjectMapService.rule()` now distinguishes `evidenceGiven` / `evidenceInherited`, fixing the wrong inherited-the-previous-evidence message when the model supplied its own evidence.
+- `ProjectMapTool`'s `module` / `op` descriptions corrected to the real required relations; `BrowserTool`'s `ref` description corrected to required for click / fill / select / hover and optional for scroll.
+- `application.yml` gains the two previously undeclared keys `budget-doc-list` and `doc-mode-code-ratio`; the handshake-file comment now documents the dev/packaged paths and the Java three-candidate probe order.
+
+### 🔢 Version sync
+
+- Backend: `3.0.6` → `3.0.7` (`pom.xml`, artifact `code-craft-3.0.7.jar`)
+- Classic frontend: `3.0.6` → `3.0.7` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.6` → `3.0.7` (`frontend-v3/package.json` + lock)
+- Electron: version and the `extraResources` jar path → `3.0.7` / `code-craft-3.0.7.jar`
+- MCP Server handshake version: `3.0.6` → `3.0.7` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, version and updated-date headers in ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN), packaging examples in DEV_QUICKREF / RELEASE_CHECKLIST(_EN) and the FAQ version sample, all synced to v3.0.7
+
+### ⬆️ Upgrade notes
+
+- This release **changes the backend and the Electron main process**: swapping the static frontend files is not enough — reinstall over the previous version. After installing, **fully quit and relaunch the client** (`Ctrl+R` cannot load `browser-bridge.js`) and let the backend restart with it.
+- The first `browser` call spawns the controlled browser window automatically; if `action=status` reports client-not-detected, you are either on plain web access or the backend was not restarted.
+- The project knowledge base is **never created automatically**: the model must call `project_map action=bootstrap` (or you can simply ask it to index the project first). Once built, `.codecraft/` appears at the project root and is gitignored by default.
+- Both lesson-retrieval switches default to on; if the ordering ever looks off, set `lesson.ranker.enabled` / `lesson.query-alias.enabled` to `false` in `application.yml` to restore the old behaviour.
+
 ## [3.0.6] - 2026-10-20
 
 > Stability release: three defects that hurt the most when they break (expired login that never

@@ -33,6 +33,11 @@ public class ToolContext {
      */
     private static final ThreadLocal<List<Long>> currentInjectUserFileAssetIds = new ThreadLocal<>();
     /**
+     * M5：注入图片的来源（desktop / browser），决定注入文案措辞。
+     * 未设置时按 desktop 处理，兼容既有桌面截图链路。
+     */
+    private static final ThreadLocal<String> currentInjectKind = new ThreadLocal<>();
+    /**
      * ★ 修复（P0 工具授权）：当前请求允许的工具集（= Agent 授权列表 tool_names；技能不再扩展授权）。
      * 由 DeepSeekServiceImpl 在工具执行前从 apiRequest._allowedToolNames 同步，
      * 供 ToolExecutor 在执行每个工具调用前做「授权白名单」校验。
@@ -170,6 +175,42 @@ public class ToolContext {
     }
 
     /**
+     * 标记本次注入图片的来源（决定注入文案的措辞）。
+     *
+     * <p>目前两种来源：</p>
+     * <ul>
+     *   <li>{@code desktop}（默认）—— screen_capture 桌面截图，文案需带「10×10 网格 + 0~1000
+     *       归一化坐标」协议说明，因为模型要靠它换算 desktop_control 的坐标</li>
+     *   <li>{@code browser} —— browser screenshot 网页截图，<b>没有</b>坐标网格，
+     *       文案不能提坐标协议，否则会误导模型去数格子</li>
+     * </ul>
+     * <p>同一次工具调用中只记最后一次设置的值（一次调用只会产出一类截图）。</p>
+     */
+    public static void setInjectKind(String kind) {
+        if (kind == null || kind.isBlank()) {
+            currentInjectKind.remove();
+            return;
+        }
+        currentInjectKind.set(kind.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    /**
+     * 读取并清空注入来源标记（ToolExecutor 在单个工具执行完成后调用）。
+     *
+     * @return 来源标识；未设置时返回 {@code desktop}（兼容旧行为）
+     */
+    public static String consumeInjectKind() {
+        String kind = currentInjectKind.get();
+        currentInjectKind.remove();
+        return kind == null || kind.isBlank() ? "desktop" : kind;
+    }
+
+    /** 防御性清理注入来源标记（工具异常/早退分支调用） */
+    public static void clearInjectKind() {
+        currentInjectKind.remove();
+    }
+
+    /**
      * M5：读取并清空注入文件资产ID列表（ToolExecutor 在单个工具执行完成后调用；读取即清空）。
      *
      * @return 待注入资产ID列表；无登记时为空列表（不为 null）
@@ -185,6 +226,7 @@ public class ToolContext {
      */
     public static void clearInjectUserFileAssetIds() {
         currentInjectUserFileAssetIds.remove();
+        currentInjectKind.remove();
     }
 
     public static void clear() {
@@ -199,6 +241,7 @@ public class ToolContext {
         currentTrustChain.remove();
         currentTaskId.remove();
         currentInjectUserFileAssetIds.remove();
+        currentInjectKind.remove();
         currentAllowedTools.remove();
     }
 }

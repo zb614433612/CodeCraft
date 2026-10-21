@@ -2,7 +2,7 @@
 # CodeCraft - AI-Powered Desktop Programming Assistant 🤖
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0.6-7C5CFC" alt="v3.0.6">
+  <img src="https://img.shields.io/badge/version-3.0.7-7C5CFC" alt="v3.0.7">
   <img src="https://img.shields.io/badge/Java-17-brightgreen" alt="Java 17">
   <img src="https://img.shields.io/badge/Spring_Boot-3.4-blue" alt="Spring Boot 3.4">
   <img src="https://img.shields.io/badge/Vue-3.4-42b883" alt="Vue 3.4">
@@ -12,7 +12,7 @@
 
 ## 📖 Project Overview
 
-**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / GPT / OpenAI-compatible / Anthropic / Qwen / Volcengine Ark / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **27 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
+**CodeCraft** is a desktop intelligent programming assistant powered by **multiple LLMs** (DeepSeek / GPT / OpenAI-compatible / Anthropic / Qwen / Volcengine Ark / Ollama / MiMo / MiniMax, etc.). Users interact with AI through a chat interface, and AI automatically invokes **29 tools** (file operations, command execution, network requests, database queries, Git version control, agent collaboration, skill & lesson management, desktop automation, etc.) to complete programming tasks. It supports sub-agent parallel collaboration, dynamic LLM Provider switching, and Agent-level Provider binding.
 
 **Core features:**
 - 🌐 **Multi-LLM Provider Support**: 10 provider templates — DeepSeek, GPT (OpenAI official), OpenAI (protocol contract), Anthropic (protocol contract), Qwen (Alibaba Model Studio), Volcengine Ark (Doubao), Ollama, MiMo, MiniMax, and Custom — with a unified LLMClient interface and runtime dynamic switching. **OpenAI / Anthropic are protocol-contract templates**: any service that follows the spec (Azure, OpenRouter, proxies, vLLM / LM Studio / One-API gateways, GLM / DeepSeek / MiniMax `/anthropic` layers) plugs in directly, with automatic protocol conversion (Anthropic `image_url → image/source`, tool schema translation). Dedicated templates (GPT / DeepSeek / Ark / Qwen) enable vendor-specific parameters (`reasoning_effort` / `thinking.type` / `enable_thinking`, `max_completion_tokens`, vision, web search). Enhanced capabilities are opt-in, skipped when credentials are missing, and always fall back: search (DeepSeek official, Ark, MiniMax) and balance/quota (DeepSeek, Volcengine AK/SK, Alibaba Cloud AK/SK, MiniMax quota, MiMo console cookie)
@@ -87,7 +87,7 @@ CodeCraft
 │   ├── service/agentinvoke/        # Agent-to-Agent Invocation (delegation/trust chain)
 │   ├── service/dbconnection/       # External DB connections (config/AES-GCM/manager)
 │   └── service/files/          # File Assets & Files API adapter (vision pipeline)
-│   ├── tool/                       # AI Agent Tools (27 tools)
+│   ├── tool/                       # AI Agent Tools (29 tools)
 │   ├── p2p/                        # ⚡ P2P Remote Collaboration
 │   │   ├── agent/                  # P2pAgentService, Handlers
 │   │   ├── connection/             # Netty Server/Client, ConnectionPool

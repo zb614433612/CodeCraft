@@ -6,6 +6,9 @@ const http = require('http')
 const net = require('net')
 // 自动更新管理器（检测 GitHub Releases / 下载 / 安装 / 升级前备份）
 const { initUpdateManager } = require('./update-manager')
+// AI 浏览器桥：把 webContents.debugger（就是 CDP 客户端）暴露给后端 Java，
+// 让模型能做 DOM 级网页操作，而不是靠截图 + 猜坐标
+const { initBrowserBridge, stopBrowserBridge } = require('./browser-bridge')
 
 const DEV_MODE = process.env.DEV_MODE === 'true'
 
@@ -1430,6 +1433,12 @@ function createWindow() {
   mainWindow.on('closed', () => {
     clearTimeout(forceShowTimer)
     mainWindow = null
+    // Windows / Linux：关闭主窗口就是「退出应用」的意图，顺带收掉 AI 浏览器窗口，
+    // 否则任务栏会残留一个孤立的网页窗口，用户不知道它属于谁。
+    // macOS 不走这里（关主窗口只是收起来，Cmd+Q 才真退出）——保留浏览器窗口是合理的。
+    if (!IS_MAC) {
+      try { stopBrowserBridge() } catch { /* 已停过就忽略 */ }
+    }
   })
 }
 /**
@@ -1693,6 +1702,36 @@ app.whenReady().then(() => {
     // 安装前先停后端：释放数据库文件句柄，保证备份一致且安装不被占用
     beforeInstall: stopBackendForUpdate
   })
+
+  // ── AI 浏览器桥 ────────────────────────────────────────────────
+  // 起一个只绑 127.0.0.1 的极小 HTTP 服务（端口由系统分配），把后端 Java 的请求
+  // 转成 webContents.debugger.sendCommand —— 即 CDP 调用，零额外依赖、零额外体积。
+  //
+  // 握手文件落点必须与 Java 侧算法一致：
+  //   打包 → app.getPath('userData')/runtime/browser-bridge.json（Java 从 -Dapp.userdata 拿同一路径）
+  //   dev  → <项目根>/runtime/browser-bridge.json（Java 在 IDE 里跑时 user.dir 就是项目根）
+  // 注意 dev 下不能写 process.cwd()：Electron 从 electron/ 目录启动时 cwd 不稳定。
+  //
+  // 失败只打日志不阻断启动：浏览器工具会自行报「需在桌面客户端中运行」。
+  const bridgeDataDir = app.isPackaged ? app.getPath('userData') : path.resolve(__dirname, '..')
+  initBrowserBridge({
+    userDataDir: bridgeDataDir,
+    // 以下三项独立于后端 application.yml（Electron 侧不读 Java 配置）：
+    // 4 个窗口已能覆盖多会话并行，再多就是白烧内存（单个窗口约 100~200MB）
+    maxWindows: 4,
+    // 单会话最多 4 个标签（每个标签一个窗口）：够「一个查资料 + 一个填表单」这类并行场景，
+    // 再多窗口会糊满任务栏，用户反而找不到 AI 在操作哪个
+    maxTabsPerConversation: 4,
+    // 空闲 10 分钟回收窗口，但 partition 带 persist: 前缀 → cookie 留盘，重开仍是登录态
+    idleMinutes: 10,
+    // 下载默认拦截：AI 误点「下载全部附件」能把磁盘写满，且下载的文件模型也读不到
+    allowDownloads: false,
+    // 默认可见：这是「操作可审计」的产品定位，模型干了什么用户应该看得见
+    defaultShow: true
+  }).catch((e) => {
+    console.warn('[browser-bridge] 初始化失败，浏览器工具将不可用:', e && e.message)
+  })
+
   start()
 })
 
@@ -1711,8 +1750,10 @@ function handleActivate () {
   // ② 启动流程进行中：它自己会创建窗口，这里不打断
   if (starting) return
   // ③ 忽略启动画面窗口：splash 存在不代表有可用主界面（不能因此跳过重建）
+  // ④ 忽略 AI 浏览器窗口：它是工具打开的独立窗口（win.__ccBrowser 标记），
+  //    若把它当成主窗口来 show/focus，用户点 Dock/任务栏会得到一个网页窗口而不是 CodeCraft 主界面
   const otherWindows = BrowserWindow.getAllWindows()
-    .filter((w) => !w.isDestroyed() && w !== splashWindow)
+    .filter((w) => !w.isDestroyed() && w !== splashWindow && !w.__ccBrowser)
   if (otherWindows.length > 0) {
     const win = otherWindows[0]
     if (win.isMinimized()) win.restore()
@@ -1758,6 +1799,9 @@ app.on('before-quit', () => {
     splashWindow.destroy()
   }
   splashWindow = null
+  // 收掉 AI 浏览器窗口 + 停本地服务 + 删握手文件
+  // （删文件很关键：否则下次启动 Java 可能读到上一个进程的过期端口，一直连不上）
+  try { stopBrowserBridge() } catch { /* 已停过就忽略 */ }
   removeFirewallRules()
   // 真正退出（Cmd+Q / 菜单退出 / app.quit()）时才停止后端进程
   stopBackend()

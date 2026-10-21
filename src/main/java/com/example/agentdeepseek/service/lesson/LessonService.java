@@ -68,17 +68,24 @@ public class LessonService {
     private final LessonNormalizerService normalizerService;
     /** P2：规则自学习表（看板统计候选/转正数 + 惰性淘汰） */
     private final LessonRuleMapper ruleMapper;
+    /** P0-1：检索排序器（相关度优先的加权总分；关闭时回退旧的环境兼容排序） */
+    private final LessonRanker ranker;
+    /** P0-2：查询侧同义扩展（中文描述 ↔ 英文报错的跨语言召回） */
+    private final QueryAliasExpander aliasExpander;
     /** P2：规则表容量上限（超限时淘汰「候选+从未被提取命中」的最旧规则；替代时间淘汰） */
     @org.springframework.beans.factory.annotation.Value("${lesson.rule.max-size:10000}")
     private long ruleMaxSize;
 
     public LessonService(LessonMapper lessonMapper, FailureNormalizer normalizer, ObjectMapper objectMapper,
-                         LessonNormalizerService normalizerService, LessonRuleMapper ruleMapper) {
+                         LessonNormalizerService normalizerService, LessonRuleMapper ruleMapper,
+                         LessonRanker ranker, QueryAliasExpander aliasExpander) {
         this.lessonMapper = lessonMapper;
         this.normalizer = normalizer;
         this.objectMapper = objectMapper;
         this.normalizerService = normalizerService;
         this.ruleMapper = ruleMapper;
+        this.ranker = ranker;
+        this.aliasExpander = aliasExpander;
     }
 
     // ============================================================
@@ -348,11 +355,15 @@ public class LessonService {
             // 若参数过滤后为空：保留原候选展示（宽松策略——参数不符不淘汰，交由 LLM 结合「适用条件」判断）
         }
 
-        // 第三级：模糊兜底（P0：多词 OR；kw 为空时用原始 error_code 文本兜底，不再直接「未找到」）
-        if (candidates.isEmpty() && !Lesson.TYPE_DETOUR.equals(effType)) {
+        // 第三级：模糊兜底 + 补足
+        // P0：多词 OR；kw 为空时用原始 error_code 文本兜底，不再直接「未找到」
+        // P1-1：精确码命中不足 Top-K 时也要补跑模糊——旧实现只在精确命中为 0 才补，
+        //       导致「只命中 1 条」时结果集里永远排不出第 2、3 名备选（漏斗漏点）
+        if (!Lesson.TYPE_DETOUR.equals(effType) && candidates.size() < RESULT_TOP_K) {
             String fuzzyKw = kw != null ? kw : rawCode;
             if (fuzzyKw != null) {
-                candidates = fuzzySearch(projectKey, tool, fuzzyKw, effType, FUZZY_SEARCH_LIMIT);
+                candidates = mergeById(candidates,
+                        fuzzySearch(projectKey, tool, fuzzyKw, effType, FUZZY_SEARCH_LIMIT));
             }
         }
 
@@ -363,11 +374,12 @@ public class LessonService {
                     + "  3. 这是新坑的话，可用 lesson action=record 记录，后续遇到就能查到", List.of());
         }
 
-        // P2：环境兼容排序（同 os/通用经验优先，异环境经验降权）后截取 Top-K
-        sortByEnvCompat(candidates);
-        List<Lesson> top = candidates.subList(0, Math.min(candidates.size(), RESULT_TOP_K));
-        for (Lesson l : top) {
-            lessonMapper.incrementHitCount(l.getId(), LocalDateTime.now());
+        // P0-1：相关度优先的加权总分排序（环境兼容从「一票否决」降为轻量加分项）后截取 Top-K
+        List<LessonRanker.RankedLesson> ranked = rankCandidates(candidates,
+                buildRankContext(exactCode, rawCode, kw, paramsJson, projectKey));
+        List<LessonRanker.RankedLesson> top = ranked.subList(0, Math.min(ranked.size(), RESULT_TOP_K));
+        for (LessonRanker.RankedLesson item : top) {
+            lessonMapper.incrementHitCount(item.lesson.getId(), LocalDateTime.now());
         }
         String text = buildResultText(top);
         if (!collectHits) {
@@ -375,13 +387,79 @@ public class LessonService {
         }
         // P1-D：收集命中引用（仅「有可用解法」条目——与 F3 SOLUTION 追踪语义一致）
         List<SearchHitTrack> hits = new ArrayList<>();
-        for (Lesson l : top) {
+        for (LessonRanker.RankedLesson item : top) {
+            Lesson l = item.lesson;
             if (l.hasUsableSolution()) {
                 hits.add(new SearchHitTrack(l.getId(), crossProjectSignature(l),
                         nz(l.getSuccessCount()), nz(l.getFailCount())));
             }
         }
         return new SearchOutcome(text, hits);
+    }
+
+    /**
+     * P0-1：构造排序入参（检索侧查询画像）。
+     *
+     * <p>code 候选集同时包含「归一化码」与「原始码」：LLM 有时直接传库内短码字面，
+     * 归一化字典不认短码，两个形态都参与精确命中判定才不会漏掉强信号。
+     * 长报错原文（&gt;80 字符）不参与比较——它永远不等于库内短码。</p>
+     */
+    private LessonRanker.RankContext buildRankContext(String exactCode, String rawCode, String keyword,
+                                                      String paramsJson, String projectKey) {
+        Set<String> codes = new LinkedHashSet<>();
+        if (exactCode != null && !exactCode.isBlank()) {
+            codes.add(exactCode);
+        }
+        if (rawCode != null && !rawCode.isBlank() && rawCode.length() <= 80) {
+            codes.add(rawCode);
+        }
+        return new LessonRanker.RankContext(
+                codes,
+                queryWordsOf(keyword != null ? keyword : rawCode),
+                parseParams(paramsJson),
+                detectOs(),
+                projectKey);
+    }
+
+    /**
+     * P0-1：统一排序出口。
+     *
+     * <p>{@code lesson.ranker.enabled=false} 时回退旧的「环境兼容排序」，
+     * 保证新排序出问题可以配置回滚，也方便做改前/改后 A/B 对比。</p>
+     */
+    private List<LessonRanker.RankedLesson> rankCandidates(List<Lesson> candidates, LessonRanker.RankContext ctx) {
+        if (ranker != null && ranker.isEnabled()) {
+            return ranker.rank(candidates, ctx);
+        }
+        sortByEnvCompat(candidates);
+        List<LessonRanker.RankedLesson> fallback = new ArrayList<>(candidates.size());
+        for (Lesson lesson : candidates) {
+            fallback.add(new LessonRanker.RankedLesson(lesson, 0, 0, List.of()));
+        }
+        return fallback;
+    }
+
+    /** P1-1：按 id 合并去重（精确命中在前、模糊补充在后，保持先来顺序） */
+    private List<Lesson> mergeById(List<Lesson> primary, List<Lesson> extra) {
+        if (extra == null || extra.isEmpty()) {
+            return primary;
+        }
+        if (primary == null || primary.isEmpty()) {
+            return extra;
+        }
+        Set<Long> seen = new LinkedHashSet<>();
+        List<Lesson> merged = new ArrayList<>(primary.size() + extra.size());
+        for (Lesson lesson : primary) {
+            if (lesson.getId() != null && seen.add(lesson.getId())) {
+                merged.add(lesson);
+            }
+        }
+        for (Lesson lesson : extra) {
+            if (lesson.getId() != null && seen.add(lesson.getId())) {
+                merged.add(lesson);
+            }
+        }
+        return merged;
     }
 
     /**
@@ -412,25 +490,9 @@ public class LessonService {
     }
 
     private Map<String, String> parseParams(String paramsJson) {
-        Map<String, String> result = new HashMap<>();
-        if (paramsJson == null || paramsJson.isBlank() || "[]".equals(paramsJson)) {
-            return result;
-        }
-        try {
-            JsonNode array = objectMapper.readTree(paramsJson);
-            if (array != null && array.isArray()) {
-                for (JsonNode node : array) {
-                    String name = node.path("name").asText("");
-                    String value = node.path("value").asText("");
-                    if (!name.isEmpty()) {
-                        result.put(name, value);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.debug("解析 params_json 失败: {}", e.getMessage());
-        }
-        return result;
+        // P0-1：解析实现下沉到 LessonParams，与检索排序器共用同一口径
+        // （参数过滤判「淘汰」，排序打分判「一致」，两处必须是同一份解析结果）
+        return LessonParams.parse(paramsJson, objectMapper);
     }
 
     /**
@@ -503,7 +565,7 @@ public class LessonService {
      * 全链路大小写不敏感（SQL LOWER + 此处小写比对）；词内通配符已转义。
      */
     private List<Lesson> fuzzySearch(String projectKey, String toolName, String rawText, String type, int limit) {
-        List<String> words = splitFuzzyKeywords(rawText);
+        List<String> words = queryWordsOf(rawText);
         if (words.isEmpty()) {
             return List.of();
         }
@@ -517,6 +579,15 @@ public class LessonService {
             hits.sort(Comparator.comparingInt((Lesson l) -> -countMatchedWords(l, words)));
         }
         return hits;
+    }
+
+    /**
+     * P0-2：检索词 = 拆词 + 同义扩展（两层都在 SQL 之前完成）。
+     * 拆词解决「长句整串 LIKE 必然失配」，扩展解决「中英术语不重合导致完全查不到」。
+     */
+    private List<String> queryWordsOf(String rawText) {
+        List<String> base = splitFuzzyKeywords(rawText);
+        return aliasExpander == null ? base : aliasExpander.expand(base, rawText);
     }
 
     /**
@@ -733,19 +804,27 @@ public class LessonService {
         return 0;
     }
 
-    private String buildResultText(List<Lesson> lessons) {
+    private String buildResultText(List<LessonRanker.RankedLesson> rankedLessons) {
         StringBuilder sb = new StringBuilder();
-        sb.append("📚 踩坑经验命中 ").append(lessons.size()).append(" 条（来自经验库，供参考）:\n");
-        for (int i = 0; i < lessons.size(); i++) {
-            Lesson l = lessons.get(i);
-            int total = l.getSuccessCount() + l.getFailCount();
-            String verified = l.getStatus() == Lesson.STATUS_ACTIVE
+        sb.append("📚 踩坑经验命中 ").append(rankedLessons.size()).append(" 条（来自经验库，供参考）:\n");
+        for (int i = 0; i < rankedLessons.size(); i++) {
+            LessonRanker.RankedLesson item = rankedLessons.get(i);
+            Lesson l = item.lesson;
+            int success = nz(l.getSuccessCount());
+            int total = success + nz(l.getFailCount());
+            Integer status = l.getStatus();
+            String verified = status != null && status == Lesson.STATUS_ACTIVE
                     ? "✅已验证" : (total > 0 ? "⏳验证中" : "🆕新记录");
             sb.append("━━━━━━━━━━━━━━━━━━━━━━\n");
             sb.append("[").append(i + 1).append("] [").append(l.getErrorCategory()).append("] ")
                     .append(l.getErrorCode()).append(" (ID:").append(l.getId()).append(", ")
                     .append(verified).append(", 命中").append(l.getHitCount())
-                    .append("次, 有效").append(l.getSuccessCount()).append("/").append(total).append(")\n");
+                    .append("次, 有效").append(success).append("/").append(total).append(")\n");
+            // P1-2：命中原因透出——让模型知道「为什么这条排在这个位置」，
+            // 避免把「仅靠 2-gram 弱相关」或「异环境」的经验当成适用解法照抄
+            if (!item.reasons.isEmpty()) {
+                sb.append("  为何召回: ").append(String.join(" | ", item.reasons)).append("\n");
+            }
             if (l.getSymptom() != null && !l.getSymptom().isBlank()) {
                 sb.append("  现象: ").append(l.getSymptom()).append("\n");
             }
@@ -936,13 +1015,17 @@ public class LessonService {
         if (candidates.isEmpty()) {
             return List.of();
         }
-        // P2：环境兼容排序（同 os/通用经验优先，异环境经验降权）——F1 双通道遍历前
-        sortByEnvCompat(candidates);
+        // P0-1：与主动检索走同一套排序（相关度优先，环境兼容只作加分项）。
+        // 旧实现按环境兼容排序取首条，会把「同环境的弱相关条目」推到「异环境的同一个坑」之前，
+        // 被动提示场景下这个错误代价更高——模型会照着不相关的经验去修。
+        List<LessonRanker.RankedLesson> ranked = rankCandidates(candidates,
+                buildRankContext(null, code, symptom, paramsJson, projectKey));
 
         // F1 双通道：解法提示 + 补全引导（两者互斥取不同记录）
         Lesson solutionHint = null;
         Lesson draftHint = null;
-        for (Lesson l : candidates) {
+        for (LessonRanker.RankedLesson item : ranked) {
+            Lesson l = item.lesson;
             if (solutionHint == null && l.hasUsableSolution()) {
                 solutionHint = l;
             } else if (draftHint == null && !l.hasUsableSolution()) {

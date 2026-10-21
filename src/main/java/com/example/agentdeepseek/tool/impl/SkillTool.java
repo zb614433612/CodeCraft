@@ -1,11 +1,13 @@
 package com.example.agentdeepseek.tool.impl;
 
 import com.example.agentdeepseek.model.entity.Skill;
+import com.example.agentdeepseek.projectcontext.ProjectContextProvider;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.tool.Tool;
 import com.example.agentdeepseek.tool.ToolRegistry;
 import com.example.agentdeepseek.tool.permission.OperationCategory;
 import com.example.agentdeepseek.tool.permission.ToolPermission;
+import com.example.agentdeepseek.util.ProjectRootContext;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,13 +35,16 @@ public class SkillTool implements Tool {
     private final SkillService skillService;
     private final ToolRegistry toolRegistry;
     private final JdbcTemplate jdbcTemplate;
+    /** 项目知识库注入层：加载技能时附带该项目特有的规则片段（只读，不创建目录） */
+    private final ProjectContextProvider projectContextProvider;
 
     public SkillTool(ObjectMapper objectMapper, SkillService skillService, ToolRegistry toolRegistry,
-                     JdbcTemplate jdbcTemplate) {
+                     JdbcTemplate jdbcTemplate, ProjectContextProvider projectContextProvider) {
         this.objectMapper = objectMapper;
         this.skillService = skillService;
         this.toolRegistry = toolRegistry;
         this.jdbcTemplate = jdbcTemplate;
+        this.projectContextProvider = projectContextProvider;
     }
 
     @Override
@@ -439,9 +444,29 @@ public class SkillTool implements Tool {
         sb.append("\n--- 使用说明（请严格按此执行） ---\n");
         sb.append(skill.getInstructions() == null || skill.getInstructions().isBlank()
                 ? "（该技能未提供详细使用说明，请依据描述与常识执行）" : skill.getInstructions());
+        // 项目特有规则片段：技能本身是跨项目通用的流程，而「在这个项目里执行它还要注意什么」
+        // 属于项目知识，写在 .codecraft/rules.md 里、只在此处加载，不污染技能本身
+        appendProjectRules(sb, skill);
         sb.append("\n\n【提示】按上述说明执行完毕后，请调用 skill action=report（skill_id=")
                 .append(skill.getId()).append(", success=true/false）反馈结果，以更新技能置信度。");
         return sb.toString();
+    }
+
+    /**
+     * 把 {@code .codecraft/rules.md} 里与本技能相关的条目追加到加载结果。
+     * <p>失败一律静默：知识库不存在是常态，不该让技能加载因它报错。</p>
+     */
+    private void appendProjectRules(StringBuilder sb, Skill skill) {
+        try {
+            String rules = projectContextProvider.skillRuleHint(ProjectRootContext.get(),
+                    skill.getName(), skill.getId() == null ? 0L : skill.getId());
+            if (rules != null && !rules.isBlank()) {
+                sb.append("\n\n--- 本项目专属规则（来自 .codecraft/rules.md，与上面说明冲突时以本节为准） ---\n");
+                sb.append(rules);
+            }
+        } catch (RuntimeException e) {
+            log.debug("追加项目规则片段失败: skill={} - {}", skill.getName(), e.getMessage());
+        }
     }
 
     // ============================================================

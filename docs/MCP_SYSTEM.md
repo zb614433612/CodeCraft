@@ -13,7 +13,7 @@ MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的�
 | 方向 | 含义 | 价值 |
 |------|------|------|
 | **MCP Client** | CodeCraft 作为客户端，连接外部 MCP Server（GitHub、数据库、浏览器自动化等），将外部工具拉取进现有 ToolRegistry | 让 DeepSeek/OpenAI 等模型直接调用海量 MCP 生态工具，无需逐个手写 |
-| **MCP Server** | CodeCraft 作为服务端，把内置 27 个工具（文件/Git/命令/搜索等）暴露为 MCP 服务 | 让 Claude Desktop、Cursor 等 MCP 客户端连接 CodeCraft，复用其工具能力 |
+| **MCP Server** | CodeCraft 作为服务端，把内置 29 个工具（文件/Git/命令/搜索等）暴露为 MCP 服务 | 让 Claude Desktop、Cursor 等 MCP 客户端连接 CodeCraft，复用其工具能力 |
 
 ---
 

@@ -35,6 +35,7 @@ import com.example.agentdeepseek.service.lesson.LessonService;
 import com.example.agentdeepseek.service.lesson.LessonReviewService;
 import com.example.agentdeepseek.service.lesson.LessonDetourService;
 import com.example.agentdeepseek.service.lesson.DetourBlockParser;
+import com.example.agentdeepseek.projectcontext.ProjectContextProvider;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.example.agentdeepseek.tool.ExecutionTokenManager;
 import com.example.agentdeepseek.tool.PermissionContext;
@@ -193,6 +194,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     @Autowired
     private DetourBlockParser detourBlockParser;
+
+    /**
+     * 项目知识库注入：读 .codecraft/INDEX.md 摘要作为本轮系统消息。
+     * 只读不写——目录不存在时本组件不做任何事（建库只能由模型显式调用 project_map action=bootstrap）。
+     */
+    @Autowired
+    private ProjectContextProvider projectContextProvider;
 
     // 常量定义
     private static final String DATA_PREFIX = "data: ";
@@ -1003,6 +1011,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     break;
                 }
             }
+        }
+
+        // 注入项目知识库摘要（.codecraft/INDEX.md，只读；目录不存在时什么都不做）
+        // 放在语言指令之前：语言指令优先级最高，必须保持最靠近响应位置
+        try {
+            projectContextProvider.injectBootstrap(historyMessages, ProjectRootContext.get());
+        } catch (RuntimeException e) {
+            log.warn("项目知识库注入失败（已跳过，不影响主链路）: {}", e.getMessage());
         }
 
         // 注入语言强制指令到消息列表末尾（靠近响应位置，优先级最高）
@@ -3849,11 +3865,18 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             List<ToolExecutor.ToolCallResult> results,
                                             Long storageConversationId,
                                             Map<String, Object> apiRequest) {
-        // 收集全部待注入资产ID
+        // 收集全部待注入资产ID（同时记录来源：桌面截图带坐标协议，网页截图不带）
         List<Long> assetIds = new ArrayList<>();
+        boolean anyBrowserShot = false;
+        boolean anyDesktopShot = false;
         for (ToolExecutor.ToolCallResult result : results) {
             if (result.hasInjections()) {
                 assetIds.addAll(result.getInjectUserFileAssetIds());
+                if ("browser".equalsIgnoreCase(result.getInjectKind())) {
+                    anyBrowserShot = true;
+                } else {
+                    anyDesktopShot = true;
+                }
             }
         }
         if (assetIds.isEmpty()) {
@@ -3883,7 +3906,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
             // 构建 user 消息（text + 图像块）——追加在全部 tool 消息之后
             // C 方案：文案含归一化坐标协议说明（固定前缀保留，兼容存量回填判据；v2 起不暴露尺寸元信息）
-            String noticeText = buildDesktopInjectNotice(storageConversationId);
+            // 网页截图（browser）没有叠加网格刻度，必须走另一套文案，否则会诱导模型去数格子
+            String noticeText = (anyBrowserShot && !anyDesktopShot)
+                    ? buildBrowserInjectNotice()
+                    : buildDesktopInjectNotice(storageConversationId);
             List<Object> parts = new ArrayList<>();
             Map<String, Object> textBlock = new HashMap<>();
             textBlock.put("type", "text");
@@ -3919,6 +3945,25 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      *
      * <p>v2 协议下不向模型暴露"标准化尺寸/缩放比"等元信息（与坐标换算完全解耦，避免诱导"像素思维"）。</p>
      */
+    /**
+     * 构建网页截图注入通知文案（browser screenshot）。
+     *
+     * <p>与桌面截图文案的关键差异：<b>没有网格刻度、没有归一化坐标协议</b>。
+     * 网页截图由浏览器直接渲染，模型不需要（也不应该）据此推算鼠标坐标 ——
+     * 后续操作一律用 browser 工具按 ref 进行，所以文案只说明「这是什么」+「怎么继续」。</p>
+     *
+     * <p>前缀刻意与桌面截图不同：前端渲染时按 message_type 跳过气泡，
+     * 而库里存量回填的判据依赖桌面截图那个固定前缀（见 {@link #afterPropertiesSet()}），
+     * 两者不共用前缀可避免网页截图被误当成桌面截图回填。</p>
+     */
+    private String buildBrowserInjectNotice() {
+        return "[系统] 网页截图已由 browser 工具自动注入（browser screenshot），请基于此图分析并继续操作。"
+                + "\n【说明】这是 AI 浏览器窗口当前的页面画面，未叠加任何网格或刻度，"
+                + "因此不要据此估算坐标 —— 需要点击/输入时用 browser 工具的 snapshot 拿元素编号（e1、e2…）再操作。"
+                + "\n【适用】布局是否错位、样式是否异常、图表/画布内容、验证码图片等「画出来」的信息。"
+                + "\n【局限】截图是静态的：看不到 hover 效果、看不到下一屏内容、也无法据此操作。";
+    }
+
     private String buildDesktopInjectNotice(Long conversationId) {
         String prefix = "[系统] 桌面截图已由工具自动注入（screen_capture），请基于此图分析并继续操作。";
         CaptureContext ctx = captureContextRegistry == null ? null : captureContextRegistry.get(conversationId);

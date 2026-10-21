@@ -230,6 +230,13 @@ import type { AgentConfig } from './api/agent-config'
 import type { AgentProviderOption } from './components/AgentEditDrawer.vue'
 /* ---- P2 / F18：工具注册表（智能体「工具集」的真实数据源，替代写死的假 key） ---- */
 import { listToolRegistry } from './api/tools'
+/* ---- AI 浏览器：窗口状态可视化（后端实时问 Electron bridge，不落库） ---- */
+import {
+  getBrowserSessions,
+  showBrowserSession,
+  closeBrowserSession
+} from './api/browser'
+import type { BrowserTab } from './api/browser'
 import { parseToolNames, toToolGroups } from './utils/tool-catalog'
 import type { ToolGroup } from './utils/tool-catalog'
 /* ---- L4 逐页接线：聊天页（SSE 流式 + 审批回执 + 会话管理） ---- */
@@ -821,6 +828,116 @@ const tasks = computed<TaskItem[]>(() => {
 const subAgentMap = ref<Record<string, SubAgentRun[]>>({})
 /** 当前会话的子Agent列表 */
 const chatSubAgents = computed<SubAgentRun[]>(() => subAgentMap.value[activeConversationId.value] ?? [])
+
+/* ============================================================
+ * AI 浏览器（browser 工具）窗口状态
+ * ============================================================ */
+
+/**
+ * 各会话的浏览器标签（key = 会话 id 字符串）。
+ *
+ * <p><b>为什么前端要维护这份</b>：browser 工具在 Electron 主进程里开的是独立窗口，
+ * 模型看得到（snapshot）、用户看不到，只能翻任务栏猜「AI 是不是在操作什么」。
+ * 这里把窗口状态拉到聊天页头部：随时能看到 AI 在浏览哪个页面，
+ * 也能一键把窗口调出来 / 收起来 / 关掉。</p>
+ *
+ * <p>数据源 {@code GET /api/browser/sessions}，后端实时问 bridge，不落库 ——
+ * 浏览器窗口是进程级资源，客户端重启后本来就不存在了。</p>
+ */
+const browserTabsMap = ref<Record<string, BrowserTab[]>>({})
+/** 通道是否可用（非桌面客户端 / 客户端刚启动为 false，此时入口不显示） */
+const browserAvailable = ref(false)
+/** 轮询定时器：只在「本会话有标签」时跑，没有标签就停，避免空转请求 */
+let browserPollTimer: number | null = null
+/** 轮询间隔：窗口可能被用户手动关掉，4 秒足以让状态自己收敛 */
+const BROWSER_POLL_MS = 4000
+
+/** 当前会话的浏览器标签 */
+const chatBrowserTabs = computed<BrowserTab[]>(
+  () => browserTabsMap.value[activeConversationId.value] ?? []
+)
+
+function stopBrowserPoll() {
+  if (browserPollTimer !== null) {
+    window.clearInterval(browserPollTimer)
+    browserPollTimer = null
+  }
+}
+
+/** 有标签时才轮询 */
+function ensureBrowserPoll() {
+  if (browserPollTimer !== null) return
+  browserPollTimer = window.setInterval(() => {
+    // 不在聊天页时跳过一次：浏览器标签属于会话，用户看不到就没必要刷新
+    if (route.path !== '/chat' || !chatBrowserTabs.value.length) {
+      if (!chatBrowserTabs.value.length) stopBrowserPoll()
+      return
+    }
+    void loadBrowserSessions()
+  }, BROWSER_POLL_MS)
+}
+
+/**
+ * 拉一次当前会话的浏览器标签。
+ *
+ * <p>失败静默：这是增强能力，接口挂了不该在聊天页弹红字；
+ * 把 available 置 false，入口自然消失即可。</p>
+ */
+async function loadBrowserSessions() {
+  const key = activeConversationId.value
+  if (!key) return
+  try {
+    const res = await getBrowserSessions(key)
+    const data = res?.data
+    if (!data) return
+    browserAvailable.value = !!data.available
+    const tabs = data.tabs ?? []
+    browserTabsMap.value = { ...browserTabsMap.value, [key]: tabs }
+    if (tabs.length) {
+      ensureBrowserPoll()
+    } else {
+      stopBrowserPoll()
+    }
+  } catch {
+    /* 静默：下次工具调用或轮询会重试 */
+  }
+}
+
+/** 用户点「显示 / 隐藏」：把窗口调出来看一眼，或收起来 */
+async function onBrowserShow(payload: { tabId: string; visible: boolean }) {
+  const key = activeConversationId.value
+  if (!key) return
+  try {
+    await showBrowserSession({ conversationId: key, tabId: payload.tabId, visible: payload.visible })
+  } catch {
+    /* 忽略：随后的状态刷新会纠正按钮状态 */
+  }
+  void loadBrowserSessions()
+}
+
+/** 用户点「关闭」：tabId 为空表示关掉本会话全部标签 */
+async function onBrowserClose(tabId: string) {
+  const key = activeConversationId.value
+  if (!key) return
+  try {
+    await closeBrowserSession({ conversationId: key, tabId: tabId || undefined, all: !tabId })
+    toast.success(tabId ? '已关闭浏览器标签' : '已关闭全部浏览器标签')
+  } catch (err: any) {
+    toast.error('关闭失败', { description: err?.message || '' })
+  }
+  void loadBrowserSessions()
+}
+
+/**
+ * 工具调用里出现 browser 时刷新一次浏览器状态。
+ *
+ * <p>不等到轮询：模型刚 open 完一个新窗口，用户应该立刻在头部看到入口，
+ * 而不是等最多 4 秒才发现「AI 好像开了个浏览器」。</p>
+ */
+function refreshBrowserOnToolCall(toolNames: string[]) {
+  if (!toolNames.some(name => (name || '').trim().toLowerCase() === 'browser')) return
+  void loadBrowserSessions()
+}
 
 /**
  * 委托调用（`delegate_progress` 心跳）。
@@ -2063,6 +2180,12 @@ async function onSelectConversation(id: string) {
   // 分页游标 / 是否还有历史按会话 key 存（见 cursorMap / hasMoreMap），切会话不必重置
   chatLoadError.value = ''
   /*
+    浏览器标签是会话级资源：切会话要立刻换成目标会话那一份。
+    放在下面的「已缓存消息」提前 return 之前 —— 否则从跑流的会话切回去时，
+    头部的浏览器入口还停留在上一个会话的数据上。
+  */
+  void loadBrowserSessions()
+  /*
     该会话正在本页后台跑流：内存里就是最新态，用 DB 覆盖反而会丢正在写的增量。
     但**内存里一条消息都没有**时必须照常加载基线（典型场景：刚重载页面、后台流刚建立、
     或某次加载失败留下了空数组）—— 否则消息区会一直空白，
@@ -2669,6 +2792,12 @@ async function consumeChatStream(
          * loadSubAgents 内部会自动开启 3s 轮询跟踪状态流转。
          */
         if (mayForkSubAgent(names)) void loadSubAgents(key)
+        /*
+         * 出现 browser 调用 → 立刻刷新浏览器窗口状态。
+         * 不等轮询：模型刚 open 完一个新窗口，用户应该马上在头部看到「AI 浏览器 · 1」，
+         * 而不是等最多 4 秒才发现 AI 在操作网页。
+         */
+        refreshBrowserOnToolCall(names)
         refreshLabel()
         continue
       }
@@ -6062,6 +6191,9 @@ const pageView = computed((): PageBinding => {
           loadError: chatLoadError,
           // 提示词优化进行中：Composer 的 ✨ 按钮转圈 + 输入区状态条（优化是同步等 LLM）
           optimizingPrompt,
+          // AI 浏览器：有窗口时头部出现入口（标签数 + 地址 + 显示/关闭）
+          browserTabs: chatBrowserTabs,
+          browserAvailable,
           // 会话列表依赖「当前 Agent」，必须先有 Agent 列表；Provider 列表用于模型下拉
           load: () => {
             if (!agentList.value.length && !agentLoading.value) {
@@ -6108,6 +6240,10 @@ const pageView = computed((): PageBinding => {
           'clear-stale': onClearStaleTask,
           // 子Agent面板里「前往会话」：被委托智能体的会话可能在别的 Agent 名下
           'open-subagent-session': onOpenSubagentSession,
+          // AI 浏览器入口：显示/隐藏某个标签、关闭标签、手动刷新
+          'browser-show': onBrowserShow,
+          'browser-close': onBrowserClose,
+          'browser-refresh': () => void loadBrowserSessions(),
           // 「未配置 Provider」引导页的两个出口：跳模型配置 / 重新拉列表
           'configure-provider': onChatConfigureProvider,
           'refresh-providers': onChatRefreshProviders

@@ -15,5 +15,6 @@ public enum OperationCategory {
     SKILL,          // 技能管理（skill: create/update/delete/list/report）
     COMMUNICATION,  // 用户交互（ask_clarification）
     ADMIN,          // 管理操作（agent / task_manager）
-    DESKTOP         // 桌面自动化（screen_capture 截图 / desktop_control 键鼠模拟）
+    DESKTOP,        // 桌面自动化（screen_capture 截图 / desktop_control 键鼠模拟）
+    BROWSER         // 浏览器自动化（browser：DOM 级网页操作，视觉层的补充）
 }

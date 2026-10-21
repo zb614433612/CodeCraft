@@ -92,7 +92,7 @@ public class LessonTool implements Tool {
 
         ObjectNode keyword = objectMapper.createObjectNode();
         keyword.put("type", "string");
-        keyword.put("description", "【search 可选】关键词（空格分隔多个词，按词模糊匹配、任一命中即召回），如 编译 依赖 端口。search 至少提供 keyword 或 error_code 之一。");
+        keyword.put("description", "【search 可选】关键词（空格分隔多个词，按词模糊匹配、任一命中即召回），如 编译 依赖 端口。中英文说法均可：内置同义词扩展（如 端口占用 ↔ Address already in use、缺少依赖 ↔ Could not resolve dependencies）。search 至少提供 keyword 或 error_code 之一。");
         properties.set("keyword", keyword);
 
         // === search 专用（P1）===

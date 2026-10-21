@@ -5,6 +5,84 @@
 
 ---
 
+## [3.0.7] - 2026-10-21
+
+> 能力扩张版：三项「让模型真会干活」的能力同时上线 —— 项目知识库（模型能读懂项目结构与团队约定）、
+> 浏览器自动化（模型能真的操作网页，而不只是截屏猜坐标）、踩坑经验检索重构（踩过的坑真能被召回）。
+> 工具总数 27 → 29，新增 `project_map` 与 `browser` 两个工具，含后端、Electron 主进程与两套前端改动，
+> 需覆盖安装并让后端随客户端一起重启。
+
+### 🗺 项目知识库 .codecraft/（新增）
+
+- **解决的问题**：模型进新项目要从零 grep 摸索「代码在哪、这模块干什么」，十几轮工具调用才能定位；团队约定（构建命令、禁区）散落在对话里，换会话就丢。
+- **目录契约**：项目根新增 `.codecraft/`，只有 4 类文件 —— `INDEX.md`（模块索引，给人看）、`map/<slug>.md`（模块详情：职责 + 代表符号 + 依赖方）、`rules.md`（团队约定，key-value 条目）、`.state.json`（机读状态：git head、文件指纹、stale 标记、规则命中数）。整目录进 `.gitignore`，定位为**本地会话加速层**，不产生 diff 噪音。
+- **双模式自适应**：代码文件占比 ≥10% 走**代码模式**（按文件数阈值聚类出模块，抽模块内代表符号）；低于 10% 走**文档模式**（按 Markdown 标题层级输出文件清单 + 章节），纯需求 / 文档目录同样能建库。
+- **5 个动作**：`project_map` 提供 `status`（HEAD 变了没、哪些模块 stale）/ `bootstrap`（建库或增量重建）/ `read`（按模块或关键词取详情）/ `annotate`（模型给模块写一句话职责）/ `rule`（团队约定的增删改查）。
+- **增量重建**：二次 `bootstrap` 先比对文件指纹，**无变化零写入**（不重写 map / INDEX / state，避免在 Git 仓库里刷无意义 diff）；有变化只重建 stale 模块（文件数变化 / mtime 更新 / 新增 / 详情缺失），复用旧模块状态，并清理已消失模块的详情文件。
+- **3 个注入点**（统一在 `ProjectContextProvider`，只读、绝不自动建目录）：① 会话常驻摘要 ≤1100 字符（技术栈 + 构建命令 + 模块目录表）；② 写文件成功后按所属模块追加 ≤120 字符提示；③ 技能加载时追加 `skill.*` 项目专属规则 ≤800 字符。
+- **规则有闸门**：key 前缀白名单 16 类（`build.` / `style.` / `arch.` / `avoid.` / `flow.` / `domain.` / `link.` / `know.` / `risk.` / `test.` / `deploy.` / `ops.` / `req.` / `doc.` / `skill.`），非白名单拒写；单条 ≤400 字符、活跃规则 ≤60 条；`update` 不传 `evidence` 时自动沿用旧证据、命中数不清零。
+- **实测**（CodeCraft 自身 718 个文件）：聚出 30 个模块，常驻摘要 669 字符，全量建库 2.7s；文档模式 4 篇需求文档 253ms 出清单。19/19 验证用例通过（首次建库、二次零写入且 mtime 全未变、改 1 个文件只重建 1 个模块、annotate 语义在增量后保留、规则证据与命中数保留、技能规则按预算截断）。
+
+### 🌐 浏览器自动化 browser（新增）
+
+- **补齐能力断层**：原有 `screen_capture` / `desktop_control` 是 AWT Robot 像素级操作（截图 + 猜坐标），`web_fetch` / `web_search` 只读正文，三者之间缺「DOM 语义级」这一层 —— 网页交互只能靠数格子点坐标。
+- **驱动通道**：新增 `electron/browser-bridge.js`（约 900 行），在 Electron 主进程起一个只绑 `127.0.0.1` 的 HTTP 服务，把 Java 侧的 `{method, params}` 直接转发给 `webContents.debugger.sendCommand`。**这是关键取舍**：`webContents.debugger` 本身就是 CDP 客户端，Java 侧只需一个 HTTP 转发，不必自己实现 WebSocket（省约 300 行）；也不引入 Playwright / Selenium —— 那要额外下载浏览器，与 214MB 安装包的体积约束冲突。
+- **握手发现**：bridge 启动后写 `<userData>/runtime/browser-bridge.json`（port + token + pid），Java 侧按三级候选探测（`-Dapp.userdata`、其父目录、项目根），请求带 `x-cc-token` 鉴权；`BrowserBridgeClient` 对回环地址强制 `NO_PROXY`（否则全局代理会把 `127.0.0.1` 请求吞掉）。
+- **19 个动作**：`open` / `navigate` / `snapshot` / `click` / `fill` / `select` / `press` / `hover` / `scroll` / `wait` / `screenshot` / `console` / `eval` / `tab` / `show` / `hide` / `close` / `status` / `list`。
+- **`snapshot` 是省 token 的核心**：不返回 HTML，而是注入采集脚本（`resources/browser/snapshot.js`，约 435 行）输出紧凑文本，按「可交互 + 可见 + 有语义文本」过滤，通常 20~60 个元素 + `e1..eN` 引用号 —— 比截图省一个数量级，模型也不用猜坐标。
+- **穿透与降级**：递归遍历 open shadowRoot（4 层）与同源 iframe（3 层），iframe 内元素标 `[iframe内]`，坐标按执行时的 `frameElement` **动态**累加（用快照旧值会点偏，因为点击前会滚动宿主）；跨域 iframe 读不到内部 DOM，则把 iframe 本身作为占位元素输出，支持 `click ref=e5 rx=0.7 ry=0.3` 按比例点进去。
+- **真实事件而非模拟赋值**：`click` 走 `Input.dispatchMouseEvent` 两段式（先 `scrollIntoViewIfNeeded`，失败回退 `el.click()`）；`fill` 走 `focus` + `select` + `Input.insertText` 三段式，校验 `value` 不符再回退原生 setter + `input` / `change` 事件；`press` 用 `dispatchKeyEvent` 而非 `insertText`（后者不触发 keydown，站点收不到回车提交）。
+- **多标签**：同一会话下每个标签是一个独立窗口、共享同一 session partition（登录态按项目根走），`/cdp` `/show` `/close` `/events` 均支持 `tabId`；事件游标按 `conversationId::tabId` 隔离，否则新标签的报错会被旧标签的游标整段吞掉。
+- **权限与安全**：新增 `OperationCategory.BROWSER`，`@ToolPermission(highRisk = true)`，首次授权后按会话级「全部同意」免打扰；`snapshot` / `status` / `list` / `console` / `wait` / `screenshot` 与 `tab op=list` 走 `SideEffectFreePreflight` 免授权。安全兜底保留 5 条：密码框值恒输出 `***`、只放行 http/https（`file:` 能绕开 `PathSecurityChecker`）、下载默认 deny、`eval` 默认拒绝需显式开启、全量审计。
+
+### 🖥 浏览器状态可视化（两套前端）
+
+- 新增 `BrowserSessionController` 三个接口：`GET /api/browser/sessions`（标签列表 + 活跃标签 + 可用性）、`POST .../show`（显示 / 隐藏）、`POST .../close`（单关或全关）；bridge 不可用时返回 `available=false` 而不报错。
+- v3：聊天页顶栏新增地球图标入口（仅有标签时渲染 —— 常驻空按钮会让人以为功能坏了）+ 下拉面板（标签列表 / 显示 / 关闭 / 全部关闭）。
+- 经典版：聊天区顶部新增 `.ai-browser-bar` 状态条 + 展开面板，走普通流布局不遮挡消息，含暗色主题适配。
+- 轮询策略：4 秒一次，仅在本会话有标签时运行，标签归零即停，非 `/chat` 路由跳过；`tool_call_start` 出现 `browser` 时立即刷新一次，不等下一次轮询。
+
+### 🔎 踩坑经验检索重构
+
+- **先体检再动手**：通读整条链路（`doSearch` → 精确码 / 模糊召回 → 参数过滤 → 排序 → 输出）后定位到 4 个结构性缺陷，而不是按清单逐点修补。
+- **缺陷 1：环境兼容分压过相关度**。原 `sortByEnvCompat` 把环境兼容（3 档离散分）当最终排序键，一条「同环境但完全不相关」的经验能压掉「异环境但高度相关」的经验。改为**加权总分**：错误码精确 3.0 / 参数一致 2.0 / 相关度 2.5 / 环境兼容 0.8 / 历史有效率 0.5 / 本项目 0.4 / 新鲜度 0.3 / 命中量 0.2 —— 环境从「一票否决」降为轻量加分。
+- **缺陷 2：五字段平权、无词频抑制**。原 `countMatchedWords` 对 symptom / root_cause / solution / keywords / goal 一视同仁，`失败` `error` 这类高频词能把无关条目拉上来。改为**字段权重 × IDF × 覆盖率**：symptom 3.0 / keywords 2.5 / goal 2.0 / root_cause 1.5 / solution 1.0；IDF 用**候选集内部统计**（候选通常 1~20 条，零额外 SQL，压制效果与全库 IDF 同量级）。
+- **缺陷 3：查询侧无同义扩展**。中文描述查英文经验（「端口占用」vs `address already in use`）直接漏召。新增 `QueryAliasExpander` + `application.yml` 约 50 组人工白名单别名，在拆词后做查询侧扩展；用人工表而非 LLM 生成，是为了同一查询每次扩展出同一批词，可复现、可 A/B。
+- **缺陷 4：精确码命中即短路**。命中 1 条就停，结果数不足 Top3 也不再补。改为命中数 < 3 时用 symptom 前 N 词补跑模糊，按 id 合并去重。
+- **可解释性**：`LessonRanker` 输出 `reasons`，每条结果附「为何召回」（最多 4 项，如「错误码精确命中」「symptom 命中 3 个词」「参数一致」），让模型能判断这条经验到底适不适用。
+- **可回滚**：`lesson.ranker.enabled` / `lesson.query-alias.enabled` 两个开关关闭后行为与改造前完全等价。
+- **实测**：对照集排序由 `[502, 503, 501]` 变为 `[501, 502, 503]`；20 条候选排序 < 3ms、200 条 < 30ms、20 条 × 6 万字解法 < 20ms；30/30 验证用例通过。
+
+### 🧩 工具注册与提示词
+
+- 工具总数 27 → 29：新增 `project_map`（`@ToolPermission(category = READ, isPathSensitive = true)`）与 `browser`（`BROWSER` / `highRisk`）；`OperationCategory` 新增 `BROWSER`，`ToolRegistryController` 补中文分类标签。
+- `application.yml` 新增两块配置：`codecraft.project-context.*`（约 30 项：注入预算 / 扫描限制 / 模块划分阈值 / 注入开关）与 `codecraft.browser.*`（域名白名单 / 视口 / 超时 / 截图 / 控制台事件上限）。
+- `prompts/code_agent_prompt.txt` 新增「项目知识库」「浏览器自动化」两段及对应工具白名单，`deepseek.tool-groups` 同步加 `project_map` / `browser`；经验检索段补「为何召回必须读」的约定。
+- `docs/TOOL_SYSTEM.md` 新增 8.6 浏览器自动化、8.7 项目知识库、8.5.4 经验排序三节；`docs/LESSON_GROWTH_OPTIMIZATION.md` 新增 5.5.4 节；README / ARCHITECTURE / MCP_SYSTEM / BUILD_AND_RUN 的工具数量与目录树同步更新。
+
+### 🩹 审查阶段修正
+
+- `BrowserBridgeClient.handshakeCandidates()` 从 2 个候选扩到 3 个（补 `-Dapp.userdata` 父目录），修掉 dev 模式下 bridge 写 `<项目根>/runtime/`、Java 却找 `<target>/runtime/` 的路径不一致；打包模式零回归。
+- `ProjectMapService.rule()` 的 `update` 分支新增 `evidenceGiven` / `evidenceInherited` 判定，修掉「模型自己填了 evidence 也提示沿用原证据」的错误文案。
+- `ProjectMapTool` 的 `module` / `op` 参数描述纠正为实际必填关系；`BrowserTool` 的 `ref` 描述改为「click / fill / select / hover 必填，scroll 可选」。
+- `application.yml` 补 `budget-doc-list` 与 `doc-mode-code-ratio` 两个漏声明的配置项；握手文件注释补 dev / 打包双路径与 Java 三级探测顺序。
+
+### 🔢 版本号同步
+
+- 后端：`3.0.6` → `3.0.7`（`pom.xml`，产物 `code-craft-3.0.7.jar`）
+- 经典版前端：`3.0.6` → `3.0.7`（`frontend/package.json` + lock）
+- v3 前端：`3.0.6` → `3.0.7`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.7` / `code-craft-3.0.7.jar`
+- MCP Server 握手版本：`3.0.6` → `3.0.7`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注与更新日期、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例，统一到 v3.0.7
+
+### ⬆️ 升级说明
+
+- 本版**含后端与 Electron 主进程改动**：仅替换前端静态文件不够，需覆盖安装；安装后请**完全退出客户端再启动**（`Ctrl+R` 加载不到 `browser-bridge.js`），并让后端随客户端一起重启。
+- 升级后首次使用 `browser` 工具会自动拉起受控浏览器窗口；若 `action=status` 报「未检测到客户端」，说明当前是纯 Web 访问，或后端未随之重启。
+- 项目知识库**不会自动创建**：需模型在任务中主动调用 `project_map action=bootstrap`（也可以直接在对话里说「先把项目索引建一下」）。建库后 `.codecraft/` 出现在项目根，已默认 gitignore。
+- 经验检索的两个开关默认开启；若排序异常，可在 `application.yml` 把 `lesson.ranker.enabled` / `lesson.query-alias.enabled` 置 `false` 回退旧行为。
+
 ## [3.0.6] - 2026-10-20
 
 > 稳定版：把三个「坏起来很难受」的缺陷修掉（登录过期却不跳登录页、技能命中标签显示字面 `xxx`、聊天正文层次感缺失），

@@ -1,6 +1,6 @@
 {
   "name": "codecraft-desktop",
-  "version": "3.0.6",
+  "version": "3.0.7",
   "description": "CodeCraft 桌面应用（Electron）",
   "homepage": "https://github.com/zb614433612/CodeCraft",
   "author": {
@@ -27,6 +27,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "browser-bridge.js",
       "update-manager.js",
       "update-utils.js",
       "package.json",
@@ -35,7 +36,7 @@
     ],
     "extraResources": [
       {
-        "from": "../target/code-craft-3.0.6.jar",
+        "from": "../target/code-craft-3.0.7.jar",
         "to": "backend/codecraft.jar"
       },
       {
