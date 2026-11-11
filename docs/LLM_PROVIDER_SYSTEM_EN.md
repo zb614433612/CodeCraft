@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v3.0.7 | Updated: 2026-10-21 | Audience: Developers / AI Collaborators
+> Version: v3.0.8 | Updated: 2026-11-11 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---
@@ -447,8 +447,10 @@ Both templates speak OpenAI Chat Completions, but their responsibilities are **s
 ### 5.1 Routing Priority
 
 ```
-Frontend dynamic providerCode > Agent config providerId > First available Provider
+Frontend dynamic providerCode > Agent config providerCode > Agent config providerId > First available Provider
 ```
+
+> Since v3.0.8, a new "Agent config providerCode" layer is inserted before providerId: `providerCode` is the semantic source written on every UI switch (the user-visible "current Provider"). Routing by it first automatically corrects stale data where "code was updated but id still points to the old value" — the core fix of the v3 Provider-switch-not-working issue. A code hit requires the Provider to be enabled (`getProviderConfig` only contains enabled Providers); when disabled/deleted, routing falls back to providerId.
 
 ### 5.2 Routing Flowchart
 
@@ -463,7 +465,17 @@ DeepSeekServiceImpl.prepareConversationContext()
     │      ↓
     │      Not found → Continue to next step
     │
-    ├─ 2. Check AgentConfig.providerId (Agent binding)
+    ├─ 2. Check AgentConfig.providerCode (Agent binding, new layer in v3.0.8)
+    │      ↓
+    │      Code non-empty and Provider enabled?
+    │      ↓ Yes
+    │      LLMClientManager.resolveClientByCode(agentProviderCode)
+    │      ↓
+    │      Found → Return LLMClient
+    │      ↓
+    │      Not found (code empty / Provider disabled) → Continue to next step
+    │
+    ├─ 3. Check AgentConfig.providerId (Agent binding)
     │      ↓
     │      LLMClientManager.resolveClientByProviderId(providerId)
     │      ↓
@@ -471,7 +483,7 @@ DeepSeekServiceImpl.prepareConversationContext()
     │      ↓
     │      Not found → Continue to next step
     │
-    └─ 3. Get first available Provider (sorted by sortOrder)
+    └─ 4. Get first available Provider (sorted by sortOrder)
            ↓
            LLMClientManager.getFirstClient()
            ↓
@@ -479,6 +491,8 @@ DeepSeekServiceImpl.prepareConversationContext()
            ↓
            Not found → Throw exception "No available LLM Provider"
 ```
+
+**Write-side consistency guarantee (v3.0.8)**: `AgentConfigServiceImpl.updateRuntime()` treats `providerCode` as the semantic source and syncs `providerId` accordingly — code-only payloads resolve the id by code (clearing the binding when unresolvable), an empty string means "follow the default" and clears providerId, eliminating field drift between the two.
 
 ---
 

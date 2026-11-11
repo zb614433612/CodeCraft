@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v3.0.7 | Updated: 2026-10-21 | Audience: Developers / AI Collaborators
+> Version: v3.0.8 | Updated: 2026-11-11 | Audience: Developers / AI Collaborators
 > This document dissects the 187KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
@@ -345,6 +345,8 @@ CompactionService.asyncPrecompress()
 ```
 Frontend dynamic providerCode (ChatRequest.providerCode)
     ↓ Not found
+Agent config providerCode (AgentConfig.providerCode, new layer in v3.0.8, must be enabled)
+    ↓ Not found
 Agent config providerId (AgentConfig.providerId)
     ↓ Not found
 First available Provider (LLMClientManager.getFirstClient())
@@ -352,12 +354,15 @@ First available Provider (LLMClientManager.getFirstClient())
 Throw exception: No available LLM Provider
 ```
 
+> Change in v3.0.8: Agent-binding resolution now prefers providerCode over providerId — code is the semantic source written on every UI switch, so routing by it first automatically corrects stale data ("code updated, id still points to the old value"; the root cause of the v3 Provider-switch issue: the frontend wrote only providerCode while providerId kept its old value, so requests still went to the old endpoint). Companion fix: `AgentConfigServiceImpl.updateRuntime()` resolves and syncs providerId from providerCode.
+
 ### 8.2 Key Code Path
 
 ```
 prepareConversationContext()
     ↓
     ├─ request.getProviderCode() → llmClientManager.resolveClientByCode()
+    ├─ agentConfig.getProviderCode() (non-empty and enabled) → llmClientManager.resolveClientByCode()   ← New in v3.0.8
     ├─ agentConfig.getProviderId() → llmClientManager.resolveClientByProviderId()
     └─ llmClientManager.getFirstClient()
     ↓

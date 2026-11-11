@@ -2978,7 +2978,6 @@ async function onSend(text: string) {
   const abort = new AbortController()
   streamAborts.set(key, abort)
   const sessionId = keyToSessionId(key) ?? undefined
-  const wasNewSession = !sessionId
   // 用户点「停止」也走 abort：收尾时靠这个标记区分「完成」与「被停止」
   let finalKey = key
 
@@ -3042,8 +3041,10 @@ async function onSend(text: string) {
       必须 force：Provider code 没变，非强制会被 loadChatBalance 里的「同一 Provider 已查过」挡掉。
     */
     void loadChatBalance(true)
-    // 新会话首轮结束后侧栏需要出现该会话 → 刷新列表
-    if (wasNewSession && convId) await loadConversations()
+    // 每轮对话结束后都刷新侧栏：后端按 updated_at 排序，刷新后最新活跃的会话重新置顶
+    // （旧版行为：每次对话结束后重新排序渲染；此前只在 wasNewSession 首轮刷新，
+    //  老会话聊完列表顺序纹丝不动，活跃会话沉在下面）
+    if (convId) await loadConversations()
     // 后台完成：用户已经切到别的会话，补一句提示（主动停止的不提示）
     if (activeConversationId.value !== finalKey && !abort.signal.aborted) {
       toast.success('后台会话已完成', { description: conversationTitleOf(finalKey) })
@@ -3538,6 +3539,13 @@ async function onChatModelApply(payload: {
   const providerChanged =
     (payload.providerCode || '') !== (currentAgent.value?.providerCode || '')
 
+  // 反查选中 Provider 的 id（与 onAgentSave 同一约定）：后端运行时按 providerId 选型，
+  // 只写 providerCode 会让 providerId 残留旧值 → 切换 Provider 后请求仍发往旧端点
+  // （报错特征：模型名是新 Provider 的、端点却是旧的，如 DeepSeek 收到 GLM 模型名）
+  const nextProvider = providerChanged
+    ? agentProviderOptions.value.find(p => p.code === payload.providerCode)
+    : undefined
+
   try {
     await updateAgentRuntime(id, {
       modelName: payload.model,
@@ -3545,7 +3553,7 @@ async function onChatModelApply(payload: {
       executionMode: payload.executionMode,
       ...(providerChanged
         ? // providerCode 必须单独写：AgentConfigServiceImpl.update() 不处理该字段，只有 updateRuntime() 处理
-          { providerCode: payload.providerCode || '' }
+          { providerCode: payload.providerCode || '', providerId: nextProvider?.id }
         : {})
     })
     toast.success(

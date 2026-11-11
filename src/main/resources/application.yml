@@ -586,12 +586,16 @@ codecraft:
       exposed-tools: []
 
   # ==================== 项目知识库（.codecraft/） ====================
-  # 设计要点：本功能**不自动创建任何目录**。只有模型显式调用 project_map action=bootstrap 才落盘；
-  # 用户只是让改某个目录下的一个文件时，仓库里不会留下任何痕迹。
-  # 下面所有开关只能「关闭能力」，不能触发创建。
+  # 建库方式（两条通道并存）：
+  # 1. 模型显式调用 project_map action=bootstrap（增量幂等，无变化零写入）；
+  # 2. 任务结束自动维护（v3.1）：本轮对话出现写类工具（file_writer / execute_sql）时，
+  #    工具循环结束后异步执行一次增量 bootstrap——目录不存在则自动创建，已存在则只更新变化模块，
+  #    保留 annotate 手工区。见 auto-maintain 开关。
   project-context:
     # 总开关：false 时不注入任何内容（请求体与未启用前逐字节一致），工具仍可手动调用
     enabled: true
+    # 任务结束后自动维护知识库（默认开）：写盘轮次结束后异步增量 bootstrap，不阻塞对话响应
+    auto-maintain: true
     # 是否把知识库摘要注入每轮请求（代码模式 ≤ budget-bootstrap 字符，文档模式 ≤ budget-doc-list 字符）
     inject-bootstrap: true
     # 是否在写类工具成功后追加单文件上下文提示（写哪个模块、模块负责什么）

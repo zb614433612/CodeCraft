@@ -1038,11 +1038,22 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (requestProviderCode != null && !requestProviderCode.isEmpty()) {
             llmClient = llmClientManager.resolveClientByCode(requestProviderCode);
         }
-        if (llmClient == null) {
-            Long providerId = (agentConfigId != null)
-                    ? agentConfigMapper.selectById(agentConfigId).map(AgentConfig::getProviderId).orElse(null)
-                    : null;
-            llmClient = llmClientManager.resolveClientByProviderId(providerId);
+        if (llmClient == null && agentConfigId != null) {
+            // Agent 绑定解析：providerCode（语义源，UI 每次切换都会写）优先于 providerId ——
+            // 历史数据可能存在「code 已更新、id 残留旧值」的错位（v3 切 Provider 无效的根因），
+            // code 命中失败再回退 providerId，最后兜底第一个可用 Provider
+            AgentConfig agentCfg = agentConfigMapper.selectById(agentConfigId).orElse(null);
+            if (agentCfg != null) {
+                String agentProviderCode = agentCfg.getProviderCode();
+                // getProviderConfig 只含已启用的 Provider：停用/已删除的 code 不命中，回退 providerId
+                if (agentProviderCode != null && !agentProviderCode.isEmpty()
+                        && llmClientManager.getProviderConfig(agentProviderCode) != null) {
+                    llmClient = llmClientManager.resolveClientByCode(agentProviderCode);
+                }
+                if (llmClient == null) {
+                    llmClient = llmClientManager.resolveClientByProviderId(agentCfg.getProviderId());
+                }
+            }
         }
         if (llmClient == null) {
             llmClient = llmClientManager.getFirstClient();
@@ -1853,10 +1864,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         Flux<String> notifyEvent = Flux.just(createReasoningSSEEvent(
                                 "所有子Agent任务已完成，正在生成最终汇总报告..."));
 
+                        // 📚 项目知识库自动维护：子 Agent 拥有独立会话 ID，其写盘不会置位本会话脏标记，
+                        // 收集过子 Agent 的任务强制维护一次（异步增量，幂等）
+                        projectContextProvider.markConversationDirty(storageConversationId);
+                        projectContextProvider.maintainAfterTask(storageConversationId, toolProjectRoot);
+
                         return notifyEvent.concatWith(handleToolCallIteration(
                                 conversationId, storageConversationId, initialApiRequest,
                                 messages, 0, summaryMaxIterations));
                     }
+
+                    // 📚 项目知识库自动维护（v3.1）：本轮对话有写盘（file_writer / execute_sql）→
+                    // 任务结束后异步增量 bootstrap——.codecraft/ 不存在则自动创建，已存在则只更新变化模块。
+                    // 幂等且不阻塞响应；开关 codecraft.project-context.auto-maintain=false 可关闭
+                    projectContextProvider.maintainAfterTask(storageConversationId, toolProjectRoot);
+
                     return Flux.empty();
                 }));
     }
@@ -3813,6 +3835,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                           List<ToolExecutor.ToolCallResult> results,
                                           Long storageConversationId,
                                           Map<String, Object> apiRequest) {
+        // 0. 📚 项目知识库自动维护前置：本轮出现写类工具 → 置会话脏标记，
+        //    工具循环正常结束后由 maintainAfterTask 消费（异步增量 bootstrap）
+        for (ToolExecutor.ToolCallResult toolResult : results) {
+            if (ProjectContextProvider.isWriteTool(toolResult.getToolName())) {
+                projectContextProvider.markConversationDirty(storageConversationId);
+                break;
+            }
+        }
+
         // 1. 工具结果消息（role=tool）+ 存库（保持原有行为）
         List<ObjectNode> toolMessages = toolExecutor.buildToolMessages(results);
         Set<String> answeredIds = new HashSet<>();

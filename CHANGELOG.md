@@ -5,6 +5,60 @@
 
 ---
 
+## [3.0.8] - 2026-11-11
+
+> 修复与自动化版：四个用户可感知的问题修复（v3 切换供应商无效、v3 新会话附件失效、会话列表不按活跃排序、任务清单编号跨轮续号）+
+> 一项自动化增强（项目知识库任务结束自动维护，`.codecraft/` 从「要模型主动建」变为「写盘任务结束自动建/更新」）。
+> 后端 + v3 前端改动，需重启后端生效；v3 前端打包版需重新构建。
+
+### 🔧 v3 切换模型供应商无效（修复）
+
+- **现象与真因**：v3 聊天页切换 Provider 后，请求仍发往旧端点（DeepSeek 报 `The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed GLM-5.3-Flash`）——模型名切过去了、端点没切。根因是「前端只写 code、后端只认 id」的字段错位：v3 的 `onChatModelApply` 应用时只写回 `providerCode` 漏传 `providerId`，写回成功后请求不再携带动态 code，后端 `DeepSeekServiceImpl` 解析链的 Agent 绑定层**只认 `providerId`**，于是按残留的旧 providerId 选中旧端点、配上新模型名。
+- **修复一（前端）**：`frontend-v3/src/App.vue` 的 `onChatModelApply` 按 code 反查 Provider id，与 `providerCode` 成对写回（对齐经典版 `saveRuntime` 与 `onAgentSave` 的既有约定）。
+- **修复二（写入侧）**：`AgentConfigServiceImpl.updateRuntime()` 收到 `providerCode` 时以它为语义源同步 `providerId`——只传 code 按 code 反查 id（查不到清空绑定），空串视为「跟随默认」清空 providerId，从根上杜绝两字段错位。
+- **修复三（读取侧兜底）**：`DeepSeekServiceImpl` Agent 绑定解析改为 **providerCode 优先（须已启用）> providerId > 第一个可用**——code 是 UI 每次切换都写的语义源，优先按 code 选型可自动纠正历史脏数据，此前切换「失败」的 Agent 无需重新配置即自愈。
+
+### 🖼 v3 新会话输入框附件失效（修复）
+
+- **现象**：新会话页面上传文件无任何反馈、粘贴截图完全无效；但会话进行中一切正常。
+- **真因**：`ChatView.vue` 存在两个 `ChatComposer` 实例（空状态分支 / 会话中分支），空状态分支漏绑三个绑定——`@paste`（粘贴事件根本到不了处理函数）、`:attachments`（上传成功后附件 chips 永不渲染，看起来像失败）、`@remove-attachment`。上传链路本身（隐藏 file input → Files API）是通的且不依赖会话 id。
+- **修复**：空状态 `ChatComposer` 补齐三个绑定，与会话中分支完全对齐；纯模板层修复（props/emits 原本就已声明）。
+
+### 📚 项目知识库任务结束自动维护（新增）
+
+- **背景**：v3.0.7 的设计铁律是「绝不自动创建任何目录」，`.codecraft/` 完全依赖模型显式调用 `project_map action=bootstrap`——而系统提示写的是「默认不建」，绝大多数任务都不会触发，知识库形同虚设。
+- **新机制**：本轮对话出现写类工具（`file_writer` / `execute_sql`）时，工具循环结束后**异步执行一次增量 bootstrap**——`.codecraft/` 不存在则自动创建，已存在则只更新变化模块（幂等：无变化零写入，保留 annotate 手工区）。纯聊天轮次零开销。
+- **实现**：`ProjectContextProvider` 新增脏标记（按会话）与 `maintainAfterTask()`（boundedElastic 异步、同 root 防重入、全链路 try-catch 不影响对话）；`DeepSeekServiceImpl` 两处挂钩——工具结果汇聚点 `appendToolResultMessages` 检测写类工具置脏，工具循环结束 defer 触发维护；子 Agent 收集分支因独立会话 ID 不置脏而强制维护一次。
+- **开关**：`codecraft.project-context.auto-maintain`（默认开），关闭后回退「仅模型显式调用才落盘」的旧行为。
+
+### 📋 会话列表按最新活跃排序（修复）
+
+- **真因**：`ConversationMapper` 四个列表查询全按 `ORDER BY created_at DESC`（创建时间）——老会话刚聊完也停在创建时的位置；且 v3 前端只在**新建会话首轮**结束后刷新侧栏，老会话每轮结束根本不刷新。
+- **修复**：四个查询改为 `ORDER BY updated_at DESC`（每轮对话开始 `ContextBuilder` 都会刷新 updated_at，数据源本就正确）；前端放宽为**每轮对话结束后都刷新**侧栏，最新活跃会话实时置顶（对齐经典版行为）；顺带清理 `wasNewSession` 死变量。
+
+### 🔢 任务清单编号规范（修复）
+
+- **现象**：每轮对话新建任务清单时编号接着上一轮编（T1-T4 → T5-T8 → T9-T11），看似「续上」旧清单。
+- **真因**：数据本就按会话隔离、`create` 是整体替换（每轮一个新清单成立），但任务 id 由模型自行填写、工具端不校验——上一轮完成后模型参考上下文里的历史编号接着编。
+- **修复**：`TaskManagerTool` 新增 `validateTaskIds` 强制编号恰好为 `T1..Tn` 连续（不缺号、不重号——顺带补上此前缺失的重复 id 校验，重号会导致 `complete` 误标记；乱序允许，分组与依赖才决定顺序），不合规返回带纠正示例的错误引导模型重置 id 与 `depends_on` 后重试；工具描述与参数说明同步注明「每次 create 都是全新清单，编号从 T1 开始」。
+
+### 🔢 版本号同步
+
+- 后端：`3.0.7` → `3.0.8`（`pom.xml`，产物 `code-craft-3.0.8.jar`）
+- 经典版前端：`3.0.7` → `3.0.8`（`frontend/package.json` + lock）
+- v3 前端：`3.0.7` → `3.0.8`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.8` / `code-craft-3.0.8.jar`
+- MCP Server 握手版本：`3.0.7` → `3.0.8`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注与更新日期（内容同步本轮五项变更）、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例，统一到 v3.0.8
+
+### ⬆️ 升级说明
+
+- **含后端改动**：需重启后端服务（`AgentConfigServiceImpl` / `DeepSeekServiceImpl` / `TaskManagerTool` / `ConversationMapper` 均有变更）；v3 前端打包版需重新构建，dev 模式热更新即生效。
+- **无数据库结构变更**：`llm_provider` / `agent_config` / `conversation` 表结构不变；此前切换供应商「失败」的 Agent 无需重新配置——providerCode 优先的选型会自动纠正 providerId 残留。
+- 项目知识库自动维护默认开启，不想让 AI 自动建库可在 `application.yml` 把 `codecraft.project-context.auto-maintain` 置 `false`。
+
+---
+
 ## [3.0.7] - 2026-10-21
 
 > 能力扩张版：三项「让模型真会干活」的能力同时上线 —— 项目知识库（模型能读懂项目结构与团队约定）、

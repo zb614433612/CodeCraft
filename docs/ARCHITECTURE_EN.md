@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v3.0.7 | Updated: 2026-10-21 | Audience: Developers / AI Collaborators
+> Version: v3.0.8 | Updated: 2026-11-11 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -536,7 +536,9 @@ CodeCraft supports multiple LLM platforms. Core components:
 - **10 Provider Templates (v3.0.0)**: `DeepSeekClient` / `GptClient` (OpenAI official) / `OpenAIClient` (protocol contract) / `AnthropicClient` (protocol contract) / `QwenClient` (Alibaba Model Studio) / `VolcengineArkClient` (Volcengine Ark) / `OllamaClient` / `MiMoClient` / `MiniMaxClient` / `custom` (OpenAIClient minimal mode), all extending `AbstractLLMClient`; each class carries a "适用范围（选型指引）" Javadoc block
 - **Agent Binding**: agent_config table gains provider_id/provider_code fields; each Agent can be bound to a specific Provider
 - **Frontend Dynamic Switching**: CodeAssistantView supports runtime Provider switching with automatic model list refresh
-- **Provider Routing Priority**: Frontend dynamic providerCode > Agent config providerId > First available Provider
+- **Provider Routing Priority (v3.0.8)**: Frontend dynamic providerCode > Agent config providerCode (must be enabled) > Agent config providerId > First available Provider; `updateRuntime()` syncs providerId from providerCode as the semantic source on write, eliminating field drift
+- **Conversation list ordering (v3.0.8)**: The four list queries in `ConversationMapper` order by `updated_at DESC` (most recently active first, refreshed by `ContextBuilder` at the start of every turn); the frontend refreshes the sidebar after every finished turn so the active conversation stays on top
+- **Project knowledge base auto-maintenance (v3.0.8)**: When write-type tools (file_writer / execute_sql) were used in the current turn, an incremental bootstrap runs asynchronously after the task ends — `.codecraft/` is created automatically when missing and only changed modules are updated otherwise (idempotent, preserves annotate); controlled by `codecraft.project-context.auto-maintain`, enabled by default
 - **DeepSeek Official Tool APIs (v2.0.3)**: `DeepSeekToolsApiClient` is enabled automatically when the Provider `baseUrl` host is `api.deepseek.com` and an API key is configured. `web_search` / `web_fetch` then prefer the official `/v1/tools/search` and `/v1/tools/fetch` endpoints and fall back to the legacy pipeline (Bing/Baidu, Jina/local) on failure. Detection uses the baseUrl host rather than providerCode, so third-party proxies / self-hosted services are never enabled
 - **Platform enhancement capabilities (v3.0.0)**: `llm_provider.extra_config` carries platform credentials (Volcengine AK/SK + search key, Alibaba Cloud AK/SK, MiniMax Coding Plan key, MiMo console cookie); capabilities work on an "opt-in + skip when credentials are missing + always fall back" basis. Balance/quota queries support DeepSeek / Volcengine / Alibaba Cloud (Qwen) / MiniMax / MiMo
 

@@ -1,7 +1,9 @@
 package com.example.agentdeepseek.service.impl;
 
 import com.example.agentdeepseek.mapper.AgentConfigMapper;
+import com.example.agentdeepseek.mapper.ProviderConfigMapper;
 import com.example.agentdeepseek.model.entity.AgentConfig;
+import com.example.agentdeepseek.model.entity.ProviderConfig;
 import com.example.agentdeepseek.service.AgentConfigService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,10 +21,13 @@ import java.util.List;
 public class AgentConfigServiceImpl implements AgentConfigService {
 
     private final AgentConfigMapper agentConfigMapper;
+    private final ProviderConfigMapper providerConfigMapper;
     private final JdbcTemplate jdbcTemplate;
 
-    public AgentConfigServiceImpl(AgentConfigMapper agentConfigMapper, JdbcTemplate jdbcTemplate) {
+    public AgentConfigServiceImpl(AgentConfigMapper agentConfigMapper, ProviderConfigMapper providerConfigMapper,
+                                  JdbcTemplate jdbcTemplate) {
         this.agentConfigMapper = agentConfigMapper;
+        this.providerConfigMapper = providerConfigMapper;
         this.jdbcTemplate = jdbcTemplate;
         // 确保 agent_config 表存在并初始化默认 Agent
         initTable();
@@ -287,8 +292,23 @@ public class AgentConfigServiceImpl implements AgentConfigService {
         if (runtimeConfig.getExecutionMode() != null) existing.setExecutionMode(runtimeConfig.getExecutionMode());
         if (runtimeConfig.getTemperature() != null) existing.setTemperature(runtimeConfig.getTemperature());
         if (runtimeConfig.getWorkDir() != null) existing.setWorkDir(runtimeConfig.getWorkDir());
-        if (runtimeConfig.getProviderId() != null) existing.setProviderId(runtimeConfig.getProviderId());
-        if (runtimeConfig.getProviderCode() != null) existing.setProviderCode(runtimeConfig.getProviderCode());
+        if (runtimeConfig.getProviderCode() != null) {
+            // providerCode 出现在请求体中 = 本次要更新 Provider 绑定，以它为语义源同步 providerId：
+            // 两字段必须一致，否则运行时按 providerId 选型会命中旧 Provider
+            // （v3「切换 Provider 无效」根因：前端只写 code，providerId 残留旧值 → 请求仍发往旧端点）
+            existing.setProviderCode(runtimeConfig.getProviderCode());
+            if (runtimeConfig.getProviderId() != null) {
+                existing.setProviderId(runtimeConfig.getProviderId());
+            } else if (!runtimeConfig.getProviderCode().isBlank()) {
+                // 只传了 code：按 code 反查 id 同步；code 无效（Provider 已删除）则清空绑定，运行时回退默认
+                ProviderConfig provider = providerConfigMapper.selectByCode(runtimeConfig.getProviderCode().trim());
+                existing.setProviderId(provider != null ? provider.getId() : null);
+            } else {
+                existing.setProviderId(null); // 空串 = 跟随默认 Provider，清掉旧 id 绑定
+            }
+        } else if (runtimeConfig.getProviderId() != null) {
+            existing.setProviderId(runtimeConfig.getProviderId());
+        }
         existing.setUpdatedAt(LocalDateTime.now());
         agentConfigMapper.update(existing);
         log.info("更新Agent运行时配置: {} (ID={})", existing.getName(), id);

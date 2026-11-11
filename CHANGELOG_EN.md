@@ -5,6 +5,62 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.8] - 2026-11-11
+
+> Fix-and-automation release: four user-visible fixes (v3 Provider switching not working, v3 new-session attachments
+> broken, conversation list not ordered by recency, task-list numbering carried across turns) plus one automation
+> enhancement — after-task auto-maintenance for the project knowledge base, where `.codecraft/` changes from
+> "created only when the model asks" to "created/updated automatically after any write-flavored task".
+> Backend + v3 frontend changes; a backend restart is required, packaged v3 frontends need a rebuild.
+
+### 🔧 v3 Provider switching not working (fix)
+
+- **Symptom & root cause**: after switching Provider on the v3 chat page, requests still went to the old endpoint (DeepSeek reported `The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed GLM-5.3-Flash`) — the model name switched, the endpoint did not. The cause was a field drift of "frontend writes only code, backend trusts only id": v3's `onChatModelApply` wrote back only `providerCode` and dropped `providerId`; after a successful write-back the request no longer carried the dynamic code, and the Agent-binding layer of the resolve chain in `DeepSeekServiceImpl` trusted **only `providerId`** — so the stale providerId selected the old endpoint, paired with the new model name.
+- **Fix 1 (frontend)**: `onChatModelApply` in `frontend-v3/src/App.vue` now resolves the Provider id by code and writes the pair together (matching the existing convention of the classic `saveRuntime` and `onAgentSave`).
+- **Fix 2 (write side)**: `AgentConfigServiceImpl.updateRuntime()` treats `providerCode` as the semantic source and syncs `providerId` — code-only payloads resolve the id by code (clearing the binding when unresolvable); an empty string means "follow the default" and clears providerId, eliminating the drift at its root.
+- **Fix 3 (read-side fallback)**: Agent-binding resolution in `DeepSeekServiceImpl` now prefers **providerCode (must be enabled) > providerId > first available** — code is the semantic source written on every UI switch, so routing by it first self-heals stale data; Agents whose switching previously "failed" need no reconfiguration.
+
+### 🖼 v3 new-session input attachments broken (fix)
+
+- **Symptom**: on the new-session page, uploading a file gave no feedback and pasting a screenshot did nothing; mid-conversation everything worked.
+- **Root cause**: `ChatView.vue` renders two `ChatComposer` instances (empty-state branch / in-conversation branch), and the empty-state branch missed three bindings — `@paste` (paste events never reached the handler), `:attachments` (attachment chips never rendered after a successful upload, which looked like a failure), and `@remove-attachment`. The upload pipeline itself (hidden file input → Files API) was fine and does not depend on a conversation id.
+- **Fix**: the empty-state `ChatComposer` gained the three bindings, fully matching the in-conversation branch; a template-only fix (props/emits were already declared).
+
+### 📚 Project knowledge base after-task auto-maintenance (new)
+
+- **Background**: the v3.0.7 iron rule was "never create any directory automatically"; `.codecraft/` relied entirely on the model explicitly calling `project_map action=bootstrap` — while the system prompt said "do not build by default", so in practice almost no task triggered it and the knowledge base stayed empty.
+- **New mechanism**: when write-type tools (`file_writer` / `execute_sql`) were used in the current turn, an incremental bootstrap runs **asynchronously after the tool loop ends** — `.codecraft/` is created automatically when missing, and when present only changed modules are updated (idempotent: zero writes when nothing changed, preserving annotate). Pure chat turns cost nothing.
+- **Implementation**: `ProjectContextProvider` gains per-conversation dirty flags and `maintainAfterTask()` (boundedElastic async, same-root re-entry guard, try-catch so the chat stream is never affected); `DeepSeekServiceImpl` hooks in two places — `appendToolResultMessages` marks the conversation dirty when a write-type tool result is seen, and the tool-loop-end defer triggers maintenance; the sub-agent collection branch force-triggers once because sub-agents use their own conversation ids and would not set the flag.
+- **Switch**: `codecraft.project-context.auto-maintain` (enabled by default); turning it off restores the old "explicit bootstrap only" behavior.
+
+### 📋 Conversation list ordered by recency (fix)
+
+- **Root cause**: all four list queries in `ConversationMapper` ordered by `ORDER BY created_at DESC` (creation time) — an old conversation stayed at its creation position even right after chatting; additionally the v3 frontend only refreshed the sidebar after the **first turn of a new session**, so finished turns on old conversations never re-sorted the list.
+- **Fix**: the four queries now order by `ORDER BY updated_at DESC` (updated_at is refreshed by `ContextBuilder` at the start of every turn, so the data was always correct); the frontend now refreshes the sidebar **after every finished turn**, keeping the active conversation on top (matching the classic behavior); the dead `wasNewSession` variable was removed.
+
+### 🔢 Task-list numbering discipline (fix)
+
+- **Symptom**: a new task list in each turn continued numbering from the previous list (T1-T4 → T5-T8 → T9-T11), looking like it "continued" the old list.
+- **Root cause**: data was already per-conversation and `create` replaces the whole list (so "one list per turn" held), but task ids were model-filled and never validated by the tool — after finishing a list, the model simply continued from the historical ids visible in context.
+- **Fix**: `TaskManagerTool` gained `validateTaskIds`, enforcing that ids are exactly `T1..Tn` consecutive (no gaps, no duplicates — also adding the previously missing duplicate-id check, which could make `complete` mark the wrong task; out-of-order input is allowed since grouping and dependencies define execution order). Invalid submissions return an error with a correction example so the model resets ids and `depends_on` and retries; the tool description and parameter docs now state "every create is a brand-new list; number from T1".
+
+### 🔢 Version sync
+
+- Backend: `3.0.7` → `3.0.8` (`pom.xml`, artifact `code-craft-3.0.8.jar`)
+- Classic frontend: `3.0.7` → `3.0.8` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.7` → `3.0.8` (`frontend-v3/package.json` + lock)
+- Electron: version and the `extraResources` jar path → `3.0.8` / `code-craft-3.0.8.jar`
+- MCP Server handshake version: `3.0.7` → `3.0.8` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, version and updated-date headers in ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) (content updated with this release's five changes), packaging examples in DEV_QUICKREF / RELEASE_CHECKLIST(_EN) and the FAQ version sample, all synced to v3.0.8
+
+### ⬆️ Upgrade notes
+
+- **Backend changes included**: restart the backend (`AgentConfigServiceImpl` / `DeepSeekServiceImpl` / `TaskManagerTool` / `ConversationMapper` all changed); packaged v3 frontends need a rebuild, dev mode hot-reloads.
+- **No database schema changes**: `llm_provider` / `agent_config` / `conversation` tables are unchanged; Agents whose Provider switching previously "failed" need no reconfiguration — code-first routing self-corrects the stale providerId.
+- Knowledge-base auto-maintenance is on by default; to disable, set `codecraft.project-context.auto-maintain` to `false` in `application.yml`.
+
+---
+
 ## [3.0.7] - 2026-10-21
 
 > Capability expansion release: three abilities that make the model materially better at the job ship together —

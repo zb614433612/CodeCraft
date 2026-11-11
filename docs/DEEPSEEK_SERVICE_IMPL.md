@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 DEEPSEEK_SERVICE_IMPL_EN](./DEEPSEEK_SERVICE_IMPL_EN.md)
 # DeepSeekServiceImpl 深描：核心引擎方法调用拓扑与状态机
 
-> 版本：v3.0.7 | 更新：2026-10-21 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.0.8 | 更新：2026-11-11 | 受众：开发者 / AI 协作伙伴
 > 本文档解剖 187KB 的 DeepSeekServiceImpl，梳理其内部方法调用关系、Tool Loop 状态机、SSE 事件流和所有安全机制。
 
 ---
@@ -350,6 +350,8 @@ CompactionService.asyncPrecompress()
 ```
 前端动态 providerCode（ChatRequest.providerCode）
     ↓ 未找到
+Agent 配置 providerCode（AgentConfig.providerCode，v3.0.8 新增层，须已启用）
+    ↓ 未找到
 Agent 配置 providerId（AgentConfig.providerId）
     ↓ 未找到
 第一个可用 Provider（LLMClientManager.getFirstClient()）
@@ -357,12 +359,15 @@ Agent 配置 providerId（AgentConfig.providerId）
 抛出异常：没有可用的 LLM Provider
 ```
 
+> v3.0.8 变更：Agent 绑定解析改为「providerCode 优先于 providerId」——code 是 UI 每次切换都写入的语义源，优先按 code 选型可自动纠正「code 已更新、id 残留旧值」的历史脏数据（此前 v3 切换 Provider 无效的根因：前端只写 providerCode，providerId 残留旧值 → 请求仍发往旧端点）。配套修复：`AgentConfigServiceImpl.updateRuntime()` 收到 providerCode 时按 code 反查同步 providerId。
+
 ### 8.2 关键代码路径
 
 ```
 prepareConversationContext()
     ↓
     ├─ request.getProviderCode() → llmClientManager.resolveClientByCode()
+    ├─ agentConfig.getProviderCode()（非空且已启用）→ llmClientManager.resolveClientByCode()   ← v3.0.8 新增
     ├─ agentConfig.getProviderId() → llmClientManager.resolveClientByProviderId()
     └─ llmClientManager.getFirstClient()
     ↓

@@ -160,6 +160,7 @@
       <ChatComposer
         v-model="draft"
         :model="conversation.model"
+        :attachments="attachments"
         :rows="3"
         :context-mode="conversation.contextMode"
         placeholder="例如：帮我梳理这个项目的登录链路，并指出风险点"
@@ -167,6 +168,8 @@
         @attach="$emit('attach')"
         @attach-history="$emit('attach-history')"
         @select-model="$emit('select-model')"
+        @remove-attachment="$emit('remove-attachment', $event)"
+        @paste="$emit('paste', $event)"
       />
     </div>
 

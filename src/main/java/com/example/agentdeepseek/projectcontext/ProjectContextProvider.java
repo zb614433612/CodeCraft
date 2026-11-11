@@ -2,6 +2,7 @@ package com.example.agentdeepseek.projectcontext;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import reactor.core.scheduler.Schedulers;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -10,6 +11,7 @@ import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -138,6 +140,76 @@ public class ProjectContextProvider {
         } catch (RuntimeException e) {
             log.debug("生成技能规则片段失败: skill={} - {}", skillName, e.getMessage());
             return null;
+        }
+    }
+
+    // ==================== 任务结束自动维护（v3.1 新增） ====================
+
+    /** 写类工具集合：本轮出现即视为产生了文件/数据变更，任务结束后需要维护知识库 */
+    private static final Set<String> WRITE_TOOLS = Set.of("file_writer", "execute_sql");
+
+    /** 会话级脏标记：本轮对话是否有写盘操作（key = storageConversationId） */
+    private final Set<Long> dirtyConversations = ConcurrentHashMap.newKeySet();
+
+    /** 正在维护中的项目根（防止并发维护同一目录产生交错写） */
+    private final Set<String> inFlightRoots = ConcurrentHashMap.newKeySet();
+
+    /** 本轮工具结果中是否出现写类工具（供工具结果汇聚点判定，避免 projectcontext 依赖 tool 包） */
+    public static boolean isWriteTool(String toolName) {
+        return toolName != null && WRITE_TOOLS.contains(toolName);
+    }
+
+    /** 标记会话本轮有写盘操作（由 DeepSeekServiceImpl 的工具结果汇聚点调用） */
+    public void markConversationDirty(long conversationId) {
+        dirtyConversations.add(conversationId);
+    }
+
+    /**
+     * 任务结束后自动维护知识库：本轮有写盘 → 异步执行增量 bootstrap。
+     *
+     * <p>设计要点：</p>
+     * <ul>
+     *   <li>增量模式（force=false）幂等：无变化零写入、保留 annotate 手工区，重复触发无害；</li>
+     *   <li>目录不存在时自动创建（这是「任务完成后软件自动建库」的需求入口）；</li>
+     *   <li>异步执行（boundedElastic，阻塞 IO 专用池），不阻塞对话响应；</li>
+     *   <li>全链路 try-catch，失败只记日志，绝不影响主链路；</li>
+     *   <li>同 root 防重入：上一轮维护未完成时跳过本轮（下轮写盘后再次触发）。</li>
+     * </ul>
+     */
+    public void maintainAfterTask(long conversationId, String root) {
+        try {
+            if (!config.isEnabled() || !config.isAutoMaintain()) {
+                dirtyConversations.remove(conversationId);   // 开关关闭时不留残留标记
+                return;
+            }
+            if (!dirtyConversations.remove(conversationId)) {
+                return;                                       // 本轮无写盘，无需维护
+            }
+            if (root == null || root.isBlank() || !Files.isDirectory(Paths.get(root))) {
+                log.debug("知识库自动维护跳过：工作目录无效 root={}", root);
+                return;
+            }
+            if (!inFlightRoots.add(root)) {
+                log.debug("知识库自动维护跳过（上一轮维护尚未完成）: root={}", root);
+                return;
+            }
+            Schedulers.boundedElastic().schedule(() -> {
+                try {
+                    ProjectMapService.WriteResult result = mapService.bootstrap(Paths.get(root), false);
+                    if (result.ok()) {
+                        cache.remove(root);   // 结构可能已变化，让下轮注入重新构建摘要
+                        log.info("项目知识库自动维护完成: root={}, {}", root, result.message());
+                    } else {
+                        log.debug("项目知识库自动维护未执行: root={}, {}", root, result.message());
+                    }
+                } catch (RuntimeException e) {
+                    log.warn("项目知识库自动维护失败（不影响对话）: root={} - {}", root, e.getMessage());
+                } finally {
+                    inFlightRoots.remove(root);
+                }
+            });
+        } catch (RuntimeException e) {
+            log.warn("知识库自动维护调度失败（不影响对话）: {}", e.getMessage());
         }
     }
 

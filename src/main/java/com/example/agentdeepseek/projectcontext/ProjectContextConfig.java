@@ -7,9 +7,13 @@ import org.springframework.context.annotation.Configuration;
 /**
  * 项目知识库（.codecraft/）配置。
  *
- * <p>设计原则（关键）：<b>本功能不自动创建任何目录</b>。
- * 只有模型显式调用 {@code project_map action=bootstrap} 时才会落盘；
- * 本配置里的所有开关都不具备「触发创建」的能力，只能「关闭能力」。</p>
+ * <p>建库方式（两条通道并存）：</p>
+ * <ol>
+ *   <li><b>模型显式调用</b> {@code project_map action=bootstrap}（沿用既有约定）；</li>
+ *   <li><b>任务结束自动维护</b>（v3.1 新增）：本轮对话出现写类工具（file_writer / execute_sql）时，
+ *       工具循环结束后异步执行一次增量 bootstrap——目录不存在则自动创建，已存在则只更新变化的模块
+ *       （幂等：无变化零写入，保留 annotate 手工区）。由 {@code autoMaintain} 开关控制，默认开启。</li>
+ * </ol>
  *
  * <p>对应 application.yml 的 {@code codecraft.project-context.*} 配置块。</p>
  */
@@ -20,6 +24,13 @@ public class ProjectContextConfig {
 
     /** 总开关：false 时工具仍可查询，但不会做任何注入（请求体与未启用前逐字节一致） */
     private boolean enabled = true;
+
+    /**
+     * 任务结束后是否自动维护知识库（v3.1）。
+     * <p>触发条件：本轮对话出现过写类工具（file_writer / execute_sql）。执行方式：异步增量 bootstrap，
+     * 不阻塞对话响应；失败只记日志。false 时回退到「仅模型显式调用 bootstrap 才落盘」的旧行为。</p>
+     */
+    private boolean autoMaintain = true;
 
     /** 是否把 INDEX.md 摘要注入到每轮请求的系统消息中（≤ budgetBootstrap 字符） */
     private boolean injectBootstrap = true;

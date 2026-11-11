@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v3.0.7 | 更新：2026-10-21 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.0.8 | 更新：2026-11-11 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -445,8 +445,10 @@ OpenAI 与 Anthropic 两个模板定位为**协议公共契约**：只要服务�
 ### 5.1 路由优先级
 
 ```
-前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
+前端动态 providerCode > Agent 配置 providerCode > Agent 配置 providerId > 第一个可用 Provider
 ```
+
+> v3.0.8 起在 providerId 之前新增 Agent 配置 providerCode 层：`providerCode` 是 UI 每次切换都会写入的语义源（用户可见的「当前 Provider」），优先以它选型可自动纠正「code 已更新、id 残留旧值」的历史脏数据（修复 v3 切换 Provider 无效问题的核心）。code 命中要求 Provider 处于启用状态（`getProviderConfig` 仅含启用的 Provider），停用/已删除时回退 providerId。
 
 ### 5.2 路由流程图
 
@@ -461,7 +463,17 @@ DeepSeekServiceImpl.prepareConversationContext()
     │      ↓
     │      未找到 → 继续下一步
     │
-    ├─ 2. 检查 AgentConfig.providerId（Agent 绑定）
+    ├─ 2. 检查 AgentConfig.providerCode（Agent 绑定，v3.0.8 新增层）
+    │      ↓
+    │      code 非空且 Provider 已启用？
+    │      ↓ 是
+    │      LLMClientManager.resolveClientByCode(agentProviderCode)
+    │      ↓
+    │      找到 → 返回 LLMClient
+    │      ↓
+    │      未找到（code 为空 / Provider 停用）→ 继续下一步
+    │
+    ├─ 3. 检查 AgentConfig.providerId（Agent 绑定）
     │      ↓
     │      LLMClientManager.resolveClientByProviderId(providerId)
     │      ↓
@@ -469,7 +481,7 @@ DeepSeekServiceImpl.prepareConversationContext()
     │      ↓
     │      未找到 → 继续下一步
     │
-    └─ 3. 获取第一个可用 Provider（按 sortOrder 排序）
+    └─ 4. 获取第一个可用 Provider（按 sortOrder 排序）
            ↓
            LLMClientManager.getFirstClient()
            ↓
@@ -477,6 +489,8 @@ DeepSeekServiceImpl.prepareConversationContext()
            ↓
            未找到 → 抛出异常 "没有可用的 LLM Provider"
 ```
+
+**写入侧一致性保障（v3.0.8）**：`AgentConfigServiceImpl.updateRuntime()` 收到 `providerCode` 时以它为语义源同步 `providerId`——只传 code 时按 code 反查 id（查不到则清空绑定），传空串视为「跟随默认」并清空 providerId，杜绝两字段错位。
 
 ---
 

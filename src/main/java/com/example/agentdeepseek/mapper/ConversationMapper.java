@@ -48,36 +48,39 @@ public interface ConversationMapper {
     Optional<Conversation> selectById(Long id);
 
     /**
-     * 查询所有会话（按创建时间倒序）
+     * 查询所有会话（按最近活跃时间倒序）
+     *
+     * <p>排序依据 updated_at（每轮对话开始时由 ContextBuilder.getOrCreateConversation 刷新），
+     * 而非 created_at —— 否则老会话即使刚聊过也永远停在创建时的位置，侧栏无法把最新活跃的会话置顶。</p>
      * @return 会话列表
      */
-    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation ORDER BY updated_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectAll();
 
     /**
-     * 根据用户ID查询会话列表（按创建时间倒序）
+     * 根据用户ID查询会话列表（按最近活跃时间倒序）
      * @param userId 用户ID
      * @return 会话列表
      */
-    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} ORDER BY updated_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectByUserId(Long userId);
 
     /**
-     * 根据用户ID和会话类型查询会话列表（按创建时间倒序）
+     * 根据用户ID和会话类型查询会话列表（按最近活跃时间倒序）
      * @param userId 用户ID
      * @param agentType 会话类型
      * @return 会话列表
      */
-    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_type = #{agentType} ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_type = #{agentType} ORDER BY updated_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectByUserIdAndAgentType(@Param("userId") Long userId, @Param("agentType") String agentType);
 
     /**
-     * 按 agentConfigId 查询会话列表（切换 Agent 时用）
+     * 按 agentConfigId 查询会话列表（切换 Agent 时用，按最近活跃时间倒序）
      */
-    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_config_id = #{agentConfigId} ORDER BY created_at DESC")
+    @Select("SELECT id, name, user_id, agent_type, agent_config_id, work_dir, created_at, updated_at FROM conversation WHERE user_id = #{userId} AND agent_config_id = #{agentConfigId} ORDER BY updated_at DESC")
     @ResultMap("conversationResultMap")
     List<Conversation> selectByUserIdAndAgentConfigId(@Param("userId") Long userId, @Param("agentConfigId") Long agentConfigId);
 

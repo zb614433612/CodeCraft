@@ -12,8 +12,10 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -61,7 +63,7 @@ public class TaskManagerTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "管理任务的生命周期，将拆解后的子任务登记、追踪、标记完成。\n"
+        return "管理任务的生命周期，将拆解后的子任务登记、追踪、标记完成。每次 create 都是一个全新的任务清单，编号必须从 T1 开始连续递增，禁止延续历史清单的编号。\n"
                 + "【适用场景】任何需要多步骤完成的复杂任务，如「实现用户注册功能」需拆解为建表、写API、写前端等子任务\n"
                 + "【使用方式】① 先用 action=create 批量登记任务（task_id 格式 T1/T2/T3...），② 每完成一项调用 action=batch_complete 标记（推荐批量，减少调用次数），③ 执行失败需重试时用 action=batch_reopen 重新打开，④ 汇总输出前必须调用 action=list 确认全部完成\n"
                 + "【区别】batch_complete 比 complete 更高效，一次可标记多个任务；batch_reopen 用于将已完成的任务回退到待处理\n"
@@ -97,7 +99,7 @@ public class TaskManagerTool implements Tool {
         ObjectNode taskItemProps = objectMapper.createObjectNode();
         ObjectNode idField = objectMapper.createObjectNode();
         idField.put("type", "string");
-        idField.put("description", "【必填】任务编号，格式 T1/T2/T3...（数字递增，如 T1、T2、T3）");
+        idField.put("description", "【必填】任务编号，必须从 T1 开始连续递增（共 n 项 → T1、T2、...、Tn）。每次 create 都是全新清单，禁止延续历史清单的编号（如接着上轮编 T5、T9）");
         taskItemProps.set("id", idField);
         ObjectNode descField = objectMapper.createObjectNode();
         descField.put("type", "string");
@@ -238,6 +240,13 @@ public class TaskManagerTool implements Tool {
             }
             String group = item.path("group").asText("");
             tasks.add(new TaskItem(id, description, priority, dependsOn, group));
+        }
+
+        // 编号规范校验：每轮 create 都是一个全新清单，编号必须恰好为 T1..Tn 连续。
+        // 防止模型参考上下文里的历史清单接着编号（T5、T9...），导致新一轮清单看起来「续上」了旧清单
+        String idError = validateTaskIds(tasks);
+        if (idError != null) {
+            return buildError(idError);
         }
 
         lock.writeLock().lock();
@@ -586,6 +595,51 @@ public class TaskManagerTool implements Tool {
             lastAccessTime.remove(id);
             log.info("清理过期会话任务数据: {}", id);
         }
+    }
+
+    /**
+     * 校验任务编号规范：必须恰好为 T1..Tn 连续递增（n = 任务总数），不重号、不缺号、格式合法。
+     *
+     * <p>背景：数据本就按会话隔离、create 是整体替换（每轮一个新清单），但编号由模型自行填写——
+     * 上一轮清单全部完成后，模型容易参考上下文里的历史编号接着编（T5、T9...），让新一轮清单
+     * 看起来「续上」了旧清单。工具端强制编号从 T1 开始；校验失败返回带纠正指引的错误，
+     * 模型按提示重置 id 与 depends_on 后重试即可。顺带覆盖此前缺失的重复 id 校验
+     * （重号会导致缺号，complete 时还会命中错误任务）。</p>
+     *
+     * @return null = 合法；否则返回可直接返回给模型的错误信息
+     */
+    private String validateTaskIds(List<TaskItem> tasks) {
+        int size = tasks.size();
+        Set<Integer> seen = new HashSet<>();
+        List<String> invalidIds = new ArrayList<>();
+        for (TaskItem task : tasks) {
+            if (!task.id.matches("T[1-9][0-9]*")) {
+                invalidIds.add(task.id.isEmpty() ? "(空)" : task.id);
+                continue;
+            }
+            int num = Integer.parseInt(task.id.substring(1));
+            if (!seen.add(num)) {
+                return "【编号不规范】任务编号 '" + task.id + "' 重复。编号必须恰好为 T1..T" + size
+                        + " 连续且不重复——每轮 create 都是一个全新清单，编号从 T1 开始，不要延续历史清单的编号；"
+                        + "请重置所有 id（depends_on 同步改用新编号）后重新调用 create";
+            }
+        }
+        if (!invalidIds.isEmpty()) {
+            return "【编号不规范】以下任务 id 不是 T+数字 格式：" + String.join("、", invalidIds)
+                    + "。编号必须恰好为 T1..T" + size + " 连续递增——每轮 create 都是一个全新清单，编号从 T1 开始；"
+                    + "请重置所有 id（depends_on 同步改用新编号）后重新调用 create";
+        }
+        for (int i = 1; i <= size; i++) {
+            if (!seen.contains(i)) {
+                String passed = seen.stream().sorted().map(n -> "T" + n)
+                        .collect(Collectors.joining("、"));
+                return "【编号不规范】编号应恰好为 T1..T" + size + " 连续递增，当前缺少 T" + i
+                        + "（传入：" + passed + "）。"
+                        + "每轮 create 都是一个全新清单，编号从 T1 开始，不要延续历史清单的编号（如 T5、T9）；"
+                        + "请重置所有 id（depends_on 同步改用新编号）后重新调用 create";
+            }
+        }
+        return null;
     }
 
     // ==================== 内部类 ====================
