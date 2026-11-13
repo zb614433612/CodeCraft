@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.service.llm;
 
+import com.example.agentdeepseek.util.ReasoningPassback;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -9,6 +10,7 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 import reactor.core.publisher.Flux;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -190,7 +192,112 @@ public abstract class AbstractLLMClient implements LLMClient {
         // 子类可进一步定制
         customizeRequest(request, messages, model, temperature, thinkingMode, stream, tools);
 
+        // ★ 请求出口兜底：assistant 消息的 reasoning_content 字段绝不能缺失
+        //   DeepSeek 对 thinking 模型强校验该字段（缺失即 400），且**关闭思考时同样校验**
+        //   （关闭思考时模型天然没有思考内容，字段更容易缺失）。这里按 Provider 能力补齐空串占位。
+        //   ⚠️ 主链路与工具循环直接用 webClient.bodyValue 发请求、不走本方法，
+        //      那两处必须显式调用 LLMClient#ensureReasoningContent（见 DeepSeekServiceImpl）。
+        if (requiresReasoningPadding()) {
+            List<Map<String, Object>> padded = padReasoningContent(messages);
+            if (padded != messages) {
+                request.put("messages", padded);
+                log.debug("[{}] 请求出口补齐 reasoning_content 字段（空串占位，防 400）", getProviderCode());
+            }
+        }
+
         return request;
+    }
+
+    /**
+     * 请求出口：是否需要为每条 assistant 消息补齐 {@code reasoning_content}（缺失时补空串）。
+     * <p>
+     * DeepSeek 对 thinking 模型强校验该字段，缺失直接 400；<b>即使请求显式关闭了思考也一样</b>
+     * —— 因为模型本身仍是思考模型，服务端仍按该协议校验。使用 {@code reasoning_content}
+     * 字段体系的 Provider 应覆盖本方法返回 {@code true}；默认 {@code false} 表示不向不使用该字段的
+     * Provider（OpenAI 官方 / Anthropic / Ollama）注入未知字段，避免被严格校验拒绝。
+     * </p>
+     */
+    protected boolean requiresReasoningPadding() {
+        return false;
+    }
+
+    /**
+     * 为 assistant 消息补齐 {@code reasoning_content} 字段（<b>仅在缺失时补空串，绝不覆盖已有值</b>）。
+     * <p>
+     * 采用 copy-on-write：只复制需要补齐的消息 Map，不修改调用方持有的列表与对象，
+     * 与 {@link ToolCallSequenceSanitizer} 的约定保持一致。
+     * </p>
+     *
+     * @param messages 原始消息列表（可为 null）
+     * @return 补齐后的新列表；无需补齐时原样返回入参引用（调用方可用引用比较判断是否发生拷贝）
+     */
+    protected static List<Map<String, Object>> padReasoningContent(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return messages;
+        }
+        boolean needPad = false;
+        for (Map<String, Object> msg : messages) {
+            if (ReasoningPassback.needsPadding(msg)) {
+                needPad = true;
+                break;
+            }
+        }
+        if (!needPad) {
+            return messages;
+        }
+
+        List<Map<String, Object>> copy = new ArrayList<>(messages.size());
+        int padded = 0;
+        for (Map<String, Object> msg : messages) {
+            if (ReasoningPassback.needsPadding(msg)) {
+                Map<String, Object> item = new HashMap<>(msg);
+                item.put(ReasoningPassback.FIELD, "");
+                copy.add(item);
+                padded++;
+            } else {
+                copy.add(msg);
+            }
+        }
+        if (log.isDebugEnabled()) {
+            log.debug("补齐 reasoning_content 空串占位 {} 条（共 {} 条消息，防 400）", padded, messages.size());
+        }
+        return copy;
+    }
+
+    /**
+     * 请求发送前的最后一道兜底（{@link LLMClient#ensureReasoningContent} 实现）。
+     * <p>
+     * <b>为什么调用方必须显式调用</b>：{@code DeepSeekServiceImpl} 的主链路与工具循环续跑
+     * 都是 {@code webClient.post().bodyValue(requestBody)} 直接发送，<b>不会经过</b>
+     * {@link #buildRequestBody} / {@link #streamChat}，只挂在那两处等于没生效。
+     * </p>
+     *
+     * @param requestBody 原始请求体
+     * @return 补齐后的副本；无需补齐时返回入参本身
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> ensureReasoningContent(Map<String, Object> requestBody) {
+        if (requestBody == null || !requiresReasoningPadding()) {
+            return requestBody;
+        }
+        Object rawMessages = requestBody.get("messages");
+        if (!(rawMessages instanceof List<?> list)) {
+            return requestBody;
+        }
+        List<Map<String, Object>> messages = (List<Map<String, Object>>) list;
+        List<Map<String, Object>> padded = padReasoningContent(messages);
+        if (padded == messages) {
+            return requestBody;
+        }
+        Map<String, Object> copy = new HashMap<>(requestBody);
+        copy.put("messages", padded);
+        // WARN：补齐意味着「某条调用路径漏写了字段」，本身值得关注。
+        // 正常情况下各调用点应已通过 ReasoningPassback 写入（真实值或空串）。
+        log.warn("[{}] 发送前补齐 reasoning_content 字段（空串占位，防 400）。"
+                        + "若频繁出现说明有调用点漏写，请检查工具循环 / 子Agent 的消息构建",
+                getProviderCode());
+        return copy;
     }
 
     /**
@@ -245,6 +352,8 @@ public abstract class AbstractLLMClient implements LLMClient {
         // ★ 请求出口统一净化：会把「工具已下发但结果缺失」的脏序列修复成合法序列（幂等、纯内存）。
         //   这里是所有 Provider 流式请求的必经之路，任何历史脏数据都无法阻断对话。
         Map<String, Object> safeBody = ToolCallSequenceSanitizer.sanitizeRequestBodyCopy(requestBody);
+        // ★ reasoning_content 兜底（子类若走本方法发请求，这里也一并保证）
+        safeBody = ensureReasoningContent(safeBody);
         return webClient.post()
                 .uri(getChatEndpoint())
                 .contentType(MediaType.APPLICATION_JSON)
@@ -265,6 +374,8 @@ public abstract class AbstractLLMClient implements LLMClient {
     public String blockingChat(Map<String, Object> requestBody, Duration timeout) {
         // ★ 同流式：非流式请求出口同样净化（评委/子Agent/复盘等路径统一兜底）
         Map<String, Object> safeBody = ToolCallSequenceSanitizer.sanitizeRequestBodyCopy(requestBody);
+        // ★ reasoning_content 兜底（子 Agent 阻塞调用同样可能缺字段）
+        safeBody = ensureReasoningContent(safeBody);
         try {
             Duration effectiveTimeout = timeout != null ? timeout : DEFAULT_BLOCKING_TIMEOUT;
             return webClient.post()

@@ -124,4 +124,13 @@ public class MiMoClient extends AbstractLLMClient {
             request.remove("_remove_top_p");
         }
     }
+
+    /**
+     * MiMo 的思考内容同样落在 {@code reasoning_content} 字段体系内，
+     * 请求出口需兜底补齐该字段（缺失时补空串），避免多轮工具调用续跑时被拒。
+     */
+    @Override
+    protected boolean requiresReasoningPadding() {
+        return true;
+    }
 }

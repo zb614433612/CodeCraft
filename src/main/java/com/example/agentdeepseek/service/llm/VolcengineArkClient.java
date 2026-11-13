@@ -327,4 +327,13 @@ public class VolcengineArkClient extends AbstractLLMClient {
             return new Options(null, null, false, null, null);
         }
     }
+
+    /**
+     * 方舟上的 DeepSeek 系模型同样把思考内容放在 {@code reasoning_content}，
+     * 并在 thinking 模式下强校验该字段，请求出口需兜底补齐（缺失时补空串）。
+     */
+    @Override
+    protected boolean requiresReasoningPadding() {
+        return true;
+    }
 }

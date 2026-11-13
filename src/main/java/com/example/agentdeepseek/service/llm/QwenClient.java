@@ -159,4 +159,13 @@ public class QwenClient extends AbstractLLMClient {
         // ===== 3. 清理其他 Provider 的残留参数（Qwen 用 max_tokens） =====
         request.remove("max_completion_tokens");
     }
+
+    /**
+     * 通义千问开启思考后，思考内容位于 {@code reasoning_content} 字段（与 DeepSeek 同族），
+     * 请求出口需兜底补齐该字段（缺失时补空串），避免多轮工具调用续跑时被拒。
+     */
+    @Override
+    protected boolean requiresReasoningPadding() {
+        return true;
+    }
 }

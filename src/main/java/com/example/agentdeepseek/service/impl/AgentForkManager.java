@@ -19,6 +19,7 @@ import com.example.agentdeepseek.tool.ToolRegistry;
 import com.example.agentdeepseek.tool.impl.DeepSeekAnalyzer;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.example.agentdeepseek.util.PromptUtil;
+import com.example.agentdeepseek.util.ReasoningPassback;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -598,15 +599,13 @@ public class AgentForkManager {
             }
 
             // 构建assistant消息并加入历史
-            // 【成本优化】默认不回传 reasoning_content（见 DeepSeekConfig#stripHistoryReasoning）：
-            //   官方文档已明确该字段仅用于 Chat Prefix Completion（prefix=true），普通多轮对话无需回传。
+            // 【强制回传】assistant 消息一律携带 reasoning_content 字段（缺失即 400，见 ReasoningPassback）：
+            //   full 回真实值，balanced/compact 置空串占位（≈3~5 token）。
             //   子 Agent 的完整消息（含 reasoning）仍会写入 fullMessagesJson 供溯源，这里只控制下发给模型的部分。
             Map<String, Object> assistantMsg = new HashMap<>();
             assistantMsg.put("role", "assistant");
             assistantMsg.put("content", assistantContent);
-            if (!reasoningContent.isEmpty() && !deepSeekConfig.isStripHistoryReasoning()) {
-                assistantMsg.put("reasoning_content", reasoningContent);
-            }
+            ReasoningPassback.putHistory(assistantMsg, reasoningContent, deepSeekConfig.resolveContextMode());
             messages.add(assistantMsg);
 
             // 检查是否有tool_calls（使用前面解析出的 toolCalls 变量）

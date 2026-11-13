@@ -141,6 +141,14 @@ public final class LLMErrorFormatter {
                             + "建议：开启或调低上下文压缩、新建会话后继续，或减少单轮携带的内容。";
                     key = "context_length_exceeded";
                     retryable = false;
+                } else if (raw != null && raw.contains("reasoning_content")) {
+                    // 精准识别 thinking 模式回传缺失：此前一律笼统提示「请求体格式错误」，排查成本很高。
+                    title = "思考内容回传缺失（HTTP 400）";
+                    message = "该 Provider 在 thinking 模式下要求每条 assistant 消息回传 reasoning_content 字段。"
+                            + "v3.0.10 已修复（字段始终下发，历史消息用空串占位）；"
+                            + "若仍出现，请确认后端已更新到 v3.0.10 并重启（桌面端需使用新安装包）。";
+                    key = "reasoning_content_missing";
+                    retryable = false;
                 } else {
                     title = "请求格式错误（HTTP 400）";
                     message = "请求体格式错误，请根据错误信息提示修改请求体。";

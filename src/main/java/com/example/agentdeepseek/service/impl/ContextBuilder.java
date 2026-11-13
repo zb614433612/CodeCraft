@@ -8,6 +8,7 @@ import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
 import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
+import com.example.agentdeepseek.util.ReasoningPassback;
 import com.example.agentdeepseek.util.TokenEstimator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -180,17 +181,16 @@ public class ContextBuilder {
                     messageMap.put("content", content);
                 }
 
-                // 【成本优化】历史 reasoning_content 默认不回传（开关见 DeepSeekConfig#stripHistoryReasoning）：
-                //   reasoning 生成时按「输出」计价（约 6 元/百万），下一轮作为历史回传时又按「未命中输入」
-                //   再计一次（约 3 元/百万），合计约 9 元/百万 —— 是所有内容类型中单价最高的；
-                //   而官方文档明确该字段属 Beta，仅用于 Chat Prefix Completion（prefix=true），
-                //   普通多轮对话无需回传，历史思考链对后续决策的参考价值也很低。
-                //   ⚠️ 数据库中 reasoning 仍完整保留（前端展示与溯源不受影响），此处只影响下发给模型的消息。
+                // 【DeepSeek thinking + tools 强校验】assistant 消息必须「始终携带」reasoning_content 字段：
+                //   只要有一条 assistant 缺少该字段，DeepSeek 就返回 400
+                //   （The reasoning_content in the thinking mode must be passed back to the API）。
+                //   因此成本优化的着力点不是「删掉字段」，而是「把值置空」——
+                //   full      → 回传真实思考内容
+                //   balanced  → 空串占位（≈3~5 token，约为真实思考链的千分之一，且能通过校验）
+                //   compact   → 空串占位（同上，额外摘要化工具结果）
+                //   ⚠️ 数据库中 reasoning 仍完整保留（前端展示与溯源不受影响），此处只影响下发给模型的部分。
                 //   ⚠️ 注意把开关做成"恒定"判断：中途切换会让前缀失效一次，属预期代价。
-                String reasoning = msg.getReasoning();
-                if (reasoning != null && !reasoning.isEmpty() && !effectiveMode.shouldStripHistoryReasoning()) {
-                    messageMap.put("reasoning_content", reasoning);
-                }
+                ReasoningPassback.putHistory(messageMap, msg.getReasoning(), effectiveMode);
 
                 result.add(messageMap);
             } else if (role == MessageRole.TOOL) {
@@ -254,6 +254,21 @@ public class ContextBuilder {
         // 压缩/裁剪都可能切断 assistant(tool_calls) 与 tool 消息的配对关系，返回前再净化一次（幂等）
         ToolCallSequenceSanitizer.sanitize(result);
 
+        // ===== 5. reasoning_content 兜底补齐（400 不复发的最后一道防线）=====
+        // DeepSeek thinking + tools 场景下，任何一条 assistant 缺少 reasoning_content 都会 400。
+        // 上面的各条路径（模式裁剪 / 工具结果摘要化 / 智能压缩 / 滑动窗口丢弃）都可能改写消息列表，
+        // 未来新增路径也可能忘记写该字段。缺字段必炸、补空串无害，因此统一扫一遍兜底。
+        int padded = 0;
+        for (Map<String, Object> message : result) {
+            if (ReasoningPassback.needsPadding(message)) {
+                ReasoningPassback.putHistory(message, null, effectiveMode);
+                padded++;
+            }
+        }
+        if (padded > 0) {
+            log.debug("reasoning_content 兜底补齐 {} 条 assistant 消息（空串占位）", padded);
+        }
+
         return result;
     }
 
@@ -276,7 +291,7 @@ public class ContextBuilder {
      * <p>
      * 规则：
      * - 找到最后一条 user 消息作为"本轮对话"的起点
-     * - 此前的 assistant 消息移除 reasoning_content
+     * - 此前的 assistant 消息把 reasoning_content <b>置为空串</b>（不删字段，字段缺失会 400）
      * - 此前的 tool 消息 content 替换为"[工具 xxx: 成功/失败]"摘要
      * - tool_call_id 完整保留（API 格式要求）
      * </p>
@@ -321,9 +336,9 @@ public class ContextBuilder {
             String role = (String) msg.get("role");
 
             if ("assistant".equals(role)) {
-                // 移除 reasoning_content（历史思考过程参考价值低、token 消耗大）
-                if (msg.containsKey("reasoning_content")) {
-                    msg.remove("reasoning_content");
+                // 剥离真实思考内容（历史思考参考价值低、token 消耗大）
+                // ⚠️ 只把值改为空串，绝不 remove 字段：字段缺失会让 DeepSeek 直接返回 400
+                if (ReasoningPassback.stripToPlaceholder(msg)) {
                     removedReasoningCount++;
                 }
             } else if ("tool".equals(role)) {

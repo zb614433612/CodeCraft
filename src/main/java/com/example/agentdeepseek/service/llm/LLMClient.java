@@ -93,6 +93,25 @@ public interface LLMClient {
     }
 
     /**
+     * 请求发送前的最后一道兜底：确保 assistant 消息的 {@code reasoning_content} 字段存在。
+     *
+     * <p>
+     * <b>为什么必须在调用方显式调用</b>：主对话链路与工具循环续跑
+     * （{@code DeepSeekServiceImpl}）是直接用 {@code webClient.post().bodyValue(requestBody)}
+     * 发请求的，<b>不会经过</b> {@link #streamChat} / {@link #buildRequestBody}，
+     * 因此兜底逻辑必须由这些调用点在发送前主动调用，否则等于没挂。
+     * </p>
+     *
+     * <p>默认实现原样返回：不使用 {@code reasoning_content} 字段体系的 Provider 无需处理。</p>
+     *
+     * @param requestBody 原始请求体
+     * @return 处理后的请求体（可能是副本）；不得为 null 时返回入参本身
+     */
+    default Map<String, Object> ensureReasoningContent(Map<String, Object> requestBody) {
+        return requestBody;
+    }
+
+    /**
      * 从阻塞式响应中提取最终内容
      *
      * @param responseBody 完整的 JSON 响应字符串

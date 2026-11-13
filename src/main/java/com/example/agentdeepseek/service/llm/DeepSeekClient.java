@@ -82,4 +82,15 @@ public class DeepSeekClient extends AbstractLLMClient {
      * 使用 AbstractLLMClient 默认的解析逻辑即可。
      * 唯一的差异是 DeepSeek 在 delta 中可能包含 reasoning_content。
      */
+
+    /**
+     * DeepSeek 在 thinking 模式下强校验 {@code reasoning_content}：
+     * 任一 assistant 消息缺失该字段即返回 400
+     * （{@code The reasoning_content in the thinking mode must be passed back to the API.}）。
+     * 因此请求出口必须兜底补齐（缺失时补空串，空串可通过校验）。
+     */
+    @Override
+    protected boolean requiresReasoningPadding() {
+        return true;
+    }
 }

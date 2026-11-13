@@ -315,10 +315,13 @@ deepseek:
   # ⚠️ 降档提示：high→low 若导致任务多跑一轮，单轮成本(约0.03~0.04元)远高于省下的 reasoning 费用，反而更贵。
   thinking-mode: thinking
   # 上下文模式（主对话历史注入策略）：full / balanced / compact
-  #   full     全量 —— 历史 reasoning 也回传、工具结果原样保留（最准、最贵）
-  #   balanced 均衡【默认】—— 剔除历史 reasoning、工具结果原样保留
-  #             理由：reasoning 双重计费约 9 元/百万（生成按输出 6 + 下轮按未命中输入再计 3），
-  #                   且历史思考链对后续决策参考价值低；工具结果是决策证据必须留
+  #   full     全量 —— 历史 reasoning 回传真实值、工具结果原样保留（最准、最贵）
+  #   balanced 均衡【默认】—— 历史 reasoning 置为空串占位、工具结果原样保留
+  #             理由：reasoning 若回传真实值会双重计费约 9 元/百万（生成按输出 6 + 下轮按未命中输入再计 3），
+  #                   且历史思考链对后续决策参考价值低；工具结果是决策证据必须留。
+  #             ⚠️ 「字段必须存在」：DeepSeek thinking 模式（尤其带 tools 时）对每条 assistant 消息
+  #                强校验 reasoning_content，缺失会直接 400。因此这里优化的是「值」而不是「字段」——
+  #                置空串（≈3~5 token）即可通过校验，比回传整段思考链便宜三个数量级。
   #   compact  精简 —— 额外摘要化历史工具结果（救急：上下文逼近模型上限时用）
   #             ⚠️ 会改写历史 → 前缀缓存失效一次，不作常规优化手段
   # 优先级：请求参数 contextMode > sys_config(context_mode) > 本配置 > balanced

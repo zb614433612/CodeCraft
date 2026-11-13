@@ -116,4 +116,13 @@ public class MiniMaxClient extends AbstractLLMClient {
         // 将 thinking 拆分到 reasoning_content（输出格式开关，不影响 thinking 开关）
         request.putIfAbsent("reasoning_split", true);
     }
+
+    /**
+     * MiniMax 开启 {@code reasoning_split} 后思考内容同样落在 {@code reasoning_content}
+     * 字段体系内，与 DeepSeek 一致，请求出口需兜底补齐该字段（缺失时补空串）。
+     */
+    @Override
+    protected boolean requiresReasoningPadding() {
+        return true;
+    }
 }

@@ -113,9 +113,15 @@ public class DeepSeekConfig {
     }
 
     /**
-     * 便捷判定：当前模式下是否剔除历史 {@code reasoning_content}
+     * 便捷判定：当前模式下是否「不携带真实的历史 {@code reasoning_content}」。
      * <p>等价于 {@code resolveContextMode().shouldStripHistoryReasoning()}；
      * 各调用点统一走此方法，避免各处自行字符串比较导致三档语义漂移。</p>
+     * <p>
+     * ⚠️ 语义提醒：为 {@code true} 表示只把字段值置为空串，<b>字段本身仍必须下发</b>
+     * —— DeepSeek thinking + tools 场景下字段缺失会直接 400。
+     * 需要写历史消息时请改用 {@code util.ReasoningPassback#putHistory}，
+     * 不要在本方法为 true 时省略字段。
+     * </p>
      */
     public boolean isStripHistoryReasoning() {
         return resolveContextMode().shouldStripHistoryReasoning();

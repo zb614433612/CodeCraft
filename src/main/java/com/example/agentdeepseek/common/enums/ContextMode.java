@@ -14,27 +14,34 @@ import java.util.Locale;
  *   <tr><th>模式</th><th>历史 reasoning</th><th>历史工具结果</th><th>适用</th></tr>
  *   <tr>
  *     <td>{@link #FULL}（全量）</td>
- *     <td>回传</td>
+ *     <td>回传真实值</td>
  *     <td>原样保留</td>
  *     <td>准确性最高、成本最高。需要模型复述"当时为什么这么想"的场景</td>
  *   </tr>
  *   <tr>
  *     <td>{@link #BALANCED}（均衡，默认）</td>
- *     <td><b>不回传</b></td>
+ *     <td><b>空串占位</b></td>
  *     <td>原样保留</td>
- *     <td>推荐。reasoning 双重计费最贵且对后续决策价值低；工具结果是决策证据，必须留</td>
+ *     <td>推荐。字段必须存在（缺失即 400），但值置空即可满足校验，成本≈0</td>
  *   </tr>
  *   <tr>
  *     <td>{@link #COMPACT}（精简）</td>
- *     <td><b>不回传</b></td>
+ *     <td><b>空串占位</b></td>
  *     <td><b>摘要化</b></td>
  *     <td>救急用：上下文逼近模型上限时。注意摘要化会改写历史 → 前缀缓存失效一次</td>
  *   </tr>
  * </table>
  *
- * <p><b>成本背景</b>：reasoning 生成按输出计价（约 6 元/百万），下一轮作为历史回传时
- * 又按「未命中输入」再计一次（约 3 元/百万），合计约 9 元/百万 —— 是所有内容类型中单价最高的；
- * 而工具结果在命中缓存后仅约 0.025 元/百万，因此 BALANCED 只砍 reasoning、保工具结果，
+ * <p><b>⚠️ 关键修正（v3.0.10）</b>：早期实现把「不回传」理解为「<b>不下发字段</b>」，
+ * 这会在 DeepSeek thinking 模式（尤其请求携带 tools 时）直接触发 400：
+ * {@code The reasoning_content in the thinking mode must be passed back to the API.}
+ * 正确做法是「<b>字段始终存在，值置为空串</b>」—— 空串可通过校验，且 token 成本仅 3~5 个，
+ * 与回传整段思考链（数千 token，按未命中输入计价约 3 元/百万）相比几乎为零。
+ * 详见 {@code util.ReasoningPassback}。</p>
+ *
+ * <p><b>成本背景</b>：reasoning 生成按输出计价（约 6 元/百万），若下一轮作为真实内容回传，
+ * 又会按「未命中输入」再计一次（约 3 元/百万），合计约 9 元/百万 —— 是所有内容类型中单价最高的；
+ * 而工具结果在命中缓存后仅约 0.025 元/百万。因此 BALANCED 只把历史 reasoning 置空、保工具结果，
  * 是「省钱但不丢准确性」的最优切分点。</p>
  */
 public enum ContextMode {
@@ -57,7 +64,7 @@ public enum ContextMode {
     /** 展示名 */
     private final String label;
 
-    /** 是否剔除历史 reasoning_content（不下发给模型） */
+    /** 是否「不携带真实历史 reasoning」：true=只下发空串占位（字段仍然保留），false=回传真实值 */
     private final boolean stripHistoryReasoning;
 
     /** 是否摘要化历史工具结果（改写历史，会导致一次前缀缓存失效） */
@@ -78,7 +85,15 @@ public enum ContextMode {
         return label;
     }
 
-    /** 是否不在请求中回传历史 reasoning_content */
+    /**
+     * 是否「不携带真实的历史 reasoning_content」。
+     * <p>
+     * ⚠️ 注意语义：返回 {@code true} 表示<b>只把字段值置为空串</b>，
+     * 字段本身仍然必须出现在请求里（缺失会触发 DeepSeek 400）。
+     * 唯一合法的「不下发」场景是 Provider 完全不支持该字段，
+     * 那属于适配层职责，与本枚举无关。
+     * </p>
+     */
     public boolean shouldStripHistoryReasoning() {
         return stripHistoryReasoning;
     }

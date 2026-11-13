@@ -53,6 +53,7 @@ import com.example.agentdeepseek.tool.permission.PathSecurityChecker;
 import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
 import com.example.agentdeepseek.util.OperationDetailGenerator;
 import com.example.agentdeepseek.util.PromptUtil;
+import com.example.agentdeepseek.util.ReasoningPassback;
 import com.example.agentdeepseek.util.TaskContext;
 import com.example.agentdeepseek.util.TaskContextRegistry;
 import com.example.agentdeepseek.util.ToolContext;
@@ -1289,12 +1290,18 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // ★ 请求出口统一净化：把「工具已下发但结果缺失」的历史脏序列修复为合法序列，
             //   避免一次中断导致该会话之后的所有请求都 400（详见 ToolCallSequenceSanitizer）
             ToolCallSequenceSanitizer.sanitizeRequestBody(requestBody);
+            // ★ reasoning_content 兜底：assistant 消息缺该字段会被 DeepSeek 直接 400
+            //   （即使请求关闭了思考，服务端仍按 thinking 模型协议校验）。
+            //   净化只修序列、不补字段；主链路不走 AbstractLLMClient#buildRequestBody，故此处显式补齐。
+            Map<String, Object> preparedBody = ctxClient != null
+                    ? ctxClient.ensureReasoningContent(requestBody)
+                    : requestBody;
             // 使用当前 Provider 的 WebClient（替换原来的 this.webClient）
             WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
             return Flux.concat(sessionEvent, activeWebClient.post()
                     .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(requestBody)
+                    .bodyValue(preparedBody)
                     .accept(MediaType.TEXT_EVENT_STREAM) // 接受text/event-stream
                     .retrieve()
                     .bodyToFlux(String.class)
@@ -3048,6 +3055,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
         WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
 
+        // ★ 工具循环每轮请求出口兜底：assistant 消息缺 reasoning_content 会被 DeepSeek 直接 400。
+        //   本方法用 webClient.bodyValue 直接发送（不经过 AbstractLLMClient#buildRequestBody），
+        //   且「关闭思考」「模型本轮无思考内容」两种情况下该字段天然缺失（服务端照样校验），
+        //   因此必须在这里显式补齐 —— 这是工具循环续跑报 400 的关键修复点。
+        Map<String, Object> preparedBody = ctxClient != null
+                ? ctxClient.ensureReasoningContent(requestBody)
+                : requestBody;
+
         // ===== 成本可观测：承接本轮请求的 usage 快照 =====
         // Provider 会把完整 usage 挂在最后一帧（data: [DONE] 之前），按官方文档流式请求同样返回，
         // 无需设置 stream_options.include_usage。这里用原子引用承接，流终止时统一落库，
@@ -3060,7 +3075,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         return activeWebClient.post()
                 .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(requestBody)
+                .bodyValue(preparedBody)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .retrieve()
                 .bodyToFlux(String.class)
@@ -3376,11 +3391,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                     tcMsg.put("content", collectedContentStr);
                                                                 }
                                                                 tcMsg.put("tool_calls", completeToolCalls);
-                                                                // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
-                                                                if (reasoning != null && !reasoning.isEmpty()
-                                                                        && !deepSeekConfig.isStripHistoryReasoning()) {
-                                                                    tcMsg.put("reasoning_content", reasoning);
-                                                                }
+                                                                // 【强制回传】本轮工具循环的 assistant 必须带真实 reasoning_content：
+                                                                //   DeepSeek thinking + tools 场景下字段缺失会 400（见 ReasoningPassback）
+                                                                ReasoningPassback.putCurrentTurn(tcMsg, reasoning);
                                                                 messages.add(tcMsg);
 
                                                                 // 为每个工具调用添加 tool 结果消息（内容均为用户自定义指示）
@@ -3452,11 +3465,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                 tcMsg.put("content", collectedContentStr);
                                                             }
                                                             tcMsg.put("tool_calls", completeToolCalls);
-                                                            // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
-                                                            if (reasoning != null && !reasoning.isEmpty()
-                                                                    && !deepSeekConfig.isStripHistoryReasoning()) {
-                                                                tcMsg.put("reasoning_content", reasoning);
-                                                            }
+                                                            // 【强制回传】本轮工具循环的 assistant 必须带真实 reasoning_content：
+                                                            //   DeepSeek thinking + tools 场景下字段缺失会 400（见 ReasoningPassback）
+                                                            ReasoningPassback.putCurrentTurn(tcMsg, reasoning);
                                                             messages.add(tcMsg);
 
                                                             // 构建工具结果消息并保存（M5：统一封装，含截图等工具的 user 消息注入）
@@ -3559,14 +3570,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             toolCallMessage.put("content", collectedContentStr);
                                         }
                                         toolCallMessage.put("tool_calls", completeToolCalls);
-                                        // 【成本优化】工具循环内同样不回传 reasoning（同 DeepSeekConfig#stripHistoryReasoning）：
-                                        //   当轮生成的 reasoning 若带入下一轮迭代，会按「未命中输入」再计一次费，
-                                        //   而模型继续推理只依赖 tool_calls 与工具结果，历史思考链参考价值极低。
-                                        //   前端展示不受影响（reasoning 已通过 SSE 实时下发并落库）。
-                                        if (reasoning != null && !reasoning.isEmpty()
-                                                && !deepSeekConfig.isStripHistoryReasoning()) {
-                                            toolCallMessage.put("reasoning_content", reasoning);
-                                        }
+                                        // 【强制回传】工具循环内必须带真实 reasoning_content：
+                                        //   DeepSeek 会在服务端强校验该字段（缺失即 400），且思维链要在
+                                        //   多步工具调用之间保持连续 —— 置空会削弱模型的推理衔接。
+                                        //   成本上这部分新增量很小（每轮仅一次「未命中输入」），
+                                        //   换来的是更少的跑偏与更少的轮次（轮次才是成本大头）。
+                                        ReasoningPassback.putCurrentTurn(toolCallMessage, reasoning);
                                         messages.add(toolCallMessage);
 
                                         // 创建工具结果事件流
@@ -3687,16 +3696,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         if (content != null && !content.isEmpty()) {
                             assistantMessage.put("content", content);
                         }
-                        // 【成本优化】不再回传 reasoning_content（见 DeepSeekConfig#stripHistoryReasoning）。
-                        // 历史约束说明：早期 deepseek-reasoner 确实要求多轮对话回传 reasoning_content，
-                        // 但现行官方文档已明确该字段仅用于 Chat Prefix Completion（prefix=true），
-                        // 普通多轮对话无需回传；回传反而按「未命中输入」再计一次费。
-                        // 若某 Provider 恢复强校验并返回 400（错误信息含 reasoning_content），
-                        // 把 deepseek.strip-history-reasoning 置为 false 即可原样回退。
-                        if (reasoning != null && !reasoning.isEmpty()
-                                && !deepSeekConfig.isStripHistoryReasoning()) {
-                            assistantMessage.put("reasoning_content", reasoning);
-                        }
+                        // 【强制回传】assistant 消息一律携带 reasoning_content 字段（缺失即 400）。
+                        //   本条是「无工具调用的最终回复」，不参与工具续跑，因此走历史策略：
+                        //   full 回真实值，balanced/compact 置空串占位（≈3~5 token，成本可忽略）。
+                        ReasoningPassback.putHistory(assistantMessage, reasoning,
+                                deepSeekConfig.resolveContextMode());
                         messages.add(assistantMessage);
 
                         // 📝 成长体系 C3：弯路通道（最终回复已追加到 messages 后触发——
@@ -3954,11 +3958,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 toolCallMessage.put("content", collectedContent);
                             }
                             toolCallMessage.put("tool_calls", completeToolCalls);
-                            // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
-                            if (reasoning != null && !reasoning.isEmpty()
-                                    && !deepSeekConfig.isStripHistoryReasoning()) {
-                                toolCallMessage.put("reasoning_content", reasoning);
-                            }
+                            // 【强制回传】工具循环内必须带真实 reasoning_content：
+                            //   DeepSeek thinking + tools 场景下字段缺失会 400（见 ReasoningPassback）
+                            ReasoningPassback.putCurrentTurn(toolCallMessage, reasoning);
                             messages.add(toolCallMessage);
 
                             // 将包含回答的工具结果添加到消息列表并保存（M5：统一封装，含截图等工具的 user 消息注入）
@@ -4191,11 +4193,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             rejectTcMsg.put("content", collectedContentStr);
         }
         rejectTcMsg.put("tool_calls", completeToolCalls);
-        // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
-        if (reasoning != null && !reasoning.isEmpty()
-                && !deepSeekConfig.isStripHistoryReasoning()) {
-            rejectTcMsg.put("reasoning_content", reasoning);
-        }
+        // 【强制回传】拒绝后续跑仍属工具循环，reasoning_content 字段缺失会 400（见 ReasoningPassback）
+        ReasoningPassback.putCurrentTurn(rejectTcMsg, reasoning);
         messages.add(rejectTcMsg);
 
         // 为每个工具调用添加 tool 结果消息（内容均为拒绝提示）

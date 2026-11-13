@@ -5,12 +5,52 @@
 
 ---
 
-## [3.0.9] - 2026-11-13
+## [3.0.9] - 2026-11-13（2026-11-14 重新构建）
 
 > 成本治理 + 长任务体验双主线版：四项成本/上下文治理（上下文模式三档、思考档位归一、能力声明配置化、Token 成本看板）+
 > 一项架构级执行模型改造（长耗时命令后台化，编译/装依赖/下载不再被超时砍断）+
 > 真终端 PTY（Electron 端从「模拟终端」升级为真实 PTY）+ 两个用户可感知问题修复（下载无法取消、v3 登录态失效）+ 工具合并瘦身。
 > 后端 + 两套前端 + Electron 均有改动，**需重启后端**；桌面端需重新打包（新增 node-pty 原生依赖）。
+>
+> ⚠️ **2026-11-14 重新构建**：修复本版引入的 **thinking 模式 400 回归**
+> （`The reasoning_content in the thinking mode must be passed back to the API.`）—— 任意上下文模式
+> （full / balanced / compact）下只要触发工具调用，续跑请求即失败，新建会话亦无法规避；详见下方「紧急修复」小节。
+> 安装包已按修复后代码重新产出，**版本号保持 3.0.9**，请下载本页最新资产。
+
+### 🐛 紧急修复：thinking 模式 reasoning_content 缺失导致 400
+
+- **现象**：v3.0.9 起，DeepSeek thinking 模式下只要模型发起工具调用（`tool_calls`），
+  续跑请求即返回 400：`The reasoning_content in the thinking mode must be passed back to the API.`；
+  切换 full / compact 模式、新建会话均无法规避。
+- **根因（三层叠加，解释了「切模式 / 换 UI / 新窗口 / 关思考都不管用」）**：
+  1. **认知错误**：v3.0.9 依据「官方文档称该字段属 Beta、仅用于 Chat Prefix Completion」判定
+     「普通多轮无需回传」，于是 `balanced` 直接**不下发该字段**。但 DeepSeek 对该字段是**强校验**：
+     任一 assistant 消息缺少 `reasoning_content` 即 400 —— **且不看思考开关**，因为模型本身是思考模型。
+  2. **逻辑错误**：原判定写成 `reasoning != null && !reasoning.isEmpty() && !strip`（**与**关系），
+     因此即使 `full` 模式，只要某轮模型没返回思考内容（长工具链后段模型常只返回裸 `tool_call`），
+     字段依旧被跳过 → 同样 400；`compact` 模式更是直接 `remove("reasoning_content")` 无条件删除 →
+     必然复发。
+  3. **关闭思考场景必炸**：关闭思考时模型天然产不出思考内容，字段永远是空的。
+     v3.0.8 靠「回传历史 reasoning」还能给字段兜住，v3.0.9 一旦剥离就露馅；
+     新会话没有历史可回传，于是「新旧会话、开关思考、切换模式」四种组合全部报错。
+- **修复（关键认知：字段必存在，只有「值」可优化）**：
+  - 新增 `util/ReasoningPassback` 全局收口回传规则：**字段始终下发**，只按场景决定值 ——
+    本轮工具循环内用**真实思考内容**（保持思维链连续），历史消息按模式取
+    **真实值（full）/ 空串占位（balanced、compact）**。
+  - 实测与业界实现一致：**空串可通过校验**，token 成本仅 3~5 个，比回传整段思考链便宜三个数量级。
+  - `ContextBuilder` 历史组装与 `compactHistoryMessages` 改为「置空不删字段」。
+  - `DeepSeekServiceImpl` 6 处、`AgentForkManager` 1 处工具循环消息统一改走 `ReasoningPassback`。
+  - **发送出口兜底（本次真正生效的关键）**：`LLMClient` 新增
+    `ensureReasoningContent(requestBody)`，`AbstractLLMClient` 实现为「按 Provider 能力补齐空串、
+    copy-on-write 不覆盖真实值」。DeepSeek / MiniMax / Qwen / Volcengine / MiMo 开启；
+    OpenAI 官方 / Anthropic / Ollama 不注入未知字段。
+    > ⚠️ 踩坑点：主链路与工具循环续跑都是 `webClient.post().bodyValue(requestBody)` **直接发送**，
+    > **不经过** `buildRequestBody` / `streamChat`。只把兜底挂在适配器基类上等于没生效，
+    > 必须在 `DeepSeekServiceImpl` 的两处真实发送点显式调用（无工具路径 + 工具循环 `handleStreamingPhase`）。
+  - `ContextBuilder` 返回前增加兜底扫描：压缩 / 裁剪 / 摘要化等路径漏写也不会再触发 400。
+  - `LLMErrorFormatter` 对含 `reasoning_content` 的 400 给出精准提示（不再笼统显示「请求体格式错误」）。
+- **验证**：`ReasoningPassbackTest`（28 项断言）+ `ReasoningPaddingTest`（25 项断言）全绿；
+  `mvn compile` 通过。
 
 ### 🧩 上下文模式三档（新增）
 

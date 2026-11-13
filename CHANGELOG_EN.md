@@ -5,7 +5,7 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
-## [3.0.9] - 2026-11-13
+## [3.0.9] - 2026-11-13 (rebuilt on 2026-11-14)
 
 > A dual-track release: cost governance + long-task experience. Four cost/context measures (three-tier context modes,
 > thinking-level normalization, configurable capability declarations, token cost dashboard) + one architectural change to
@@ -14,6 +14,53 @@ This document records all important version changes of the CodeCraft project.
 > v3 login state going stale) + tool-definition slimming.
 > Backend + both frontends + Electron are all changed; a **backend restart is required**, and desktop packages must be
 > rebuilt (a new `node-pty` native dependency is involved).
+>
+> ⚠️ **Rebuilt on 2026-11-14**: fixes the **thinking-mode 400 regression** introduced by this very release
+> (`The reasoning_content in the thinking mode must be passed back to the API.`) — under any context mode
+> (full / balanced / compact) the follow-up request failed as soon as a tool call was issued, and starting a new
+> conversation did not help; see the hotfix section below. Installers have been rebuilt from the fixed code;
+> **the version number stays 3.0.9** — please grab the latest assets on this page.
+
+### 🐛 Hotfix: missing reasoning_content in thinking mode caused 400
+
+- **Symptom**: since v3.0.9, in DeepSeek thinking mode, once the model issues a tool call (`tool_calls`),
+  the follow-up request returns 400: `The reasoning_content in the thinking mode must be passed back to the API.`
+  Switching to full / compact mode or creating a new conversation made no difference.
+- **Root cause (three layers, which explains why switching modes / UIs / conversations / thinking toggles all failed)**:
+  1. **Wrong assumption**: v3.0.9 concluded from "this field is Beta and only used for Chat Prefix Completion"
+     that "normal multi-turn calls need not pass it back", so `balanced` mode **omitted the field entirely**.
+     But DeepSeek **strictly validates** it: any assistant message missing `reasoning_content` triggers 400 —
+     **regardless of the thinking toggle**, because the model itself is a reasoning model.
+  2. **Logic bug**: the original condition was `reasoning != null && !reasoning.isEmpty() && !strip` (an **AND** chain),
+     so even in `full` mode the field was skipped whenever a turn produced no reasoning content
+     (models often return a bare `tool_call` late in long tool chains) → still 400.
+     `compact` mode was worse: it unconditionally did `remove("reasoning_content")` → guaranteed recurrence.
+  3. **Thinking-disabled always broke**: with thinking off, the model produces no reasoning at all, so the field
+     is always empty. v3.0.8 survived only because it echoed historical reasoning back; once v3.0.9 stripped that,
+     it broke — and a new conversation has no history to echo, so all four combinations
+     (new/old conversation × thinking on/off × any mode) failed.
+- **Fix (key insight: the field must exist; only its value is optimizable)**:
+  - New `util/ReasoningPassback` centralizes the rule: **always send the field**, decide only its value —
+    real reasoning for the current tool-loop turn (keeps the chain of thought continuous),
+    and for history: real value (`full`) or an empty-string placeholder (`balanced` / `compact`).
+  - Verified consistent with mainstream implementations: **an empty string passes validation** and costs
+    only 3–5 tokens — three orders of magnitude cheaper than echoing the whole reasoning chain.
+  - `ContextBuilder` history assembly and `compactHistoryMessages` now blank the value instead of deleting the field.
+  - 6 call sites in `DeepSeekServiceImpl` and 1 in `AgentForkManager` now go through `ReasoningPassback`.
+  - **Send-exit padding (the part that actually took effect)**: `LLMClient` gains
+    `ensureReasoningContent(requestBody)`, implemented by `AbstractLLMClient` as "pad with an empty string
+    according to Provider capability, copy-on-write, never overwriting a real value". Enabled for DeepSeek /
+    MiniMax / Qwen / Volcengine / MiMo; OpenAI official / Anthropic / Ollama are left untouched.
+    > ⚠️ Pitfall: both the main path and the tool-loop continuation send with
+    > `webClient.post().bodyValue(requestBody)` **directly**, **bypassing** `buildRequestBody` / `streamChat`.
+    > Hooking the padding only in the client base class has no effect — it must be called explicitly at the two
+    > real send points in `DeepSeekServiceImpl` (no-tools path + tool-loop `handleStreamingPhase`).
+  - `ContextBuilder` also performs a final sweep before returning, so compaction / trimming / summarizing
+    paths can never re-trigger the 400.
+  - `LLMErrorFormatter` now gives a precise message for 400s containing `reasoning_content`
+    (no longer a generic "request body format error").
+- **Verification**: `ReasoningPassbackTest` (28 assertions) + `ReasoningPaddingTest` (25 assertions) all green;
+  `mvn compile` passes.
 
 ### 🧩 Three-tier Context Modes (New)
 
