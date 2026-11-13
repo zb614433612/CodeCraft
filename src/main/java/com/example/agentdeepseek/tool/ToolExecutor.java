@@ -17,7 +17,9 @@ import org.springframework.stereotype.Component;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -279,6 +281,19 @@ public class ToolExecutor {
             }
         }
 
+        // ================================================================
+        // 🔧 必填参数前置校验（action 已确定后）
+        //    目的：在创建快照 / 真正执行之前就拦截"参数不全"，
+        //    避免工具跑到一半才失败、模型再重试——那等于白跑一整轮。
+        //    只校验"缺了必然失败"的参数，可选参数一律不检，避免误伤。
+        // ================================================================
+        String missingParamError = validateRequiredParams(toolName, arguments);
+        if (missingParamError != null) {
+            log.info("🔧 必填参数校验未通过: tool={}, action={}", toolName, arguments.path("action").asText(""));
+            lessonRecorder.recordAsync(toolName, functionNode.path("arguments").asText(""), missingParamError);
+            return new ToolCallResult(toolCallId, toolName, missingParamError);
+        }
+
         try {
             String displayArgs = detailGenerator.generate(toolName, arguments);
             boolean isRestricted = permissionRegistry.requiresDataApproval(toolName);
@@ -468,10 +483,12 @@ public class ToolExecutor {
      */
     private static final Set<String> ACTION_REQUIRED_TOOLS = Set.of(
             "file_explorer", "file_writer", "command",
-            "git_query", "git_submit", "git_branch",
+            // Git 六合一后的统一工具；旧名保留，历史消息或旧配置仍可能引用
+            "git", "git_query", "git_submit", "git_branch",
             "agent", "skill", "task_manager",
             "chat_attachment", "schedule_task",
-            "desktop_control"
+            // 桌面双工具：screen_capture（快照）/ desktop_control（键鼠）/ desktop（合并后的统一入口）
+            "screen_capture", "desktop_control", "desktop"
     );
 
     /**
@@ -537,6 +554,115 @@ public class ToolExecutor {
             String guidance = buildActionGuidance(toolName, arguments);
             return new ActionFixResult(false, null, null, null, guidance);
         }
+    }
+
+    /**
+     * 各工具在特定 action 下的必填参数表
+     * <p>
+     * 只收录「缺了必然失败」的参数：可选参数一律不检，避免误伤正常调用。
+     * 特别地，git 的 projectRoot 虽然有默认值 "."，因此<b>不</b>纳入校验。
+     * </p>
+     */
+    private static final Map<String, Map<String, String[]>> REQUIRED_PARAMS = buildRequiredParamsTable();
+
+    private static Map<String, Map<String, String[]>> buildRequiredParamsTable() {
+        Map<String, Map<String, String[]>> table = new HashMap<>();
+
+        Map<String, String[]> fileExplorer = new HashMap<>();
+        fileExplorer.put("read", new String[]{"file_path"});
+        fileExplorer.put("grep", new String[]{"pattern"});
+        fileExplorer.put("glob", new String[]{"pattern"});
+        table.put("file_explorer", fileExplorer);
+
+        Map<String, String[]> fileWriter = new HashMap<>();
+        fileWriter.put("write", new String[]{"path", "content"});
+        fileWriter.put("edit", new String[]{"path", "old_text", "new_text"});
+        fileWriter.put("delete", new String[]{"path"});
+        table.put("file_writer", fileWriter);
+
+        Map<String, String[]> command = new HashMap<>();
+        command.put("exec", new String[]{"command"});
+        command.put("start", new String[]{"command"});
+        command.put("logs", new String[]{"service_id"});
+        command.put("stop", new String[]{"service_id"});
+        table.put("command", command);
+
+        Map<String, String[]> desktop = new HashMap<>();
+        desktop.put("mouse_move", new String[]{"x", "y"});
+        desktop.put("mouse_click", new String[]{"x", "y"});
+        desktop.put("mouse_drag", new String[]{"fromX", "fromY", "toX", "toY"});
+        desktop.put("mouse_scroll", new String[]{"amount"});
+        desktop.put("key", new String[]{"key"});
+        desktop.put("type", new String[]{"text"});
+        table.put("desktop", desktop);
+
+        Map<String, String[]> git = new HashMap<>();
+        git.put("commit", new String[]{"message"});
+        git.put("add", new String[]{"path"});
+        git.put("unstage", new String[]{"path"});
+        git.put("restore", new String[]{"path"});
+        git.put("reset", new String[]{"target"});
+        for (String a : new String[]{"branch_create", "branch_switch", "branch_merge", "branch_delete"}) {
+            git.put(a, new String[]{"name"});
+        }
+        git.put("tag_create", new String[]{"name"});
+        git.put("tag_delete", new String[]{"name"});
+        git.put("remote_add", new String[]{"name", "url"});
+        git.put("remote_set_url", new String[]{"name", "url"});
+        git.put("remote_remove", new String[]{"name"});
+        table.put("git", git);
+
+        return table;
+    }
+
+    /**
+     * 必填参数前置校验
+     *
+     * @return {@code null} 表示通过；否则返回面向模型的可操作错误提示（模型据此补齐即可，无需整轮重试）
+     */
+    private String validateRequiredParams(String toolName, JsonNode arguments) {
+        if (arguments == null || !arguments.isObject()) {
+            return null;
+        }
+
+        // desktop / desktop_control 批量模式：顶层 actions 数组非空时不校验单动作参数
+        if ("desktop".equals(toolName) || "desktop_control".equals(toolName)) {
+            if (arguments.path("actions").isArray() && !arguments.path("actions").isEmpty()) {
+                return null;
+            }
+        }
+
+        Map<String, String[]> actionRules = REQUIRED_PARAMS.get(toolName);
+        if (actionRules == null) {
+            return null;
+        }
+        String action = arguments.path("action").asText("");
+        if (action.isEmpty()) {
+            return null; // action 缺失交给 fixMissingAction 处理
+        }
+        String[] required = actionRules.get(action);
+        if (required == null || required.length == 0) {
+            return null;
+        }
+
+        List<String> missing = new ArrayList<>();
+        for (String param : required) {
+            if (!isNonEmpty(arguments, param)) {
+                missing.add(param);
+            }
+        }
+        if (missing.isEmpty()) {
+            return null;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("【缺少参数】").append(toolName).append("(action=").append(action)
+                .append(") 缺少必填参数：").append(String.join("、", missing)).append("\n");
+        sb.append("【下一步】补齐上述参数后重新调用一次即可，不要重复已完成的其他步骤。\n");
+        if ("file_writer".equals(toolName) && "write".equals(action) && missing.contains("content")) {
+            sb.append("【提示】确实要创建空文件时，显式传 content=\"\"。\n");
+        }
+        return sb.toString();
     }
 
     /**

@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 TOOL_SYSTEM](./TOOL_SYSTEM.md)
 # Tool System Deep Dive: How to Add a New AI Tool
 
-> Version: v3.0.8 | Updated: 2026-11-11 | Audience: Developers / AI Collaborators
+> Version: v3.0.9 | Updated: 2026-11-13 | Audience: Developers / AI Collaborators
 > This document covers the complete architecture of the tool system, execution chain, and a step-by-step checklist for adding a new Tool.
 
 ---
@@ -288,7 +288,7 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 
 | Tool Name | Category | affectsData | pathSensitive | highRisk |
 |-----------|----------|:-----------:|:-------------:|:--------:|
-| `file_explorer` | READ | ✓ | ✓ | ✗ |
+| `file_explorer` | READ | ✗ | ✓ | ✗ |
 | `file_writer` | WRITE | ✓ | ✓ | ✗ |
 | `command` | EXECUTE | ✓ | ✗ | ✓ |
 | `web_search` | NETWORK | ✗ | ✗ | ✗ |
@@ -296,12 +296,7 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `http_request` | NETWORK | ✗ | ✗ | ✗ |
 | `check_network` | NETWORK | ✗ | ✗ | ✗ |
 | `execute_sql` | DATABASE | ✓ | ✗ | ✓ |
-| `git_query` | GIT | ✗ | ✗ | ✗ |
-| `git_submit` | GIT | ✓ | ✗ | ✗ |
-| `git_branch` | GIT | ✓ | ✗ | ✗ |
-| `git_stash` | GIT | ✓ | ✗ | ✗ |
-| `git_tag` | GIT | ✓ | ✗ | ✗ |
-| `git_remote` | GIT | ✓ | ✗ | ✗ |
+| `git` | GIT | ✓ | ✗ | ✗ |
 | `agent` | ADMIN | ✗ | ✗ | ✗ |
 | `agent_invoke` | ADMIN | ✓ | ✗ | ✗ |
 | `skill` | SKILL | ✓ | ✗ | ✗ |
@@ -313,10 +308,14 @@ Refer to `WriteFileTool`, call post-processing pipeline after `execute()`. Note:
 | `mcp_server_manager` | ADMIN | ✓ | ✗ | ✗ |
 | `schedule_task` | ADMIN | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
-| `screen_capture` | DESKTOP | ✗ | ✗ | ✓ |
-| `desktop_control` | DESKTOP | ✓ | ✗ | ✓ |
+| `desktop` | DESKTOP | ✓ | ✗ | ✓ |
+| `browser` | BROWSER | ✓ | ✗ | ✓ |
+| `project_map` | READ | ✗ | ✓ | ✗ |
 
-> 📌 This table tracks the current 27 built-in tools; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
+> 📌 This table tracks the current **23 model-facing built-in tools**; MCP external tools (dynamically registered via `mcp_server_manager`) are not listed here.
+> Since v3.0.9 the six `git_*` tools are merged into `git`, and `screen_capture` + `desktop_control` into `desktop`; **the legacy tool classes remain registered in `ToolRegistry`** (for historical messages and `normalizeToolNames()` compatibility) but are no longer sent to the model.
+> `browser` also implements `SideEffectFreePreflight`: the six read-only actions `snapshot` / `status` / `list` / `console` / `wait` / `screenshot` skip authorization; within `tab`, only `op=list` is exempt (`new` / `switch` / `close` change window state and still require authorization).
+> `project_map` writes to `.codecraft/` but is confined by `PathSecurityChecker` to the project root and never touches source code, hence `affectsData=false`; `isPathSensitive=true` drives path-escape validation.
 
 ---
 
@@ -373,6 +372,81 @@ LLM fails again        → F3 marks "ineffective" → demoted/hidden (HIDDEN)
 ### 8.5.4 Management UI
 
 "Lesson" management page (`/lesson-manage`, "AI Capabilities" menu group): paginated browsing, details, manual editing/completion, feedback, delete, plus a growth dashboard (total/draft/active/hidden/hits/success rate).
+
+---
+
+### 8.9 Long-Running Command Backgrounding (command, v3.0.9)
+
+> The real problem it solves: for minute-scale commands like `mvn package`, the old model was "block synchronously, then kill on timeout" — a 120s default cap, forcefully terminated in the second minute, **wasting every minute of dependency download and compilation that came before**; meanwhile the whole agent stalled (no file reads, no code analysis), and on failure the only option was to start over.
+
+| Aspect | Old model (≤ v3.0.8) | New model (v3.0.9+) |
+|--------|----------------------|---------------------|
+| Foreground wait | until `timeout` (default 120s) | at most 20s (10s for build/dependency commands) |
+| On timeout | `destroyForcibly()` kills the process | **moved to a background task and keeps running** |
+| Response | output so far + "terminated" | task ID + elapsed time + last 15 lines + next-step guidance |
+| Control | held until timeout | returned immediately; the model can do other work |
+| Follow-up | none (only re-run) | `wait` to block / `logs` for progress / `stop` to abort |
+| Agent stalls | yes | no |
+
+**State machine**
+
+```
+exec ──start──> [running] ──finishes within N s──> full output + exit code (short commands unaffected)
+                   │
+                   └──exceeds N s──> "backgrounded" + task ID
+                                        │
+                                        ├─ wait   → block (default 300s, can wait again)
+                                        ├─ logs   → last N lines (default 50, tail=0 for all)
+                                        └─ stop   → kill the whole process tree
+```
+
+**Key mechanisms**
+
+| Mechanism | Implementation | Why it is required |
+|-----------|----------------|--------------------|
+| Slow-command detection | `SLOW_COMMAND_PATTERN` matches `mvn\|gradle\|npm\|pnpm\|yarn\|pip\|cargo\|go\|dotnet\|docker\|make\|...` | These take tens of seconds anyway; no point making the user wait the full 20s |
+| De-duplication | `findRunningTask(workDir, command)` — same cwd + same command + still running → return "already running (task #N)" | Otherwise the model re-issues it: two mvn processes fight over the `.m2` lock, blow up memory, overwrite each other's artifacts |
+| Separate pools | one-shot long tasks capped at 10 (`isTask()` count) / long-lived services capped at 5 | A 20-minute mvn must not consume the slot needed by `npm run dev` |
+| Output retention | kept for 30 minutes after completion (`TASK_RETAIN_MS`); `cleanupFinishedServices()` now does TTL cleanup instead of deleting immediately | So `logs` can still explain a failure — immediate deletion means "just finished, already gone" |
+| Failure output governance | `ERROR_LINE_PATTERN` extracts key lines (`[ERROR]` / `Caused by` / `BUILD FAILURE` / `npm ERR` / `at Xxx.java:N`) then appends the last 30 lines | A 1MB truncation tends to cut out exactly the error buried in the middle |
+
+**Configuration and rollback**
+
+```yaml
+command:
+  exec:
+    background-after-seconds: 20        # foreground window for normal commands; 0 or negative = old behaviour
+    background-after-build-seconds: 10  # window for build/dependency commands
+```
+
+> ⚠️ **Semantic change**: the `exec` `timeout` parameter **no longer kills the process** — it now only applies to `wait`. Scenarios relying on "timeout means abort" must call `command(action=stop, service_id=N)` explicitly.
+
+**Contract with the model**: `getDescription()` and the system-prompt section "Long-running commands" jointly constrain the model — "backgrounding is not a failure", "do not re-run the same command", "follow up with wait / logs". Miss either one and the model treats "backgrounded" as a failure and retries.
+
+---
+
+### 8.10 Tool Merging Strategy (git / desktop, v3.0.9)
+
+**Motivation**: tool definitions ship in the system prompt every turn, and with the DeepSeek cache-hit price at 1/40 of a miss, **any schema change invalidates the entire prefix**. Six similarly-named git tools also invite the model to pick the wrong one — costing an extra turn, which is far more expensive than the schema saved.
+
+**Approach: pure delegation, zero logic duplication**
+
+| Merge | Original tools | New tool | Routing |
+|-------|----------------|----------|---------|
+| Git | `git_query` / `git_submit` / `git_branch` / `git_stash` / `git_tag` / `git_remote` | `git` | `ACTION_ROUTING` (`LinkedHashMap` keeps the order stable so it never perturbs the cache prefix) → route by `action` to the atomic instances with parameters passed through |
+| Desktop | `screen_capture` / `desktop_control` | `desktop` | action dispatch (`capture` / `click` / `type` / `key` …) |
+
+**Compatibility design (essential)**
+
+- **Legacy classes stay registered**: they still implement `Tool` and exist in `ToolRegistry`, just no longer sent to the model — historical `git_query(...)` calls in old conversations still execute instead of erroring with "unknown tool".
+- **`normalizeToolNames()`**: normalizes old names to the new ones, so legacy tool whitelists and custom agent configs need no migration.
+- **Behavioural parity**: pure delegation means the execution path is identical before and after — there is no "merging introduced a difference" risk.
+
+**Action naming convention** (avoiding collisions with sub-tool actions)
+
+- Git queries keep their original semantics: `status` / `diff` / `log` / `show`
+- Others are domain-prefixed: `branch_list` / `branch_create` / `stash_save` / `stash_pop` …
+- Commit-related stay short: `add` / `commit` / `push` / `pull` / `reset` / `revert`
 
 ---
 

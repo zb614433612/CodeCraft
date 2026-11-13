@@ -1,6 +1,6 @@
 {
   "name": "codecraft-desktop",
-  "version": "3.0.8",
+  "version": "3.0.9",
   "description": "CodeCraft 桌面应用（Electron）",
   "homepage": "https://github.com/zb614433612/CodeCraft",
   "author": {
@@ -24,19 +24,23 @@
       "output": "release"
     },
     "afterPack": "afterPack.js",
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
     "files": [
       "main.js",
       "preload.js",
       "browser-bridge.js",
       "update-manager.js",
       "update-utils.js",
+      "pty-manager.js",
       "package.json",
       "icon.png",
       "loading.html"
     ],
     "extraResources": [
       {
-        "from": "../target/code-craft-3.0.8.jar",
+        "from": "../target/code-craft-3.0.9.jar",
         "to": "backend/codecraft.jar"
       },
       {
@@ -86,6 +90,7 @@
   },
   "dependencies": {
     "cross-env": "^7.0.3",
+    "node-pty": "^1.1.0",
     "png-to-ico": "^3.0.1",
     "sharp": "^0.34.5"
   },

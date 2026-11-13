@@ -170,12 +170,10 @@ export const FALLBACK_TOOL_GROUPS: ToolGroup[] = [
     code: 'GIT',
     label: 'Git 操作',
     options: [
-      { key: 'git_query', label: '查询Git状态与历史', description: '查询Git仓库状态与历史', group: 'GIT', risk: 'low' },
-      { key: 'git_submit', label: 'Git提交与同步', description: 'Git提交、远程同步与撤销操作', group: 'GIT', risk: 'medium' },
-      { key: 'git_stash', label: '管理Git储藏', description: '管理Git储藏(stash)', group: 'GIT', risk: 'medium' },
-      { key: 'git_branch', label: '管理Git分支', description: '管理Git分支', group: 'GIT', risk: 'medium' },
-      { key: 'git_remote', label: '管理Git远程', description: '管理Git远程仓库配置', group: 'GIT', risk: 'medium' },
-      { key: 'git_tag', label: '管理Git标签', description: '管理Git标签(tag)', group: 'GIT', risk: 'medium' }
+      // 六合一：原 git_query / git_submit / git_branch / git_stash / git_tag / git_remote
+      // 已合并为单个 git 工具（action 区分具体动作）。旧配置里的六个名字由后端
+      // DeepSeekServiceImpl#normalizeToolNames 自动归一化，读写都不受影响。
+      { key: 'git', label: 'Git 操作（统一）', description: '查询/提交/分支/储藏/标签/远程，通过 action 区分', group: 'GIT', risk: 'medium' }
     ]
   },
   {
@@ -208,8 +206,9 @@ export const FALLBACK_TOOL_GROUPS: ToolGroup[] = [
     code: 'DESKTOP',
     label: '桌面自动化',
     options: [
-      { key: 'screen_capture', label: '桌面截图', description: '桌面截图', group: 'DESKTOP', risk: 'high' },
-      { key: 'desktop_control', label: '桌面键鼠模拟', description: '桌面键鼠模拟', group: 'DESKTOP', risk: 'high' }
+      // 二合一：原 screen_capture + desktop_control 已合并为 desktop
+      // （action=capture 截图，其余为键鼠动作）。旧配置名由后端 normalizeToolNames 归一化。
+      { key: 'desktop', label: '桌面自动化（统一）', description: '截图（capture）与键鼠控制（click/type/key 等）', group: 'DESKTOP', risk: 'high' }
     ]
   }
 ]

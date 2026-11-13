@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.service.impl;
 
+import com.example.agentdeepseek.common.enums.ContextMode;
 import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
@@ -111,6 +112,20 @@ public class ContextBuilder {
      * @return 消息列表，每个元素包含role、content和可选的tool_calls
      */
     public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId) {
+        return buildMessagesFromHistory(conversationId, deepSeekConfig.resolveContextMode());
+    }
+
+    /**
+     * 按指定上下文模式构建历史消息
+     * <p>
+     * 模式决定两件事：① 是否剔除历史 reasoning（full 回传，balanced/compact 不回传）；
+     * ② 是否摘要化历史工具结果（仅 compact）。详见 {@link ContextMode}。
+     * </p>
+     *
+     * @param mode 上下文模式；{@code null} 时回退到全局配置
+     */
+    public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, ContextMode mode) {
+        ContextMode effectiveMode = mode != null ? mode : deepSeekConfig.resolveContextMode();
         // 1. 加载原始消息
         List<ConversationMessage> dbMessages = conversationMessageMapper.selectByConversationId(conversationId);
 
@@ -165,8 +180,15 @@ public class ContextBuilder {
                     messageMap.put("content", content);
                 }
 
+                // 【成本优化】历史 reasoning_content 默认不回传（开关见 DeepSeekConfig#stripHistoryReasoning）：
+                //   reasoning 生成时按「输出」计价（约 6 元/百万），下一轮作为历史回传时又按「未命中输入」
+                //   再计一次（约 3 元/百万），合计约 9 元/百万 —— 是所有内容类型中单价最高的；
+                //   而官方文档明确该字段属 Beta，仅用于 Chat Prefix Completion（prefix=true），
+                //   普通多轮对话无需回传，历史思考链对后续决策的参考价值也很低。
+                //   ⚠️ 数据库中 reasoning 仍完整保留（前端展示与溯源不受影响），此处只影响下发给模型的消息。
+                //   ⚠️ 注意把开关做成"恒定"判断：中途切换会让前缀失效一次，属预期代价。
                 String reasoning = msg.getReasoning();
-                if (reasoning != null && !reasoning.isEmpty()) {
+                if (reasoning != null && !reasoning.isEmpty() && !effectiveMode.shouldStripHistoryReasoning()) {
                     messageMap.put("reasoning_content", reasoning);
                 }
 
@@ -195,6 +217,20 @@ public class ContextBuilder {
         // 空 assistant 消息整条丢弃，保证序列一定合法（宁可丢信息，也绝不让会话卡死）。
         ToolCallSequenceSanitizer.sanitize(result);
 
+        // ===== 3.5 上下文模式：仅精简模式额外摘要化历史工具结果 =====
+        // ⚠️ 这一步会改写历史 tool 消息的 content，导致前缀缓存失效一次（O(历史长度) 全额重算），
+        //    因此只在 compact（救急模式）执行；balanced 只剔 reasoning（构建阶段就不加入），
+        //    工具结果原样保留、前缀保持稳定，这是"省钱但不丢准确性"的最优切分点。
+        if (effectiveMode.shouldCompactToolResults()) {
+            int beforeCompact = TokenEstimator.estimateMessages(result);
+            compactHistoryMessages(result);
+            int afterCompact = TokenEstimator.estimateMessages(result);
+            log.info("compact 模式：历史工具结果摘要化完成, 消息数={}, Token: {} → {} (节省 {}%)",
+                    result.size(), beforeCompact, afterCompact,
+                    beforeCompact > 0 ? (beforeCompact - afterCompact) * 100 / beforeCompact : 0);
+            ToolCallSequenceSanitizer.sanitize(result);
+        }
+
         // 4. 三级阈值上下文管理：先尝试压缩，兜底丢弃
         int maxTokens = deepSeekConfig.getMaxContextTokens();
         int estimatedTokens = TokenEstimator.estimateMessages(result);
@@ -222,32 +258,17 @@ public class ContextBuilder {
     }
 
     /**
-     * 根据会话ID构建历史消息列表（支持上下文模式）
-     * @param conversationId 会话ID
-     * @param contextMode 上下文模式：full（全量）/ compact（精简）
-     * @return 消息列表
+     * 按字符串形式构建历史消息（对外兼容层）
+     * <p>
+     * 内部统一收敛到 {@link ContextMode}：字符串 → 枚举的容错解析放在这里，
+     * 避免调用方各自写 {@code "compact".equals(...)} 导致三档语义漂移。
+     * </p>
+     *
+     * @param contextMode 上下文模式字符串（full / balanced / compact，含历史别名）
      */
     public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, String contextMode) {
-        List<Map<String, Object>> result = buildMessagesFromHistory(conversationId);
-        if ("compact".equals(contextMode)) {
-            int beforeTokens = TokenEstimator.estimateMessages(result);
-            compactHistoryMessages(result);
-            int afterTokens = TokenEstimator.estimateMessages(result);
-            log.info("compact 模式：精简完成, 消息数={}, Token: {} → {} (节省 {}%)",
-                    result.size(), beforeTokens, afterTokens,
-                    beforeTokens > 0 ? (beforeTokens - afterTokens) * 100 / beforeTokens : 0);
-
-            // 精简后仍超限则执行滑动窗口丢弃
-            int maxTokens = deepSeekConfig.getMaxContextTokens();
-            if (afterTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
-                log.warn("compact 精简后仍超限，执行滑动窗口丢弃：{} tokens > {} 上限",
-                        afterTokens, maxTokens);
-                trimToTokenBudget(result, maxTokens);
-            }
-            // 精简/裁剪后再次净化（幂等）：compact 改动 content、trim 会删消息，都可能切断 tool 配对
-            ToolCallSequenceSanitizer.sanitize(result);
-        }
-        return result;
+        return buildMessagesFromHistory(conversationId,
+                ContextMode.from(contextMode, deepSeekConfig.resolveContextMode()));
     }
 
     /**

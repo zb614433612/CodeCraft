@@ -484,7 +484,11 @@ public class CompactionService {
             Map<String, Object> map = new HashMap<>();
             map.put("role", msg.getRole().getValue());
             if (msg.getContent() != null) map.put("content", msg.getContent());
-            if (msg.getReasoning() != null) map.put("reasoning_content", msg.getReasoning());
+            // 【口径一致】与真实请求保持一致：stripHistoryReasoning=true 时 reasoning 不下发，
+            // 此处 token 估算也一并不计，避免「多估 → 提前触发压缩」而损失历史细节（准确性优先）。
+            if (msg.getReasoning() != null && !deepSeekConfig.isStripHistoryReasoning()) {
+                map.put("reasoning_content", msg.getReasoning());
+            }
             if (msg.getToolCalls() != null) map.put("tool_calls", msg.getToolCalls());
             result.add(map);
         }

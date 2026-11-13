@@ -842,6 +842,7 @@
                   dropdown-class-name="mode-dropdown"
                 >
                   <a-select-option value="non-thinking">关闭思考</a-select-option>
+                  <a-select-option value="thinking_low">浅思考</a-select-option>
                   <a-select-option value="thinking">思考</a-select-option>
                   <a-select-option value="thinking_max">深度思考</a-select-option>
                 </a-select>
@@ -851,12 +852,13 @@
                 <span class="mode-label">上下文</span>
                 <a-select
                   :value="settingsStore.contextMode"
-                  @change="(v: string) => { settingsStore.contextMode = v as 'full' | 'compact'; saveContextModeToServer(v) }"
+                  @change="(v: string) => { settingsStore.contextMode = v as 'full' | 'balanced' | 'compact'; saveContextModeToServer(v) }"
                   size="small"
                   class="model-select"
                   dropdown-class-name="mode-dropdown"
                 >
                   <a-select-option value="full">📋 全量</a-select-option>
+                  <a-select-option value="balanced">⚖️ 均衡</a-select-option>
                   <a-select-option value="compact">⚡ 精简</a-select-option>
                 </a-select>
               </div>

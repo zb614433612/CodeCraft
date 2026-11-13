@@ -5,6 +5,115 @@
 
 ---
 
+## [3.0.9] - 2026-11-13
+
+> 成本治理 + 长任务体验双主线版：四项成本/上下文治理（上下文模式三档、思考档位归一、能力声明配置化、Token 成本看板）+
+> 一项架构级执行模型改造（长耗时命令后台化，编译/装依赖/下载不再被超时砍断）+
+> 真终端 PTY（Electron 端从「模拟终端」升级为真实 PTY）+ 两个用户可感知问题修复（下载无法取消、v3 登录态失效）+ 工具合并瘦身。
+> 后端 + 两套前端 + Electron 均有改动，**需重启后端**；桌面端需重新打包（新增 node-pty 原生依赖）。
+
+### 🧩 上下文模式三档（新增）
+
+- **背景**：此前上下文治理只有「是否剔除历史 reasoning」一个布尔开关，无法在「省 token」与「保前缀缓存」之间取舍——粗暴压缩历史会让前缀缓存 O(历史) 全量失效（实测缓存命中 98% 时，压缩带来的回本周期长达 100~150 轮）。
+- **新机制**：`ContextMode` 枚举三档——`full`（全量，调试用）/ `balanced`（默认：只剔 reasoning，工具结果原样保留）/ `compact`（激进：摘要工具结果，会致一次缓存失效，适合超长会话）。
+- **关键设计**：`balanced` 在**构建阶段就不写 reasoning**，而非事后裁剪——前缀天然稳定，每轮零额外失效；`compact` 才改写工具结果（明确告知会触发一次缓存重建）。
+- **实现**：`ContextBuilder` 按模式分流；`DeepSeekServiceImpl` / `AgentForkManager` / `CompactionService` 统一走枚举；`DeepSeekConfig.resolveContextMode()` 兼容旧的 `stripHistoryReasoning` 配置（自动映射到 full / balanced），老配置无需迁移。
+
+### 💰 Token 成本可观测（新增）
+
+- **背景**：此前只有「感觉费 token」，没有任何量化依据——不知道钱花在哪个模型、哪类任务、输入还是输出。
+- **新机制**：`llm_token_usage` 表记录每次调用的 prompt / completion / cached / reasoning token，配合 `llm.pricing` 计价配置算出金额；两套前端各增「成本看板」页（按月/按模型/按会话聚合）。
+- **采集精度**：SSE 采集点放在 `doOnNext`（**避开 `takeWhile` 截断**，否则末尾 usage 帧会被吞），落库放在 `doFinally`（正常结束/异常/取消都能落账）。
+- **配置化计价**：`TokenPricingConfig` 管理各模型单价（含缓存命中价），新增模型只改 `application.yml`。
+- **实测结论**：缓存命中率 98% 时，缓存命中单价仅 0.025 元/百万，只占总成本约 13%——真正的成本大头在**输出侧**（reasoning 双重计费 9 元/百万）与**新增侧**（工具结果体积），据此定下了本版的方向。
+
+### 🧠 思考档位统一归一化（修复 + 重构）
+
+- **真 Bug**：MiniMax 适配器把 `thinking_low` 误判为 disabled——`startsWith("thinking")` 粗判 + 大小写敏感的档位匹配，导致低档位思考被静默关闭。
+- **根因**：各适配器各自解析档位字符串，每新增一档就得改一批适配器，漏一个就是静默降级。
+- **重构**：`AbstractLLMClient.normalizeThinkingMode()` 统一归一为 `none / low / medium / high / max` 五档，8 个适配器（DeepSeek / MiniMax / Gpt / Anthropic / MiMo / Qwen / Volcengine / Ollama）只处理规范值；未知档位回退到 `medium` 并 WARN，不再静默变 disabled。
+
+### ⚙️ 模型能力声明配置化（重构）
+
+- **根因**：推理模型前缀、effort 支持、输出上限、视觉能力此前硬编码在 `GptClient` / `OpenAIClient` / `FileVisionService` 里，新增模型必须改代码发版。
+- **重构**：新增 `ModelCapabilityRules` + `ModelCapabilityConfig`，`llm.model-capabilities` 配置推理模型前缀（含 `gpt-6`）、`effort-none/minimal` 支持、输出 token 上限、视觉能力规则；三处调用方改为查规则表。
+- **收益**：新增模型只改 `application.yml`，不动代码。
+
+### 🔒 前缀缓存保护（新增）
+
+- **背景**：DeepSeek 前缀缓存命中价仅为未命中的 1/40，但**任何 system 或 tools 定义的变化都会让整个前缀失效**——这类回退没有报错、只有账单变贵，极难察觉。
+- **新机制**：`ContextFingerprint` 在每轮请求前比对 `system + tools` 的哈希指纹，一旦变化立即 WARN 并打印差异摘要，把「静默变贵」变成「日志可见」。
+
+### 🧰 工具定义瘦身（重构）
+
+- **GitTool**：`git_status` / `git_diff` / `git_log` / `git_add` / `git_commit` / `git_push` 六个工具合并为 `git`（按 action 分发，纯委托不改行为），`normalizeToolNames()` 兼容旧工具名，历史会话与自定义 Agent 无需迁移。
+- **DesktopTool**：`screenshot` + `desktop_control` 合并为 `desktop`（2→1）。
+- **收益**：工具定义（每轮都进 system prompt）体积下降，且不与缓存前缀打架。
+- **配套**：`ToolExecutor.validateRequiredParams()` 必填参数前置校验（缺参直接返回可读错误，不再把参数错误当业务异常烧一轮 token）；系统提示词新增 15 行「工具选择边界表」，明确同类工具的分工。
+
+### 🖥 真终端 PTY（新增，Electron）
+
+- **背景**：此前终端是「模拟终端」——每次回车都走一次 `/project/exec` 同步 HTTP，无法跑交互式程序（vim / top / 脚手架向导），输出靠轮询拼接。
+- **新机制**：`electron/pty-manager.js` 基于 `node-pty` 实现真实伪终端（会话池上限 8、create / write / resize / kill 全生命周期、**输出只回推创建者**避免多窗口串流、渲染进程销毁自动回收、cwd 路径 clamp 校验）。
+- **链路**：`preload.js` 暴露 `electronAPI.pty`；`main.js` 接入 `initPtyManager()` 并在 `before-quit` 调 `disposeAllSessions()`（否则残留 shell 会拖住退出）；`package.json` 补 `node-pty` 依赖 + `files` + `asarUnpack`（原生模块不能进 asar）。
+- **前端**：两套 `TerminalPanel.vue` 双模式——Electron 走 PTY（含 `fit` 同步 resize、切目录 kill 重开、退出后按键重连），浏览器降级回 `/project/exec`（PTY 不可用不白屏）。
+- **验证**：Electron 33 实测 `PTY_RESULT:OK pid=9980`；`node-pty` 1.1.0 走 N-API，**无需 electron-rebuild**。
+- **注意**：`node-pty` 自带 win32 / darwin prebuilds，**无 linux prebuild**——Linux 打包机需具备 node-gyp 工具链。
+
+### ⏳ 长耗时命令后台化（新增，执行模型改造）
+
+- **背景**：`command(action=exec)` 此前是「同步阻塞直到超时被杀」——`mvn package` 这类命令默认 120s 上限，跑到第 2 分钟被强制终止，**前面几分钟的依赖下载/编译全部白费**；期间整个 Agent 停摆，模型不能读文件、不能分析代码；失败后只能从头再跑一次。
+- **新执行模型**：exec 启动进程后**前台最多等 20 秒**（编译/依赖/构建类命令识别为 10 秒），超时**不杀进程**，转后台任务继续跑，立刻把控制权还给模型：
+  ```
+  命令耗时超过 10 秒，已转后台继续执行（进程不会中断）
+  任务 ID：7　已运行：10s　状态：运行中
+  当前输出（最后 15 行）：...
+  【下一步】logs 看进度 / wait 阻塞等 / stop 中止
+  ```
+- **新增 `action=wait`**：阻塞等待任务结束（默认 300s / 最大 600s），结束返回完整输出 + 退出码，未结束返回尾部并可再次 wait——长构建可分多段等，中间穿插别的活。
+- **去重保护**：同工作目录 + 同命令已在运行时不重复启动，直接返回「已在运行（任务 #N，已运行 45s），不要重复执行」——否则模型会重复下发，两个 mvn 抢 `.m2` 锁 / 爆内存 / 产物互相覆盖。
+- **任务池分离**：一次性长任务（上限 10）与长期服务（上限 5）分开计数，20 分钟的 mvn 不再占掉 `npm run dev` 的槽位。
+- **输出治理**：转后台只给尾部 15 行；`logs` 默认尾部 50 行（`tail=0` 取全量）；**失败时自动抽取关键错误行**（`[ERROR]` / `Caused by` / `BUILD FAILURE` / `npm ERR` 等）再附尾部 30 行——避免 1MB 截断恰好切掉中间的关键报错。
+- **结果可回看**：任务结束后输出**保留 30 分钟**（原为 5 分钟，且会被 `cleanupFinishedServices()` 直接删掉），期间随时可 logs / wait 回看。
+- **可回退**：`command.exec.background-after-seconds`（默认 20）设为 `0` 或负数即完整回退旧的「同步阻塞 + 超时终止」行为。
+- **配套**：`CommandTool.getDescription()` 重写（讲清「转后台不是失败」「不要重复执行」「用 wait/logs 跟进」）；系统提示词新增《长耗时命令（编译/装依赖/下载/构建）》7 条规则。
+- **验证**：`CommandToolBackgroundTest` 13 项断言全绿（短命令零变化 / 长命令转后台不杀进程 / 去重拦截 / wait 拿到退出码 / list 可见）。
+
+### 🖱 下载无法取消（修复）
+
+- **现象**：点击「取消下载」后 UI 显示已取消，但后台仍在重试下载，重试耗尽后才真正停下——期间网络与磁盘持续被占用。
+- **真因**：`update-manager.js` 的取消只是置了一个标记，`for` 重试循环从不检查它，只有全部重试失败后才退出。
+- **修复**：引入 `cancelRequested` 令牌 + `CANCELLED` 错误码，重试循环每轮先检查令牌、命中立即终止且**不再重试**；`VersionCard.vue` 把「成功 / 失败 / 已取消」三终态分开提示（此前取消被渲染成失败）；经典版 `SystemSettingView.vue` 同步补 `cancelled` 分支与 loading 兜底。
+
+### 🔐 v3 登录态失效（修复）
+
+- **现象**：v3 在 token 被服务端吊销后，页面仍停留在业务界面，接口持续 401 但没有任何跳转。
+- **真因**：`http-client.ts` 的 `fireUnauthorized()` 依赖外部注册的 handler，handler 尚未注册（如页面初始化早期）时直接 return，401 被静默吞掉；且路由 `afterEach` 没有兜底复查。
+- **修复**：`fireUnauthorized` 在 handler 缺失时改为 `location.hash` 兜底跳转登录；`router/index.ts` 的 `afterEach` 增加漏网校验（`isTokenRevoked()` 仍为真且处在业务页则强制回登录）。
+
+### 🔢 版本号同步
+
+- 后端：`3.0.8` → `3.0.9`（`pom.xml`，产物 `code-craft-3.0.9.jar`）
+- 经典版前端：`3.0.8` → `3.0.9`（`frontend/package.json` + lock）
+- v3 前端：`3.0.8` → `3.0.9`（`frontend-v3/package.json` + lock）
+- Electron：版本与 `extraResources` jar 路径 → `3.0.9` / `code-craft-3.0.9.jar`
+- MCP Server 握手版本：`3.0.8` → `3.0.9`（`CodeCraftMcpServer.SERVER_VERSION`）
+- 文档：README(_EN) 版本徽章、ARCHITECTURE / DEEPSEEK_SERVICE_IMPL / LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) 版本标注与更新日期（内容同步本轮变更）、DEV_QUICKREF / RELEASE_CHECKLIST(_EN) 打包命令示例、FAQ 版本示例，统一到 v3.0.9
+
+### ⬆️ 升级说明
+
+- **含后端改动**：需重启后端服务（上下文构建、LLM 适配器、工具层、成本采集均有变更）；两套前端 dev 模式热更新即生效，打包版需重新构建。
+- **新增数据库表**：`llm_token_usage`（`schema.sql` 已含建表语句，启动自动创建）；`sys_menu` 新增成本看板菜单（id=19）。
+- **桌面端需重新打包**：新增 `node-pty` 原生依赖并配置了 `asarUnpack`，旧安装包不包含该模块；Electron 33 + node-pty 1.1.0（N-API）无需 electron-rebuild。
+- **配置项变更**（全部有默认值，不配也能跑）：
+  - `deepseek.context-mode`：`full` / `balanced`（默认）/ `compact`；旧 `stripHistoryReasoning` 自动映射
+  - `llm.pricing.*`：各模型单价（含缓存命中价）
+  - `llm.model-capabilities.*`：推理模型前缀、effort 支持、输出上限、视觉能力
+  - `command.exec.background-after-seconds`（默认 20）/ `background-after-build-seconds`（默认 10）：设为 `0` 可回退旧的超时终止行为
+- **行为变化提醒**：`command(action=exec)` 超时**不再杀进程**，而是转后台；`exec` 的 `timeout` 参数语义改为「仅对 wait 生效」。依赖「超时即中止」的脚本请显式改用 `command action=stop`。
+
+---
+
 ## [3.0.8] - 2026-11-11
 
 > 修复与自动化版：四个用户可感知的问题修复（v3 切换供应商无效、v3 新会话附件失效、会话列表不按活跃排序、任务清单编号跨轮续号）+

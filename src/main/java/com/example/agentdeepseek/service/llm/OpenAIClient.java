@@ -102,13 +102,9 @@ public class OpenAIClient extends AbstractLLMClient {
     }
 
     /** 模型名归一：取最后一段（兼容 openai/gpt-4o、azure/o3-mini 这类前缀写法） */
+    /** 模型名归一：取最后一段（兼容 openai/gpt-5、azure/o3-mini 这类前缀写法），实现见能力规则 */
     static String normalizeModelKey(String model) {
-        if (model == null) {
-            return "";
-        }
-        String normalized = model.trim().toLowerCase(Locale.ROOT);
-        int slash = normalized.lastIndexOf('/');
-        return slash >= 0 ? normalized.substring(slash + 1) : normalized;
+        return ModelCapabilityRules.normalize(model);
     }
 
     // ==================== 请求体构建 ====================
@@ -134,7 +130,7 @@ public class OpenAIClient extends AbstractLLMClient {
             // 推理模型：不支持 temperature / max_tokens，必须用 max_completion_tokens（协议级差异）
             request.remove("temperature");
             request.remove("max_tokens");
-            request.putIfAbsent("max_completion_tokens", DEFAULT_REASONING_MAX_COMPLETION_TOKENS);
+            request.putIfAbsent("max_completion_tokens", ModelCapabilityRules.maxOutputTokens(true));
         } else {
             // 普通模型：不主动下发 max_tokens（兼容服务上限未知），交给服务端默认值
             request.remove("max_completion_tokens");
@@ -147,14 +143,10 @@ public class OpenAIClient extends AbstractLLMClient {
 
     /**
      * 是否为「推理模型」（使用 max_completion_tokens、拒绝 temperature / max_tokens）。
-     * <p>覆盖 o1 / o3 / o4 系列与 gpt-5 系列；入参应为 {@link #normalizeModelKey(String)} 归一后的模型名。</p>
+     * <p>判定来源：{@code llm.model-capabilities.reasoning-model-prefixes}（配置驱动，不再硬编码模型名）。
+     * 入参应为 {@link #normalizeModelKey(String)} 归一后的模型名。</p>
      */
     static boolean isReasoningModel(String modelKey) {
-        if (modelKey == null || modelKey.isBlank()) {
-            return false;
-        }
-        String m = modelKey.toLowerCase(Locale.ROOT);
-        return m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4")
-                || m.startsWith("gpt-5") || m.startsWith("gpt5");
+        return ModelCapabilityRules.isReasoningModel(normalizeModelKey(modelKey));
     }
 }

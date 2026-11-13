@@ -86,6 +86,9 @@
             <p v-else-if="downloadState.status === 'error'" class="backup-tip warn-tip">
               ⚠️ 下载失败：{{ downloadState.error || '未知错误' }}（可重试，或点「打开发布页」手动下载）
             </p>
+            <p v-else-if="downloadState.status === 'cancelled'" class="backup-tip">
+              ⏹ 已取消下载，可点上方「下载更新」重新开始。
+            </p>
 
             <div class="update-settings">
               <div class="update-setting-row">
@@ -475,8 +478,17 @@ async function handleDownloadUpdate() {
   try {
     const res = await updateApi.download()
     if (res) downloadState.value = res
+    /*
+      三种终态要分开处理（与 v3 的 VersionCard 保持一致）：
+        done      下载完成
+        cancelled 用户主动取消 —— 不是失败，绝不能弹 error
+        error     真正的下载失败
+      历史坑：旧实现只判 error/done，取消时若主进程把状态收敛成 error('下载已取消')，
+      这里就会弹「下载已取消」的错误提示；即便主进程返回 cancelled，界面也毫无反馈。
+    */
     if (res?.status === 'error') message.error(res.error || '下载失败')
     else if (res?.status === 'done') message.success('安装包下载完成')
+    else if (res?.status === 'cancelled') message.info('已取消下载，可随时重新下载')
   } catch (e: any) {
     message.error(e?.message || '下载失败')
   } finally {
@@ -490,6 +502,14 @@ async function handleCancelDownload() {
     if (res) downloadState.value = res
   } catch (e: any) {
     message.warning(e?.message || '取消失败')
+  } finally {
+    /*
+      兜底：正常情况下主进程的下载 Promise 会因 abort 收敛并 resolve，
+      handleDownloadUpdate 的 finally 会把 loading 置回 false。
+      但万一 IPC 异常导致那个 Promise 没返回，这里不能把按钮永久卡在 loading 态 ——
+      置 false 后「取消下载」按钮会按 downloadState 切回「下载更新」，用户可再次发起。
+    */
+    updateDownloading.value = false
   }
 }
 

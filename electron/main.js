@@ -6,6 +6,9 @@ const http = require('http')
 const net = require('net')
 // 自动更新管理器（检测 GitHub Releases / 下载 / 安装 / 升级前备份）
 const { initUpdateManager } = require('./update-manager')
+// 真终端管理器：在 Electron 主进程用 node-pty 起真实 shell，通过 IPC 与 xterm.js 双向转发。
+// 浏览器环境不使用本模块（前端会降级到后端 /project/exec）。
+const { initPtyManager, disposeAllSessions } = require('./pty-manager')
 // AI 浏览器桥：把 webContents.debugger（就是 CDP 客户端）暴露给后端 Java，
 // 让模型能做 DOM 级网页操作，而不是靠截图 + 猜坐标
 const { initBrowserBridge, stopBrowserBridge } = require('./browser-bridge')
@@ -1703,6 +1706,11 @@ app.whenReady().then(() => {
     beforeInstall: stopBackendForUpdate
   })
 
+  // ── 真终端（PTY） ──────────────────────────────────────────────
+  // 只注册 IPC 通道，不 spawn 进程：真正的 shell 等用户在终端面板里操作时才创建，
+  // 避免「应用一启动就白起一个 shell 进程」。
+  initPtyManager()
+
   // ── AI 浏览器桥 ────────────────────────────────────────────────
   // 起一个只绑 127.0.0.1 的极小 HTTP 服务（端口由系统分配），把后端 Java 的请求
   // 转成 webContents.debugger.sendCommand —— 即 CDP 调用，零额外依赖、零额外体积。
@@ -1799,6 +1807,9 @@ app.on('before-quit', () => {
     splashWindow.destroy()
   }
   splashWindow = null
+  // 先收掉所有 PTY 会话：每个会话都是一个真实 shell 进程，
+  // 不主动 kill 会在应用退出后变成孤儿进程（Windows 上任务管理器里能看到残留的 powershell.exe）。
+  try { disposeAllSessions() } catch { /* 已清理过就忽略 */ }
   // 收掉 AI 浏览器窗口 + 停本地服务 + 删握手文件
   // （删文件很关键：否则下次启动 Java 可能读到上一个进程的过期端口，一直连不上）
   try { stopBrowserBridge() } catch { /* 已停过就忽略 */ }

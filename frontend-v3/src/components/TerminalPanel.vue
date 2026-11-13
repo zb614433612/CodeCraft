@@ -111,6 +111,37 @@ const executing = ref(false)
 /** 当前工作目录（cd 只改这里，命令执行时带给后端） */
 const cwd = ref(props.root)
 
+/* ---------------- 真终端（PTY）----------------
+ * Electron 桌面端：走主进程 node-pty 起真实 shell —— 支持 vim/top/ssh、Ctrl+C、Tab 补全、
+ *   长命令实时出字（真终端形态）。
+ * 浏览器环境：没有 preload，降级回既有的「输入行 + /project/exec」模式（功能有限但可用）。
+ */
+interface ElectronPtyApi {
+  isAvailable: () => Promise<{ available: boolean; error?: string; defaultShell?: string }>
+  create: (options: { cwd?: string; cols?: number; rows?: number; shell?: string }) => Promise<{
+    sessionId: string
+    pid: number
+    shell: string
+    cwd: string
+  }>
+  write: (sessionId: string, data: string) => Promise<boolean>
+  resize: (sessionId: string, cols: number, rows: number) => Promise<boolean>
+  kill: (sessionId: string) => Promise<boolean>
+  onData: (callback: (payload: { sessionId: string; data: string }) => void) => () => void
+  onExit: (callback: (payload: { sessionId: string; exitCode: number; signal?: number }) => void) => () => void
+}
+
+const ptyApi: ElectronPtyApi | undefined = (window as any).electronAPI?.pty
+
+/** 当前是否处于真 PTY 模式（true 时所有按键原样转发给 shell，不再走本地输入行逻辑） */
+const ptyMode = ref(false)
+/** 当前 PTY 会话 ID（空串表示没有活跃会话） */
+let ptySessionId = ''
+let offPtyData: (() => void) | null = null
+let offPtyExit: (() => void) | null = null
+/** shell 自己 exit 后置 true：下一次按键用于重连（避免注册第二个 onData 监听） */
+let ptyExited = false
+
 let buffer = ''
 let history: string[] = []
 let historyIndex = -1
@@ -299,7 +330,58 @@ function fit() {
   try {
     fitAddon.fit()
   } catch {
-    /* ignore */
+    return
+  }
+  // 真 PTY：尺寸必须同步给 shell，否则长命令换行错位、vim/top 界面错乱
+  if (ptyMode.value && ptySessionId && term) {
+    void ptyApi?.resize(ptySessionId, term.cols, term.rows)
+  }
+}
+
+/**
+ * 尝试启动真 PTY 会话。
+ * @returns true = 已进入真终端模式（支持 vim/top/ssh、Ctrl+C、Tab 补全、实时输出）；
+ *          false = 降级到 /project/exec 简易模式（浏览器环境或 node-pty 不可用）
+ */
+async function tryStartPty(): Promise<boolean> {
+  if (!ptyApi?.isAvailable || !term) return false
+  try {
+    const info = await ptyApi.isAvailable()
+    if (!info?.available) {
+      term.writeln(`\x1b[33m[真终端不可用：${info?.error || '未知原因'}，已降级为简易模式（不支持交互式程序）]\x1b[0m`)
+      return false
+    }
+    const session = await ptyApi.create({
+      cwd: props.root || undefined,
+      cols: term.cols,
+      rows: term.rows
+    })
+    ptySessionId = session.sessionId
+    ptyMode.value = true
+    ptyExited = false
+
+    // 输出：直接写进 xterm —— shell 已经处理好提示符 / 着色 / 换行，前端不再自行拼接
+    offPtyData = ptyApi.onData((payload) => {
+      if (!payload || payload.sessionId !== ptySessionId) return
+      term?.write(payload.data)
+    })
+
+    // 退出：只标记状态，等下一次按键重连（避免在这里再注册一个 onData 造成监听器叠加）
+    offPtyExit = ptyApi.onExit((payload) => {
+      if (!payload || payload.sessionId !== ptySessionId) return
+      ptySessionId = ''
+      ptyMode.value = false
+      ptyExited = true
+      offPtyData?.(); offPtyData = null
+      offPtyExit?.(); offPtyExit = null
+      term?.write(`\r\n\x1b[33m[会话已结束 exitCode=${payload.exitCode}；按任意键重新连接]\x1b[0m\r\n`)
+    })
+
+    // 真终端不打印自绘 banner：shell 启动后会输出它自己的提示符与欢迎信息
+    return true
+  } catch (e: any) {
+    term?.writeln(`\x1b[33m[真终端启动失败：${e?.message || '未知错误'}，已降级为简易模式]\x1b[0m`)
+    return false
   }
 }
 
@@ -328,6 +410,19 @@ function initTerminal() {
   resizeObserver.observe(hostRef.value)
 
   term.onData(data => {
+    // 会话刚结束：任意键重连真 PTY（靠标记位，不重复注册监听器）
+    if (ptyExited) {
+      ptyExited = false
+      void tryStartPty()
+      return
+    }
+    // 真终端模式：所有按键（含 Ctrl+C / Tab / 方向键 / 输入法合成）原样转发给 shell，
+    // 由 shell 自己处理行编辑、补全、信号与历史 —— 前端不再自绘提示符。
+    if (ptyMode.value) {
+      if (ptySessionId) void ptyApi?.write(ptySessionId, data)
+      return
+    }
+
     if (executing.value) return
 
     if (data === '\r') {
@@ -370,17 +465,35 @@ function initTerminal() {
     redraw()
   })
 
-  term.writeln('\x1b[38;5;141mCodeCraft Terminal\x1b[0m — 输入命令后回车执行（↑↓ 翻历史，Ctrl+L 清屏，cd 可切目录）')
+  // banner 保留：让用户一眼看出当前是「真终端」还是「简易模式」
+  term.writeln('\x1b[38;5;141mCodeCraft Terminal\x1b[0m')
   if (props.root) {
     term.writeln(`\x1b[2m工作目录：${props.root}\x1b[0m`)
   } else {
     term.writeln('\x1b[33m当前智能体没有设置工作目录，可用 cd 切换后再执行命令\x1b[0m')
   }
-  writePrompt(false)
   term.focus()
+
+  // 异步探测真终端：成功 → 进入 PTY 模式（提示符由 shell 输出，前端不再自绘）；
+  // 失败 / 浏览器环境 → 打印简易模式说明并画本地提示符
+  void tryStartPty().then(ok => {
+    if (ok) return
+    term?.writeln('\x1b[2m简易模式：输入命令后回车执行（↑↓ 翻历史，Ctrl+L 清屏，cd 可切目录）\x1b[0m')
+    writePrompt(false)
+  })
 }
 
 function disposeTerminal() {
+  // 先收 PTY：只关面板不 kill 会留下孤儿 shell 进程（面板关了 powershell 还在后台跑）
+  offPtyData?.(); offPtyData = null
+  offPtyExit?.(); offPtyExit = null
+  if (ptySessionId) {
+    void ptyApi?.kill(ptySessionId)
+    ptySessionId = ''
+  }
+  ptyMode.value = false
+  ptyExited = false
+
   resizeObserver?.disconnect()
   resizeObserver = null
   term?.dispose()
@@ -411,6 +524,29 @@ watch(
   value => {
     cwd.value = value
     if (!term) return
+
+    // 真终端：shell 启动时就把 cwd 固定了，切目录必须 kill 旧会话再重开，
+    // 否则用户会看到「提示符还停在旧目录」这种自相矛盾的状态。
+    if (ptyMode.value || ptySessionId) {
+      offPtyData?.(); offPtyData = null
+      offPtyExit?.(); offPtyExit = null
+      if (ptySessionId) {
+        void ptyApi?.kill(ptySessionId)
+        ptySessionId = ''
+      }
+      ptyMode.value = false
+      ptyExited = false
+      term.clear()
+      term.writeln('\x1b[38;5;141mCodeCraft Terminal\x1b[0m — 工作目录已切换')
+      term.writeln(`\x1b[2m${value || '（未设置）'}\x1b[0m`)
+      void tryStartPty().then(ok => {
+        if (ok) return
+        term?.writeln('\x1b[2m简易模式：输入命令后回车执行\x1b[0m')
+        writePrompt(false)
+      })
+      return
+    }
+
     term.clear()
     term.writeln('\x1b[38;5;141mCodeCraft Terminal\x1b[0m — 工作目录已切换')
     term.writeln(`\x1b[2m${value || '（未设置）'}\x1b[0m`)

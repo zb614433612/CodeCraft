@@ -104,6 +104,12 @@ const router = createRouter({
           name: 'file-manage',
           component: () => import('@/views/FileManageView.vue')
         },
+        {
+          // 成本看板：基于每轮真实 usage 的费用与缓存命中率统计（只读）
+          path: 'token-usage',
+          name: 'token-usage',
+          component: () => import('@/views/TokenUsageView.vue')
+        },
 
       ]
     }

@@ -128,6 +128,18 @@ milvus:
   connect-timeout: 10000 # 连接超时时间（毫秒）
   keep-alive-timeout: 30000 # 连接保活时间（毫秒）
 
+# ==================== 命令执行：长耗时命令后台化 ====================
+# 背景：编译 / 装依赖 / 下载 这类命令耗时不可预测（几十秒到十几分钟）。
+# 旧模型是「同步阻塞 + 超时杀进程」—— 跑 5 分钟被砍掉，前面几分钟全白费，模型还得重来。
+# 新模型：前台最多等 N 秒；超时**不杀进程**，转后台任务继续跑，立刻把控制权还给模型
+#         （返回「任务 ID + 输出尾部」），后续用 command(action=wait/logs/stop) 跟进。
+command:
+  exec:
+    # 前台最大等待秒数（普通命令）。设为 0 或负数 = 关闭后台化，完整回退旧行为（应急开关）
+    background-after-seconds: 20
+    # 编译 / 依赖 / 构建类命令（mvn/npm/pip/cargo/docker/...）的前台等待窗口，更短
+    background-after-build-seconds: 10
+
 # 文件删除工具配置
 delete-file:
   # 受保护目录列表（相对项目根目录），删除操作会拒绝删除这些目录及其子文件
@@ -295,8 +307,25 @@ deepseek:
   api-key:
   # 默认模型
   default-model: deepseek-v4-pro
-  # 思考模式：non-thinking / thinking / thinking_max
+  # 思考模式（与官方 reasoning_effort 四档对齐）：
+  #   non-thinking → thinking.type=disabled（等同 reasoning_effort=none）
+  #   thinking_low → reasoning_effort=low   浅思考，仅适合读文件/改文案/跑命令等简单任务
+  #   thinking     → reasoning_effort=high  默认档，通用场景
+  #   thinking_max → reasoning_effort=max   最深思，适合疑难根因分析/协议设计/多方案权衡
+  # ⚠️ 降档提示：high→low 若导致任务多跑一轮，单轮成本(约0.03~0.04元)远高于省下的 reasoning 费用，反而更贵。
   thinking-mode: thinking
+  # 上下文模式（主对话历史注入策略）：full / balanced / compact
+  #   full     全量 —— 历史 reasoning 也回传、工具结果原样保留（最准、最贵）
+  #   balanced 均衡【默认】—— 剔除历史 reasoning、工具结果原样保留
+  #             理由：reasoning 双重计费约 9 元/百万（生成按输出 6 + 下轮按未命中输入再计 3），
+  #                   且历史思考链对后续决策参考价值低；工具结果是决策证据必须留
+  #   compact  精简 —— 额外摘要化历史工具结果（救急：上下文逼近模型上限时用）
+  #             ⚠️ 会改写历史 → 前缀缓存失效一次，不作常规优化手段
+  # 优先级：请求参数 contextMode > sys_config(context_mode) > 本配置 > balanced
+  context-mode: balanced
+  # 【已废弃】旧的 reasoning 回传开关，仅在 context-mode 为空时用于兼容（false 等价于 full）。
+  # 新配置请直接使用上面的 context-mode，不要再改这一项。
+  # strip-history-reasoning: false
   # 上下文最大 token 数（DeepSeek 模型为 1M）
   max-context-tokens: 1000000
   # 上下文智能压缩配置
@@ -328,12 +357,10 @@ deepseek:
       - "check_network"
       - "execute_sql"
       - "http_request"
-      - "git_query"
-      - "git_submit"
-      - "git_branch"
-      - "git_stash"
-      - "git_tag"
-      - "git_remote"
+      # Git 统一工具（原 git_query / git_submit / git_branch / git_stash / git_tag / git_remote 六合一）
+      # 合并动机：六个工具重复声明 projectRoot/action 与描述包装，且模型要在 6 个相似名字间选择，
+      #           选错就多一轮（多一轮的成本远高于省下的 schema）。旧工具名仍可被历史消息引用执行。
+      - "git"
       - "agent"
       - "skill"
       - "query_tool_history"
@@ -342,8 +369,10 @@ deepseek:
       - "mcp_server_manager"
       - "lesson"
       - "agent_invoke"
-      - "screen_capture"
-      - "desktop_control"
+      # 桌面统一工具（原 screen_capture + desktop_control 二合一）
+      # 合并动机：两者共用同一套 0~1000 归一化坐标/网格刻度/元素清单/点击前校验说明，
+      #           原来这套说明在两份描述里各写了一遍；合并后只保留一份，并把「先看后动」的流程写进同一描述。
+      - "desktop"
       - "browser"
       - "project_map"
 
@@ -715,3 +744,77 @@ llm:
     enabled: true              # 是否启用限流（false=全部放行，压测/排查用）
     max-concurrency: 500       # 全局最大并发在飞请求数（官方 pro 档 500，flash 档 2500，可按需调大）
     max-wait-ms: 5000          # 并发占满时的等待超时（毫秒），超时报「Provider 繁忙」且不再重试
+  # ==================== 计费单价（成本看板估算用） ====================
+  # 单位：元 / 百万 tokens。⚠️ 仅用于本地成本结构可视化，**不是账单**，最终以官方平台为准。
+  # 必须区分「缓存命中 / 未命中 / 输出」三者：deepseek-v4-pro 命中与未命中相差约 120 倍，
+  # 用单一"输入均价"算出来的数字会完全误导优化方向。
+  pricing:
+    default:                   # 未在 models 中命中的模型使用此单价
+      cache-hit-input: 0.025
+      cache-miss-input: 3.0
+      output: 6.0
+    models:                    # 支持精确匹配与前缀匹配（如配置 deepseek 可命中 deepseek-v4-pro）
+      deepseek-v4-pro:
+        cache-hit-input: 0.025
+        cache-miss-input: 3.0
+        output: 6.0
+      deepseek-flash:
+        cache-hit-input: 0.02
+        cache-miss-input: 1.0
+        output: 2.0
+  # ==================== 模型能力声明（配置驱动，替代硬编码模型名白名单） ====================
+  # 为什么配置化：旧实现把 o1/o3/o4/gpt-5 硬编码在适配器里，新模型（如 gpt-6）上线后会被判成
+  # 非推理模型 → 输出上限压到 8192（思考链被截断）、non-thinking 关不掉、minimal 档失效、
+  # temperature 不被剔除而触发官方拒绝。现在只需改这里，无需改代码发版。
+  # 匹配方式：模型名前缀匹配（模型名会先归一为 /  之后最后一段并转小写），
+  #          配置 gpt-6 可同时命中 gpt-6 / gpt-6-mini / gpt-6-turbo。
+  model-capabilities:
+    # 推理模型：命中后剔除 temperature、使用 max_completion_tokens 大额度
+    reasoning-model-prefixes:
+      - "o1"
+      - "o3"
+      - "o4"
+      - "gpt-5"
+      - "gpt5"
+      - "gpt-6"
+      - "gpt6"
+    # 支持 reasoning_effort=none（可显式关闭思考）的系列；o 系列不在其中（不支持关闭）
+    effort-none-supported-prefixes:
+      - "gpt-5"
+      - "gpt5"
+      - "gpt-6"
+      - "gpt6"
+    # 支持 reasoning_effort=minimal（比 low 更浅）的系列
+    effort-minimal-supported-prefixes:
+      - "gpt-5"
+      - "gpt5"
+    # 普通模型默认输出上限（max_completion_tokens）
+    default-max-output-tokens: 8192
+    # 推理模型默认输出上限（需容纳思考链 + 正文）
+    reasoning-max-output-tokens: 16384
+    # -------------------- 视觉（图像输入）能力 --------------------
+    # 判定顺序：模型名为空 → 放行；命中 exclude（关键词/前缀）→ 不支持；命中 include 关键词 → 支持；
+    #          都未命中 → 该 Provider 的 default-allow；Provider 无规则 → 下面这个全局开关。
+    # key 支持逗号分隔多个别名，也支持前缀匹配（minimax 可命中 minimax-coding-plan）。
+    # 内置默认规则与历史硬编码行为完全等价，一般无需配置；新增视觉模型时加关键词即可。
+    default-allow-vision: true
+    # 需要覆盖内置规则时，取消下面的注释并按需调整（未配置时使用代码内置默认）：
+    # vision-rules:
+    #   deepseek:
+    #     include-keywords: ["flash", "vision", "-vl"]
+    #     default-allow: false
+    #   "volcengine,ark,doubao":
+    #     include-keywords: ["vision", "-vl", "vlm"]
+    #     exclude-prefixes: ["deepseek"]
+    #     default-allow: true
+    #   "mimo,xiaomi-mimo":
+    #     include-keywords: ["v2.5", "vision", "-vl"]
+    #     default-allow: false
+    #   minimax:
+    #     include-keywords: ["m3", "vision", "-vl", "abab"]
+    #     exclude-keywords: ["-m2"]
+    #     exclude-prefixes: ["m2"]
+    #     default-allow: false
+    #   "qwen,dashscope,tongyi":
+    #     include-keywords: ["-vl", "vl-", "omni", "vision"]
+    #     default-allow: false

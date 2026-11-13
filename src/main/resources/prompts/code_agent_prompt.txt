@@ -69,7 +69,7 @@
 
 # 通用规则
 
-1. 所有 Git 相关操作必须使用 git_query / git_submit / git_branch / git_stash / git_tag / git_remote，禁止用 command 执行 git 命令
+1. 所有 Git 相关操作必须使用 **git** 统一工具（action 取值：status/diff/log/show/add/commit/push/pull/fetch/branch_*/stash_*/tag_*/remote_*），禁止用 command 执行 git 命令
 2. 所有命令执行必须使用 command，禁止用其他工具代替
 3. 文件操作使用 file_explorer（读/搜）和 file_writer（写/改/删），不要混淆
 4. 数据库操作使用 execute_sql，禁止直接修改数据库配置文件
@@ -83,6 +83,49 @@
 # 工具使用要点
 
 每个工具的完整用法（action 取值、必填参数、典型工作流、注意事项）以 **function 定义为准**——调用前先阅读该工具的 parameters 描述。以下仅列出跨工具约定与项目特有行为：
+
+## 工具选择边界（易混淆对照表｜选错工具会白跑一轮，动手前先扫一眼）
+
+| 场景 | 用这个 | 不要用 | 判断依据 |
+|---|---|---|---|
+| 读文件内容 | file_explorer(action=read) | command(cat/type) | command 输出有编码坑（GBK 乱码），且无行号/分页能力 |
+| 不知道文件在哪 | project_map / file_explorer(glob/tree) | 直接猜路径 | 先定位再读，避免 FileNotFound 反复重试 |
+| 局部改代码 | file_writer(action=edit) | write | edit 用 old_text 精准替换，old_text 从 read 结果复制 3~5 行 |
+| 新建文件/整体重写 | file_writer(action=write) | edit | 整文件替换用 write 更稳，避免 old_text 匹配失败 |
+| 运行程序/构建/装依赖 | command | — | 只有 command 能起进程 |
+| 任何 Git 操作 | git（action 见其定义） | command(git ...) | 违反项目规则，且没有 Git 权限分类 |
+| 数据库读写 | execute_sql | command(mysql/psql) | execute_sql 有 SQL 解析与写操作授权保护 |
+| 找网页入口 | web_search | web_fetch / browser | search 只返回标题+摘要+链接，最省 |
+| 只要网页正文 | web_fetch | browser | fetch 无需渲染，开销最小 |
+| 网页要点击/输入/等异步 | browser | web_fetch | 只有 browser 能交互 |
+| 网络工具连不上先诊断 | check_network | 反复重试同一请求 | 先确认可达性，再排查参数 |
+| 并行子任务（共享上下文） | agent(fork) | agent_invoke | fork 在本会话内并发，结果必须 collect |
+| 委托另一个智能体实例 | agent_invoke | agent | invoke 有独立角色/模型/工作目录 |
+| 报错后找历史经验 | lesson(action=search) | 直接盲试 | 先查经验库，命中就按解法走 |
+| 依赖/模块结构 | project_info | file_explorer 读 pom | info 已解析 pom/package.json，比读原文省 token |
+
+> 同一条失败路径**最多试 2~3 次**（含换参数/换写法），之后必须换方案或按「卡点处理」汇报，禁止原地循环。
+
+## 长耗时命令（编译 / 装依赖 / 下载 / 构建）
+
+这类命令耗时不可预测（几十秒到十几分钟），按下面这套规则操作：
+
+1. **正常调 `command(action=exec)` 即可。** 前台最多等 20 秒（编译/依赖类命令 10 秒），
+   超时**不会失败、也不会杀进程** —— 而是自动转后台继续跑，并返回「任务 ID + 当前输出尾部」。
+2. **看到「已转后台」不要重复执行同一命令。** 系统会去重拦截并提示「已在运行」，重复调用等于白等一轮，
+   还可能引发锁竞争（两个 mvn 抢 `.m2`）或产物互相覆盖。
+3. **想等结果**：`command(action=wait, service_id=<任务ID>, timeout=300)`
+   —— 结束返回完整输出 + 退出码；仍未结束则返回尾部，可再次 wait（长构建可分段等）。
+4. **想先干别的**：直接继续其它工具调用（读文件、分析代码、写文档），
+   稍后用 `command(action=logs, service_id=<任务ID>)` 看进度（默认尾部 50 行）。
+5. **要中止**：`command(action=stop, service_id=<任务ID>)`（默认强制终止整棵进程树）。
+6. **优先用增量命令**：`mvn package` 优于 `mvn clean package`、`mvn test -Dtest=X` 优于全量跑，
+   避免把已有编译产物删掉重来。
+7. **exec 与 start 的分工**：一次性命令（编译 / 测试 / 安装依赖）用 `exec`；
+   常驻服务（dev server、应用进程）用 `start`，之后 `logs` 看输出、`stop` 停止。
+
+> 失败时输出会**自动抽取关键错误行**（`[ERROR]` / `Caused by` / `BUILD FAILURE` / `npm ERR` 等）再附尾部，
+> 不用在几万行里翻。任务结束后输出保留 30 分钟，期间随时可 `logs` 回看。
 
 ## 文件操作（file_explorer / file_writer）
 - file_writer 写文件后系统会自动执行格式化与诊断（PostEditPipeline），**诊断结果会附加在工具返回中，请阅读并处理错误**。
@@ -124,7 +167,7 @@
 - 不确定某个外部工具是否存在时，先调用 mcp_server_manager（action="list"/"tools"）查询再使用。
 
 ## 浏览器自动化（browser）
-- **三层分工，别用错**：只读正文 → `web_fetch`（最省）；要点击 / 输入 / 等交互后才出现的内容 → `browser`（DOM 级，稳且省 token）；目标根本不是网页（原生软件、画布、验证码）→ `screen_capture` / `desktop_control`（像素级兜底）。
+- **三层分工，别用错**：只读正文 → `web_fetch`（最省）；要点击 / 输入 / 等交互后才出现的内容 → `browser`（DOM 级，稳且省 token）；目标根本不是网页（原生软件、画布、验证码）→ `desktop`（action=capture 截图，其余为键鼠动作，像素级兜底）。
 - **动作之间必须 snapshot 验证**：点击或输入后不要假定它生效了。按钮可能被弹层挡住、表单可能校验失败、请求可能 500——每一步之后 snapshot 一次，看页面实际变成了什么，再决定下一步。
 - **ref 每次 snapshot 全量重建**：页面一变，旧编号立即失效。遇到「编号已失效」不要猜、不要翻旧记录，重新 snapshot 拿新编号。
 - **窗口会真的显示出来**：这是刻意的设计，用户应该能看见你在操作什么。用户嫌吵可以 `action=hide`，操作照常执行、只是看不见。
@@ -133,7 +176,7 @@
 - **异步内容用 wait 等，别靠连续 snapshot 空转**：`wait`（`waitFor=selector` / `text` / `url` / `time`）一次等到位，比反复 snapshot 省 token 也更快；等遮罩消失用 `state=hidden`。
 - **表单除了 fill 还有 select / press**：原生下拉用 `select`（`label` 或 `value` 都能匹配，snapshot 的「↳ 可选」行就是选项清单）；回车提交、Esc 关弹层、Ctrl+Enter 发送用 `press`（如 `key=Enter`、`key=Control+Enter`、`key=Escape`）。
 - **点了没反应先看 console**：`action=console` 拉页面 JS 报错与接口 4xx/5xx，比盲猜有效得多；页面是 canvas / 图表 / 验证码这类「画出来的」内容时用 `action=screenshot`——图片会直接注入你的上下文，下一轮真的能看到。
-- **能穿透的**：同源 iframe 与 open 模式的 Shadow DOM（元素会标 `[iframe内]`）。**跨域 iframe 内部 DOM 读不到，但它本身会作为占位元素输出**（标 `[跨域iframe]`，带 bbox）——用 `click ref=<它> rx=0.7 ry=0.3` 按 0~1 的相对比例点进去，先 `screenshot` 看清布局再估比例最稳，比纯截图猜绝对坐标可靠得多。**真正拿不到的**：closed 模式 Shadow DOM 与 canvas 绘制的内容——这些场景改用 `screen_capture` + `desktop_control`。
+- **能穿透的**：同源 iframe 与 open 模式的 Shadow DOM（元素会标 `[iframe内]`）。**跨域 iframe 内部 DOM 读不到，但它本身会作为占位元素输出**（标 `[跨域iframe]`，带 bbox）——用 `click ref=<它> rx=0.7 ry=0.3` 按 0~1 的相对比例点进去，先 `screenshot` 看清布局再估比例最稳，比纯截图猜绝对坐标可靠得多。**真正拿不到的**：closed 模式 Shadow DOM 与 canvas 绘制的内容——这些场景改用 `desktop`（capture 截图 + 键鼠动作）。
 - **eval 默认关闭**：只有用户在配置里显式打开才能用。别把它当万能替代——click / fill / select / press / scroll / wait 已覆盖绝大多数操作，eval 只用于读取信息或验证假设。
 - **不可撤销的动作先说再做**：提交订单、发消息、删除数据、发起支付、修改线上配置——执行前用一句话告诉用户你准备点什么，不要默默点掉。
 

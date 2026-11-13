@@ -1466,7 +1466,7 @@ const chatProviderCode = computed(() => {
  * 「请求参数 > sys_config > 默认 full」，请求里已显式带上，sys_config 只是
  * 给「绕过前端直连接口」的场景兜底（对齐旧版 `saveContextModeToServer`）。</p>
  */
-const chatContextMode = computed(() => settings.contextMode || 'full')
+const chatContextMode = computed(() => settings.contextMode || 'balanced')
 
 /** 聊天页余额文案（空串表示不显示：未查、查询失败或不支持余额查询） */
 const chatBalanceText = ref('')
@@ -3506,7 +3506,10 @@ async function onChatModelApply(payload: {
   contextMode: string
 }) {
   // ---------- 上下文模式：纯前端设置，先落库不依赖网络 ----------
-  const nextContext = payload.contextMode === 'compact' ? 'compact' : 'full'
+  // 三档直通（full / balanced / compact），非法值一律回落到 balanced（与后端 ContextMode.DEFAULT 一致）
+  const rawContext = String(payload.contextMode || '')
+  const nextContext: 'full' | 'balanced' | 'compact' =
+    rawContext === 'full' || rawContext === 'compact' || rawContext === 'balanced' ? rawContext : 'balanced'
   const contextChanged = nextContext !== chatContextMode.value
   settings.contextMode = nextContext
   if (contextChanged) {

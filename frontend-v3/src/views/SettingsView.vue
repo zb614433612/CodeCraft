@@ -32,6 +32,32 @@
         <span>本机偏好 <b>外观设置</b></span>
       </div>
 
+      <!-- 本机偏好：只影响当前设备的对话行为（与「管理页面入口」区分开） -->
+      <section class="cc-set-prefs">
+        <div class="cc-set-prefs__head">
+          <div class="cc-set-prefs__title">本机偏好</div>
+          <div class="cc-set-prefs__hint">立即生效；同时镜像一份到服务端作为兜底默认值</div>
+        </div>
+        <div class="cc-set-prefs__row">
+          <div class="cc-set-prefs__meta">
+            <div class="cc-set-prefs__label">上下文模式</div>
+            <div class="cc-set-prefs__desc">{{ currentContextDesc }}</div>
+          </div>
+          <div class="cc-set-prefs__modes">
+            <button
+              v-for="mode in CONTEXT_MODE_OPTIONS"
+              :key="mode.value"
+              :class="['cc-set-mode', { 'cc-set-mode--active': contextMode === mode.value }]"
+              :title="mode.tip"
+              @click="onContextModeChange(mode.value)"
+            >
+              <span class="cc-set-mode__label">{{ mode.label }}</span>
+              <span class="cc-set-mode__desc">{{ mode.desc }}</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
       <!-- 分组导航 -->
       <div class="cc-set-grid">
         <section v-for="group in groups" :key="group.title" class="cc-set-group">
@@ -63,6 +89,9 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { MORE_GROUPS, type MenuGroup } from '../menu.config'
+import { useSettingsStore } from '../store/settings'
+import { setConfig } from '../api/config'
+import { toast } from '../utils/toast'
 
 const props = withDefaults(
   defineProps<{
@@ -122,6 +151,54 @@ const adminCount = computed(() =>
   MORE_GROUPS.reduce((n, g) => n + g.items.filter(item => item.adminOnly).length, 0)
 )
 
+// ==================== 本机偏好：上下文模式（三档） ====================
+
+type CtxMode = 'full' | 'balanced' | 'compact'
+
+/**
+ * 三档选项（与后端 ContextMode 枚举同源）。
+ * 值必须保持 full / balanced / compact 原文，后端按枚举精确判定。
+ */
+const CONTEXT_MODE_OPTIONS: Array<{ value: CtxMode; label: string; desc: string; tip: string }> = [
+  {
+    value: 'full',
+    label: '全量',
+    desc: '历史完整注入',
+    tip: '历史消息完整注入（含历史思考过程）—— 最准，成本最高'
+  },
+  {
+    value: 'balanced',
+    label: '均衡',
+    desc: '去掉历史思考',
+    tip: '剔除历史思考过程，工具结果完整保留 —— 推荐默认：省钱且不丢准确性'
+  },
+  {
+    value: 'compact',
+    label: '精简',
+    desc: '工具仅留摘要',
+    tip: '在均衡基础上再摘要化历史工具结果 —— 最省，会改写历史，建议仅上下文逼近上限时使用'
+  }
+]
+
+const settings = useSettingsStore()
+const contextMode = computed<CtxMode>(() => settings.contextMode as CtxMode)
+const currentContextDesc = computed(
+  () => CONTEXT_MODE_OPTIONS.find(o => o.value === contextMode.value)?.tip || ''
+)
+
+/**
+ * 切换上下文模式：先落本地（persist 到 localStorage，立即生效），
+ * 再镜像到 {@code sys_config.context_mode}（后端在请求未带该参数时用它兜底）。
+ * 同步失败不影响当前会话（请求参数里已显式带上），只提示一次。
+ */
+function onContextModeChange(next: CtxMode) {
+  if (contextMode.value === next) return
+  settings.contextMode = next
+  void setConfig('context_mode', next).catch(() => {
+    toast.warning('已保存到本机，但同步服务端失败（不影响当前对话）')
+  })
+}
+
 function describe(key: string): string {
   return DESCRIPTIONS[key] || ''
 }
@@ -136,3 +213,102 @@ function go(key: string) {
  */
 onMounted(() => props.load?.())
 </script>
+
+<style scoped>
+/* 本机偏好卡片：与下方「管理页面入口」网格在视觉上区分开（一个改行为、一个是跳转） */
+.cc-set-prefs {
+  margin-bottom: var(--sp-4, 16px);
+  padding: var(--sp-4, 16px) var(--sp-5, 20px);
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: var(--r-lg, 12px);
+  background: var(--bg-1, #fff);
+}
+
+.cc-set-prefs__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3, 12px);
+  margin-bottom: var(--sp-3, 12px);
+  flex-wrap: wrap;
+}
+
+.cc-set-prefs__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1, #1f2328);
+}
+
+.cc-set-prefs__hint {
+  font-size: 12px;
+  color: var(--text-3, #8b949e);
+}
+
+.cc-set-prefs__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4, 16px);
+  flex-wrap: wrap;
+}
+
+.cc-set-prefs__meta {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
+.cc-set-prefs__label {
+  margin-bottom: 2px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-1, #1f2328);
+}
+
+.cc-set-prefs__desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3, #8b949e);
+}
+
+.cc-set-prefs__modes {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cc-set-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 108px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: var(--r-md, 8px);
+  background: var(--bg-1, #fff);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.cc-set-mode:hover {
+  border-color: var(--accent, #0969da);
+}
+
+.cc-set-mode--active {
+  border-color: var(--accent, #0969da);
+  background: var(--accent-soft, rgba(9, 105, 218, 0.08));
+}
+
+.cc-set-mode__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1, #1f2328);
+}
+
+.cc-set-mode--active .cc-set-mode__label {
+  color: var(--accent, #0969da);
+}
+
+.cc-set-mode__desc {
+  font-size: 11px;
+  color: var(--text-3, #8b949e);
+}
+</style>

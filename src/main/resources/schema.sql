@@ -681,3 +681,47 @@ SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'user' AND m.id = 4
 ALTER TABLE agent_config ALTER COLUMN avatar SET DATA TYPE VARCHAR(255);
 -- MySQL/MariaDB 语法兜底（H2 下该句报语法错误但被 continue-on-error 容忍，不影响启动）
 ALTER TABLE agent_config MODIFY COLUMN avatar VARCHAR(255);
+
+-- ============================================================
+-- 成本可观测：LLM 调用用量记录（每次 API 请求一条，含工具循环内每一轮）
+-- 数据来源：Provider 响应的 usage 字段（OpenAI 兼容协议）
+--   prompt_tokens / completion_tokens / total_tokens
+--   prompt_cache_hit_tokens / prompt_cache_miss_tokens（DeepSeek 缓存明细）
+--   completion_tokens_details.reasoning_tokens（思考链 token，部分 Provider 提供）
+-- 用途：成本看板、缓存命中率诊断、按模型/时间/会话维度统计
+-- 说明：刻意不加外键——会话被删除后历史账单仍应保留，便于长期成本核算。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS llm_token_usage (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id BIGINT COMMENT '会话ID（可空：后台任务/定时任务无归属会话时为空）',
+  message_id BIGINT COMMENT '关联的 assistant 消息ID（可空：落库时尚未生成消息ID）',
+  iteration INT DEFAULT 0 COMMENT '工具循环迭代轮次（0=非工具循环或未知）',
+  provider VARCHAR(50) COMMENT 'Provider编码，如 deepseek / openai / anthropic',
+  model VARCHAR(100) COMMENT '模型名，如 deepseek-v4-pro',
+  prompt_tokens INT DEFAULT 0 COMMENT '输入 token 总数（命中+未命中）',
+  completion_tokens INT DEFAULT 0 COMMENT '输出 token 总数（含思考链）',
+  total_tokens INT DEFAULT 0 COMMENT '输入+输出总 token',
+  cache_hit_tokens INT DEFAULT 0 COMMENT '缓存命中输入 token（prompt_cache_hit_tokens）',
+  cache_miss_tokens INT DEFAULT 0 COMMENT '缓存未命中输入 token（prompt_cache_miss_tokens）',
+  reasoning_tokens INT DEFAULT 0 COMMENT '思考链 token（completion_tokens_details.reasoning_tokens）',
+  cost_estimate DECIMAL(14,6) DEFAULT 0 COMMENT '估算费用（元），按 provider 单价计算',
+  created_at DATETIME NOT NULL COMMENT '创建时间',
+  INDEX idx_usage_conversation (conversation_id),
+  INDEX idx_usage_created_at (created_at),
+  INDEX idx_usage_model (model)
+) DEFAULT CHARSET=utf8mb4 COMMENT='LLM 调用用量记录表（成本可观测）';
+
+-- ============================================================
+-- 新增 SETTING 菜单：成本看板（LLM 用量与费用统计，只读页面）
+-- 数据来源 llm_token_usage 表；不含敏感信息，故管理员与普通用户都开放
+-- ============================================================
+INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
+(19, '成本看板', '/token-usage', 'BarChartOutlined', NULL, 13, 'SETTING');
+
+-- 管理员分配成本看板菜单
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'admin' AND m.id = 19;
+
+-- 普通用户分配成本看板菜单（页面只读：本机全部会话的用量汇总）
+INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id FROM sys_role r, sys_menu m WHERE r.code = 'user' AND m.id = 19;

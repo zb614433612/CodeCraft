@@ -112,20 +112,26 @@ public class QwenClient extends AbstractLLMClient {
     @Override
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
         Map<String, Object> params = new HashMap<>();
-        String mode = thinkingMode == null ? "" : thinkingMode.trim();
+        // 统一档位归一化：none / low / medium / high / max / ""(auto)
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
 
-        if (mode.isEmpty() || "auto".equals(mode)) {
+        if (EFFORT_AUTO.equals(canonical)) {
             // 不下发：由模型默认策略决定（Qwen3 混合模型默认不思考，思考模型默认思考）
             return params;
         }
-        if ("non-thinking".equals(mode)) {
+        if (EFFORT_NONE.equals(canonical)) {
             params.put("enable_thinking", false);
             return params;
         }
+
+        // low / medium / high / max 一律开启思考（原来仅 thinking / thinking_max 开启，
+        // thinking_low 会掉进空分支导致"看起来没思考"，此处修复）
         params.put("enable_thinking", true);
         if (thinkingBudget != null && thinkingBudget > 0) {
+            // 显式配置的预算优先（便于精细控制）
             params.put("thinking_budget", thinkingBudget);
-        } else if ("thinking_max".equals(mode)) {
+        } else if (EFFORT_MAX.equals(canonical)) {
+            // 仅最深档主动给预算；其余档沿用 Qwen 服务端默认，避免对不支持的模型下发未知字段
             params.put("thinking_budget", DEFAULT_MAX_THINKING_BUDGET);
         }
         return params;

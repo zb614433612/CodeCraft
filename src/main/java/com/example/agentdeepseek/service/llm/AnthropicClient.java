@@ -65,8 +65,14 @@ public class AnthropicClient extends AbstractLLMClient {
     /** 默认输出上限（普通模式） */
     private static final int DEFAULT_MAX_TOKENS = 8192;
 
-    /** 思考预算（extended thinking budget_tokens） */
+    /** 思考预算（extended thinking budget_tokens）—— high 档（等价历史默认值） */
     private static final int THINKING_BUDGET_TOKENS = 8000;
+
+    /** 思考预算：low 档（浅思考，适合读文件/改文案/跑命令） */
+    private static final int THINKING_BUDGET_LOW = 2048;
+
+    /** 思考预算：max 档（疑难根因/协议设计/多方案权衡） */
+    private static final int THINKING_BUDGET_MAX = 16384;
 
     /** 思考模式下在预算之外额外预留的回复空间 */
     private static final int THINKING_EXTRA_TOKENS = 8192;
@@ -148,13 +154,26 @@ public class AnthropicClient extends AbstractLLMClient {
                                      String thinkingMode,
                                      boolean stream,
                                      List<Map<String, Object>> tools) {
-        String effectiveMode = (thinkingMode == null || thinkingMode.isBlank())
-                ? "non-thinking" : thinkingMode.trim();
-        boolean thinkingEnabled = !"non-thinking".equals(effectiveMode);
+        // 统一档位归一化：none / low / medium / high / max / ""(auto)
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        // Anthropic 历史行为：未指定时默认关闭思考（避免兼容层不认 thinking 字段而 400）
+        if (EFFORT_AUTO.equals(canonical)) {
+            canonical = EFFORT_NONE;
+        }
+        boolean thinkingEnabled = !EFFORT_NONE.equals(canonical);
+        // Anthropic 没有"档位"概念，用 budget_tokens 表达思考深度
+        //   low  → 2048（浅思考）
+        //   medium / high → 8000（历史默认值，保持既有行为不变）
+        //   max  → 16384（最深）
+        int thinkingBudget = switch (canonical) {
+            case EFFORT_LOW -> THINKING_BUDGET_LOW;
+            case EFFORT_MAX -> THINKING_BUDGET_MAX;
+            default -> THINKING_BUDGET_TOKENS;
+        };
 
         // ===== 1. max_tokens 必填；思考模式下必须严格大于 budget_tokens =====
         if (thinkingEnabled) {
-            int thinkingMaxTokens = Math.max(maxTokens, THINKING_BUDGET_TOKENS + THINKING_EXTRA_TOKENS);
+            int thinkingMaxTokens = Math.max(maxTokens, thinkingBudget + THINKING_EXTRA_TOKENS);
             request.put("max_tokens", thinkingMaxTokens);
         } else {
             request.put("max_tokens", maxTokens);
@@ -198,7 +217,7 @@ public class AnthropicClient extends AbstractLLMClient {
         if (thinkingEnabled) {
             Map<String, Object> thinking = new HashMap<>();
             thinking.put("type", "enabled");
-            thinking.put("budget_tokens", THINKING_BUDGET_TOKENS);
+            thinking.put("budget_tokens", thinkingBudget);
             request.put("thinking", thinking);
             // Anthropic 规定：开启 extended thinking 时 temperature 必须为 1
             request.remove("temperature");

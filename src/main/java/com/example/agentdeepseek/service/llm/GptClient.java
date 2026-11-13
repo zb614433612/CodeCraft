@@ -132,31 +132,29 @@ public class GptClient extends AbstractLLMClient {
 
     /** 模型名归一：取最后一段（兼容 openai/gpt-5、azure/gpt-5 这类前缀写法） */
     static String normalizeModelKey(String model) {
-        if (model == null) {
-            return "";
-        }
-        String normalized = model.trim().toLowerCase(Locale.ROOT);
-        int slash = normalized.lastIndexOf('/');
-        return slash >= 0 ? normalized.substring(slash + 1) : normalized;
+        return ModelCapabilityRules.normalize(model);
     }
 
-    /** 是否为推理模型（o1 / o3 / o4 / gpt-5 系列） */
+    /**
+     * 是否为推理模型（拒绝 temperature、使用 max_completion_tokens 大额度）
+     * <p>
+     * 判定来源：{@code llm.model-capabilities.reasoning-model-prefixes}（配置驱动）。
+     * 不再硬编码模型名 —— 新增 GPT-6 / o5 等模型只需改配置，无需发版。
+     * </p>
+     */
     static boolean isReasoningModel(String modelKey) {
-        if (modelKey == null || modelKey.isBlank()) {
-            return false;
-        }
-        String m = modelKey.toLowerCase(Locale.ROOT);
-        return m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4")
-                || m.startsWith("gpt-5") || m.startsWith("gpt5");
+        return ModelCapabilityRules.isReasoningModel(normalizeModelKey(modelKey));
     }
 
-    /** 是否为 GPT-5 系列（支持 reasoning_effort=none / minimal） */
+    /**
+     * 是否支持 {@code reasoning_effort=none}（可显式关闭思考）
+     * <p>
+     * 判定来源：{@code llm.model-capabilities.effort-none-supported-prefixes}。
+     * 方法名为历史兼容保留（原语义"是否 GPT-5 系列"），现已泛化为"是否支持显式关闭"。
+     * </p>
+     */
     static boolean isGpt5Family(String modelKey) {
-        if (modelKey == null) {
-            return false;
-        }
-        String m = modelKey.toLowerCase(Locale.ROOT);
-        return m.startsWith("gpt-5") || m.startsWith("gpt5");
+        return ModelCapabilityRules.supportsEffortNone(normalizeModelKey(modelKey));
     }
 
     // ==================== 请求体构建 ====================
@@ -177,10 +175,11 @@ public class GptClient extends AbstractLLMClient {
                                     List<Map<String, Object>> tools) {
         String modelKey = normalizeModelKey(model);
         boolean reasoningModel = isReasoningModel(modelKey);
-        boolean gpt5 = isGpt5Family(modelKey);
+        // 是否支持显式关闭思考（配置驱动，gpt-5 / gpt-6 系列支持；o 系列不支持）
+        boolean supportsNone = isGpt5Family(modelKey);
 
         // ===== 1. 推理强度（reasoning_effort）=====
-        String effort = resolveReasoningEffort(thinkingMode, reasoningModel, gpt5);
+        String effort = resolveReasoningEffort(thinkingMode, reasoningModel, supportsNone);
         if (effort != null) {
             request.put("reasoning_effort", effort);
         }
@@ -191,8 +190,9 @@ public class GptClient extends AbstractLLMClient {
             // 兼容 post-build 注入（如 PromptOptimizeService）
             request.put("max_completion_tokens", injectedMaxTokens);
         } else {
+            // 输出上限由能力配置决定（推理模型需要更大额度容纳思考链）
             request.putIfAbsent("max_completion_tokens",
-                    reasoningModel ? DEFAULT_REASONING_MAX_COMPLETION_TOKENS : DEFAULT_MAX_COMPLETION_TOKENS);
+                    ModelCapabilityRules.maxOutputTokens(reasoningModel));
         }
 
         // ===== 3. temperature：推理模型、或开启推理（非 none）时官方会拒绝 =====
@@ -220,29 +220,38 @@ public class GptClient extends AbstractLLMClient {
      * @param gpt5           是否 GPT-5 系列（唯一支持 none / minimal 的官方系列）
      * @return effort 取值；null 表示不下发
      */
-    static String resolveReasoningEffort(String thinkingMode, boolean reasoningModel, boolean gpt5) {
-        String mode = thinkingMode == null ? "" : thinkingMode.trim().toLowerCase(Locale.ROOT);
-        if (mode.isEmpty() || "auto".equals(mode)) {
-            return null;
+    /**
+     * 解析 reasoning_effort（基于统一归一化档位）
+     *
+     * @param thinkingMode        Agent 的思考模式（支持 thinking_low / low / medium / high / xhigh 等写法）
+     * @param reasoningModel      是否推理模型（o 系列 / gpt-5 / gpt-6 …，由能力配置决定）
+     * @param supportsEffortNone  是否支持显式关闭（reasoning_effort=none），目前 GPT-5 / GPT-6 系列支持
+     * @return effort 取值；{@code null} 表示不下发（交给模型默认策略）
+     */
+    static String resolveReasoningEffort(String thinkingMode, boolean reasoningModel, boolean supportsEffortNone) {
+        // 统一归一化：none / low / medium / high / max / ""(auto)
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        if (canonical.isEmpty()) {
+            return null;   // auto / 未指定 → 不下发
         }
-        switch (mode) {
-            case "non-thinking":
-                // GPT-5 系列可显式关闭推理；o 系列不支持 none，只能不下发
-                return gpt5 ? "none" : null;
-            case "thinking":
-                return "medium";
-            case "thinking_max":
-                return "high";
-            case "minimal":
-                // 仅 GPT-5 系列支持 minimal，其他推理模型降级为 low
-                return gpt5 ? "minimal" : (reasoningModel ? "low" : null);
-            case "low":
-            case "medium":
-            case "high":
-            case "xhigh":
-                return mode;
-            default:
-                return null;
-        }
+        // minimal 是 OpenAI 独有的更浅档，归一化会把它并入 low，这里按原始值还原
+        boolean originallyMinimal = thinkingMode != null
+                && "minimal".equalsIgnoreCase(thinkingMode.trim());
+
+        return switch (canonical) {
+            case AbstractLLMClient.EFFORT_NONE ->
+                    supportsEffortNone ? "none" : null;   // o 系列不支持 none，只能不下发
+            case AbstractLLMClient.EFFORT_LOW -> {
+                if (originallyMinimal) {
+                    yield supportsEffortNone ? "minimal" : (reasoningModel ? "low" : null);
+                }
+                yield reasoningModel ? "low" : null;
+            }
+            case AbstractLLMClient.EFFORT_MEDIUM -> "medium";
+            case AbstractLLMClient.EFFORT_HIGH -> "high";
+            // OpenAI 官方目前最高档就是 high（无 xhigh 枚举），max 归一到 high 避免 400
+            case AbstractLLMClient.EFFORT_MAX -> "high";
+            default -> null;
+        };
     }
 }

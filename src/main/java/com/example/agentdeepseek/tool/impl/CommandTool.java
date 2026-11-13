@@ -53,6 +53,58 @@ public class CommandTool implements Tool {
     private static final int MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
     private static final ConcurrentHashMap<Integer, ServiceInfo> SERVICES = new ConcurrentHashMap<>();
     private static final AtomicInteger SERVICE_ID_SEQ = new AtomicInteger(1);
+
+    // ============ 长耗时命令后台化（exec 新执行模型） ============
+    /**
+     * 一次性长任务池上限（与服务池分开计数）。
+     * <p>为什么要分开：一个 20 分钟的 mvn 不该占掉「长期服务」的槽位，
+     * 否则用户想再起一个 npm run dev 会被拒。</p>
+     */
+    private static final int MAX_TASKS = 10;
+
+    /** 已结束任务在池中的保留时长：结束后仍可用 logs/wait 回看结果，超时才真正移除 */
+    private static final long TASK_RETAIN_MS = 30 * 60 * 1000L;
+
+    /** wait 动作默认 / 最大等待秒数 */
+    private static final int DEFAULT_WAIT_SECONDS = 300;
+    private static final int MAX_WAIT_SECONDS = 600;
+
+    /** 转后台提示里展示的输出行数 */
+    private static final int BACKGROUND_TAIL_LINES = 15;
+    /** logs 默认展示的尾部行数 */
+    private static final int LOGS_DEFAULT_TAIL = 50;
+
+    /**
+     * 编译 / 依赖下载 / 构建类命令识别。
+     * <p>命中后前台等待窗口缩短（默认 10s）：这类命令本来就要几十秒到几分钟，
+     * 没必要让用户干等满 20 秒才转后台。</p>
+     */
+    private static final Pattern SLOW_COMMAND_PATTERN = Pattern.compile(
+            "^\\s*(mvn|mvnw|gradle|gradlew|npm|pnpm|yarn|pip|pip3|poetry|pipenv|cargo|go|dotnet|docker|"
+                    + "make|cmake|msbuild|composer|bundle|nuget|vcpkg|conda|brew)\\b",
+            Pattern.CASE_INSENSITIVE);
+
+    /** 失败输出特征行（失败时优先回传这些行，而不是让模型在几万行里翻） */
+    private static final Pattern ERROR_LINE_PATTERN = Pattern.compile(
+            "(?i)(\\berror\\b|\\bfail(ed|ure)?\\b|\\bexception\\b|caused by|\\bcannot\\b|could not|"
+                    + "not found|no such file|BUILD FAILURE|npm ERR|permission denied|connection refused|"
+                    + "\\bat [\\w.$]+\\([\\w.]+\\.java:\\d+\\)|\\[ERROR\\])");
+
+    /** 任务类型：长期运行的服务（start） */
+    private static final String KIND_SERVICE = "service";
+    /** 任务类型：一次性长任务（exec 转后台） */
+    private static final String KIND_TASK = "task";
+
+    /**
+     * 前台最大等待窗口（秒）。超时后命令**不会被杀**，而是转后台任务继续跑。
+     * <p>设为 0 或负数 = 关闭新执行模型，完全回退到旧的「同步阻塞直到超时被杀」行为（应急开关）。</p>
+     */
+    @org.springframework.beans.factory.annotation.Value("${command.exec.background-after-seconds:20}")
+    private int backgroundAfterSeconds = 20;
+
+    /** 编译 / 依赖类命令的前台等待窗口（秒），比普通命令更短 */
+    @org.springframework.beans.factory.annotation.Value("${command.exec.background-after-build-seconds:10}")
+    private int backgroundAfterBuildSeconds = 10;
     private static final Pattern PORT_PATTERN = Pattern.compile(
             "(?:https?://|bind\\s+|port\\s+)(?:localhost|0\\.0\\.0\\.0|127\\.0\\.0\\.1)[:/]?(\\d{2,5})", Pattern.CASE_INSENSITIVE);
     private static final Pattern SHELL_NEEDED_PATTERN = Pattern.compile("[|&;<>$`'\"()]|\\b(cd|export|set\\s+\\w+=|source)\\b");
@@ -72,16 +124,34 @@ public class CommandTool implements Tool {
     public String getDescription() {
         return "【适用场景】命令执行与服务管理一站式工具，通过 action 参数选择操作模式。\n"
                 + "⚠️ 调用示例：{\"action\":\"exec\",\"command\":\"mvn clean compile\"} | "
-                + "{\"action\":\"start\",\"command\":\"npm run dev\"}\n"
+                + "{\"action\":\"wait\",\"service_id\":7} | {\"action\":\"start\",\"command\":\"npm run dev\"}\n"
                 + "【action 说明】\n"
-                + "  exec  — 阻塞执行一次性命令（编译、安装依赖、运行测试等），等待完成返回完整输出\n"
-                + "  start — 后台启动持续运行的服务（npm run dev、mvn spring-boot:run 等），返回服务ID\n"
-                + "  list  — 列出所有后台服务及其状态\n"
-                + "  logs  — 查看指定服务的日志输出\n"
-                + "  stop  — 停止指定服务\n"
-                + "【典型工作流】start 启动服务 → list 确认运行 → logs 查看日志 → stop 停止服务\n"
-                + "【注意事项】action 必填；exec 默认超时 120s（最大 600s），输出持续增长时自动延长；"
-                + "start 最多同时运行 " + MAX_CONCURRENT + " 个后台服务";
+                + "  exec  — 执行命令。**长耗时命令不会失败、也不会被杀**：前台最多等 "
+                + getBackgroundWindowHint() + " 秒，超时自动转为后台任务继续跑，并返回「任务 ID + 当前输出尾部」。\n"
+                + "  wait  — 阻塞等待某个任务结束（默认 300s / 最大 600s）：结束后返回完整输出与退出码，未结束则返回尾部并可再次 wait。\n"
+                + "  start — 后台启动**持续运行**的服务（npm run dev、mvn spring-boot:run 等），返回服务 ID。\n"
+                + "  list  — 列出所有任务 / 服务及其状态（运行中 / 已结束）。\n"
+                + "  logs  — 查看任务或服务的输出（默认尾部 50 行，可用 tail 调整，tail=0 取全量）。\n"
+                + "  stop  — 停止任务或服务（默认强制终止整棵进程树）。\n"
+                + "【长耗时命令的正确用法】编译 / 装依赖 / 下载 / 构建 这类命令：\n"
+                + "  ① 正常调 exec 即可；超过等待窗口会自动转后台，返回里带「任务 ID」，这不是失败；\n"
+                + "  ② 收到「已转后台」后**不要重复执行同一命令**（系统会拦截并提示已在运行，白等一轮）；\n"
+                + "  ③ 想等结果：command(action=wait, service_id=<任务ID>, timeout=300)；\n"
+                + "  ④ 想先干别的：直接继续其它工具调用，稍后用 command(action=logs, service_id=<任务ID>) 看进度。\n"
+                + "【典型工作流】\n"
+                + "  一次性命令：exec → （若转后台）wait / logs → stop（需要中止时）\n"
+                + "  长期服务：start → list 确认运行 → logs 查看日志 → stop 停止服务\n"
+                + "【注意事项】action 必填；同一工作目录 + 同一命令重复调用会被去重拦截；"
+                + "长任务最多同时 " + MAX_TASKS + " 个、长期服务最多 " + MAX_CONCURRENT + " 个；"
+                + "任务结束后输出保留 30 分钟供 logs 回看。";
+    }
+
+    /** 描述里的前台等待窗口提示（编译类命令更短，分档说明） */
+    private String getBackgroundWindowHint() {
+        if (backgroundAfterSeconds <= 0) {
+            return "（当前已关闭后台化，按超时终止）";
+        }
+        return String.valueOf(backgroundAfterSeconds);
     }
 
     @Override
@@ -93,9 +163,10 @@ public class CommandTool implements Tool {
         // === action ===
         ObjectNode action = props.putObject("action");
         action.put("type", "string");
-        action.put("description", "【必填】操作类型。exec=阻塞执行命令；start=后台启动服务；list=列出服务；logs=查看日志；stop=停止服务。");
+        action.put("description", "【必填】操作类型。exec=执行命令（耗时超过阈值自动转后台，进程不会中断）；"
+                + "wait=阻塞等待任务结束；start=后台启动长期服务；list=列出任务/服务；logs=查看输出；stop=停止任务/服务。");
         ArrayNode actionEnum = action.putArray("enum");
-        actionEnum.add("exec").add("start").add("list").add("logs").add("stop");
+        actionEnum.add("exec").add("wait").add("start").add("list").add("logs").add("stop");
 
         // === exec/start 共用 ===
         ObjectNode cmd = props.putObject("command");
@@ -107,20 +178,21 @@ public class CommandTool implements Tool {
         cwd.put("type", "string");
         cwd.put("description", "【exec/start 可选】工作目录，默认项目根。示例：\"frontend\"（前端子目录）。");
 
-        // === exec 专属 ===
+        // === exec/wait 专属 ===
         ObjectNode execTimeout = props.putObject("timeout");
         execTimeout.put("type", "integer");
-        execTimeout.put("description", "【exec 可选】超时秒数，默认120，最大600。输出持续增长时自动延长。");
+        execTimeout.put("description", "【wait 可选】等待秒数，默认 300，最大 600。"
+                + "注意：exec 已改为「超过等待窗口自动转后台、不杀进程」，此参数仅用于 wait。");
 
         // === start 专属 ===
         ObjectNode waitFor = props.putObject("wait_for");
         waitFor.put("type", "string");
         waitFor.put("description", "【start 可选】就绪检测方式。数字：等待固定秒数（如\"5\"）；URL：轮询HTTP 200（如\"http://localhost:8080\"）；关键字：等待输出中出现指定文本（如\"Started\"）。不设则立即返回。");
 
-        // === logs/stop 共用 ===
+        // === logs/wait/stop 共用 ===
         ObjectNode serviceId = props.putObject("service_id");
         serviceId.put("type", "integer");
-        serviceId.put("description", "【logs/stop 时必填】start 返回的服务ID。");
+        serviceId.put("description", "【logs/wait/stop 时必填】任务或服务 ID：exec 转后台时返回的「任务 ID」，或 start 返回的服务 ID。");
 
         // === logs 专属 ===
         ObjectNode tail = props.putObject("tail");
@@ -149,11 +221,12 @@ public class CommandTool implements Tool {
         }
         return switch (action) {
             case "exec"  -> doExec(arguments);
+            case "wait"  -> doWait(arguments);
             case "start" -> doStart(arguments);
             case "list"  -> doList();
             case "logs"  -> doLogs(arguments);
             case "stop"  -> doStop(arguments);
-            default -> "❌ 错误：未知的 action '" + action + "'，仅支持 exec / start / list / logs / stop 五种取值，请改为其中之一。";
+            default -> "❌ 错误：未知的 action '" + action + "'，仅支持 exec / wait / start / list / logs / stop 六种取值，请改为其中之一。";
         };
     }
 
@@ -190,7 +263,21 @@ public class CommandTool implements Tool {
         }
 
         List<String> cmdLine = CommandUtils.buildShellCommand(effectiveCommand);
-        return runProcess(cmdLine, workDir, timeout, commandStr);
+
+        // ① 去重：相同工作目录 + 相同命令已在运行 → 不重复启动。
+        //    否则模型不知道后台在跑，很可能再发一次，导致两个 mvn 抢 .m2 锁 / 爆内存 / 产物互相踩。
+        ServiceInfo running = findRunningTask(workDir, commandStr);
+        if (running != null) {
+            return formatAlreadyRunning(running);
+        }
+
+        // ② 应急开关：background-after-seconds <= 0 时完整回退到旧的「同步阻塞直到超时被杀」行为
+        if (backgroundAfterSeconds <= 0) {
+            return runProcess(cmdLine, workDir, timeout, commandStr);
+        }
+
+        // ③ 新执行模型：启动 → 注册长任务 → 有限前台等待 → 超时转后台（进程不会被杀）
+        return execWithBackground(cmdLine, workDir, commandStr);
     }
 
     private String runProcess(List<String> cmdLine, Path workDir, int timeout, String displayName) {
@@ -260,6 +347,225 @@ public class CommandTool implements Tool {
             Thread.currentThread().interrupt();
             return "【执行中断】命令执行被中断。";
         }
+    }
+
+    // ================================================================
+    //        长耗时命令：后台化执行（exec 新执行模型）
+    // ================================================================
+
+    /** 是否为编译 / 依赖 / 构建类慢命令（命中后前台等待窗口更短） */
+    private boolean isSlowCommand(String command) {
+        return command != null && SLOW_COMMAND_PATTERN.matcher(command).find();
+    }
+
+    /**
+     * 查找「同工作目录 + 同命令」且仍在运行的任务
+     * <p>命中的意义：模型不知道后台在跑时会重复下发同一命令，导致两个 mvn 抢 .m2 锁、
+     * 两个 npm 同时写 node_modules、内存暴涨。这里直接拦掉。</p>
+     */
+    private ServiceInfo findRunningTask(Path workDir, String command) {
+        if (command == null || command.isBlank() || workDir == null) return null;
+        String normalizedCmd = command.trim();
+        String normalizedDir = workDir.toAbsolutePath().normalize().toString();
+        for (ServiceInfo info : SERVICES.values()) {
+            if (!info.isAlive()) continue;
+            if (info.command == null) continue;
+            if (!normalizedCmd.equals(info.command.trim())) continue;
+            if (info.workDir == null) continue;
+            if (normalizedDir.equals(info.workDir.toAbsolutePath().normalize().toString())) return info;
+        }
+        return null;
+    }
+
+    /** 重复执行拦截提示 */
+    private String formatAlreadyRunning(ServiceInfo info) {
+        long elapsed = (System.currentTimeMillis() - info.startTime) / 1000;
+        return "【已在运行】相同命令正在执行中，本次未重复启动\n"
+                + "任务 ID：" + info.id + "\n"
+                + "命令：" + info.command + "\n"
+                + "已运行：" + elapsed + "s\n\n"
+                + "【下一步】任选其一：\n"
+                + " · 看进度：command(action=logs, service_id=" + info.id + ", tail=50)\n"
+                + " · 等它跑完：command(action=wait, service_id=" + info.id + ")\n"
+                + " · 想停掉：command(action=stop, service_id=" + info.id + ")\n\n"
+                + "⚠️ 不要重复执行同一命令（会造成锁竞争 / 内存暴涨 / 产物互相覆盖）。";
+    }
+
+    /**
+     * 新执行模型核心：启动进程 → 注册长任务 → 有限前台等待
+     * <p>与旧 {@link #runProcess} 的本质区别：超时**不杀进程**，而是转后台继续跑，
+     * 立刻把控制权还给模型（模型可以继续读文件/分析代码，稍后再 logs 或 wait）。</p>
+     */
+    private String execWithBackground(List<String> cmdLine, Path workDir, String displayName) {
+        cleanupExpiredTasks();
+
+        long runningTasks = SERVICES.values().stream().filter(i -> i.isTask() && i.isAlive()).count();
+        if (runningTasks >= MAX_TASKS) {
+            return "【并发限制】后台长任务已达上限（" + MAX_TASKS + " 个）。\n"
+                    + "先用 command(action=list) 查看现状，stop 掉不需要的任务后重试。";
+        }
+
+        Charset charset = CommandUtils.getProcessOutputCharset();
+        ProcessBuilder pb = new ProcessBuilder(cmdLine);
+        pb.directory(workDir.toFile());
+        pb.redirectErrorStream(true);
+
+        try {
+            Process process = pb.start();
+            int sid = SERVICE_ID_SEQ.getAndIncrement();
+            ServiceInfo info = new ServiceInfo(sid, displayName, workDir, process,
+                    System.currentTimeMillis(), true, KIND_TASK);
+            SERVICES.put(sid, info);
+            // 复用后台服务的输出读取线程：持续读进环形缓冲，供 logs / wait / 失败抽取使用
+            startServiceOutputReader(sid, process);
+
+            int waitSeconds = isSlowCommand(displayName) ? backgroundAfterBuildSeconds : backgroundAfterSeconds;
+            if (waitSeconds <= 0) waitSeconds = backgroundAfterSeconds;
+
+            boolean done = waitForTask(info, waitSeconds);
+            if (done) return formatCompletedResult(info);
+            return formatBackgroundedResult(info, waitSeconds);
+
+        } catch (IOException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("Cannot run program") || msg.contains("error=2"))) {
+                return displayName + "\n工作目录：" + workDir.toAbsolutePath() + "\n"
+                        + "────────────────────────────────────────\n【命令未找到】" + msg + "\n"
+                        + "【建议】1. 确认命令已安装  2. 检查命令名拼写  3. 尝试使用完整路径";
+            }
+            log.error("执行命令失败", e);
+            return "【执行异常】" + e.getMessage();
+        }
+    }
+
+    /**
+     * 有限等待任务结束
+     *
+     * @return true = 已结束；false = 等待窗口内仍在运行
+     */
+    private boolean waitForTask(ServiceInfo info, int seconds) {
+        long deadline = System.currentTimeMillis() + Math.max(1, seconds) * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (!info.isAlive()) return true;
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return !info.isAlive();
+            }
+        }
+        return !info.isAlive();
+    }
+
+    /** 任务已完成：返回完整输出（失败时优先关键错误行） */
+    private String formatCompletedResult(ServiceInfo info) {
+        long elapsed = info.finishTime > 0
+                ? (info.finishTime - info.startTime) / 1000
+                : (System.currentTimeMillis() - info.startTime) / 1000;
+        int code = info.exitValue();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("执行命令：").append(info.command).append("\n");
+        sb.append("工作目录：").append(info.workDir.toAbsolutePath()).append("\n");
+        sb.append("────────────────────────────────────────\n");
+        sb.append("退出码：").append(code).append("\n");
+        sb.append("耗时：").append(elapsed).append(" 秒\n\n");
+
+        List<String> lines = info.getOutputLines();
+        if (lines.isEmpty()) {
+            sb.append("（无输出）");
+            return sb.toString();
+        }
+
+        if (code != 0) {
+            sb.append(formatFailureOutput(lines, info.id));
+        } else {
+            String body = String.join("\n", lines);
+            if (body.length() > MAX_OUTPUT_SIZE) {
+                sb.append(body, 0, MAX_OUTPUT_SIZE)
+                        .append("\n...（输出超过 1MB 已截断，可用 command(action=logs, service_id=")
+                        .append(info.id).append(", tail=N) 按需查看）");
+            } else {
+                sb.append(body);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 失败输出治理：先给命中的错误行，再给尾部
+     * <p>为什么不能一把梭给全量：编译失败时输出常有几万行，关键 Caused by / [ERROR] 往往夹在中间，
+     * 而 1MB 截断恰好会把它们切掉。这里主动抽取，让模型第一眼就看到原因。</p>
+     */
+    private String formatFailureOutput(List<String> lines, int taskId) {
+        List<String> errorLines = new ArrayList<>();
+        for (String line : lines) {
+            if (ERROR_LINE_PATTERN.matcher(line).find()) {
+                errorLines.add(line);
+                if (errorLines.size() >= 60) break;
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        int tailN = Math.min(BACKGROUND_TAIL_LINES * 2, lines.size());
+        List<String> tail = lines.subList(lines.size() - tailN, lines.size());
+
+        if (!errorLines.isEmpty()) {
+            sb.append("【关键错误行】（共 ").append(lines.size()).append(" 行输出，以下为命中的错误/异常行）\n");
+            sb.append("────────────────────────────────────────\n");
+            sb.append(String.join("\n", errorLines)).append("\n");
+            sb.append("────────────────────────────────────────\n\n");
+        } else {
+            sb.append("（未匹配到典型错误关键字，请参考下方输出尾部）\n\n");
+        }
+
+        sb.append("【输出尾部】（最后 ").append(tailN).append(" 行）\n");
+        sb.append("────────────────────────────────────────\n");
+        sb.append(String.join("\n", tail)).append("\n");
+        sb.append("────────────────────────────────────────\n");
+        sb.append("（完整输出共 ").append(lines.size()).append(" 行，可用 command(action=logs, service_id=")
+                .append(taskId).append(", tail=N) 查看）");
+        return sb.toString();
+    }
+
+    /** 转后台提示（关键：明确告诉模型「不是失败」「不要重复执行」） */
+    private String formatBackgroundedResult(ServiceInfo info, int waitedSeconds) {
+        long elapsed = (System.currentTimeMillis() - info.startTime) / 1000;
+        List<String> tail = info.getOutputTail(BACKGROUND_TAIL_LINES);
+        int total = info.getOutputLineCount();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("命令耗时超过 ").append(waitedSeconds).append(" 秒，已转后台继续执行（进程不会中断）\n\n");
+        sb.append("任务 ID：").append(info.id).append("\n");
+        sb.append("命令：").append(info.command).append("\n");
+        sb.append("工作目录：").append(info.workDir.toAbsolutePath()).append("\n");
+        sb.append("已运行：").append(elapsed).append("s　状态：运行中\n\n");
+
+        if (!tail.isEmpty()) {
+            sb.append("当前输出（最后 ").append(tail.size()).append(" 行）：\n");
+            sb.append("────────────────────────────────────────\n");
+            sb.append(String.join("\n", tail)).append("\n");
+            sb.append("────────────────────────────────────────\n");
+            sb.append("（共 ").append(total).append(" 行输出，此处只显示尾部）\n\n");
+        } else {
+            sb.append("（暂无输出）\n\n");
+        }
+
+        sb.append("【下一步】任选其一：\n");
+        sb.append(" · 继续做别的事，稍后再看：command(action=logs, service_id=").append(info.id).append(", tail=50)\n");
+        sb.append(" · 阻塞等它跑完：command(action=wait, service_id=").append(info.id).append(")\n");
+        sb.append(" · 想停掉：command(action=stop, service_id=").append(info.id).append(")\n\n");
+        sb.append("⚠️ 不要重复执行同一命令（会触发去重拦截，白等一轮）。");
+        return sb.toString();
+    }
+
+    /** 清理超过保留期的已结束任务（markFinished 里的定时线程是主路径，这里是兜底） */
+    private void cleanupExpiredTasks() {
+        long now = System.currentTimeMillis();
+        SERVICES.entrySet().removeIf(e -> {
+            ServiceInfo info = e.getValue();
+            return info.finished && info.finishTime > 0 && (now - info.finishTime) > TASK_RETAIN_MS;
+        });
     }
 
     private Thread startOutputReader(Process process, StringBuilder output, Charset charset) {
@@ -362,7 +668,10 @@ public class CommandTool implements Tool {
             boolean alive = info.isAlive();
             long elapsed = (System.currentTimeMillis() - info.startTime) / 1000;
             int lines = info.getOutputLineCount();
-            sb.append(String.format("  #%d %s [%s] %ds (%d行输出)", info.id, info.command, alive ? "运行中" : "已结束", elapsed, lines));
+            // 区分「长期服务」与「一次性长任务」：前者常驻，后者跑完就该收尾
+            String kindLabel = info.isTask() ? "任务" : "服务";
+            sb.append(String.format("  [%s] #%d %s [%s] %ds (%d行输出)",
+                    kindLabel, info.id, info.command, alive ? "运行中" : "已结束", elapsed, lines));
             if (!alive) sb.append(" exit=").append(info.exitValue());
             if (info.detectedPorts != null && !info.detectedPorts.isEmpty()) sb.append(" ports=").append(String.join(",", info.detectedPorts));
             sb.append("\n");
@@ -387,7 +696,9 @@ public class CommandTool implements Tool {
         int sid = args.get("service_id").asInt();
         if (sid <= 0) return "【参数错误】无效的服务ID：" + sid;
 
-        int tailN = args.has("tail") ? args.get("tail").asInt(0) : 0;
+        // 默认只回传尾部 50 行：长编译 / 下载动辄几万行，全量回传会直接撑爆上下文
+        // （显式传 tail=0 仍可取全量，供确有需要的场景）
+        int tailN = args.has("tail") ? args.get("tail").asInt(0) : LOGS_DEFAULT_TAIL;
         if (tailN < 0) return "【参数错误】tail 不能为负数。";
 
         ServiceInfo info = SERVICES.get(sid);
@@ -406,6 +717,60 @@ public class CommandTool implements Tool {
         for (int i = start; i < total; i++) sb.append(allLines.get(i)).append("\n");
         if (info.isAlive()) sb.append("（服务仍在运行）");
         else sb.append("（服务已结束，退出码: ").append(info.exitValue()).append("）");
+        return sb.toString();
+    }
+
+    // ================================================================
+    //                      action=wait（阻塞等待任务结束）
+    // ================================================================
+
+    /**
+     * 阻塞等待任务结束（最多 timeout 秒）
+     * <p>与 exec 的分工：exec 只在前台等一小会儿就转后台返回，把控制权还给模型；
+     * wait 是模型**主动**要求继续等 —— 长构建（10 分钟）可以分多次 wait，
+     * 中间穿插读文件 / 分析代码这类别的活。</p>
+     */
+    private String doWait(JsonNode args) {
+        int sid = args.path("service_id").asInt(0);
+        if (sid <= 0) {
+            return "【参数缺失】action=wait 需要 service_id 参数。\n"
+                    + "先用 command(action=list) 查看当前任务 / 服务的 ID。";
+        }
+        ServiceInfo info = SERVICES.get(sid);
+        if (info == null) {
+            return "【任务不存在】找不到任务 #" + sid + "（任务结束后会保留 30 分钟，超时才会被清理）。\n"
+                    + "用 command(action=list) 查看现有任务。";
+        }
+
+        // 已经结束：直接返回完整结果
+        if (!info.isAlive()) {
+            return formatCompletedResult(info);
+        }
+
+        int waitSeconds = args.path("timeout").asInt(DEFAULT_WAIT_SECONDS);
+        if (waitSeconds <= 0) waitSeconds = DEFAULT_WAIT_SECONDS;
+        if (waitSeconds > MAX_WAIT_SECONDS) waitSeconds = MAX_WAIT_SECONDS;
+
+        boolean done = waitForTask(info, waitSeconds);
+        if (done) {
+            return formatCompletedResult(info);
+        }
+
+        // 仍未结束：给尾部 + 允许继续等
+        long elapsed = (System.currentTimeMillis() - info.startTime) / 1000;
+        List<String> tail = info.getOutputTail(BACKGROUND_TAIL_LINES);
+        StringBuilder sb = new StringBuilder();
+        sb.append("任务 #").append(sid).append(" 仍在运行（已运行 ").append(elapsed)
+                .append("s，本次等待 ").append(waitSeconds).append("s 未结束）\n\n");
+        if (!tail.isEmpty()) {
+            sb.append("当前输出（最后 ").append(tail.size()).append(" 行）：\n");
+            sb.append("────────────────────────────────────────\n");
+            sb.append(String.join("\n", tail)).append("\n");
+            sb.append("────────────────────────────────────────\n\n");
+        }
+        sb.append("【下一步】可再次 command(action=wait, service_id=").append(sid)
+                .append(", timeout=").append(waitSeconds).append(") 继续等，"
+                        + "或用 command(action=logs, service_id=").append(sid).append(") 看进度。");
         return sb.toString();
     }
 
@@ -441,11 +806,17 @@ public class CommandTool implements Tool {
     // ================================================================
 
     private void cleanupFinishedServices() {
-        SERVICES.entrySet().removeIf(e -> !e.getValue().isAlive());
+        /*
+          注意语义变化：不能再「把已结束的直接删掉」。
+          长任务（编译 / 下载）跑完后，模型往往还要 logs 回看失败原因、或 wait 拿退出码；
+          直接删会导致「刚跑完就查不到」。现在只清理超过 TASK_RETAIN_MS（30 分钟）的。
+        */
+        cleanupExpiredTasks();
     }
 
+    /** 运行中的「长期服务」数量（不含一次性长任务，两者池子分开计数） */
     private long getRunningCount() {
-        return SERVICES.values().stream().filter(ServiceInfo::isAlive).count();
+        return SERVICES.values().stream().filter(i -> !i.isTask() && i.isAlive()).count();
     }
 
     private void startServiceOutputReader(int sid, Process process) {
@@ -524,14 +895,27 @@ public class CommandTool implements Tool {
     static class ServiceInfo {
         final int id; final String command; final Path workDir; final Process process;
         final long startTime; final boolean useShell;
+        /** 任务类型：{@link #KIND_SERVICE}（长期服务）或 {@link #KIND_TASK}（一次性长任务） */
+        final String kind;
         volatile boolean finished; volatile Integer exitCode; volatile Set<String> detectedPorts;
+        /** 结束时间戳（毫秒）；未结束时为 0。用于「结束后保留 TTL 内仍可回看」的判断 */
+        volatile long finishTime;
         private final List<String> outputLines = new LinkedList<>();
         private int totalBytes;
 
         ServiceInfo(int id, String command, Path workDir, Process process, long startTime, boolean useShell) {
+            this(id, command, workDir, process, startTime, useShell, KIND_SERVICE);
+        }
+
+        ServiceInfo(int id, String command, Path workDir, Process process, long startTime,
+                    boolean useShell, String kind) {
             this.id = id; this.command = command; this.workDir = workDir;
             this.process = process; this.startTime = startTime; this.useShell = useShell;
+            this.kind = kind == null ? KIND_SERVICE : kind;
         }
+
+        /** 是否是一次性长任务 */
+        boolean isTask() { return KIND_TASK.equals(kind); }
 
         synchronized void addOutputLine(String line) {
             int lb = line.getBytes(StandardCharsets.UTF_8).length + 1;
@@ -551,12 +935,17 @@ public class CommandTool implements Tool {
         boolean isAlive() { return !finished && process.isAlive(); }
         void markFinished() {
             finished = true;
+            finishTime = System.currentTimeMillis();
             try { exitCode = process.exitValue(); } catch (IllegalThreadStateException e) { exitCode = -1; }
-            // 延迟清理：服务结束5分钟后自动从SERVICES中移除，避免内存泄漏
+            /*
+              延迟清理：结束后保留 TASK_RETAIN_MS（30 分钟）再移除。
+              为什么从 5 分钟延长到 30 分钟：长任务（编译 / 下载依赖）跑完后，模型往往还要
+              logs 回看失败原因；5 分钟内如果模型先去做了别的事，回来就查不到了。
+            */
             Thread cleanupThread = new Thread(() -> {
-                try { Thread.sleep(5 * 60 * 1000); } catch (InterruptedException e) { return; }
+                try { Thread.sleep(TASK_RETAIN_MS); } catch (InterruptedException e) { return; }
                 SERVICES.remove(id);
-                log.debug("自动清理已结束的服务 #{}", id);
+                log.debug("自动清理已结束的任务 #{}（{}）", id, kind);
             }, "svc-cleanup-" + id);
             cleanupThread.setDaemon(true);
             cleanupThread.start();

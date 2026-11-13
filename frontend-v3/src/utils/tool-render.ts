@@ -419,6 +419,46 @@ export function clipToolDetail(text: string, max = 4000): string {
  * ========================================================================== */
 
 const GIT_ACTION_MAP: Record<string, Record<string, string>> = {
+  // 合并后的统一 git 工具：action 为扁平取值（status/diff/.../branch_create/...）
+  git: {
+    // 查询
+    status: '状态',
+    diff: '差异',
+    log: '日志',
+    show: '提交详情',
+    // 提交与同步
+    add: '暂存',
+    commit: '提交',
+    push: '推送',
+    pull: '拉取',
+    fetch: '获取远程',
+    unstage: '取消暂存',
+    restore: '还原改动',
+    reset: '回退提交',
+    revert: '撤销提交',
+    // 分支
+    branch_list: '分支列表',
+    branch_create: '创建分支',
+    branch_switch: '切换分支',
+    branch_merge: '合并分支',
+    branch_delete: '删除分支',
+    // 储藏
+    stash_save: '储藏',
+    stash_list: '储藏列表',
+    stash_pop: '恢复储藏',
+    stash_drop: '删除储藏',
+    // 标签
+    tag_list: '标签列表',
+    tag_create: '创建标签',
+    tag_delete: '删除标签',
+    tag_push: '推送标签',
+    // 远程
+    remote_list: '远程列表',
+    remote_add: '添加远程',
+    remote_set_url: '修改远程',
+    remote_remove: '删除远程'
+  },
+  // ↓ 旧工具名保留：历史会话里的工具调用记录仍按旧名渲染
   git_submit: {
     add: '暂存',
     commit: '提交',
@@ -441,6 +481,21 @@ function gitLabel(name: string, text: string): string {
   const head = firstLine(text)
   const action = text.match(/action=(\w+)/)?.[1]
   if (action && GIT_ACTION_MAP[name]?.[action]) return GIT_ACTION_MAP[name][action]
+  if (name === 'git') {
+    // 统一工具：action 未命中时按内容特征兜底判别（前缀语义与旧工具一致）
+    if (/文件变更状态|工作区干净/.test(text)) return '状态'
+    if (/^diff --git|\+\+\+ |--- /m.test(text)) return '差异'
+    if (/^commit [0-9a-f]{6,}/m.test(text)) return '提交详情'
+    if (/暂无提交记录/.test(text)) return '日志'
+    if (/暂存/.test(head)) return '暂存'
+    if (/提交|commit/i.test(head)) return '提交'
+    if (/推送|push/i.test(head)) return '推送'
+    if (/拉取|pull/i.test(head)) return '拉取'
+    if (/获取远程|fetch/i.test(head)) return '获取远程'
+    if (/已还原|已取消暂存/.test(head)) return '还原改动'
+    if (/反向|回退|撤销/.test(head)) return '回退提交'
+    return 'Git'
+  }
   if (name === 'git_submit') {
     if (/暂存/.test(head)) return '暂存'
     if (/提交|commit/i.test(head)) return '提交'

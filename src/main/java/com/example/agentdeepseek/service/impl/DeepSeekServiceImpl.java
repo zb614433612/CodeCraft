@@ -1,11 +1,16 @@
 package com.example.agentdeepseek.service.impl;
 
+import com.example.agentdeepseek.common.enums.ContextMode;
 import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
 import com.example.agentdeepseek.service.llm.LLMErrorFormatter;
+import com.example.agentdeepseek.service.llm.TokenUsageParser;
+import com.example.agentdeepseek.mapper.LlmTokenUsageMapper;
+import com.example.agentdeepseek.model.entity.LlmTokenUsage;
+import com.example.agentdeepseek.util.ContextFingerprint;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.mapper.AgentConfigMapper;
 import com.example.agentdeepseek.model.dto.ChatRequest;
@@ -278,7 +283,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                      FileAssetService fileAssetService,
                                      FileVisionService fileVisionService,
                                      CaptureContextRegistry captureContextRegistry,
-                                     @Lazy AgentInvokeService agentInvokeService) {
+                                     @Lazy AgentInvokeService agentInvokeService,
+                                     TokenUsageParser tokenUsageParser,
+                                     LlmTokenUsageMapper llmTokenUsageMapper,
+                                     ContextFingerprint contextFingerprint) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -308,6 +316,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.fileVisionService = fileVisionService;
         this.captureContextRegistry = captureContextRegistry;
         this.agentInvokeService = agentInvokeService;
+        this.tokenUsageParser = tokenUsageParser;
+        this.llmTokenUsageMapper = llmTokenUsageMapper;
+        this.contextFingerprint = contextFingerprint;
     }
 
     // ===== 拆分出的组件 =====
@@ -323,6 +334,15 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     /** M5：桌面截图坐标上下文注册表（注入文案补充归一化坐标协议与图片尺寸说明） */
     private final CaptureContextRegistry captureContextRegistry;
+
+    /** 成本可观测：Provider usage 解析与计费估算 */
+    private final TokenUsageParser tokenUsageParser;
+
+    /** 成本可观测：用量明细落库 */
+    private final LlmTokenUsageMapper llmTokenUsageMapper;
+
+    /** 缓存保护：系统提示词 / 工具定义的前缀指纹监控 */
+    private final ContextFingerprint contextFingerprint;
 
     @Override
     public void afterPropertiesSet() {
@@ -804,16 +824,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        // 确定上下文模式：请求优先 > 系统配置 > 默认 full
-        String contextMode = request.getContextMode();
-        if (contextMode == null || contextMode.isEmpty()) {
-            contextMode = configService.getValue("context_mode");
+        // 确定上下文模式：请求参数 > sys_config(context_mode) > 全局配置 > 默认（balanced）
+        // 统一收敛到 ContextMode 枚举，避免各处字符串比较导致三档语义漂移
+        ContextMode contextMode = ContextMode.tryParse(request.getContextMode());
+        if (contextMode == null) {
+            contextMode = ContextMode.tryParse(configService.getValue("context_mode"));
         }
-        if (contextMode == null || contextMode.isEmpty()) {
-            contextMode = "full";
+        if (contextMode == null) {
+            contextMode = deepSeekConfig.resolveContextMode();
         }
 
-        // 构建历史消息（包括本次用户消息），根据上下文模式精简
+        // 构建历史消息（包括本次用户消息），按上下文模式决定 reasoning 剔除 / 工具结果摘要
         List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId, contextMode);
 
         // 检查是否为首次会话（是否已存在SYSTEM消息）
@@ -871,7 +892,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         // 注入 compact 模式指令到系统提示词
-        if ("compact".equals(contextMode)) {
+        if (contextMode.shouldCompactToolResults()) {
             String compactInstruction = contextBuilder.buildCompactModeInstruction(conversationId);
             for (Map<String, Object> msg : historyMessages) {
                 if ("system".equals(msg.get("role"))) {
@@ -882,7 +903,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        List<String> filteredToolNames = new ArrayList<>(toolNames);
+        // 工具名归一化：把已合并的历史工具名映射到新工具
+        // （早期 AgentConfig.toolNames 落库的是 git_query/git_submit/... 六个独立名字，
+        //   合并成 git 后若不做映射，这些旧配置会"看不到任何 Git 能力"）
+        List<String> filteredToolNames = new ArrayList<>(normalizeToolNames(toolNames));
         String skillCatalogSection = null;  // 技能目录文本（供工具循环复用）
 
         // 注入技能目录（L1 渐进式披露）：把【全部活跃技能】压成「简介目录」动态注入 system prompt；
@@ -1163,7 +1187,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             apiRequest.put("_imageBlocks", visionBlocks);
         }
         // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
-        apiRequest.put("_contextMode", contextMode);
+        apiRequest.put("_contextMode", contextMode.getValue());
 
         // 将技能目录（L1 简介段）存入隐藏字段，供工具循环路径复用
         if (skillCatalogSection != null) {
@@ -1749,7 +1773,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // 构建初始消息列表
         List<Map<String, Object>> messages = new ArrayList<>();
-        String contextMode = (String) initialApiRequest.getOrDefault("_contextMode", "full");
+        String contextMode = (String) initialApiRequest.getOrDefault("_contextMode", ContextMode.DEFAULT.getValue());
         List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId, contextMode);
         for (Map<String, Object> msg : historyMessages) {
             Map<String, Object> mutableMsg = new HashMap<>(msg);
@@ -3013,9 +3037,26 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
                 conversationId, iteration, requestBodySize);
 
+        // ===== 缓存保护：前缀指纹检查 =====
+        // 只盯住「系统提示词」与「工具定义」这两段——它们是缓存前缀的头部，
+        // 一旦变化，后面的历史再稳定也全部未命中（未命中单价约为命中的 120 倍）。
+        contextFingerprint.check(conversationId, iteration,
+                extractSystemPromptForFingerprint(messages),
+                extractToolsJsonForFingerprint(requestBody));
+
         // 使用当前 Provider 的 WebClient（从 _llmClient 提取）
         LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
         WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
+
+        // ===== 成本可观测：承接本轮请求的 usage 快照 =====
+        // Provider 会把完整 usage 挂在最后一帧（data: [DONE] 之前），按官方文档流式请求同样返回，
+        // 无需设置 stream_options.include_usage。这里用原子引用承接，流终止时统一落库，
+        // 确保「每次迭代请求 = 一条用量记录」，且正常完成/取消/异常三条路径都不遗漏。
+        java.util.concurrent.atomic.AtomicReference<TokenUsageParser.UsageSnapshot> usageRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final String usageProvider = ctxClient != null ? ctxClient.getProviderCode() : null;
+        final String usageModel = (String) apiRequest.get("model");
+
         return activeWebClient.post()
                 .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -3029,6 +3070,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         long ttfbMs = (System.nanoTime() - requestStartNanos) / 1_000_000;
                         log.info("[Perf] conversationId={}, iteration={}, LLM首字节到达, TTFB={}ms",
                                 conversationId, iteration, ttfbMs);
+                    }
+                    // 成本可观测：捕获 usage 帧（本轮请求只会有一帧携带，位于 data: [DONE] 之前）
+                    // 放在 doOnNext 而非 flatMap 内，是因为 flatMap 之后有 takeWhile，
+                    // 工具调用一旦完整会提前终止链路，导致尾部 usage 帧被丢弃。
+                    try {
+                        TokenUsageParser.UsageSnapshot snap = tokenUsageParser.parse(chunk);
+                        if (snap != null) {
+                            usageRef.set(snap);
+                        }
+                    } catch (Exception e) {
+                        log.trace("usage 帧解析异常（忽略）: {}", e.getMessage());
                     }
                     // 收集响应块
                     responseBuilder.append(chunk);
@@ -3324,7 +3376,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                     tcMsg.put("content", collectedContentStr);
                                                                 }
                                                                 tcMsg.put("tool_calls", completeToolCalls);
-                                                                if (reasoning != null && !reasoning.isEmpty()) {
+                                                                // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
+                                                                if (reasoning != null && !reasoning.isEmpty()
+                                                                        && !deepSeekConfig.isStripHistoryReasoning()) {
                                                                     tcMsg.put("reasoning_content", reasoning);
                                                                 }
                                                                 messages.add(tcMsg);
@@ -3398,7 +3452,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                 tcMsg.put("content", collectedContentStr);
                                                             }
                                                             tcMsg.put("tool_calls", completeToolCalls);
-                                                            if (reasoning != null && !reasoning.isEmpty()) {
+                                                            // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
+                                                            if (reasoning != null && !reasoning.isEmpty()
+                                                                    && !deepSeekConfig.isStripHistoryReasoning()) {
                                                                 tcMsg.put("reasoning_content", reasoning);
                                                             }
                                                             messages.add(tcMsg);
@@ -3503,7 +3559,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             toolCallMessage.put("content", collectedContentStr);
                                         }
                                         toolCallMessage.put("tool_calls", completeToolCalls);
-                                        if (reasoning != null && !reasoning.isEmpty()) {
+                                        // 【成本优化】工具循环内同样不回传 reasoning（同 DeepSeekConfig#stripHistoryReasoning）：
+                                        //   当轮生成的 reasoning 若带入下一轮迭代，会按「未命中输入」再计一次费，
+                                        //   而模型继续推理只依赖 tool_calls 与工具结果，历史思考链参考价值极低。
+                                        //   前端展示不受影响（reasoning 已通过 SSE 实时下发并落库）。
+                                        if (reasoning != null && !reasoning.isEmpty()
+                                                && !deepSeekConfig.isStripHistoryReasoning()) {
                                             toolCallMessage.put("reasoning_content", reasoning);
                                         }
                                         messages.add(toolCallMessage);
@@ -3626,8 +3687,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         if (content != null && !content.isEmpty()) {
                             assistantMessage.put("content", content);
                         }
-                        // DeepSeek 思考模式要求将 reasoning_content 传回
-                        if (reasoning != null && !reasoning.isEmpty()) {
+                        // 【成本优化】不再回传 reasoning_content（见 DeepSeekConfig#stripHistoryReasoning）。
+                        // 历史约束说明：早期 deepseek-reasoner 确实要求多轮对话回传 reasoning_content，
+                        // 但现行官方文档已明确该字段仅用于 Chat Prefix Completion（prefix=true），
+                        // 普通多轮对话无需回传；回传反而按「未命中输入」再计一次费。
+                        // 若某 Provider 恢复强校验并返回 400（错误信息含 reasoning_content），
+                        // 把 deepseek.strip-history-reasoning 置为 false 即可原样回退。
+                        if (reasoning != null && !reasoning.isEmpty()
+                                && !deepSeekConfig.isStripHistoryReasoning()) {
                             assistantMessage.put("reasoning_content", reasoning);
                         }
                         messages.add(assistantMessage);
@@ -3646,7 +3713,91 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     }
                     // P0-4：异常出口只清理追踪（不判账）——中断的会话不承接自动验证
                     clearLessonTracking(storageConversationId);
-                });
+                })
+                // 成本可观测：流终止（正常完成 / 取消 / 异常）统一落库，保证每次请求一条记录
+                .doFinally(signalType -> persistTokenUsageSafely(
+                        conversationId, iteration, usageProvider, usageModel, usageRef.get()));
+    }
+
+    /**
+     * 成本可观测：把单次请求的 usage 落库
+     * <p>
+     * 刻意保证「任何异常都不影响对话主流程」——观测是旁路能力，绝不能因为写库失败而中断会话。
+     * 日志同时输出结构化摘要，便于在没有前端看板时直接从 app.log 里读成本。
+     * </p>
+     */
+    private void persistTokenUsageSafely(Long conversationId, int iteration, String provider,
+                                         String model, TokenUsageParser.UsageSnapshot snapshot) {
+        if (snapshot == null || snapshot.getTotalTokens() <= 0) {
+            return;
+        }
+        try {
+            LlmTokenUsage entity = tokenUsageParser.toEntity(
+                    conversationId, null, iteration, provider, model, snapshot);
+            llmTokenUsageMapper.insert(entity);
+            log.info("[成本] 会话={} 轮次={} 模型={} 输入={}(命中{}/未命中{}) 输出={}(思考{}) 估算费用=¥{}",
+                    conversationId, iteration, model,
+                    snapshot.getPromptTokens(), snapshot.getCacheHitTokens(), snapshot.getCacheMissTokens(),
+                    snapshot.getCompletionTokens(), snapshot.getReasoningTokens(),
+                    String.format("%.6f", entity.getCostEstimate()));
+        } catch (Exception e) {
+            log.warn("用量记录落库失败（不影响对话主流程）: conversationId={}, iteration={}, err={}",
+                    conversationId, iteration, e.getMessage());
+        }
+    }
+
+    /**
+     * 缓存保护：从消息列表中取系统提示词原文（用于前缀指纹）
+     */
+    private String extractSystemPromptForFingerprint(List<Map<String, Object>> messages) {
+        if (messages == null) {
+            return "";
+        }
+        for (Map<String, Object> msg : messages) {
+            if ("system".equals(msg.get("role"))) {
+                Object content = msg.get("content");
+                return content instanceof String s ? s : "";
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 缓存保护：取本次请求下发的工具定义 JSON（顺序参与指纹，顺序变化即视为变化）
+     */
+    private String extractToolsJsonForFingerprint(Map<String, Object> requestBody) {
+        Object tools = requestBody.get("tools");
+        return tools == null ? "" : tools.toString();
+    }
+
+    /**
+     * 工具名归一化：把历史上独立的工具名映射为合并后的统一工具
+     * <p>
+     * 背景：AgentConfig.toolNames 是落库保存的，早期版本存的是 git_query / git_submit / ...
+     * 六个独立名字。合并为 {@code git} 单工具后，如果不做映射，这些旧配置将彻底看不到 Git 能力。
+     * 同理桌面双工具合并为 {@code desktop}。
+     * </p>
+     * <p>去重并保持首次出现顺序，避免工具定义顺序抖动（顺序影响缓存前缀）。</p>
+     */
+    private List<String> normalizeToolNames(List<String> toolNames) {
+        if (toolNames == null || toolNames.isEmpty()) {
+            return toolNames;
+        }
+        List<String> result = new ArrayList<>();
+        for (String name : toolNames) {
+            if (name == null || name.isEmpty()) {
+                continue;
+            }
+            String normalized = switch (name) {
+                case "git_query", "git_submit", "git_branch", "git_stash", "git_tag", "git_remote" -> "git";
+                case "screen_capture", "desktop_control" -> "desktop";
+                default -> name;
+            };
+            if (!result.contains(normalized)) {
+                result.add(normalized);
+            }
+        }
+        return result;
     }
 
 
@@ -3803,7 +3954,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 toolCallMessage.put("content", collectedContent);
                             }
                             toolCallMessage.put("tool_calls", completeToolCalls);
-                            if (reasoning != null && !reasoning.isEmpty()) {
+                            // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
+                            if (reasoning != null && !reasoning.isEmpty()
+                                    && !deepSeekConfig.isStripHistoryReasoning()) {
                                 toolCallMessage.put("reasoning_content", reasoning);
                             }
                             messages.add(toolCallMessage);
@@ -4038,7 +4191,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             rejectTcMsg.put("content", collectedContentStr);
         }
         rejectTcMsg.put("tool_calls", completeToolCalls);
-        if (reasoning != null && !reasoning.isEmpty()) {
+        // 【成本优化】历史 reasoning 不回传（见 DeepSeekConfig#stripHistoryReasoning）
+        if (reasoning != null && !reasoning.isEmpty()
+                && !deepSeekConfig.isStripHistoryReasoning()) {
             rejectTcMsg.put("reasoning_content", reasoning);
         }
         messages.add(rejectTcMsg);

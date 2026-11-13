@@ -5,6 +5,191 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.0.9] - 2026-11-13
+
+> A dual-track release: cost governance + long-task experience. Four cost/context measures (three-tier context modes,
+> thinking-level normalization, configurable capability declarations, token cost dashboard) + one architectural change to
+> the execution model (long-running commands are backgrounded instead of being killed on timeout) + a real PTY terminal
+> (Electron goes from "simulated terminal" to a genuine PTY) + two user-visible fixes (downloads could not be cancelled,
+> v3 login state going stale) + tool-definition slimming.
+> Backend + both frontends + Electron are all changed; a **backend restart is required**, and desktop packages must be
+> rebuilt (a new `node-pty` native dependency is involved).
+
+### 🧩 Three-tier Context Modes (New)
+
+- **Background**: context handling previously offered only a boolean "strip historical reasoning" switch, which forced a
+  choice between saving tokens and preserving the prefix cache — aggressively compressing history invalidates the prefix
+  cache wholesale (O(history)). With an observed 98% cache hit rate, compression would take 100–150 turns to pay back.
+- **New mechanism**: a `ContextMode` enum with three tiers — `full` (everything, for debugging) / `balanced` (default:
+  strip reasoning only, tool results untouched) / `compact` (aggressive: summarize tool results, costs one cache rebuild,
+  meant for very long sessions).
+- **Key design**: `balanced` **never writes reasoning in the first place** rather than trimming afterwards, so the prefix
+  stays naturally stable with zero extra invalidation per turn; only `compact` rewrites tool results (and says so).
+- **Implementation**: `ContextBuilder` branches by mode; `DeepSeekServiceImpl` / `AgentForkManager` / `CompactionService`
+  all go through the enum; `DeepSeekConfig.resolveContextMode()` maps the legacy `stripHistoryReasoning` flag onto
+  `full` / `balanced` so old configs need no migration.
+
+### 💰 Token Cost Observability (New)
+
+- **Background**: previously there was only a vague "this feels expensive" — no way to tell which model, which kind of
+  task, or whether input or output was consuming the budget.
+- **New mechanism**: the `llm_token_usage` table records prompt / completion / cached / reasoning tokens per call, priced
+  via the `llm.pricing` config; both frontends gain a "Cost Dashboard" page (aggregated by month / model / conversation).
+- **Collection accuracy**: the SSE collection point sits in `doOnNext` (**avoiding the `takeWhile` cut-off**, which would
+  otherwise swallow the trailing usage frame), and persistence happens in `doFinally` (so normal completion, errors and
+  cancellations are all recorded).
+- **Configurable pricing**: `TokenPricingConfig` holds per-model unit prices (including the cache-hit price); new models
+  require only an `application.yml` change.
+- **Measured conclusion**: at a 98% cache hit rate the cache-hit price is just ¥0.025/M tokens and only ~13% of total cost
+  — the real weight sits on the **output side** (reasoning is billed twice, ¥9/M) and the **input-additive side**
+  (tool-result size). This finding set the direction for the whole release.
+
+### 🧠 Thinking-Level Normalization (Fix + Refactor)
+
+- **Real bug**: the MiniMax adapter mis-classified `thinking_low` as disabled — a coarse `startsWith("thinking")` check
+  combined with a case-sensitive level match silently turned low-level thinking off.
+- **Root cause**: every adapter parsed level strings on its own, so each new level required touching a batch of adapters and
+  any miss meant a silent downgrade.
+- **Refactor**: `AbstractLLMClient.normalizeThinkingMode()` normalizes everything into five canonical levels
+  (`none / low / medium / high / max`); the eight adapters (DeepSeek / MiniMax / Gpt / Anthropic / MiMo / Qwen /
+  Volcengine / Ollama) only ever handle canonical values. Unknown levels fall back to `medium` with a WARN instead of
+  silently becoming disabled.
+
+### ⚙️ Configurable Model Capability Declarations (Refactor)
+
+- **Root cause**: reasoning-model prefixes, effort support, output limits and vision capability were hard-coded across
+  `GptClient` / `OpenAIClient` / `FileVisionService`, so adding a model required a code change and a release.
+- **Refactor**: new `ModelCapabilityRules` + `ModelCapabilityConfig`; `llm.model-capabilities` declares reasoning-model
+  prefixes (including `gpt-6`), `effort-none/minimal` support, output-token caps and vision rules; the three call sites now
+  consult the rule table.
+- **Benefit**: adding a model is an `application.yml` edit, not a release.
+
+### 🔒 Prefix Cache Protection (New)
+
+- **Background**: DeepSeek's cache-hit price is 1/40 of the miss price, but **any change to the `system` or `tools`
+  definition invalidates the entire prefix** — such regressions raise no error, only the bill, making them very hard to
+  notice.
+- **New mechanism**: `ContextFingerprint` hashes `system + tools` before every request and emits a WARN with a diff summary
+  the moment the fingerprint changes — turning a silent cost increase into a visible log line.
+
+### 🧰 Tool Definition Slimming (Refactor)
+
+- **GitTool**: six tools (`git_status` / `git_diff` / `git_log` / `git_add` / `git_commit` / `git_push`) merged into a
+  single `git` tool dispatched by `action` (pure delegation, no behaviour change); `normalizeToolNames()` keeps the old
+  names working, so existing conversations and custom agents need no migration.
+- **DesktopTool**: `screenshot` + `desktop_control` merged into `desktop` (2→1).
+- **Benefit**: the tool definitions (shipped in the system prompt every turn) shrink, without disturbing the cache prefix.
+- **Companion**: `ToolExecutor.validateRequiredParams()` validates required parameters up front (a missing parameter now
+  returns a readable error instead of burning a turn as a business exception); the system prompt gains a 15-line
+  "tool selection boundaries" table clarifying which sibling tool to use when.
+
+### 🖥 Real Terminal PTY (New, Electron)
+
+- **Background**: the terminal used to be "simulated" — every Enter press issued a synchronous `/project/exec` HTTP call,
+  interactive programs (vim / top / scaffolding wizards) were impossible, and output was stitched together by polling.
+- **New mechanism**: `electron/pty-manager.js` provides a genuine pseudo-terminal on `node-pty` (session pool capped at 8,
+  full create / write / resize / kill lifecycle, **output pushed only to the creating window** to prevent cross-window
+  bleed, automatic reclamation when the renderer is destroyed, clamped cwd validation).
+- **Wiring**: `preload.js` exposes `electronAPI.pty`; `main.js` calls `initPtyManager()` on start and
+  `disposeAllSessions()` on `before-quit` (otherwise lingering shells block app exit); `package.json` gains the `node-pty`
+  dependency plus `files` and `asarUnpack` (native modules cannot live inside asar).
+- **Frontend**: both `TerminalPanel.vue` implementations are dual-mode — Electron uses PTY (including `fit`-driven resize,
+  kill-and-reopen on directory change, keypress-to-reconnect after exit), while the browser degrades to `/project/exec`
+  (no white screen when PTY is unavailable).
+- **Verified**: measured on Electron 33 with `PTY_RESULT:OK pid=9980`; `node-pty` 1.1.0 is N-API based and needs
+  **no electron-rebuild**.
+- **Caveat**: `node-pty` ships win32 / darwin prebuilds but **no linux prebuild** — Linux build machines need a node-gyp
+  toolchain.
+
+### ⏳ Long-Running Command Backgrounding (New, Execution-Model Change)
+
+- **Background**: `command(action=exec)` used to be "block synchronously until the timeout kills it" — commands like
+  `mvn package` hit a 120s default cap, were forcefully terminated in the second minute, and **every minute of dependency
+  download or compilation before that was wasted**; meanwhile the whole agent stalled (no file reads, no code analysis),
+  and on failure the only option was to start over.
+- **New execution model**: exec starts the process and then **waits at most 20 seconds in the foreground** (10 seconds for
+  recognized build/dependency commands). On timeout it **does not kill the process** — it moves the command to a background
+  task and hands control straight back to the model:
+  ```
+  Command exceeded 10s; moved to background and still running (process not interrupted)
+  Task ID: 7   Elapsed: 10s   Status: running
+  Current output (last 15 lines): ...
+  Next: logs for progress / wait to block / stop to abort
+  ```
+- **New `action=wait`**: blocks until the task finishes (default 300s / max 600s), returning full output plus exit code on
+  completion, or the tail plus a "still running" note so it can be waited on again — long builds can be awaited in
+  segments with other work in between.
+- **De-duplication**: a command already running with the same working directory and command string is not started again;
+  the call returns "already running (task #N, 45s elapsed), do not re-run" — otherwise the model re-issues it and two mvn
+  processes fight over the `.m2` lock, blow up memory, or overwrite each other's artifacts.
+- **Separate pools**: one-shot long tasks (cap 10) and long-lived services (cap 5) are counted independently, so a
+  20-minute mvn no longer occupies the slot needed by `npm run dev`.
+- **Output governance**: backgrounding returns only the last 15 lines; `logs` defaults to the last 50 (`tail=0` for
+  everything); **on failure the key error lines** (`[ERROR]` / `Caused by` / `BUILD FAILURE` / `npm ERR`, …) are extracted
+  first, followed by a 30-line tail — so a 1MB truncation no longer happens to cut out the middle where the real error sits.
+- **Retrievable results**: output is **kept for 30 minutes** after completion (previously 5 minutes, and it was outright
+  deleted by `cleanupFinishedServices()`), so logs / wait can be consulted at any point in that window.
+- **Reversible**: setting `command.exec.background-after-seconds` (default 20) to `0` or a negative value fully restores
+  the old "block until timeout" behaviour.
+- **Companion**: `CommandTool.getDescription()` was rewritten (making clear that backgrounding is not a failure, that the
+  command must not be re-run, and how to follow up with wait / logs); the system prompt gains a
+  "Long-running commands (build / install / download)" section with seven rules.
+- **Verified**: `CommandToolBackgroundTest` — 13 assertions green (short commands unchanged / long commands backgrounded
+  without being killed / duplicate calls intercepted / wait returns the exit code / task listed).
+
+### 🖱 Downloads Could Not Be Cancelled (Fix)
+
+- **Symptom**: after clicking "cancel download" the UI showed cancelled, yet the download kept retrying in the background
+  until retries were exhausted — network and disk stayed busy the whole time.
+- **Root cause**: cancellation in `update-manager.js` only set a flag; the `for` retry loop never checked it and exited
+  only after every retry had failed.
+- **Fix**: a `cancelRequested` token plus a `CANCELLED` error code — the retry loop checks the token each round and aborts
+  immediately **without retrying**; `VersionCard.vue` distinguishes the three terminal states (success / failure /
+  cancelled) instead of rendering cancellation as failure; the classic `SystemSettingView.vue` gains the matching
+  `cancelled` branch and a loading fallback.
+
+### 🔐 Stale v3 Login State (Fix)
+
+- **Symptom**: after the server revoked a token, v3 stayed on the business page — APIs kept returning 401 with no
+  redirect anywhere.
+- **Root cause**: `http-client.ts`'s `fireUnauthorized()` depended on an externally registered handler and simply returned
+  when the handler was not yet registered (e.g. early in page initialization), silently swallowing the 401; the router's
+  `afterEach` had no fallback re-check either.
+- **Fix**: `fireUnauthorized` now falls back to a `location.hash` redirect when the handler is missing; `router/index.ts`'s
+  `afterEach` re-checks (`isTokenRevoked()` still true while on a business page forces a return to login).
+
+### 🔢 Version Sync
+
+- Backend: `3.0.8` → `3.0.9` (`pom.xml`, artifact `code-craft-3.0.9.jar`)
+- Classic frontend: `3.0.8` → `3.0.9` (`frontend/package.json` + lock)
+- v3 frontend: `3.0.8` → `3.0.9` (`frontend-v3/package.json` + lock)
+- Electron: version and the `extraResources` jar path → `3.0.9` / `code-craft-3.0.9.jar`
+- MCP Server handshake version: `3.0.8` → `3.0.9` (`CodeCraftMcpServer.SERVER_VERSION`)
+- Docs: README(_EN) badge, version and updated-date headers in ARCHITECTURE / DEEPSEEK_SERVICE_IMPL /
+  LLM_PROVIDER_SYSTEM / TOOL_SYSTEM(_EN) (content synced with this release), packaging examples in
+  DEV_QUICKREF / RELEASE_CHECKLIST(_EN) and the FAQ version sample, all unified to v3.0.9
+
+### ⬆️ Upgrade Notes
+
+- **Backend changes included**: restart the backend (context building, LLM adapters, tool layer and cost collection all
+  changed); both frontends hot-reload in dev, packaged builds need rebuilding.
+- **New database table**: `llm_token_usage` (created automatically on startup; the DDL ships in `schema.sql`); `sys_menu`
+  gains a cost-dashboard entry (id=19).
+- **Desktop package must be rebuilt**: a new `node-pty` native dependency is bundled via `asarUnpack` and is absent from
+  older installers; Electron 33 + node-pty 1.1.0 (N-API) needs no electron-rebuild.
+- **Config changes** (all defaulted, nothing required):
+  - `deepseek.context-mode`: `full` / `balanced` (default) / `compact`; the legacy `stripHistoryReasoning` is mapped
+    automatically
+  - `llm.pricing.*`: per-model unit prices (including cache-hit pricing)
+  - `llm.model-capabilities.*`: reasoning-model prefixes, effort support, output caps, vision rules
+  - `command.exec.background-after-seconds` (default 20) / `background-after-build-seconds` (default 10): set to `0` to
+    restore the old timeout-terminate behaviour
+- **Behaviour change to note**: `command(action=exec)` **no longer kills the process** on timeout — it backgrounds it;
+  the `timeout` parameter now **only applies to wait**. Scripts relying on "timeout means abort" should call
+  `command action=stop` explicitly.
+
+---
+
 ## [3.0.8] - 2026-11-11
 
 > Fix-and-automation release: four user-visible fixes (v3 Provider switching not working, v3 new-session attachments

@@ -2,6 +2,7 @@ package com.example.agentdeepseek.service.files;
 
 import com.example.agentdeepseek.mapper.FileAssetMapper;
 import com.example.agentdeepseek.model.entity.FileAsset;
+import com.example.agentdeepseek.service.llm.ModelCapabilityRules;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
@@ -274,63 +275,23 @@ public class FileVisionService {
     /**
      * 模型 vision 能力判定（后端防线：带图但模型不支持 → 调用方抛明确异常）
      * <p>
-     * 规则：<br>
-     * - deepseek 官方：flash / vision / vl 系列支持图像理解；chat / reasoner 暂不支持；<br>
-     * - 火山方舟（volcengine / ark / doubao）：方舟上的 DeepSeek 文本模型不支持图像输入；
-     *   豆包 seed 系列、vision / vl 系列支持；其余未知模型宽松放行（由 API 层兜底报错）；<br>
-     * - 小米 MiMo：v2.5 系列原生多模态（图片/音频/视频），更早的纯文本模型不支持；<br>
-     * - MiniMax：M3 与 VL / abab-vl 系列支持视觉，M2.x 为纯文本模型；<br>
-     * - 其他 Provider：暂不限制（宽松放行，由 API 层兜底报错；未来按需扩展）；<br>
-     * - 模型名为空：放行（未知即不拦，避免误伤）。
+     * 判定规则已迁移到 {@link ModelCapabilityRules#supportsVisionModel(String, String)}，
+     * 由 {@code llm.model-capabilities.vision-rules} <b>配置驱动</b> ——
+     * 新模型上线（如 Qwen4-VL / MiMo v3 / MiniMax M4）只需改配置，无需改代码发版。
+     * </p>
+     * <p>内置默认规则与历史硬编码行为完全等价（升级零行为变化）：
+     * <ul>
+     *   <li>deepseek：flash / vision / vl 系列支持，chat / reasoner 不支持</li>
+     *   <li>火山方舟：deepseek 系文本模型不支持；豆包 seed / vision / vl 支持；其余宽松放行</li>
+     *   <li>小米 MiMo：v2.5 系列原生多模态</li>
+     *   <li>MiniMax：M3 / VL / abab 支持；M2.x 纯文本</li>
+     *   <li>通义千问：VL / Omni 系列支持；qwen-plus / qwen-max 等纯文本不支持</li>
+     *   <li>其他 Provider 与空模型名：宽松放行，由 API 层兜底报错</li>
+     * </ul>
      * </p>
      */
     public static boolean supportsVisionModel(String providerCode, String model) {
-        if (model == null || model.isBlank()) {
-            return true;
-        }
-        String m = model.toLowerCase();
-        String code = providerCode == null ? "" : providerCode.toLowerCase();
-        if ("deepseek".equals(code)) {
-            return m.contains("flash") || m.contains("vision") || m.contains("-vl");
-        }
-        if ("volcengine".equals(code) || "ark".equals(code) || "doubao".equals(code)) {
-            return supportsArkVisionModel(m);
-        }
-        if ("mimo".equals(code) || "xiaomi-mimo".equals(code)) {
-            // MiMo v2.5 / v2.5-pro 原生多模态；早期纯文本模型（如 mimo-7b）不带视觉塔
-            return m.contains("v2.5") || m.contains("vision") || m.contains("-vl");
-        }
-        if (code.startsWith("minimax")) {
-            // M2 / M2.1 / M2.5 / M2.7 为纯文本；M3 与 VL 系列支持图像输入
-            if (m.contains("-m2") || m.startsWith("m2")) {
-                return false;
-            }
-            return m.contains("m3") || m.contains("vision") || m.contains("-vl") || m.contains("abab");
-        }
-        if ("qwen".equals(code) || "dashscope".equals(code) || "tongyi".equals(code)) {
-            // Qwen-VL / Qwen3-VL / Omni 系列支持图像输入；qwen-plus / qwen-max 等纯文本模型不支持
-            return m.contains("-vl") || m.contains("vl-") || m.contains("omni") || m.contains("vision");
-        }
-        return true;
-    }
-
-    /**
-     * 火山方舟模型的图像理解能力判定。
-     * <p>
-     * 方舟上的 deepseek 系文本模型（deepseek-v4-pro / flash / v3 等）不支持图像输入；
-     * 豆包 seed 系列原生多模态，vision / vl 命名同样支持；
-     * 其余模型（glm / kimi 等）宽松放行，由方舟 API 返回明确错误。
-     * </p>
-     */
-    private static boolean supportsArkVisionModel(String modelLowerCase) {
-        if (modelLowerCase.startsWith("deepseek")) {
-            return false;
-        }
-        if (modelLowerCase.contains("vision") || modelLowerCase.contains("-vl") || modelLowerCase.contains("vlm")) {
-            return true;
-        }
-        // 豆包 seed 系列（1.6 / 2.0 / 2.1 等）原生多模态
-        return true;
+        return ModelCapabilityRules.supportsVisionModel(providerCode, model);
     }
 
     // ==================== 内部工具 ====================

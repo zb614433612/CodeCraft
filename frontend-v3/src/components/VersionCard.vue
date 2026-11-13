@@ -399,7 +399,14 @@ async function onDownload () {
   try {
     const next = await api.download()
     applyDownload(next)
+    /*
+      三种终态要分开处理：
+        done      正常完成
+        cancelled 用户主动取消 —— 不是失败，不能弹 error（旧实现会弹「下载失败：下载已取消」）
+        error     真正的下载失败
+    */
     if (next.status === 'done') toast.success('安装包已下载完成，可以开始安装')
+    else if (next.status === 'cancelled') toast.info('已取消下载，可随时重新下载')
     else if (next.status === 'error') toast.error(`下载失败：${next.error || '未知原因'}`)
   } catch (e) {
     error.value = e instanceof Error ? e.message : '下载失败'

@@ -12,16 +12,18 @@ export interface ExecutionModes {
 // 模型类型
 export type Model = 'deepseek-v4-pro' | 'deepseek-v4-flash'
 
-// 思考模式类型
-// non-thinking -> thinking.type=disabled
-// thinking    -> thinking.type=enabled + reasoning_effort=high
-// thinking_max -> thinking.type=enabled + reasoning_effort=max
-export type ThinkingMode = 'non-thinking' | 'thinking' | 'thinking_max'
+// 思考模式类型（与后端 reasoning_effort 四档对齐）
+// non-thinking  -> thinking.type=disabled（不思考）
+// thinking_low  -> reasoning_effort=low   浅思考，仅适合读文件/改文案/跑命令等简单任务
+// thinking      -> reasoning_effort=high  默认档
+// thinking_max  -> reasoning_effort=max   最深思，适合疑难根因/协议设计/多方案权衡
+export type ThinkingMode = 'non-thinking' | 'thinking_low' | 'thinking' | 'thinking_max'
 
-// 上下文模式类型
-// full     -> 全量注入，所有历史消息完整保留
-// compact  -> 精简模式，非本轮对话的工具调用结果只保留成功/失败摘要，思考过程移除
-export type ContextMode = 'full' | 'compact'
+// 上下文模式类型（三档，与后端 ContextMode 枚举同源）
+// full     全量：历史 reasoning 也回传、工具结果原样保留（最准、最贵）
+// balanced 均衡【默认】：剔除历史 reasoning（双重计费最贵且参考价值低），工具结果原样保留
+// compact  精简：额外摘要化历史工具结果（救急：上下文逼近模型上限时用）
+export type ContextMode = 'full' | 'balanced' | 'compact'
 
 // 各助手的模型配置
 export interface Models {
@@ -72,8 +74,8 @@ export const useSettingsStore = defineStore('settings', () => {
   // 项目工作目录（持久化，刷新不丢失）
   const projectRoot = ref('')
 
-  // 上下文模式（持久化，刷新不丢失），默认 full
-  const contextMode = ref<ContextMode>('full')
+  // 上下文模式（持久化，刷新不丢失），默认 balanced（与后端 ContextMode.DEFAULT 一致）
+  const contextMode = ref<ContextMode>('balanced')
 
   // 获取指定助手的执行模式
   function getMode(agentType: string): ExecutionMode {

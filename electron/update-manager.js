@@ -62,6 +62,19 @@ let pendingAsset = null
 /** 进行中的下载请求（用于取消） */
 let currentRequest = null
 
+/**
+ * 「用户主动取消」标记。
+ *
+ * <p>为什么必须是独立标记而不是靠错误文案判断：取消会触发 {@code abort} → {@code downloadOnce} reject，
+ * 而 {@code startDownload} 的候选源循环原本把所有 reject 都当成「这个源失败，换下一个」，
+ * 于是用户点取消后**又静默发起了一次真实下载**，最后循环走完还把状态写成
+ * {@code error: '下载已取消'} —— 表现就是「取消了却还在下」「再点下载没反应」「最后弹下载失败」。</p>
+ *
+ * <p>约定：{@code startDownload} 开头清零；{@code cancelDownload} 先置 true 再 abort；
+ * 任何依赖它的判断都只看本标记，不解析错误文案。</p>
+ */
+let cancelRequested = false
+
 /** 下载状态（推送给渲染进程） */
 let downloadState = {
   status: 'idle',      // idle | downloading | done | error | cancelled
@@ -323,6 +336,10 @@ function downloadOnce (url, filePath, expectedSize) {
       try { out.destroy() } catch (_) { /* ignore */ }
       try { fs.rmSync(tmpPath, { force: true }) } catch (_) { /* ignore */ }
       currentRequest = null
+      // 取消是「用户主动终止」而非「下载源失败」：打错误码，供上层 for 循环识别并立即停止重试
+      if (cancelRequested && err && !err.code) {
+        err.code = 'CANCELLED'
+      }
       reject(err)
     }
 
@@ -382,7 +399,11 @@ function downloadOnce (url, filePath, expectedSize) {
       response.on('error', fail)
     })
     request.on('error', fail)
-    request.on('abort', () => fail(new Error('下载已取消')))
+    request.on('abort', () => {
+      const err = new Error('下载已取消')
+      err.code = 'CANCELLED'
+      fail(err)
+    })
     request.end()
   })
 }
@@ -391,9 +412,12 @@ async function startDownload () {
   if (!pendingAsset) {
     throw new Error('没有可下载的安装包，请先检查更新')
   }
-  if (downloadState.status === 'downloading') {
+  // 真正的「下载中」才直接返回；currentRequest 为空说明是取消后残留的僵尸状态，允许重新开始
+  if (downloadState.status === 'downloading' && currentRequest) {
     return { ...downloadState }
   }
+  // 新一轮下载：清掉上一轮的取消标记（否则本次一开始就会被判成已取消）
+  cancelRequested = false
 
   const dir = downloadDir()
   fs.mkdirSync(dir, { recursive: true })
@@ -433,6 +457,18 @@ async function startDownload () {
       emitDownloadState()
       return { ...downloadState }
     } catch (e) {
+      /*
+        用户主动取消 ≠ 下载源失败：取消必须**立刻终止**整个候选源循环。
+        旧实现把它当普通失败继续尝试下一个镜像，导致取消后又静默发起一次真实下载，
+        最终状态还被写成 error('下载已取消') —— 用户看到报错，且后台僵尸下载让「再点下载」无效。
+      */
+      if (cancelRequested || (e && e.code === 'CANCELLED')) {
+        console.log('[update] 用户取消下载，终止后续所有下载源重试')
+        try { fs.rmSync(filePath + '.part', { force: true }) } catch (_) { /* ignore */ }
+        downloadState = { ...downloadState, status: 'cancelled', percent: 0, received: 0, error: '' }
+        emitDownloadState()
+        return { ...downloadState }
+      }
       lastError = e
       console.warn('[update] 下载源失败，尝试下一个:', url, e.message)
     }
@@ -444,11 +480,14 @@ async function startDownload () {
 }
 
 function cancelDownload () {
+  // 先立标记再 abort：downloadOnce 的 fail 靠它把错误归类为 CANCELLED，
+  // startDownload 的候选源循环也靠它立刻停止重试（顺序反了会漏判一次）。
+  cancelRequested = true
   if (currentRequest) {
     try { currentRequest.abort() } catch (_) { /* ignore */ }
   }
   currentRequest = null
-  downloadState = { ...downloadState, status: 'cancelled', error: '' }
+  downloadState = { ...downloadState, status: 'cancelled', percent: 0, received: 0, error: '' }
   emitDownloadState()
   return { ...downloadState }
 }

@@ -45,21 +45,35 @@ public class DeepSeekClient extends AbstractLLMClient {
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
         Map<String, Object> params = new HashMap<>();
 
-        // 默认 thinking 模式
-        String effectiveMode = (thinkingMode == null || thinkingMode.isEmpty())
-                ? "thinking" : thinkingMode;
+        // 统一档位归一化（none / low / medium / high / max / auto）
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        // DeepSeek 历史行为：未指定时按"开启思考"处理
+        if (EFFORT_AUTO.equals(canonical)) {
+            canonical = EFFORT_MEDIUM;
+        }
 
-        if ("non-thinking".equals(effectiveMode)) {
+        if (EFFORT_NONE.equals(canonical)) {
             Map<String, Object> thinking = new HashMap<>();
             thinking.put("type", "disabled");
             params.put("thinking", thinking);
-        } else {
-            Map<String, Object> thinking = new HashMap<>();
-            thinking.put("type", "enabled");
-            params.put("thinking", thinking);
-            params.put("reasoning_effort", "thinking_max".equals(effectiveMode) ? "max" : "high");
+            return params;
         }
 
+        Map<String, Object> thinking = new HashMap<>();
+        thinking.put("type", "enabled");
+        params.put("thinking", thinking);
+
+        // DeepSeek 官方 reasoning_effort 只有 none / low / high / max 四档（无 medium）：
+        //   low    → low     浅思考（读文件/改文案/跑命令）
+        //   medium → high    DeepSeek 的默认档就是 high，承接"thinking"语义
+        //   high   → high
+        //   max    → max     最深（疑难根因/协议设计）
+        String effort = switch (canonical) {
+            case EFFORT_LOW -> "low";
+            case EFFORT_MAX -> "max";
+            default -> "high";
+        };
+        params.put("reasoning_effort", effort);
         return params;
     }
 

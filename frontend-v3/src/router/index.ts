@@ -26,7 +26,7 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import { PRIMARY_NAV, MORE_GROUPS } from '../menu.config'
 import { clearSession, ensureIdentity, peekIdentity } from '../utils/session'
-import { hasToken, setUnauthorizedHandler } from '../utils/http-client'
+import { hasToken, isTokenRevoked, setUnauthorizedHandler } from '../utils/http-client'
 import { toast } from '../utils/toast'
 
 /** 已实现的页面组件登记表 */
@@ -42,6 +42,7 @@ const ROUTE_COMPONENTS: Record<string, () => Promise<unknown>> = {
   '/p2p': () => import('../views/P2pListView.vue'),
   '/providers': () => import('../views/ProviderListView.vue'),
   '/logs': () => import('../views/LogListView.vue'),
+  '/token-usage': () => import('../views/TokenUsageView.vue'),
   '/data': () => import('../views/DataManageView.vue'),
   '/users': () => import('../views/UserListView.vue'),
   '/menu-permission': () => import('../views/MenuPermissionView.vue'),
@@ -190,10 +191,25 @@ setUnauthorizedHandler(() => {
     .catch(() => fallback())
 })
 
-/** 同步页面标题：`页面名 · CodeCraft` */
+/**
+ * 同步页面标题，并做一次「漏网登录态校验」。
+ *
+ * <p>为什么 afterEach 还要再查一次：401 的清 token 与跳转是异步的，下面这些路径都可能让用户
+ * 停在业务页 —— ① 跳转被并发导航打断且 fallback 也被打断；② 某页面只有静态内容、压根不发 API，
+ * 于是「token 已判废」这个事实没有触发点；③ 用户用浏览器前进/后退回到业务页。
+ * afterEach 是每次导航的最后一站，在这里比对一次 {@code isTokenRevoked()} 成本极低，
+ * 但能兜住所有「提示过期却没退出」的观感问题。</p>
+ */
 router.afterEach((to) => {
   const title = typeof to.meta.title === 'string' ? to.meta.title : ''
   document.title = title ? `${title} · ${APP_NAME}` : APP_NAME
+
+  // 漏网校验：token 已判废却仍停在业务页 → 直接改 hash 回登录页（不依赖导航队列，避免再被打断）
+  if (to.path !== LOGIN_PATH && isTokenRevoked()) {
+    const redirect = to.fullPath && to.fullPath !== '/' ? to.fullPath : ''
+    const query = redirect ? `?redirect=${encodeURIComponent(redirect)}` : ''
+    window.location.hash = `#${LOGIN_PATH}${query}`
+  }
 })
 
 export default router

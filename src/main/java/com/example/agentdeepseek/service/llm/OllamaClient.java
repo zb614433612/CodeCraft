@@ -65,9 +65,11 @@ public class OllamaClient extends AbstractLLMClient {
     @Override
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
         // Ollama 0.6+ 通过顶层 think 开关控制推理模型（qwen3 / deepseek-r1 等）是否输出思考过程。
-        // 仅在需要思考时显式下发 true：对不支持 think 的模型不传该字段，避免服务端报错。
+        // 仅在"明确开启思考"时下发 true：auto（交给模型默认）与 none（关闭即不下发）都不传该字段，
+        // 避免对不支持 think 的模型下发未知字段导致服务端报错。
         Map<String, Object> params = new HashMap<>();
-        if (thinkingMode != null && !thinkingMode.isBlank() && !"non-thinking".equals(thinkingMode)) {
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        if (isThinkingExplicitlyEnabled(canonical)) {
             params.put("think", true);
         }
         return params;

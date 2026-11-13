@@ -338,7 +338,19 @@ const UNAUTHORIZED_DEDUPE_MS = 800
  * token 已经清掉，后续请求本来也过不去。</p>
  */
 function fireUnauthorized(reason: string): void {
-  if (!unauthorizedHandler) return
+  /*
+    兜底：handler 未注册时（HMR 热更、单测、或 router 模块尚未求值的极端时序）**不能直接 return**。
+    旧实现这里就是 `if (!unauthorizedHandler) return`，于是 request 的 401 分支静默失效 ——
+    用户停在业务页，观感正是「提示登录过期，但没退出」。这里与 notifyUnauthorized 对齐：直接改 hash。
+  */
+  if (!unauthorizedHandler) {
+    try {
+      if (!window.location.hash.startsWith('#/login')) window.location.hash = '#/login'
+    } catch {
+      // 非浏览器环境（SSR / 单测）忽略
+    }
+    return
+  }
   const now = Date.now()
   if (now - lastUnauthorizedAt < UNAUTHORIZED_DEDUPE_MS) return
   lastUnauthorizedAt = now

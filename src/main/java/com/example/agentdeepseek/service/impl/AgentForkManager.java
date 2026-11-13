@@ -597,11 +597,14 @@ public class AgentForkManager {
                 break;
             }
 
-            // 构建assistant消息并加入历史（thinking模式下reasoning_content必须回传）
+            // 构建assistant消息并加入历史
+            // 【成本优化】默认不回传 reasoning_content（见 DeepSeekConfig#stripHistoryReasoning）：
+            //   官方文档已明确该字段仅用于 Chat Prefix Completion（prefix=true），普通多轮对话无需回传。
+            //   子 Agent 的完整消息（含 reasoning）仍会写入 fullMessagesJson 供溯源，这里只控制下发给模型的部分。
             Map<String, Object> assistantMsg = new HashMap<>();
             assistantMsg.put("role", "assistant");
             assistantMsg.put("content", assistantContent);
-            if (!reasoningContent.isEmpty()) {
+            if (!reasoningContent.isEmpty() && !deepSeekConfig.isStripHistoryReasoning()) {
                 assistantMsg.put("reasoning_content", reasoningContent);
             }
             messages.add(assistantMsg);

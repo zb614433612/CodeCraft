@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.config;
 
+import com.example.agentdeepseek.common.enums.ContextMode;
 import io.netty.channel.ChannelOption;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -47,18 +48,78 @@ public class DeepSeekConfig {
     private String defaultModel = "deepseek-v4-pro";
 
     /**
-     * 思考模式：non-thinking / thinking / thinking_max
-     * non-thinking -> thinking.type=disabled
-     * thinking    -> thinking.type=enabled + reasoning_effort=high
-     * thinking_max -> thinking.type=enabled + reasoning_effort=max
+     * 思考模式：non-thinking / thinking_low / thinking / thinking_max
+     * <p>
+     * 与 DeepSeek 官方 {@code reasoning_effort} 四档（none / low / high / max）的映射关系：
+     * <ul>
+     *   <li>{@code non-thinking} → {@code thinking.type=disabled}（不下发 reasoning_effort，等同 none）</li>
+     *   <li>{@code thinking_low}  → {@code thinking.type=enabled} + {@code reasoning_effort=low}（浅思考）</li>
+     *   <li>{@code thinking}      → {@code thinking.type=enabled} + {@code reasoning_effort=high}（默认档）</li>
+     *   <li>{@code thinking_max}  → {@code thinking.type=enabled} + {@code reasoning_effort=max}（最深思）</li>
+     * </ul>
+     * </p>
+     * <p><b>降档提示</b>：{@code high → low} 只适合简单任务（读文件/改文案/跑命令）。
+     * 疑难 bug 根因分析、跨模块重构、多方案权衡类任务降档会明显掉质量，且一旦因降档多跑一轮，
+     * 单轮成本（约 0.03~0.04 元）远高于省下的 reasoning 费用，反而更贵。</p>
      */
     private String thinkingMode = "thinking";
 
     /**
-     * 上下文模式：full（全量注入）/ compact（精简历史工具调用和思考过程）
-     * 默认 full，运行时可通过 sys_config 表 context_mode 键动态覆盖
+     * 上下文模式（主对话历史注入策略）：full / balanced / compact
+     * <p>
+     * <b>三档差异</b>：
+     * <ul>
+     *   <li>{@code full}     —— 历史 reasoning 也回传、工具结果原样保留（最准、最贵）</li>
+     *   <li>{@code balanced} —— <b>默认</b>：剔除历史 reasoning、工具结果原样保留。
+     *       reasoning 双重计费约 9 元/百万且对后续决策价值低；工具结果是决策证据必须留</li>
+     *   <li>{@code compact}  —— 额外摘要化历史工具结果（救急：上下文逼近模型上限时用，
+     *       会改写历史导致一次前缀缓存失效）</li>
+     * </ul>
+     * </p>
+     * <p>取值优先级：请求参数 {@code ChatRequest.contextMode} &gt;
+     * sys_config 表 {@code context_mode} 键 &gt; 本配置 &gt; {@link ContextMode#DEFAULT}。</p>
      */
-    private String contextMode = "full";
+    private String contextMode;
+
+    /**
+     * 【已废弃】是否回传历史 reasoning —— 由 {@link #contextMode} 统一取代
+     * <p>
+     * 保留仅为平滑升级：仅当 {@code context-mode} 未显式配置、且本字段被显式设为 {@code false} 时，
+     * 才等价于请求 {@code full} 模式。新配置请直接使用 {@code deepseek.context-mode}。
+     * </p>
+     *
+     * @deprecated 请改用 {@link #contextMode} / {@link #resolveContextMode()}
+     */
+    @Deprecated
+    private Boolean stripHistoryReasoning;
+
+    /**
+     * 解析生效的上下文模式（含旧开关兼容）
+     * <p>
+     * 兼容规则：只有当 {@code context-mode} 未显式配置（为空 / 无法识别）且旧的
+     * {@code strip-history-reasoning} 被显式设为 {@code false} 时，才回到 {@code full}；
+     * 其余情况一律以 {@code context-mode} 为准。
+     * </p>
+     */
+    public ContextMode resolveContextMode() {
+        ContextMode parsed = ContextMode.tryParse(contextMode);
+        if (parsed != null) {
+            return parsed;
+        }
+        if (Boolean.FALSE.equals(stripHistoryReasoning)) {
+            return ContextMode.FULL;
+        }
+        return ContextMode.DEFAULT;
+    }
+
+    /**
+     * 便捷判定：当前模式下是否剔除历史 {@code reasoning_content}
+     * <p>等价于 {@code resolveContextMode().shouldStripHistoryReasoning()}；
+     * 各调用点统一走此方法，避免各处自行字符串比较导致三档语义漂移。</p>
+     */
+    public boolean isStripHistoryReasoning() {
+        return resolveContextMode().shouldStripHistoryReasoning();
+    }
 
     /**
      * 提示词文件与工具组映射

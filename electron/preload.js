@@ -48,6 +48,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // ==================== 真终端 PTY（实现见 electron/pty-manager.js） ====================
+  // xterm.js 只负责渲染，真正执行命令靠主进程的 node-pty（VS Code 同款伪终端）。
+  // 只在 Electron 桌面端可用；浏览器环境前端会降级到后端 /project/exec。
+  pty: {
+    /** 探测可用性：{ available, platform, defaultShell, maxSessions } 或 { available:false, error } */
+    isAvailable: () => ipcRenderer.invoke('pty:isAvailable'),
+    /**
+     * 创建会话：{ cwd, cols, rows, shell, sessionId }
+     * @returns {{sessionId:string, pid:number, shell:string, cwd:string, cols:number, rows:number}}
+     */
+    create: (options) => ipcRenderer.invoke('pty:create', options || {}),
+    /** 写入键盘输入 / 粘贴内容 */
+    write: (sessionId, data) => ipcRenderer.invoke('pty:write', { sessionId, data }),
+    /** 同步终端尺寸（xterm fit 之后必须调，否则 PTY 换行错位） */
+    resize: (sessionId, cols, rows) => ipcRenderer.invoke('pty:resize', { sessionId, cols, rows }),
+    /** 结束会话（前端切目录/重开时先 kill 再 create） */
+    kill: (sessionId) => ipcRenderer.invoke('pty:kill', { sessionId }),
+    /** 监听终端输出；返回取消监听函数 */
+    onData: (callback) => {
+      const listener = (_event, payload) => callback(payload)
+      ipcRenderer.on('pty:data', listener)
+      return () => ipcRenderer.removeListener('pty:data', listener)
+    },
+    /** 监听会话退出（shell 自己 exit 时触发）；返回取消监听函数 */
+    onExit: (callback) => {
+      const listener = (_event, payload) => callback(payload)
+      ipcRenderer.on('pty:exit', listener)
+      return () => ipcRenderer.removeListener('pty:exit', listener)
+    }
+  },
+
   /**
    * 清理本地非数据库数据（升级备份 / 已下载安装包 / 更新检测缓存）。
    * 「重置所有数据」成功后调用，确保"清空"是彻底清空（备份里不会残留数据库副本）。

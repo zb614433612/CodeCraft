@@ -168,12 +168,25 @@ public class VolcengineArkClient extends AbstractLLMClient {
     @Override
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
         Map<String, Object> params = new HashMap<>();
-        String mode = (thinkingMode == null || thinkingMode.isBlank()) ? "thinking" : thinkingMode.trim();
 
-        String type = switch (mode) {
-            case "non-thinking" -> "disabled";
-            case "auto" -> "auto";
-            default -> "enabled";
+        // auto 需要保留原始语义（方舟有独立的 thinking.type=auto），归一化会把它并入空值，先单独判断
+        boolean explicitlyAuto = thinkingMode != null && "auto".equalsIgnoreCase(thinkingMode.trim());
+        if (explicitlyAuto) {
+            params.put("thinking", Map.of("type", "auto"));
+            return params;
+        }
+
+        // 统一档位归一化：none / low / medium / high / max / ""(auto)
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        // 方舟历史行为：未指定时默认开启思考
+        if (EFFORT_AUTO.equals(canonical)) {
+            canonical = EFFORT_MEDIUM;
+        }
+
+        // 方舟只有 disabled / enabled / auto 三态（不区分具体档位）
+        String type = switch (canonical) {
+            case EFFORT_NONE -> "disabled";
+            default -> "enabled";   // low / medium / high / max 统一开启
         };
         params.put("thinking", Map.of("type", type));
         return params;

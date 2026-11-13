@@ -65,6 +65,8 @@ export const MORE_GROUPS: MenuGroup[] = [
       // 同上：数据库连接存有明密文凭证，前端收口为管理员页
       { key: '/databases', label: '数据库连接', icon: 'i-db', adminOnly: true },
       { key: '/logs', label: '运行日志', icon: 'i-log' },
+      // 成本看板：基于每轮真实 usage 的费用与缓存命中率统计（只读，无敏感数据）
+      { key: '/token-usage', label: '成本看板', icon: 'i-log' },
       // SystemController 的 data-stats / export / import / reset 均 checkAdmin
       { key: '/data', label: '数据管理', icon: 'i-disk', adminOnly: true }
     ]

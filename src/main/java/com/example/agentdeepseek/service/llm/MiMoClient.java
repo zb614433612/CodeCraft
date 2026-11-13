@@ -58,13 +58,18 @@ public class MiMoClient extends AbstractLLMClient {
      */
     @Override
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
-        String effectiveMode = (thinkingMode == null || thinkingMode.isEmpty())
-                ? "non-thinking" : thinkingMode;
+        // 统一档位归一化：none / low / medium / high / max / ""(auto)
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        // MiMo 历史行为：未指定时默认关闭思考
+        if (EFFORT_AUTO.equals(canonical)) {
+            canonical = EFFORT_NONE;
+        }
 
         Map<String, Object> params = new HashMap<>();
-        if ("non-thinking".equals(effectiveMode)) {
+        if (EFFORT_NONE.equals(canonical)) {
             params.put("thinking", Map.of("type", "disabled"));
         } else {
+            // low / medium / high / max 统一视为"开启"（MiMo 不区分具体档位）
             params.put("thinking", Map.of("type", "enabled"));
             // MiMo 思考模式下不支持自定义 temperature/top_p，标记移除
             // 实际移除在 customizeRequest 中执行（因为 temperature 由父类设置）

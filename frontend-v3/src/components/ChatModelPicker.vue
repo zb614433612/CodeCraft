@@ -103,6 +103,7 @@
               <div class="cc-mpk__select">
                 <select v-model="draftThinking" class="cc-select">
                   <option value="">默认</option>
+                  <option value="thinking_low">浅思考</option>
                   <option value="thinking">思考</option>
                   <option value="thinking_max">深度思考</option>
                   <option value="non-thinking">关闭思考</option>
@@ -145,9 +146,9 @@ export interface ModelPickerProvider {
 }
 
 /**
- * 上下文模式选项。
- * 值与后端 `ChatRequest.contextMode` / `sys_config.context_mode` 完全一致（full / compact），
- * 不要改成中文或驼峰，后端 `DeepSeekServiceImpl` 用 `"compact".equals(contextMode)` 精确判定。
+ * 上下文模式选项（三档，与后端 ContextMode 枚举同源）。
+ * 值与后端 `ChatRequest.contextMode` / `sys_config.context_mode` 完全一致（full / balanced / compact），
+ * 不要改成中文或驼峰，后端 `DeepSeekServiceImpl` 按枚举精确判定。
  *
  * desc 会直接显示在卡片里（v2 说明文字从 tooltip 挪到明面上），控制在 10 字以内以保证单行。
  */
@@ -156,13 +157,19 @@ const CONTEXT_MODES = [
     value: 'full',
     label: '全量',
     desc: '历史消息完整注入',
-    tip: '全部历史消息完整注入（对齐旧版「📋 全量」）'
+    tip: '全部历史完整注入（含历史思考过程），最准但最贵'
+  },
+  {
+    value: 'balanced',
+    label: '均衡',
+    desc: '历史去掉思考过程',
+    tip: '剔除历史思考过程（reasoning 双重计费最贵、对后续决策参考价值低），工具结果完整保留 —— 推荐默认'
   },
   {
     value: 'compact',
     label: '精简',
     desc: '历史工具仅留摘要',
-    tip: '历史轮次的工具调用只留摘要、思考过程移除，节省上下文'
+    tip: '在均衡基础上再摘要化历史工具结果，最省；会改写历史导致一次缓存失效，仅在上下文逼近上限时使用'
   }
 ] as const
 
@@ -189,7 +196,7 @@ const props = withDefaults(
     model: '',
     thinkingMode: '',
     executionMode: 'auto',
-    contextMode: 'full'
+    contextMode: 'balanced'
   }
 )
 
@@ -211,7 +218,7 @@ const draftProvider = ref(props.providerCode)
 const draftModel = ref(props.model)
 const draftThinking = ref(props.thinkingMode)
 const draftExecution = ref(props.executionMode)
-const draftContext = ref(props.contextMode || 'full')
+const draftContext = ref(props.contextMode || 'balanced')
 
 /** 当前选中的 Provider（找不到时返回 undefined，此时模型列表回退全局合集） */
 const activeProvider = computed(() => props.providers.find(p => p.code === draftProvider.value))
@@ -256,7 +263,7 @@ watch(
     draftModel.value = props.model || props.models[0] || ''
     draftThinking.value = props.thinkingMode || ''
     draftExecution.value = props.executionMode || 'auto'
-    draftContext.value = props.contextMode || 'full'
+    draftContext.value = props.contextMode || 'balanced'
   }
 )
 

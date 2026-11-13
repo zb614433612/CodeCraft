@@ -47,6 +47,87 @@ public abstract class AbstractLLMClient implements LLMClient {
         this.providerCode = providerCode;
     }
 
+    // ==================== 思考档位归一化（跨 Provider 统一口径） ====================
+
+    /** 规范档位：关闭思考 */
+    public static final String EFFORT_NONE = "none";
+    /** 规范档位：浅思考 */
+    public static final String EFFORT_LOW = "low";
+    /** 规范档位：中等（多数 Provider 的"默认思考"档） */
+    public static final String EFFORT_MEDIUM = "medium";
+    /** 规范档位：深度思考 */
+    public static final String EFFORT_HIGH = "high";
+    /** 规范档位：最深（如 DeepSeek max / 部分 Provider 的 xhigh） */
+    public static final String EFFORT_MAX = "max";
+    /** 规范档位：未指定（auto，是否思考与档位完全交给模型默认策略） */
+    public static final String EFFORT_AUTO = "";
+
+    /**
+     * 把各 Provider / 配置里五花八门的思考模式字符串归一化成 5 个规范档位
+     * <p>
+     * <b>为什么需要它</b>：Agent 配置与请求参数里可能出现
+     * {@code non-thinking / thinking_low / thinking / thinking_max / low / medium / high / xhigh / minimal / auto}
+     * 等多种写法，而各家 Provider 支持的档位与语义并不同。若各适配器各自做字符串比较，
+     * 每新增一个档位就会漏掉一批适配器（历史教训：新增 {@code thinking_low} 时 MiniMax 适配器
+     * 因为 {@code switch} 的 {@code default} 分支直接把思考关掉了）。统一归一化后，
+     * 适配器只需处理 5 个规范值 + auto。
+     * </p>
+     *
+     * <table border="1">
+     *   <caption>归一化映射</caption>
+     *   <tr><th>输入（大小写不敏感）</th><th>规范档位</th></tr>
+     *   <tr><td>non-thinking / none / disabled / off / false</td><td>{@link #EFFORT_NONE}</td></tr>
+     *   <tr><td>thinking_low / low / minimal</td><td>{@link #EFFORT_LOW}</td></tr>
+     *   <tr><td>thinking / medium</td><td>{@link #EFFORT_MEDIUM}</td></tr>
+     *   <tr><td>thinking_high / high</td><td>{@link #EFFORT_HIGH}</td></tr>
+     *   <tr><td>thinking_max / max / xhigh</td><td>{@link #EFFORT_MAX}</td></tr>
+     *   <tr><td>空 / auto / default / 无法识别</td><td>{@link #EFFORT_AUTO}</td></tr>
+     * </table>
+     *
+     * <p>注意：{@code thinking} 归一为 {@code medium}（"默认思考档"），各适配器再映射到自己的默认值
+     * ——例如 DeepSeek 侧会映射为 {@code reasoning_effort=high}，OpenAI 侧映射为 {@code medium}。</p>
+     *
+     * @param thinkingMode Agent 配置或请求传入的思考模式（可为 null / 空 / 混合大小写）
+     * @return 规范档位（{@link #EFFORT_NONE}~{@link #EFFORT_MAX} 或 {@link #EFFORT_AUTO}）
+     */
+    public static String normalizeThinkingMode(String thinkingMode) {
+        if (thinkingMode == null) {
+            return EFFORT_AUTO;
+        }
+        String mode = thinkingMode.trim().toLowerCase(java.util.Locale.ROOT);
+        if (mode.isEmpty()) {
+            return EFFORT_AUTO;
+        }
+        return switch (mode) {
+            // ===== 关闭 =====
+            case "non-thinking", "nonthinking", "none", "disabled", "off", "false" -> EFFORT_NONE;
+            // ===== 浅思考 =====
+            case "thinking_low", "thinking-low", "low", "minimal" -> EFFORT_LOW;
+            // ===== 默认思考（多数 Provider 的中等档）=====
+            case "thinking", "thinking_default", "thinking-default", "medium" -> EFFORT_MEDIUM;
+            // ===== 深度思考 =====
+            case "thinking_high", "thinking-high", "high" -> EFFORT_HIGH;
+            // ===== 最深 =====
+            case "thinking_max", "thinking-max", "max", "xhigh" -> EFFORT_MAX;
+            // ===== auto / 未知 → 交给模型默认策略 =====
+            default -> EFFORT_AUTO;
+        };
+    }
+
+    /**
+     * 规范档位是否为"关闭思考"
+     */
+    public static boolean isThinkingDisabled(String canonicalEffort) {
+        return EFFORT_NONE.equals(canonicalEffort);
+    }
+
+    /**
+     * 规范档位是否为"明确开启思考"（不含 auto）
+     */
+    public static boolean isThinkingExplicitlyEnabled(String canonicalEffort) {
+        return canonicalEffort != null && !canonicalEffort.isEmpty() && !EFFORT_NONE.equals(canonicalEffort);
+    }
+
     // ==================== 抽象方法：子类实现 ====================
 
     /**

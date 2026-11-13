@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 TOOL_SYSTEM_EN](./TOOL_SYSTEM_EN.md)
 # 工具系统深描：如何新增一个 AI Tool
 
-> 版本：v3.0.8 | 更新：2026-11-11 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.0.9 | 更新：2026-11-13 | 受众：开发者 / AI 协作伙伴
 > 本文档覆盖工具系统的完整架构、执行链路，以及新增一个 Tool 的 step-by-step checklist。
 
 ---
@@ -335,12 +335,7 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 | `http_request` | NETWORK | ✗ | ✗ | ✗ |
 | `check_network` | NETWORK | ✗ | ✗ | ✗ |
 | `execute_sql` | DATABASE | ✓ | ✗ | ✓ |
-| `git_query` | GIT | ✗ | ✗ | ✗ |
-| `git_submit` | GIT | ✓ | ✗ | ✗ |
-| `git_branch` | GIT | ✓ | ✗ | ✗ |
-| `git_stash` | GIT | ✓ | ✗ | ✗ |
-| `git_tag` | GIT | ✓ | ✗ | ✗ |
-| `git_remote` | GIT | ✓ | ✗ | ✗ |
+| `git` | GIT | ✓ | ✗ | ✗ |
 | `agent` | ADMIN | ✗ | ✗ | ✗ |
 | `agent_invoke` | ADMIN | ✓ | ✗ | ✗ |
 | `skill` | SKILL | ✓ | ✗ | ✗ |
@@ -352,12 +347,12 @@ Spring 自动发现 `@Component` → `ToolInitializer` 自动注册到 `ToolRegi
 | `mcp_server_manager` | ADMIN | ✓ | ✗ | ✗ |
 | `schedule_task` | ADMIN | ✓ | ✗ | ✗ |
 | `query_tool_history` | READ | ✗ | ✗ | ✗ |
-| `screen_capture` | DESKTOP | ✗ | ✗ | ✓ |
-| `desktop_control` | DESKTOP | ✓ | ✗ | ✓ |
+| `desktop` | DESKTOP | ✓ | ✗ | ✓ |
 | `browser` | BROWSER | ✓ | ✗ | ✓ |
 | `project_map` | READ | ✗ | ✓ | ✗ |
 
-> 📌 速查表按当前 29 个内置工具维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
+> 📌 速查表按当前 **23 个面向模型的内置工具**维护；MCP 外部工具（`mcp_server_manager` 动态注册）不在此表内。
+> v3.0.9 起 `git_*`（6 个）合并为 `git`、`screen_capture` + `desktop_control` 合并为 `desktop`；**旧工具类仍注册在 `ToolRegistry` 中**（供历史消息引用与 `normalizeToolNames()` 兼容），但不再下发给模型。
 > `browser` 同时实现 `SideEffectFreePreflight`：`snapshot` / `status` / `list` / `console` / `wait` / `screenshot` 六个只读动作免授权；此外 `tab` 动作只有 `op=list` 免授权（`new` / `switch` / `close` 会改窗口状态，仍需授权）。
 > `project_map` 虽会写 `.codecraft/`，但作用域被 `PathSecurityChecker` 限制在项目根内、且不触碰源码，因此 `affectsData=false`（不打扰用户）；`isPathSensitive=true` 用于路径越界校验。
 
@@ -534,6 +529,81 @@ Chromium CDP
 - **编号校验（`validateTaskIds`）**：`create` 落库前强制校验编号必须恰好为 `T1..Tn` 连续——不缺号、不重号（重复 id 会导致 `complete` 误标记）、格式必须为 `T+数字`；乱序传入允许（分组 `group` 与依赖 `depends_on` 才决定执行顺序）。校验失败返回带纠正示例的错误，模型重置 id（`depends_on` 同步改用新编号）后重试。
 - **描述引导**：工具描述与 `id` 参数说明同步注明「每次 create 都是全新清单，编号从 T1 开始，禁止延续历史清单编号」——校验是兜底，引导减少重试轮次。
 - **既有约束保留**：上一轮清单仍有未完成任务时 `create` 依然被拒（防止半途丢弃清单），全部完成后才能开新清单。
+
+---
+
+### 8.9 长耗时命令后台化（command，v3.0.9）
+
+> 解决的真实问题：`mvn package` 这类分钟级命令，旧模型是「同步阻塞 + 超时杀进程」——默认 120s 上限，跑到第 2 分钟被强制终止，**前面几分钟的依赖下载/编译全部白费**；期间整个 Agent 停摆（模型不能读文件、不能分析代码）；失败后只能从头再跑。
+
+| 维度 | 旧执行模型（≤ v3.0.8） | 新执行模型（v3.0.9+） |
+|------|----------------------|---------------------|
+| 前台等待 | 等到 `timeout`（默认 120s） | 最多 20s（编译/依赖类 10s） |
+| 超时行为 | `destroyForcibly()` 杀进程 | **转后台任务继续跑，不杀** |
+| 返回内容 | 超时前攒的全部输出 + 「已强制终止」 | 任务 ID + 已运行时长 + 输出尾部 15 行 + 下一步指引 |
+| 控制权 | 被占住直到超时 | 立刻归还，模型可并行做别的事 |
+| 跟进方式 | 无（只能重跑） | `wait` 阻塞等 / `logs` 看进度 / `stop` 中止 |
+| Agent 停摆 | 是 | 否 |
+
+**状态机**
+
+```
+exec ──启动──> [运行中] ──N 秒内结束──> 返回完整输出 + 退出码（短命令零感知）
+                  │
+                  └──超过 N 秒──> 返回「已转后台 + 任务 ID」
+                                      │
+                                      ├─ wait   → 阻塞等（默认 300s，可再等）
+                                      ├─ logs   → 尾部 N 行（默认 50，tail=0 全量）
+                                      └─ stop   → 杀整棵进程树
+```
+
+**关键机制**
+
+| 机制 | 实现 | 为什么必须有 |
+|------|------|-------------|
+| 慢命令识别 | `SLOW_COMMAND_PATTERN` 匹配 `mvn\|gradle\|npm\|pnpm\|yarn\|pip\|cargo\|go\|dotnet\|docker\|make\|...` | 这类命令本来就要几十秒起，没必要让用户干等满 20s |
+| 去重保护 | `findRunningTask(workDir, command)`：同 cwd + 同命令 + 仍在运行 → 直接返回「已在运行（任务 #N）」 | 模型不知道后台在跑会重复下发 → 两个 mvn 抢 `.m2` 锁 / 爆内存 / 产物互相覆盖 |
+| 任务池分离 | 一次性长任务上限 10（`isTask()` 计数）/ 长期服务上限 5 | 20 分钟的 mvn 不该占掉 `npm run dev` 的槽位 |
+| 输出保留 | 结束后保留 30 分钟（`TASK_RETAIN_MS`）；`cleanupFinishedServices()` 改为 TTL 清理而非立即删除 | 跑完想 `logs` 回看失败原因，立即删除会导致「刚跑完就查不到」 |
+| 失败输出治理 | `ERROR_LINE_PATTERN` 抽取关键行（`[ERROR]`/`Caused by`/`BUILD FAILURE`/`npm ERR`/`at Xxx.java:N`）→ 再附尾部 30 行 | 1MB 截断恰好会切掉夹在中间的关键报错 |
+
+**配置与回退**
+
+```yaml
+command:
+  exec:
+    background-after-seconds: 20        # 普通命令前台等待窗口；0 或负数 = 回退旧行为
+    background-after-build-seconds: 10  # 编译/依赖类命令窗口
+```
+
+> ⚠️ **语义变更**：`exec` 的 `timeout` 参数**不再杀死进程**，现在仅对 `wait` 生效。依赖「超时即中止」的场景请显式 `command(action=stop, service_id=N)`。
+
+**行为约束的交接口径**：工具描述（`getDescription()`）与系统提示词《长耗时命令》小节共同约束模型——「转后台不是失败」「不要重复执行同一命令」「用 wait/logs 跟进」。二者缺一，模型就会把「已转后台」误判为失败并重试。
+
+---
+
+### 8.10 工具合并策略（git / desktop，v3.0.9）
+
+**动机**：工具定义每轮都随 system prompt 下发，且在 DeepSeek 前缀缓存命中价仅为未命中 1/40 的前提下，**任何 schema 变动都会让整个前缀失效**。六个名字相近的 git 工具还会让模型「选错 → 多一轮 → 代价远高于省下的 schema」。
+
+**做法：纯委托，零逻辑复制**
+
+| 合并 | 原工具 | 新工具 | 路由方式 |
+|------|--------|--------|---------|
+| Git | `git_query` / `git_submit` / `git_branch` / `git_stash` / `git_tag` / `git_remote` | `git` | `ACTION_ROUTING`（`LinkedHashMap` 保证顺序稳定，避免影响缓存前缀）→ 按 action 路由到原子工具实例，参数原样透传 |
+| 桌面 | `screen_capture` / `desktop_control` | `desktop` | action 分发（`capture` / `click` / `type` / `key` …） |
+
+**兼容性设计（关键）**
+
+- **旧工具类保留注册**：仍实现 `Tool` 并存在于 `ToolRegistry`，只是不再下发给模型 —— 历史会话里出现的 `git_query(...)` 调用仍能正确执行，不会因为升级而报「未知工具」。
+- **`normalizeToolNames()`**：把旧工具名归一化到新名字，历史工具白名单与自定义 Agent 配置无需迁移。
+- **行为一致性**：纯委托意味着合并前后执行路径完全相同，不存在「合并引入行为差异」的风险。
+
+**action 命名约定**（避免与子工具的 action 冲突）
+
+- Git 查询类保持原语义：`status` / `diff` / `log` / `show`
+- 其余按域加前缀：`branch_list` / `branch_create` / `stash_save` / `stash_pop` …
+- 提交类保持短名：`add` / `commit` / `push` / `pull` / `reset` / `revert`
 
 ---
 

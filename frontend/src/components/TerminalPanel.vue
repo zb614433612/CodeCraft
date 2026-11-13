@@ -63,9 +63,37 @@ const xtermContainer = ref<HTMLElement | null>(null)
 let xterm: Terminal | null = null
 let inputBuffer = ''
 let systemThemeCleanup: (() => void) | null = null  // matchMedia 监听器清理
+
+/* ==================== 真终端（PTY） ====================
+ * Electron 桌面端：走主进程 node-pty 起真实 shell —— 支持 vim/top/ssh、Ctrl+C、Tab 补全、
+ *   长命令实时出字。提示符/行编辑/补全/历史全部由 shell 负责，前端只做字节转发。
+ * 浏览器环境：没有 preload，降级回既有的「输入行 + /project/exec」模式（含目录补全）。
+ */
+interface ElectronPtyApi {
+  isAvailable: () => Promise<{ available: boolean; error?: string; defaultShell?: string }>
+  create: (options: { cwd?: string; cols?: number; rows?: number; shell?: string }) => Promise<{
+    sessionId: string
+    pid: number
+    shell: string
+    cwd: string
+  }>
+  write: (sessionId: string, data: string) => Promise<boolean>
+  resize: (sessionId: string, cols: number, rows: number) => Promise<boolean>
+  kill: (sessionId: string) => Promise<boolean>
+  onData: (callback: (payload: { sessionId: string; data: string }) => void) => () => void
+  onExit: (callback: (payload: { sessionId: string; exitCode: number; signal?: number }) => void) => () => void
+}
+
+const ptyApi: ElectronPtyApi | undefined = (window as any).electronAPI?.pty
+/** 当前是否处于真 PTY 模式（true 时按键原样转发，不再走本地补全/输入行逻辑） */
+const ptyMode = ref(false)
+let ptySessionId = ''
+let offPtyData: (() => void) | null = null
+let offPtyExit: (() => void) | null = null
+/** shell 自己 exit 后置 true：下一次按键用于重连 */
+let ptyExited = false
 const isTerminalExecuting = ref(false)
 const terminalCwd = ref(props.workDir || '')
-let lastPromptText = ''
 
 // 补全相关
 const terminalGhostText = ref('')
@@ -114,7 +142,6 @@ const formatTerminalPrompt = () => {
 const writePrompt = () => {
   if (!xterm) return
   const prompt = formatTerminalPrompt()
-  lastPromptText = prompt
   xterm.write('\r\n' + prompt)
   inputBuffer = ''
   terminalGhostText.value = ''
@@ -139,6 +166,52 @@ const applyXtermTheme = () => {
   xterm.options.theme = resolvedTheme.value === 'dark' ? DARK_THEME : LIGHT_THEME
 }
 
+/**
+ * 尝试启动真 PTY 会话。
+ * @returns true = 真终端模式（vim/top/ssh、Ctrl+C、Tab 补全、实时输出）；
+ *          false = 降级到 /project/exec 简易模式（浏览器环境或 node-pty 不可用）
+ */
+const tryStartPty = async (): Promise<boolean> => {
+  if (!ptyApi?.isAvailable || !xterm) return false
+  try {
+    const info = await ptyApi.isAvailable()
+    if (!info?.available) {
+      xterm.writeln(`\x1b[33m[真终端不可用：${info?.error || '未知原因'}，已降级为简易模式（不支持交互式程序）]\x1b[0m`)
+      return false
+    }
+    const session = await ptyApi.create({
+      cwd: props.workDir || undefined,
+      cols: xterm.cols,
+      rows: xterm.rows
+    })
+    ptySessionId = session.sessionId
+    ptyMode.value = true
+    ptyExited = false
+    // 真终端由 shell 自己补全，本地补全弹层/ghost text 必须收起来，否则会与 shell 输出叠在一起
+    terminalShowSuggestions.value = false
+    terminalGhostText.value = ''
+
+    offPtyData = ptyApi.onData((payload) => {
+      if (!payload || payload.sessionId !== ptySessionId) return
+      xterm?.write(payload.data)
+    })
+
+    offPtyExit = ptyApi.onExit((payload) => {
+      if (!payload || payload.sessionId !== ptySessionId) return
+      ptySessionId = ''
+      ptyMode.value = false
+      ptyExited = true
+      offPtyData?.(); offPtyData = null
+      offPtyExit?.(); offPtyExit = null
+      xterm?.write(`\r\n\x1b[33m[会话已结束 exitCode=${payload.exitCode}；按任意键重新连接]\x1b[0m\r\n`)
+    })
+    return true
+  } catch (e: any) {
+    xterm?.writeln(`\x1b[33m[真终端启动失败：${e?.message || '未知错误'}，已降级为简易模式]\x1b[0m`)
+    return false
+  }
+}
+
 const initXterm = () => {
   if (!xtermContainer.value || xterm) return
   commandHistory = loadHistory()
@@ -156,8 +229,17 @@ const initXterm = () => {
   fitAddon.fit()
   applyXtermTheme()
 
-  // 容器大小变化自动 fit
-  const ro = new ResizeObserver(() => { try { fitAddon.fit() } catch { /* ignore */ } })
+  // 容器大小变化自动 fit；PTY 模式下还要把新尺寸同步给 shell（否则换行/全屏程序错位）
+  const ro = new ResizeObserver(() => {
+    try {
+      fitAddon.fit()
+    } catch {
+      return
+    }
+    if (ptyMode.value && ptySessionId && xterm) {
+      void ptyApi?.resize(ptySessionId, xterm.cols, xterm.rows)
+    }
+  })
   ro.observe(xtermContainer.value)
 
   // 监听主题变化 → 实时切换 xterm 主题（基于 Pinia + 系统媒体查询）
@@ -169,6 +251,19 @@ const initXterm = () => {
 
   // onData 键盘处理
   xterm.onData((data) => {
+    // 会话刚结束：任意键重连真 PTY（靠标记位，不重复注册监听器）
+    if (ptyExited) {
+      ptyExited = false
+      void tryStartPty()
+      return
+    }
+    // 真终端模式：所有按键（含 Ctrl+C / Tab / 方向键 / 输入法合成）原样转发给 shell，
+    // 行编辑、补全、历史、信号全部由 shell 负责 —— 前端不再自绘提示符。
+    if (ptyMode.value) {
+      if (ptySessionId) void ptyApi?.write(ptySessionId, data)
+      return
+    }
+
     if (isTerminalExecuting.value) return
     if (data === '\r') {
       terminalGhostText.value = ''
@@ -250,14 +345,30 @@ const initXterm = () => {
     }
   })
 
-  xterm.writeln('CodeCraft Terminal — 输入命令，按 Enter 执行')
-  writePrompt()
+  xterm.writeln('CodeCraft Terminal')
   xterm.focus()
+
+  // 异步探测真终端：成功 → PTY 模式（提示符/补全/历史全部由 shell 提供）；
+  // 失败 / 浏览器环境 → 打印简易模式说明并画本地提示符
+  void tryStartPty().then(ok => {
+    if (ok) return
+    xterm?.writeln('\x1b[2m简易模式：输入命令，按 Enter 执行（Tab 补全路径）\x1b[0m')
+    writePrompt()
+  })
 }
 
 const disposeXterm = () => {
   systemThemeCleanup?.()
   systemThemeCleanup = null
+  // 先收 PTY：只关面板不 kill 会留下孤儿 shell 进程
+  offPtyData?.(); offPtyData = null
+  offPtyExit?.(); offPtyExit = null
+  if (ptySessionId) {
+    void ptyApi?.kill(ptySessionId)
+    ptySessionId = ''
+  }
+  ptyMode.value = false
+  ptyExited = false
   if (xterm) { xterm.dispose(); xterm = null }
 }
 
@@ -450,6 +561,23 @@ const processCommand = async (cmd: string) => {
 // ===== 生命周期 =====
 watch(() => props.workDir, (val) => {
   if (val && !terminalCwd.value) terminalCwd.value = val
+  // 真终端：shell 在 spawn 时就把 cwd 固定了，切目录必须 kill 旧会话再重开，
+  // 否则提示符还停在旧目录，用户会以为 cd 没生效。（immediate 时 xterm 尚未创建，跳过）
+  if (ptyApi && xterm && (ptyMode.value || ptySessionId)) {
+    offPtyData?.(); offPtyData = null
+    offPtyExit?.(); offPtyExit = null
+    if (ptySessionId) {
+      void ptyApi.kill(ptySessionId)
+      ptySessionId = ''
+    }
+    ptyMode.value = false
+    ptyExited = false
+    xterm.clear()
+    xterm.writeln('CodeCraft Terminal — 工作目录已切换')
+    void tryStartPty().then(ok => {
+      if (!ok) writePrompt()
+    })
+  }
 }, { immediate: true })
 
 onMounted(() => { nextTick(() => initXterm()) })

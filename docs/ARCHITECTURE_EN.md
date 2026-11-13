@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v3.0.8 | Updated: 2026-11-11 | Audience: Developers / AI Collaborators
+> Version: v3.0.9 | Updated: 2026-11-13 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -509,6 +509,12 @@ src/main/java/com/example/agentdeepseek/
 11. **Tool-Call Sequence Pairing (hard constraint)**: `assistant.tool_calls` and `role=tool` messages must be strictly one-to-one; a single mismatch returns 400 and permanently poisons the conversation. Every LLM request exit must pass through `ToolCallSequenceSanitizer` (idempotent, copy-on-write) — any "remove one side only" patch is wrong.
 12. **Chat Message API**: always use `GET /conversation/{id}/messages/page` (by-round cursor) instead of the full `GET /conversation/{id}/messages` for long conversations.
 13. **Auto Update**: `pom.xml` is the single source of truth for the version (`scripts/sync-version.*` syncs to electron); GitHub Releases asset names must match `CodeCraft-Setup-{version}.exe` / `CodeCraft-{version}.dmg` / `CodeCraft-{version}.AppImage`.
+14. **Three-tier context modes (v3.0.9)**: `deepseek.context-mode` = `full` / `balanced` (default) / `compact`. `balanced` **never writes reasoning in the first place** (rather than trimming afterwards), keeping the prefix naturally stable with zero extra invalidation per turn; only `compact` summarizes tool results (costing one cache rebuild). The legacy `stripHistoryReasoning` flag is mapped by `DeepSeekConfig.resolveContextMode()`, so no migration is needed. Read this before touching context building — **any change to `system` or `tools` invalidates the entire prefix cache**, and at a 98% hit rate the payback period is 100–150 turns.
+15. **Token cost collection (v3.0.9)**: the SSE collection point must live in `doOnNext` (**never after `takeWhile`** — that drops the trailing usage frame); persistence happens in `doFinally` (so completion, errors and cancellations are all recorded). Pricing comes from `llm.pricing` config (including the cache-hit price); unit prices are never hard-coded.
+16. **Prefix cache fingerprint (v3.0.9)**: `ContextFingerprint` hashes `system + tools` before every request and WARNs on any change. Cache invalidation raises no error, only the bill — this is the single lever that turns "silently more expensive" into "visible in logs". Watch that log line when adding or editing tool schemas.
+17. **Tool definition merging (v3.0.9)**: `git_*` (6) → `git`, `screen_capture` + `desktop_control` → `desktop`. Implemented as **pure delegation** (route by `action` to the atomic tool instances, parameters passed through); the legacy tool classes remain registered in `ToolRegistry` for historical messages, and `normalizeToolNames()` keeps old names working. The goal is shrinking the per-turn schema and the model's choice space, not reducing registration entries.
+18. **Electron terminal PTY (v3.0.9)**: inside Electron the terminal uses a real pseudo-terminal via `node-pty` (`electron/pty-manager.js`, IPC channel, no local port); the browser degrades to `/project/exec`. `node-pty` is a native module and **must be `asarUnpack`ed**; `before-quit` must call `disposeAllSessions()` (otherwise lingering shells block exit). It ships win32/darwin prebuilds but **no linux prebuild** — Linux build machines need a node-gyp toolchain.
+19. **Long-running command backgrounding (v3.0.9)**: `command(action=exec)` **no longer kills the process** on timeout — it moves it to a background task (returning a task ID) with `wait` / `logs` / `stop` to follow up. The `timeout` parameter now **only applies to `wait`**. Duplicate calls with the same cwd + command are intercepted; one-shot tasks (cap 10) and long-lived services (cap 5) use separate pools; output is retained for 30 minutes after completion. Emergency rollback: `command.exec.background-after-seconds: 0`.
 
 ---
 

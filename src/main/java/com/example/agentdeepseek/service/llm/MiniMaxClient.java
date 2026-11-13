@@ -65,13 +65,23 @@ public class MiniMaxClient extends AbstractLLMClient {
      */
     @Override
     protected Map<String, Object> buildThinkingParams(String thinkingMode) {
-        String effectiveMode = (thinkingMode == null || thinkingMode.isEmpty())
-                ? "non-thinking" : thinkingMode;
+        // 统一档位归一化（none / low / medium / high / max / auto）
+        String canonical = AbstractLLMClient.normalizeThinkingMode(thinkingMode);
+        // MiniMax 历史行为：未指定时默认关闭思考（工具调用场景更稳定）
+        if (EFFORT_AUTO.equals(canonical)) {
+            canonical = EFFORT_NONE;
+        }
 
-        String type = switch (effectiveMode) {
-            case "thinking" -> "enabled";
-            case "thinking_max" -> "adaptive";
-            default -> "disabled"; // non-thinking
+        // MiniMax 只有三态：disabled / enabled / adaptive（不区分具体档位）
+        //   none                  → disabled
+        //   low / medium / high   → enabled（浅思考也属于"开启"，绝不能再落到 disabled）
+        //   max                   → adaptive（自适应深度思考）
+        // ⚠️ 历史 Bug 修复：旧实现用 switch 的 default 兜 non-thinking，
+        //    导致 thinking_low 掉进 default 把思考直接关掉。
+        String type = switch (canonical) {
+            case EFFORT_NONE -> "disabled";
+            case EFFORT_MAX -> "adaptive";
+            default -> "enabled";
         };
         return Map.of("thinking", Map.of("type", type));
     }
