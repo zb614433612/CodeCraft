@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v3.0.9 | 更新：2026-11-13 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.1.0 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -536,6 +536,7 @@ src/main/java/com/example/agentdeepseek/
 17. **工具定义合并（v3.0.9）**: `git_*`（6 个）→ `git`、`screen_capture` + `desktop_control` → `desktop`。**纯委托**实现（按 action 路由到原子工具实例，参数透传），旧工具类仍注册在 `ToolRegistry` 供历史消息引用，`normalizeToolNames()` 负责旧名兼容。合并的目的是压缩每轮下发的 schema 与减少模型的选择空间，不是减少注册项。
 18. **Electron 终端 PTY（v3.0.9）**: 终端在 Electron 内走 `node-pty` 真伪终端（`electron/pty-manager.js`，IPC 通道，不监听本地端口）；浏览器降级走 `/project/exec`。`node-pty` 是原生模块，**必须 `asarUnpack`**，且 `before-quit` 必须调 `disposeAllSessions()`（否则残留 shell 拖住退出）。自带 win32/darwin prebuilds、**无 linux prebuild**，Linux 打包机需 node-gyp 工具链。
 19. **长耗时命令后台化（v3.0.9）**: `command(action=exec)` 超时**不杀进程**，转后台任务（返回任务 ID），配合 `wait` / `logs` / `stop`。`timeout` 参数语义已改为**仅对 `wait` 生效**。同 cwd + 同命令有去重拦截；一次性任务（上限 10）与长期服务（上限 5）分池计数；结束输出保留 30 分钟。应急回退：`command.exec.background-after-seconds: 0`。
+20. **按轮成本归并（v3.1.0）**: 一次用户提问在工具循环里会拆成多次 API 请求，成本只有按 `turn_id` 归并才能对应「这一轮花了多少」。`turn_id` 由前端生成、随 `ChatRequest.turnId` 下发（与代码快照、重新生成共用同一 id），存入 `llm_token_usage.turn_id`，按轮查询走 `GET /api/token-usage/turns`。**存量数据没有 `turn_id`，只计入会话 / 时间维度汇总** —— 不要事后回填到某一轮，否则该轮成本虚高。带 `turn_id` 的 insert 失败必须降级为不带该列写入：宁可丢「按轮展示」，不能让整条成本记账静默中断。删除会话会级联删除该会话的成本明细（`ConversationServiceImpl` 显式调用，不靠外键）。
 
 ---
 

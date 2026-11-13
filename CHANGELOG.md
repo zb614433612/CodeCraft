@@ -5,6 +5,86 @@
 
 ---
 
+## [3.1.0] - 2026-11-14
+
+> 成本可见性版本：v3.0.9 让成本「事后可查」，本版让它「边用边可见」——每条 AI 回复下方**常显**
+> 本轮成本 / 缓存命中率 / token，输入区底部显示整会话累计。配套后端 `turn_id` 按轮归并、
+> 删除会话级联清理账单，并把「上下文模式」入口从设置页收敛到聊天页模型选择器。
+> 后端 + 两套前端均有改动，**需重启后端**（新增 `turn_id` 列与 `/api/token-usage/turns` 接口）；桌面端需重新打包。
+
+### 💰 每轮对话成本展示（新增）
+
+- **背景**：v3.0.9 的成本看板是「事后查阅」——聊天过程中看不到本轮花了多少，也就谈不上「边用边省」。
+  更关键的是，工具循环会把**一次提问**拆成多次 API 请求（编译失败自动重试、多步文件编辑常见 5~10 次），
+  只按 `iteration` 记录时用户看到的是一串碎片数字，而不是直觉里的「这一轮多少钱」。
+- **归并口径**：前端每次提问生成 `turnId`（与代码快照、「重新生成」的删除范围复用同一个 id），随
+  `ChatRequest.turnId` 下发 → 后端存入 `llm_token_usage.turn_id` → 按 `turn_id` 聚合工具循环内的多次请求。
+  **存量数据不参与**：v3.0.9 及更早的记录没有 `turn_id`，硬塞进某一轮会让该轮成本虚高，故只计入会话 / 时间维度汇总。
+- **后端实现**：
+  - `schema.sql`：`llm_token_usage` 新增 `turn_id VARCHAR(64)` 与 `idx_usage_turn (conversation_id, turn_id)`；
+    附 H2 `ADD COLUMN IF NOT EXISTS` 与 MySQL 兜底两条迁移语句（老库自动升级，无需手工改表）。
+  - `LlmTokenUsageMapper`：新增 `summarizeByTurn`（`GROUP BY turn_id`，`ORDER BY MIN(id)` 保证按发生顺序返回）、
+    `deleteByConversationId`、`insertWithoutTurn`。
+  - `TokenUsageParser.toEntity()` 增加 `turnId` 参数；`DeepSeekServiceImpl.persistTokenUsageSafely()` 取其
+    `apiRequest._turnId`（与快照 / 重新生成同源），启动时补一次 `turn_id` 列兜底。
+  - **降级路径**：带 `turn_id` 的 insert 失败会自动改为不带该列写入——老库迁移失败时宁可失去「按轮展示」，
+    也不能让整条成本记账静默中断（成本看板会变成空表）。
+  - 新增 `TokenUsageTurnVO` + `TokenUsageService.turnUsage()`（含 `cacheHitRate` 计算）+
+    `GET /api/token-usage/turns?conversationId=`。
+- **前端（两套同步：`frontend/`、`frontend-v3/`）**：
+  - 每条 AI 回复底部**常显**「本轮 ¥x · 缓存 x% · x tokens」；工具循环发起多次请求时追加轮次徽章
+    （hover 可见「共发起 N 次请求，已合并计入本轮」）。刻意不做 hover 显隐——成本要能被看见才会被优化。
+  - 输入区底部新增「会话 ¥x · 缓存 x% · x tokens」，与既有「上下文 X」并排但**语义不同**：
+    前者是「这个会话历史累计烧了多少」，后者是「这一屏要送多少」。
+  - 布局上用量在左、操作按钮在右：按钮 hover 渐显时只向右挤占空白，不会把数字来回推动；
+    外层 `min-height` 预留行高，避免有无用量时消息高度抖动。
+  - `App.vue` 统一拉取与分发（`sessionUsageMap` / `turnUsageMap`），加载历史消息与每轮结束后各刷一次；
+    删除会话、草稿转正式会话时同步清理与迁移缓存，避免数字张冠李戴。
+  - 匹配不到 `turnId` 时整块用量不渲染（而不是显示「¥0」），不给用户假信息。
+- **写入时序处理**：后端在 Flux `doFinally` 里才落库，前端收到 done 事件时该记录可能还没写入 →
+  采用「立即拉一次 + 800ms 延时补拉一次」，补拉仅在「这一轮仍无数据」时触发，不产生无谓请求。
+
+### 🗑️ 删除会话时级联清理成本记录（行为变更）
+
+- **背景**：成本看板按会话分组，原设计「刻意不加外键，会话删除后历史账单仍应保留」用于长期核算；
+  但实际使用中，删除会话后看板会留下 `会话#N` 幽灵条目——点不进去（会话已不存在），也无从判断是谁的。
+- **变更**：`ConversationServiceImpl.deleteConversation()` 显式调用 `deleteByConversationId()`
+  （独立 try/catch，清理失败不影响会话删除本身）；`SystemController` 的「重置所有数据」表清单
+  加入 `llm_token_usage`。
+- **影响**：删除会话 = 同时删除该会话的成本明细，跨会话的时间 / 模型维度汇总不再包含已删除会话的消耗。
+  需要长期成本审计的话，请在删除前先导出。
+
+### ⚙️ 上下文模式入口收敛（体验调整）
+
+- 设置页移除「本机偏好 → 上下文模式」整块——它与聊天页模型选择器写的是同一份 `settingsStore.contextMode`，
+  两处入口容易让人误以为可以按页分别设置，实际互相覆盖。
+- 唯一入口改为聊天页「模型选择」弹层（`ChatModelPicker.vue`），三档 `full` / `balanced` / `compact` 与后端
+  `ContextMode` 枚举同源；聊天页底部的「⚡ 精简」徽章仍随 `compact` 显示，口径不变。
+
+### ✅ 验证
+
+- 后端 `mvn -q compile -DskipTests` 通过。
+- v3 `npx vue-tsc --noEmit -p tsconfig.app.json` 零错误；经典版 typecheck 无新增错误。
+- H2 实测 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 可用；开发库确认 `turn_id` 列已就绪。
+
+### 📚 文档与版本号
+
+- 版本号同步：后端 `pom.xml`（产物 `code-craft-3.1.0.jar`）、经典版 / v3 前端 `package.json` + lock、
+  Electron `version` 与 `extraResources` jar 路径、MCP Server 握手版本 `CodeCraftMcpServer.SERVER_VERSION`。
+- 文档：README(_EN) 版本徽章；ARCHITECTURE(_EN) 新增「按轮成本归并」关键约定；TOOL_SYSTEM(_EN) /
+  DEEPSEEK_SERVICE_IMPL(_EN) / LLM_PROVIDER_SYSTEM(_EN) 版本标注；DEV_QUICKREF / RELEASE_CHECKLIST(_EN)
+  打包命令示例；FAQ 版本示例 —— 统一到 v3.1.0。
+
+### ⬆️ 升级说明
+
+- **后端需重启**：启动时会自动为老库补 `turn_id` 列（失败则降级为不按轮展示，不影响对话）。
+- **桌面端需重新打包 / 重新安装**：安装包内嵌的 jar 已更新（新增接口与 DDL）。
+- **存量会话**：v3.0.9 及更早产生的成本记录没有 `turn_id`，历史消息下方不会出现「本轮」用量，
+  但会话级汇总（输入区底部）仍会包含它们。
+- 无配置项变更，无需迁移 `application.yml`。
+
+---
+
 ## [3.0.9] - 2026-11-13（2026-11-14 重新构建）
 
 > 成本治理 + 长任务体验双主线版：四项成本/上下文治理（上下文模式三档、思考档位归一、能力声明配置化、Token 成本看板）+

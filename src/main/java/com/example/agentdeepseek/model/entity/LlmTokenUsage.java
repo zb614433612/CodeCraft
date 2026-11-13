@@ -30,6 +30,16 @@ public class LlmTokenUsage {
     /** 会话 ID（可空：后台任务/定时任务无归属会话时为空） */
     private Long conversationId;
 
+    /**
+     * 轮次 ID（前端生成，一次用户提问一个）。
+     * <p>
+     * 工具循环会把同一次提问拆成多次 API 请求（每次一个 {@code iteration}），
+     * 只有靠 turnId 才能把它们归并成「这一轮对话花了多少钱／命中率多少」。
+     * 后台任务、定时任务无 turnId（可空），它们只参与会话/时间维度汇总。
+     * </p>
+     */
+    private String turnId;
+
     /** 关联的 assistant 消息 ID（可空：落库时尚未生成消息 ID） */
     private Long messageId;
 

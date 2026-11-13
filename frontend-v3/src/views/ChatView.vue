@@ -552,6 +552,7 @@
       :context-tokens="conversation.stats?.contextTokens"
       :context-mode="conversation.contextMode"
       :balance="conversation.balance"
+      :usage="conversation.usage"
       :optimizing="optimizingPrompt"
       :undo-available="optimizeUndoAvailable"
       @send="onSend"
@@ -629,7 +630,7 @@
 <script setup lang="ts">
 import DrawerResizer from '../components/DrawerResizer.vue'
 import { computed, nextTick, onBeforeUnmount, ref, watch, onMounted } from 'vue'
-import ChatComposer, { type Attachment } from '../components/ChatComposer.vue'
+import ChatComposer, { type Attachment, type SessionUsage } from '../components/ChatComposer.vue'
 import ChatMessage, { type ChatMessageModel } from '../components/ChatMessage.vue'
 import ChatApproval from '../components/ChatApproval.vue'
 import ProviderGuide from '../components/ProviderGuide.vue'
@@ -663,6 +664,11 @@ export interface ConversationDetail {
   /** 上下文模式：full / compact（输入区底部据此显示「⚡ 精简」徽章） */
   contextMode?: string
   balance?: string
+  /**
+   * 整个会话的真实用量（后端 llm_token_usage 汇总，含全部历史轮次与工具循环）。
+   * 与 stats.contextTokens 是两个口径，见 ChatComposer 底部两段小字。
+   */
+  usage?: SessionUsage
   updatedAt?: string
   stats?: {
     toolCalls: number

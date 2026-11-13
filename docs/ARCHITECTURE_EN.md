@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 中文版：[🇨🇳 ARCHITECTURE](./ARCHITECTURE.md)
 # CodeCraft Architecture Panorama
 
-> Version: v3.0.9 | Updated: 2026-11-13 | Audience: Developers / AI Collaborators
+> Version: v3.1.0 | Updated: 2026-11-14 | Audience: Developers / AI Collaborators
 > This document aims to help new developers (including AI Agents) build a complete cognitive map of the project within 5 minutes.
 
 ---
@@ -515,6 +515,7 @@ src/main/java/com/example/agentdeepseek/
 17. **Tool definition merging (v3.0.9)**: `git_*` (6) → `git`, `screen_capture` + `desktop_control` → `desktop`. Implemented as **pure delegation** (route by `action` to the atomic tool instances, parameters passed through); the legacy tool classes remain registered in `ToolRegistry` for historical messages, and `normalizeToolNames()` keeps old names working. The goal is shrinking the per-turn schema and the model's choice space, not reducing registration entries.
 18. **Electron terminal PTY (v3.0.9)**: inside Electron the terminal uses a real pseudo-terminal via `node-pty` (`electron/pty-manager.js`, IPC channel, no local port); the browser degrades to `/project/exec`. `node-pty` is a native module and **must be `asarUnpack`ed**; `before-quit` must call `disposeAllSessions()` (otherwise lingering shells block exit). It ships win32/darwin prebuilds but **no linux prebuild** — Linux build machines need a node-gyp toolchain.
 19. **Long-running command backgrounding (v3.0.9)**: `command(action=exec)` **no longer kills the process** on timeout — it moves it to a background task (returning a task ID) with `wait` / `logs` / `stop` to follow up. The `timeout` parameter now **only applies to `wait`**. Duplicate calls with the same cwd + command are intercepted; one-shot tasks (cap 10) and long-lived services (cap 5) use separate pools; output is retained for 30 minutes after completion. Emergency rollback: `command.exec.background-after-seconds: 0`.
+20. **Per-turn cost roll-up (v3.1.0)**: one user question becomes several API requests inside the tool loop, so cost only maps to "what this turn cost" when aggregated by `turn_id`. The id is generated on the frontend and sent as `ChatRequest.turnId` (the same id already used by code snapshots and regenerate), stored in `llm_token_usage.turn_id`, and queried per turn via `GET /api/token-usage/turns`. **Legacy rows carry no `turn_id` and only count toward conversation/time totals** — never backfill them into a turn, that would inflate it. If the insert with `turn_id` fails it must degrade to a write without that column: losing per-turn display is acceptable, silently losing the whole ledger is not. Deleting a conversation cascade-deletes its cost detail (called explicitly from `ConversationServiceImpl`, not via a foreign key).
 
 ---
 

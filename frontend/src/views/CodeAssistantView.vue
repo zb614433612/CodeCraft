@@ -222,7 +222,7 @@
         v-slot="{ item: msg, active }"
         @scroll.passive="handleMessageListScroll"
       >
-        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [streamingUpdateTick] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '', msg.taskError?.message?.length || 0]">
+        <DynamicScrollerItem :item="msg" :active="active" :size-dependencies="msg.isStreaming ? [streamingUpdateTick] : [msg.content?.length || 0, msg.thinking?.length || 0, msg.snapshotId || '', msg.taskError?.message?.length || 0, msg.usage ? 1 : 0]">
         <!-- v-track-msg-size：实测高度兜底（内容异步变化/展开折叠后尺寸表未同步 → 触发重测，防消息重叠） -->
         <div :class="['message-item', msg.role]" v-track-msg-size="msg.id">
           <div class="message-avatar">
@@ -326,6 +326,22 @@
             <div v-if="msg.role === 'assistant' && msg.taskError" class="message-task-error">
               <div class="task-error-title">⚠️ {{ msg.taskError.title || '任务已中断' }}</div>
               <div class="task-error-detail">{{ msg.taskError.message }}</div>
+            </div>
+            <!--
+              本轮真实用量（成本 / 缓存命中 / token）：放在消息末尾，与 v3 的「操作区用量」对齐。
+              常显而非 hover：成本要能被看见才会被优化。存量数据无 turnId → msg.usage 为空 → 整行不渲染。
+            -->
+            <div
+              v-if="msg.role === 'assistant' && msg.usage && !msg.isStreaming"
+              class="message-usage"
+              :title="usageTitleOf(msg.usage)"
+            >
+              <span class="message-usage-cost">{{ formatCost(msg.usage.costEstimate) }}</span>
+              <span class="message-usage-sep">·</span>
+              <span>缓存 {{ formatHitRate(msg.usage.cacheHitRate) }}</span>
+              <span class="message-usage-sep">·</span>
+              <span>{{ formatUsageTokens(msg.usage.totalTokens) }} tokens</span>
+              <span v-if="msg.usage.requestCount > 1" class="message-usage-rounds">{{ msg.usage.requestCount }} 轮</span>
             </div>
           </div>
         </div>
@@ -870,6 +886,13 @@
               上下文 Token: {{ formatTokenCount(totalContextTokens) }}
               <span v-if="settingsStore.contextMode === 'compact'" class="context-mode-badge" title="精简模式：非本轮工具调用和思考过程已精简">⚡ 精简</span>
             </span>
+            <!--
+              整会话真实用量：与「上下文 Token」是两个口径 ——
+              上面那个是「当前这一屏要送多少」，这个是「本会话历史累计烧了多少」（含分页之外的全部轮次）。
+            -->
+            <span v-if="sessionUsageText" class="session-usage" :title="sessionUsageTitle">
+              {{ sessionUsageText }}
+            </span>
           </div>
         </div>
         <!-- 任务清单下拉面板 -->
@@ -1065,9 +1088,11 @@ import type { DelegateProgressData } from '@/utils/sse-client'
 import type { TaskErrorData } from '@/utils/sse-client'
 import { submitAnswer } from '@/api/askUser'
 import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rollbackFile, rollbackAllFiles, getSnapshotFileContent, type SessionChanges } from '@/api/snapshot'
+/* 成本可观测：会话 / 单轮真实用量（每条 AI 回复下方 + 输入区底部） */
+import { getUsageSummary, getUsageTurns, type TokenUsageSummary, type TokenUsageTurn } from '@/api/token-usage'
 import { useSettingsStore } from '@/store/settings'
 import { renderMarkdown, renderMarkdownLight } from '@/utils/markdown'
-import { estimateTokenCount, formatTokenCount } from '@/utils/tokenCalculator'
+import { estimateTokenCount, formatTokenCount, formatCost, formatHitRate, formatUsageTokens } from '@/utils/tokenCalculator'
 import {
   CodeOutlined,
   DeleteOutlined,
@@ -1167,6 +1192,14 @@ interface ChatMessage {
   /** 任务错误（LLM 接口错误停止时由 task_error 事件写入；聊天区展示错误详情，
    *  输入区同步展示「任务中断」横幅 + 「一键继续」入口） */
   taskError?: TaskErrorData
+  /**
+   * 本轮真实用量（成本 / 缓存命中率 / token）。
+   *
+   * <p>来自 {@code GET /api/token-usage/turns?conversationId=}，后端按 turn_id
+   * 把工具循环内的多次请求聚合成「这一轮」。v3.0.9 及更早的存量数据没有 turnId，
+   * 匹配不到就是 undefined —— 此时不渲染，不显示「¥0」误导用户。</p>
+   */
+  usage?: TokenUsageTurn
 }
 
 /** M4/M7：消息气泡中展示的文件（图片→缩略图；文档→文件图标卡片） */
@@ -3587,6 +3620,9 @@ const clearConvState = (convId: string | null | undefined) => {
   taskItemsMap.delete(convId)
   activeTaskMap.delete(convId)
   pendingQuestions.delete(convId)  // P3：待审批问题随会话删除一并清理
+  // 成本用量缓存：会话已删，这些数字只对那个会话有意义（后端已同步删掉 llm_token_usage 行）
+  delete sessionUsageMap.value[convId]
+  delete turnUsageMap.value[convId]
 }
 
 // Markdown 渲染缓存（避免历史消息重复解析 markdown，性能优化）
@@ -3752,6 +3788,114 @@ const totalContextTokens = computed(() => {
   return total
 })
 
+/* ============================ 真实用量（成本 / 缓存命中 / token） ============================ */
+
+/**
+ * 会话 → 按轮用量（turnId → 聚合结果）。
+ * 一次请求覆盖整个会话（后端 GROUP BY turn_id），再按 turnId 贴到具体 AI 消息上。
+ */
+const turnUsageMap = ref<Record<string, Record<string, TokenUsageTurn>>>({})
+
+/** 会话 → 会话级汇总（输入区底部「会话 ¥x · 缓存 x% · x tokens」） */
+const sessionUsageMap = ref<Record<string, TokenUsageSummary>>({})
+
+/** 当前会话的汇总用量 */
+const currentSessionUsage = computed<TokenUsageSummary | null>(
+  () => sessionUsageMap.value[currentConversationId.value] ?? null
+)
+
+/** 底部小字：有数据才显示，避免「会话 ¥0 · 缓存 — · 0 tokens」的噪音 */
+const sessionUsageText = computed(() => {
+  const u = currentSessionUsage.value
+  if (!u || (u.totalTokens <= 0 && u.costEstimate <= 0)) return ''
+  return `会话 ${formatCost(u.costEstimate)} · 缓存 ${formatHitRate(u.cacheHitRate)} · ${formatUsageTokens(u.totalTokens)} tokens`
+})
+
+/** 底部小字悬停说明：讲清结构与「估算非账单」 */
+const sessionUsageTitle = computed(() => {
+  const u = currentSessionUsage.value
+  if (!u) return ''
+  const lines = [
+    `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens)} / 未命中 ${formatUsageTokens(u.cacheMissTokens)}）`,
+    `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens)}）`,
+    `缓存命中率 ${formatHitRate(u.cacheHitRate)}`
+  ]
+  if (u.requestCount) lines.push(`共 ${u.requestCount} 次模型请求（含工具循环内每一轮）`)
+  lines.push('完整明细见「成本看板」页面')
+  return lines.join('\n')
+})
+
+/** 单条消息的用量悬停说明（构成 + 轮次说明） */
+function usageTitleOf(u: TokenUsageTurn): string {
+  const lines = [
+    `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens)} / 未命中 ${formatUsageTokens(u.cacheMissTokens)}）`,
+    `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens)}）`,
+    `缓存命中率 ${formatHitRate(u.cacheHitRate)}`
+  ]
+  if (u.requestCount > 1) lines.push(`工具循环共发起 ${u.requestCount} 次请求，已合并计入本轮`)
+  return lines.join('\n')
+}
+
+/** 把按轮用量贴到消息上（只贴 assistant；就地赋值以触发响应式更新） */
+function applyTurnUsage(conversationId: string) {
+  const byTurn = turnUsageMap.value[conversationId]
+  const list = messages.value[conversationId]
+  if (!byTurn || !list?.length) return
+  for (const msg of list) {
+    if (msg.role !== 'assistant') continue
+    const hit = msg.turnId ? byTurn[msg.turnId] : undefined
+    if (hit) msg.usage = hit
+    else if (msg.usage) msg.usage = undefined
+  }
+}
+
+/** 拉按轮聚合用量（失败静默：统计不可用不该影响聊天） */
+async function refreshTurnUsage(conversationId = currentConversationId.value) {
+  const sid = parseInt(conversationId)
+  if (!sid || Number.isNaN(sid)) return
+  try {
+    const list = await getUsageTurns(sid)
+    const byTurn: Record<string, TokenUsageTurn> = {}
+    for (const item of list || []) {
+      if (item.turnId) byTurn[item.turnId] = item
+    }
+    turnUsageMap.value = { ...turnUsageMap.value, [conversationId]: byTurn }
+    applyTurnUsage(conversationId)
+  } catch (_) { /* 静默 */ }
+}
+
+/** 拉会话级汇总用量（失败静默） */
+async function refreshSessionUsage(conversationId = currentConversationId.value) {
+  const sid = parseInt(conversationId)
+  if (!sid || Number.isNaN(sid)) return
+  try {
+    const summary = await getUsageSummary('all', sid)
+    if (summary) {
+      sessionUsageMap.value = { ...sessionUsageMap.value, [conversationId]: summary }
+    }
+  } catch (_) { /* 静默 */ }
+}
+
+/**
+ * 一轮结束后刷新用量：立即拉一次 + 800ms 后补一次。
+ *
+ * <p>后端在 SSE 流终止的 doFinally 里才落库，前端收到 done 时可能还没写完 ——
+ * 补拉只在「这一轮仍没数据」时发，避免无谓请求。</p>
+ */
+function refreshUsageAfterTurn(conversationId = currentConversationId.value) {
+  void refreshTurnUsage(conversationId)
+  void refreshSessionUsage(conversationId)
+  window.setTimeout(() => {
+    const list = messages.value[conversationId] || []
+    const lastAssistant = [...list].reverse().find(m => m.role === 'assistant')
+    if (lastAssistant?.turnId && lastAssistant.usage) return
+    void refreshTurnUsage(conversationId)
+    void refreshSessionUsage(conversationId)
+  }, 800)
+}
+
 const SAVED_CONV_KEY = 'code_assistant_last_conv_id'
 
 const saveConversationId = (id: string) => {
@@ -3864,6 +4008,9 @@ const fetchMessages = async (conversationId: string, force = false) => {
       messageCursors.value[conversationId] = response.data.nextBeforeId ?? null
       // 历史消息加载后，匹配回滚快照
       matchSnapshotsForMessages(conversationId)
+      // 真实用量：会话汇总 + 按轮明细（历史消息的「本轮成本」靠这一步点亮）
+      void refreshSessionUsage(conversationId)
+      void refreshTurnUsage(conversationId)
       // M4：历史图片回显（按 messageId 映射 file_reference）
       loadMessageFileRefs(conversationId)
       // 加载会话改动统计
@@ -5476,6 +5623,12 @@ const sendMessage = async (textOverride?: string) => {
     }
     // ★ 每次对话结束后刷新一次 DeepSeek 余额（当前 Provider 为 DeepSeek 时自动展示）
     refreshBalance()
+    /*
+      ★ 真实用量：本轮成本 / 缓存命中 / token。
+      立即拉一次保证「不卡」，再延时补一次兜住「usage 落库晚于最后一个 SSE 事件」的时序差
+      （后端在 Flux 的 doFinally 里写库，见 refreshUsageAfterTurn）。
+    */
+    refreshUsageAfterTurn(convId)
   }
 }
 
@@ -8288,6 +8441,44 @@ watch(currentConversationId, (newId) => {
 }
 [data-theme="dark"] .task-error-title {
   color: #ff7875;
+}
+
+/* ===== 本轮真实用量（消息末尾：成本 · 缓存命中 · token） =====
+   常显而非 hover：成本要能被看见才会被优化。用小字 + 极浅色，避免抢正文视线。 */
+.message-usage {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.message-usage-cost {
+  font-weight: 600;
+  color: var(--text-2);
+}
+.message-usage-sep {
+  color: var(--text-4, #b0b0b0);
+  opacity: 0.7;
+}
+.message-usage-rounds {
+  padding: 0 5px;
+  height: 15px;
+  line-height: 15px;
+  border-radius: 999px;
+  background: var(--bg-root);
+  border: 1px solid var(--border);
+  font-size: 10px;
+}
+
+/* ===== 整会话真实用量（输入区底部：与「上下文 Token」并排） ===== */
+.session-usage {
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+  white-space: nowrap;
 }
 
 /* ===== 思考过程 ===== */

@@ -141,11 +141,20 @@ public class TokenUsageParser {
 
     /**
      * 构造可落库的用量实体
+     *
+     * @param conversationId 会话 ID（可空）
+     * @param turnId         轮次 ID（前端生成，可空；空值只参与会话/时间维度汇总）
+     * @param messageId      关联消息 ID（当前落库时机拿不到，传 null）
+     * @param iteration      工具循环迭代轮次
+     * @param provider       Provider 编码
+     * @param model          模型名
+     * @param snapshot       本次请求的用量快照
      */
-    public LlmTokenUsage toEntity(Long conversationId, Long messageId, int iteration,
+    public LlmTokenUsage toEntity(Long conversationId, String turnId, Long messageId, int iteration,
                                   String provider, String model, UsageSnapshot snapshot) {
         LlmTokenUsage entity = new LlmTokenUsage();
         entity.setConversationId(conversationId);
+        entity.setTurnId(turnId);
         entity.setMessageId(messageId);
         entity.setIteration(iteration);
         entity.setProvider(provider);

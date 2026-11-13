@@ -199,27 +199,45 @@
       <span v-if="message.streaming" class="cc-caret" />
     </div>
 
-    <!-- 悬浮操作（复制 / 重新生成 / 回滚本轮改动） -->
-    <div v-if="!message.streaming" class="cc-msg-ai__actions">
-      <button class="cc-icon-btn cc-icon-btn--sm" title="复制" @click="$emit('copy', message)">
-        <svg class="cc-i cc-i--sm"><use href="#i-copy" /></svg>
-      </button>
-      <button class="cc-icon-btn cc-icon-btn--sm" title="重新生成" @click="$emit('regenerate', message)">
-        <svg class="cc-i cc-i--sm"><use href="#i-refresh" /></svg>
-      </button>
+    <!-- 悬浮操作（复制 / 重新生成 / 回滚本轮改动）+ 本轮真实用量 -->
+    <div v-if="!message.streaming" class="cc-msg-ai__foot">
       <!--
-        回滚本轮改动：本轮产生过代码快照时才出现（snapshotId 由 App.vue 按 turnId 匹配快照写入）。
-        做成「图标 + 文字」而非纯图标：破坏性操作需要一眼能看懂，不靠猜图标含义。
+        本轮用量：常显（不随 hover 隐藏）。
+        依据是「成本要能被看见才会被优化」——藏在 hover 里的数字没人会看。
+        顺序放在操作按钮之前：按钮 hover 渐显时只会向右挤占空白，不会把这段文字来回推动。
       -->
-      <button
-        v-if="message.snapshotId"
-        class="cc-msg-ai__rollback"
-        title="把这一轮改过的文件恢复到修改前的状态"
-        @click="$emit('rollback', message)"
-      >
-        <svg class="cc-i cc-i--sm"><use href="#i-undo" /></svg>
-        回滚改动
-      </button>
+      <span v-if="message.usage" class="cc-msg-ai__usage" :title="usageTitle">
+        <span class="cc-msg-ai__usage-item">{{ usageCost }}</span>
+        <span class="cc-msg-ai__usage-dot" />
+        <span class="cc-msg-ai__usage-item">缓存 <b>{{ usageHitRate }}</b></span>
+        <span class="cc-msg-ai__usage-dot" />
+        <span class="cc-msg-ai__usage-item"><b>{{ usageTokens }}</b> tokens</span>
+        <span v-if="message.usage.requestCount && message.usage.requestCount > 1" class="cc-msg-ai__usage-rounds">
+          {{ message.usage.requestCount }} 轮
+        </span>
+      </span>
+
+      <div class="cc-msg-ai__actions">
+        <button class="cc-icon-btn cc-icon-btn--sm" title="复制" @click="$emit('copy', message)">
+          <svg class="cc-i cc-i--sm"><use href="#i-copy" /></svg>
+        </button>
+        <button class="cc-icon-btn cc-icon-btn--sm" title="重新生成" @click="$emit('regenerate', message)">
+          <svg class="cc-i cc-i--sm"><use href="#i-refresh" /></svg>
+        </button>
+        <!--
+          回滚本轮改动：本轮产生过代码快照时才出现（snapshotId 由 App.vue 按 turnId 匹配快照写入）。
+          做成「图标 + 文字」而非纯图标：破坏性操作需要一眼能看懂，不靠猜图标含义。
+        -->
+        <button
+          v-if="message.snapshotId"
+          class="cc-msg-ai__rollback"
+          title="把这一轮改过的文件恢复到修改前的状态"
+          @click="$emit('rollback', message)"
+        >
+          <svg class="cc-i cc-i--sm"><use href="#i-undo" /></svg>
+          回滚改动
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -229,6 +247,8 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { renderMarkdown, renderMarkdownLight } from '../utils/markdown'
 import { isImageAvatar, avatarFallback } from '../utils/avatar'
 import { toolHeadline } from '../utils/tool-render'
+/* 真实用量展示：金额 / 命中率 / token 缩写的统一口径（与底部会话统计共用） */
+import { formatCost, formatHitRate, formatUsageTokens } from '../utils/tokenCalculator'
 import type { TaskItem } from '../utils/task-list'
 /* 用户消息附件：图片点开灯箱、文档走 blob 下载（<a href> 无法带鉴权头） */
 import { openLightbox } from '../utils/lightbox'
@@ -333,6 +353,36 @@ export interface ChatMessageModel {
    * 用当前 Agent 兜底会把别人的头像挂在它的回复上。
    */
   agentAvatar?: string
+
+  /**
+   * 本轮真实用量（成本 / 缓存命中率 / token）。
+   *
+   * <p>数据来源 {@code GET /api/token-usage/turns?conversationId=}：后端按 {@code turn_id}
+   * 把工具循环内的多次请求聚合成「这一轮」。v3.0.9 及更早的存量数据没有 turnId，
+   * 匹配不到就是 undefined —— 此时整块用量信息不渲染，不显示「¥0」误导用户。</p>
+   */
+  usage?: TurnUsage
+}
+
+/**
+ * 单轮用量（精简自 api/token-usage 的 TokenUsageTurn）。
+ *
+ * <p>刻意只声明展示需要的字段：这是消息模型，不该把整张统计 VO 挂到每条消息上。</p>
+ */
+export interface TurnUsage {
+  turnId?: string
+  /** 本轮发起过几次 API 请求（工具循环轮次） */
+  requestCount?: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  cacheHitTokens?: number
+  cacheMissTokens?: number
+  reasoningTokens?: number
+  /** 估算费用（元） */
+  costEstimate: number
+  /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
+  cacheHitRate: number
 }
 
 const props = withDefaults(
@@ -376,6 +426,34 @@ const emit = defineEmits<{
    */
   (e: 'expand', kind: 'process' | 'tools'): void
 }>()
+
+/* ============================ 本轮真实用量（成本 / 缓存 / token） ============================ */
+
+/**
+ * 用量展示是「只读快照」：数据由 App.vue 按 turnId 从 /api/token-usage/turns 拉取后挂在消息上。
+ *
+ * <p>为什么不在组件里自己请求：一个会话有几十条 AI 回复，逐条请求会把接口打爆；
+ * 父级一次拿到整个会话的按轮聚合结果，再按 turnId 分发，只需 1 次网络往返。</p>
+ */
+const usageCost = computed(() => formatCost(props.message.usage?.costEstimate))
+const usageHitRate = computed(() => formatHitRate(props.message.usage?.cacheHitRate))
+const usageTokens = computed(() => formatUsageTokens(props.message.usage?.totalTokens))
+
+/** 悬停说明：把「构成」讲清楚，避免用户把轮次数当成消息条数 */
+const usageTitle = computed(() => {
+  const u = props.message.usage
+  if (!u) return ''
+  const parts = [
+    `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens || 0)} / 未命中 ${formatUsageTokens(u.cacheMissTokens || 0)}）`,
+    `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens || 0)}）`,
+    `缓存命中率 ${formatHitRate(u.cacheHitRate)}`
+  ]
+  if (u.requestCount && u.requestCount > 1) {
+    parts.push(`工具循环共发起 ${u.requestCount} 次请求，已合并计入本轮`)
+  }
+  return parts.join('\n')
+})
 
 /**
  * 思考折叠默认收起（信息密度优先）；展开时通知父级恢复跟随

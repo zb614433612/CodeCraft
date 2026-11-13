@@ -1278,6 +1278,57 @@ html.cc-electron .cc-login { padding-top: 32px; }
 }
 html[data-theme="dark"] .cc-msg-ai__body code { color: #B7A6FF; }
 /*
+  消息底部行：左边是本轮真实用量（常显），右边是操作按钮（hover 渐显）。
+
+  为什么把用量和按钮拆成两层而不是塞进同一个 flex 容器：
+  按钮有 opacity:0 → 1 的显隐，如果用量和按钮同级，显隐只会影响自身不影响布局，
+  但为了让「用量不被按钮挤动」，用量固定在最左侧，按钮组紧跟其后；
+  外层用 min-height 预留行高，避免有无用量时消息高度抖动。
+*/
+.cc-msg-ai__foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 24px;
+  margin-top: 2px;
+}
+/*
+  本轮用量：12px 极浅小字。
+  刻意常显而不是 hover 才出现 —— 成本要能被看见才会被优化，藏起来的数字没人看。
+*/
+.cc-msg-ai__usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.cc-msg-ai__usage b {
+  font-weight: 600;
+  color: var(--text-3);
+}
+.cc-msg-ai__usage-dot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--text-4);
+  opacity: 0.7;
+}
+/* 轮次徽章：只有工具循环发起过 >1 次请求才出现，说明「这一轮内部跑了多轮」 */
+.cc-msg-ai__usage-rounds {
+  padding: 0 5px;
+  height: 15px;
+  line-height: 15px;
+  border-radius: var(--r-full);
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-4);
+}
+/*
   操作区显隐：三个按钮统一「鼠标悬停才显示」（复制 / 重新生成 / 回滚改动）。
 
   历史：早期担心整组透明会把回滚按钮一起藏起来，所以让回滚胶囊常驻；
@@ -2092,6 +2143,20 @@ html[data-theme="dark"] .cc-stop-btn:hover {
 }
 .cc-composer__foot .cc-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-4); }
 .cc-composer__foot b { color: var(--text-3); font-weight: 600; }
+/*
+  整会话真实用量（成本 · 缓存命中率 · token 总量）。
+  与左边「上下文 X」并排但语义不同：那个是「这一屏要送多少」，这个是「历史累计烧了多少」，
+  所以中间用圆点分隔，并保持同一行不换行（数字位数多时允许缩略，避免把余额挤出视野）。
+*/
+.cc-composer__usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.cc-usage-sep { color: var(--text-4); opacity: 0.6; margin: 0 1px; }
 /* 上下文「⚡ 精简」徽章：提示当前上下文口径与全量模式不同（历史思考被移除、工具只留摘要） */
 .cc-ctx-badge {
   display: inline-flex;

@@ -3,6 +3,7 @@ package com.example.agentdeepseek.service.impl;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.mapper.FileReferenceMapper;
+import com.example.agentdeepseek.mapper.LlmTokenUsageMapper;
 import com.example.agentdeepseek.mapper.SubAgentLogMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
@@ -45,6 +46,10 @@ public class ConversationServiceImpl implements ConversationService {
     /** M2：文件资产服务（删除会话后"引用归零"级联清理） */
     @Autowired
     private FileAssetService fileAssetService;
+
+    /** 成本可观测：会话删除时级联清理该会话的用量记录（用户要求） */
+    @Autowired
+    private LlmTokenUsageMapper llmTokenUsageMapper;
 
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -121,6 +126,19 @@ public class ConversationServiceImpl implements ConversationService {
         int affectedRows = conversationMapper.delete(conversationId);
         // M2：删除该会话的全部文件引用
         fileReferenceMapper.deleteByConversationId(conversationId);
+        /*
+          成本记录级联清理（用户要求：删会话即删它的成本记录）。
+          独立 try/catch：llm_token_usage 是观测旁路表，任何异常都不该让「删会话」这个主操作失败
+          （例如老库缺表 / 缺列时）。失败只留 warn，用户可以到成本看板手工确认残留。
+        */
+        try {
+            int removedUsage = llmTokenUsageMapper.deleteByConversationId(conversationId);
+            if (removedUsage > 0) {
+                log.info("会话删除联动清理成本记录: conversationId={}, 删除={}条", conversationId, removedUsage);
+            }
+        } catch (Exception e) {
+            log.warn("会话成本记录清理失败（不影响会话删除）: conversationId={}, err={}", conversationId, e.getMessage());
+        }
 
         // M2：注册事务提交后回调——"引用归零"的文件做远端+本地级联清理
         // （远端 IO 不进事务，F3 决策 4；事务回滚时 afterCommit 不触发，天然安全）

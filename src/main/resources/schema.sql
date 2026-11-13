@@ -689,11 +689,14 @@ ALTER TABLE agent_config MODIFY COLUMN avatar VARCHAR(255);
 --   prompt_cache_hit_tokens / prompt_cache_miss_tokens（DeepSeek 缓存明细）
 --   completion_tokens_details.reasoning_tokens（思考链 token，部分 Provider 提供）
 -- 用途：成本看板、缓存命中率诊断、按模型/时间/会话维度统计
--- 说明：刻意不加外键——会话被删除后历史账单仍应保留，便于长期成本核算。
+-- 归并口径：同一次用户提问在工具循环里会发起多次请求，靠 turn_id（前端 ChatRequest.turnId）聚合成「一轮」
+-- 生命周期：不加外键，但删除会话时由 ConversationServiceImpl 显式级联清理该会话的记录
+--          （否则成本看板会留下「会话#N（已删除）」幽灵分组，用户也无从定位）
 -- ============================================================
 CREATE TABLE IF NOT EXISTS llm_token_usage (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   conversation_id BIGINT COMMENT '会话ID（可空：后台任务/定时任务无归属会话时为空）',
+  turn_id VARCHAR(64) COMMENT '前端生成的轮次ID（一次用户提问一个，用于把工具循环多轮请求归并成「一轮对话」）',
   message_id BIGINT COMMENT '关联的 assistant 消息ID（可空：落库时尚未生成消息ID）',
   iteration INT DEFAULT 0 COMMENT '工具循环迭代轮次（0=非工具循环或未知）',
   provider VARCHAR(50) COMMENT 'Provider编码，如 deepseek / openai / anthropic',
@@ -707,9 +710,20 @@ CREATE TABLE IF NOT EXISTS llm_token_usage (
   cost_estimate DECIMAL(14,6) DEFAULT 0 COMMENT '估算费用（元），按 provider 单价计算',
   created_at DATETIME NOT NULL COMMENT '创建时间',
   INDEX idx_usage_conversation (conversation_id),
+  INDEX idx_usage_turn (conversation_id, turn_id),
   INDEX idx_usage_created_at (created_at),
   INDEX idx_usage_model (model)
 ) DEFAULT CHARSET=utf8mb4 COMMENT='LLM 调用用量记录表（成本可观测）';
+
+-- ============================================================
+-- 老库迁移：llm_token_usage 增加 turn_id（按「一次用户提问」聚合成本）
+-- 背景：v3.0.9 只记到 iteration（工具循环内轮次），前端无法把多轮请求归并到一次提问，
+--      导致「每轮对话成本」无法在聊天页展示。turn_id 由前端下发（ChatRequest.turnId）。
+-- 说明：H2 支持 IF NOT EXISTS；MySQL/MariaDB 不支持时该句报错由 continue-on-error 容忍，
+--      下一句不带 IF NOT EXISTS 的写法作为 MySQL 兜底（列已存在时同样被容忍）。
+-- ============================================================
+ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS turn_id VARCHAR(64);
+ALTER TABLE llm_token_usage ADD COLUMN turn_id VARCHAR(64);
 
 -- ============================================================
 -- 新增 SETTING 菜单：成本看板（LLM 用量与费用统计，只读页面）

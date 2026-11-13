@@ -95,6 +95,8 @@ public class SystemController {
             "conversation_message",
             "conversation_compaction",
             "sub_agent_log",
+            /* 成本用量：与会话/消息同生命周期，重置后成本看板不应继续显示已删除会话的旧账 */
+            "llm_token_usage",
             "conversation",
             "agent_task",
             "schedule_task",

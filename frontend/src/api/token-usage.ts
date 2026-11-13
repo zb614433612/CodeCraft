@@ -64,6 +64,23 @@ export interface TokenUsageDetail {
   createdAt: string
 }
 
+/** 单轮对话用量（一次用户提问，含其工具循环内的多次请求） */
+export interface TokenUsageTurn {
+  turnId: string
+  /** 本轮发起过几次 API 请求（工具循环轮次） */
+  requestCount: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  cacheHitTokens: number
+  cacheMissTokens: number
+  reasoningTokens: number
+  /** 估算费用（元） */
+  costEstimate: number
+  /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
+  cacheHitRate: number
+}
+
 export type UsageRange = 'today' | '7d' | '30d' | 'all'
 
 /**
@@ -96,4 +113,14 @@ export function getUsageByConversation(range: UsageRange = '7d', limit = 10) {
 /** 会话内轮次明细 */
 export function getUsageDetail(conversationId: number) {
   return fetchData<TokenUsageDetail[]>(`/token-usage/detail?conversationId=${conversationId}`)
+}
+
+/**
+ * 会话内「按轮次」聚合（聊天页每条 AI 回复的成本 / 命中率 / token）
+ *
+ * <p>只返回带 turnId 的记录：v3.0.9 及更早的存量数据没有 turnId，
+ * 无法归并到具体某一轮，只体现在会话汇总里。</p>
+ */
+export function getUsageTurns(conversationId: number) {
+  return fetchData<TokenUsageTurn[]>(`/token-usage/turns?conversationId=${conversationId}`)
 }

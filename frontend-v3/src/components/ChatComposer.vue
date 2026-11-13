@@ -128,7 +128,7 @@
         </div>
       </div>
 
-      <!-- 状态小字：上下文 / 余额 -->
+      <!-- 状态小字：上下文 / 整会话用量 / 余额 -->
       <div class="cc-composer__foot">
         <!-- 口径：已加载消息的正文 + 思考过程 + 工具返回，前端字符估算（后端未透传真实 usage）。
              精简模式下口径会变（历史轮次不计思考、工具只算摘要），故加一枚徽章说明当前口径。 -->
@@ -137,7 +137,17 @@
           :title="contextTitle"
         >上下文 <b>{{ contextTokens }}</b></span>
         <span v-if="compactMode" class="cc-ctx-badge" :title="compactTip">⚡ 精简</span>
-        <span v-if="contextTokens && balance" class="cc-dot" />
+        <!--
+          整会话真实用量：与上面「上下文」是两个口径，必须能分辨 —
+          上下文的单位是「当前这一屏要送多少 token」，这里的单位是「这个会话历史累计烧了多少」。
+        -->
+        <span v-if="hasUsage && contextTokens" class="cc-dot" />
+        <span v-if="hasUsage" class="cc-composer__usage" :title="usageTitle">
+          会话 <b>{{ sessionCost }}</b>
+          <span class="cc-usage-sep">·</span>缓存 <b>{{ sessionHitRate }}</b>
+          <span class="cc-usage-sep">·</span><b>{{ sessionTokens }}</b> tokens
+        </span>
+        <span v-if="(contextTokens || hasUsage) && balance" class="cc-dot" />
         <span v-if="balance">余额 <b>{{ balance }}</b></span>
       </div>
     </div>
@@ -147,6 +157,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { openLightbox } from '../utils/lightbox'
+/* 真实用量展示：与消息底部共用同一套格式化口径（金额 / 命中率 / token 缩写） */
+import { formatCost, formatHitRate, formatUsageTokens } from '../utils/tokenCalculator'
 
 export interface Attachment {
   id: string
@@ -158,6 +170,27 @@ export interface Attachment {
   isImage?: boolean
   /** 图片缩略图地址（blob: / data: / http(s): 均可） */
   previewUrl?: string
+}
+
+/**
+ * 整个会话的真实用量（来自后端 {@code llm_token_usage} 表，非前端估算）。
+ *
+ * <p>只声明展示用得到的字段：这里刻意不直接复用 api 层的完整 VO 类型，
+ * 组件不该因为统计接口加字段而被动改动。</p>
+ */
+export interface SessionUsage {
+  /** 请求次数（≈ 工具循环总轮次 + 独立请求数） */
+  requestCount?: number
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens: number
+  cacheHitTokens?: number
+  cacheMissTokens?: number
+  reasoningTokens?: number
+  /** 估算费用（元） */
+  costEstimate: number
+  /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
+  cacheHitRate: number
 }
 
 const props = withDefaults(
@@ -179,6 +212,14 @@ const props = withDefaults(
     balance?: string
     /** 上下文模式：full / compact（compact 时底部加「⚡ 精简」徽章并说明口径） */
     contextMode?: string
+    /**
+     * 整个会话的真实用量（成本 / 缓存命中率 / token）。
+     *
+     * <p>与 contextTokens 的区别：contextTokens 是「当前上下文有多大」的前端估算，
+     * 这个来自 {@code llm_token_usage} 表，是「这个会话一路聊下来一共烧了多少」的真实记账，
+     * 含全部历史轮次与工具循环，不会因为分页只加载最近 5 轮而少算。</p>
+     */
+    usage?: SessionUsage
     placeholder?: string
     /** textarea 初始行数（空状态用 3，会话中默认 2） */
     rows?: number
@@ -194,6 +235,7 @@ const props = withDefaults(
     contextTokens: '',
     balance: '',
     contextMode: 'full',
+    usage: undefined,
     placeholder: '描述你的需求，Enter 发送 / Shift+Enter 换行',
     rows: 2
   }
@@ -311,6 +353,31 @@ const contextTitle = computed(() =>
 )
 
 const compactTip = '精简模式：历史轮次的思考过程已移除、工具调用只保留摘要，节省上下文'
+
+/* ============================ 整会话真实用量 ============================ */
+
+/** 有数据才显示（0 token 时不渲染「会话 ¥0 · 缓存 — · 0 tokens」这种噪音） */
+const hasUsage = computed(() => !!props.usage && (props.usage.totalTokens > 0 || props.usage.costEstimate > 0))
+const sessionCost = computed(() => formatCost(props.usage?.costEstimate))
+const sessionHitRate = computed(() => formatHitRate(props.usage?.cacheHitRate))
+const sessionTokens = computed(() => formatUsageTokens(props.usage?.totalTokens))
+
+/** 悬停说明：把「会话累计」的构成讲清楚，并声明是估算而非账单 */
+const usageTitle = computed(() => {
+  const u = props.usage
+  if (!u) return ''
+  const parts = [
+    `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    `输入 ${formatUsageTokens(u.promptTokens || 0)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens || 0)} / 未命中 ${formatUsageTokens(u.cacheMissTokens || 0)}）`,
+    `输出 ${formatUsageTokens(u.completionTokens || 0)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens || 0)}）`,
+    `缓存命中率 ${formatHitRate(u.cacheHitRate)}`
+  ]
+  if (u.requestCount) {
+    parts.push(`共 ${u.requestCount} 次模型请求（含工具循环内每一轮）`)
+  }
+  parts.push('完整明细见「成本看板」页面')
+  return parts.join('\n')
+})
 
 /**
  * 运行中给出明确原因，避免用户以为输入框坏了。

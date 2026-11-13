@@ -4,6 +4,7 @@ import com.example.agentdeepseek.common.response.ApiResponse;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
 import com.example.agentdeepseek.model.vo.TokenUsageGroupVO;
 import com.example.agentdeepseek.model.vo.TokenUsageSummaryVO;
+import com.example.agentdeepseek.model.vo.TokenUsageTurnVO;
 import com.example.agentdeepseek.service.TokenUsageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -69,5 +70,15 @@ public class TokenUsageController {
             @Parameter(description = "会话ID", required = true)
             @RequestParam Long conversationId) {
         return ApiResponse.success(tokenUsageService.detailByConversation(conversationId));
+    }
+
+    @Operation(summary = "按轮次聚合",
+            description = "返回指定会话每一轮对话（一次用户提问，含其工具循环内多次请求）的成本/token/缓存命中率，"
+                    + "供聊天页在每条 AI 回复下展示用量；存量数据无 turnId，只计入会话汇总")
+    @GetMapping("/turns")
+    public ApiResponse<List<TokenUsageTurnVO>> turns(
+            @Parameter(description = "会话ID", required = true)
+            @RequestParam Long conversationId) {
+        return ApiResponse.success(tokenUsageService.turnUsage(conversationId));
     }
 }

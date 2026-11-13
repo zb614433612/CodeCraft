@@ -5,6 +5,104 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.0] - 2026-11-14
+
+> The cost-visibility release. v3.0.9 made cost **reviewable after the fact**; this version makes it
+> **visible while you work** — every AI reply now shows the cost / cache-hit rate / tokens of that single
+> turn, and the composer footer shows the running total for the whole conversation. Backed by a `turn_id`
+> roll-up in the backend, cascade cleanup of cost records when a conversation is deleted, and moving the
+> "context mode" entry point out of Settings into the chat model picker.
+> Backend + both frontends are changed; a **backend restart is required** (new `turn_id` column and
+> `/api/token-usage/turns` endpoint), and desktop packages must be rebuilt.
+
+### 💰 Per-turn cost display (new)
+
+- **Background**: the v3.0.9 cost dashboard is "look it up afterwards" — you cannot see what the current turn
+  is costing while chatting, so there is no way to economise as you go. Worse, the tool loop splits **one
+  question** into several API requests (auto-retry after a failed compile, multi-step file edits commonly take
+  5–10), so recording by `iteration` alone gives you a pile of fragments instead of the "what did this turn cost"
+  figure a user actually thinks in.
+- **Roll-up semantics**: each question generates a `turnId` on the frontend (the same id already used for code
+  snapshots and for the delete-range of "regenerate"), sent as `ChatRequest.turnId` → stored in
+  `llm_token_usage.turn_id` → aggregated across the tool loop's multiple requests.
+  **Legacy rows are excluded**: records from v3.0.9 and earlier have no `turn_id`, and forcing them into a turn
+  would inflate that turn's cost, so they only count toward conversation/time-level totals.
+- **Backend**:
+  - `schema.sql`: `llm_token_usage` gains `turn_id VARCHAR(64)` and `idx_usage_turn (conversation_id, turn_id)`,
+    plus two migration statements (H2 `ADD COLUMN IF NOT EXISTS` and a MySQL fallback) so old databases upgrade
+    automatically without manual DDL.
+  - `LlmTokenUsageMapper`: new `summarizeByTurn` (`GROUP BY turn_id`, `ORDER BY MIN(id)` to keep chronological
+    order), `deleteByConversationId`, and `insertWithoutTurn`.
+  - `TokenUsageParser.toEntity()` takes a new `turnId` parameter; `DeepSeekServiceImpl.persistTokenUsageSafely()`
+    reads it from `apiRequest._turnId` (the same source as snapshots/regenerate), and a startup probe ensures the
+    `turn_id` column exists.
+  - **Degradation path**: if the insert with `turn_id` fails, the record is written without that column instead —
+    on an un-migrated old database we would rather lose per-turn display than silently lose the whole cost ledger.
+  - New `TokenUsageTurnVO` + `TokenUsageService.turnUsage()` (computes `cacheHitRate`) +
+    `GET /api/token-usage/turns?conversationId=`.
+- **Frontend (both editions: `frontend/`, `frontend-v3/`)**:
+  - Every AI reply shows, **always visible** (not on hover), `this turn ¥x · cache x% · x tokens`; a round badge
+    appears when the tool loop issued multiple requests (hover explains "N requests merged into this turn").
+    Hiding it behind hover was rejected on purpose — cost only gets optimised when it is seen.
+  - The composer footer gains `conversation ¥x · cache x% · x tokens`, sitting next to the existing
+    "context X" but **semantically different**: one is "what this conversation has burned in total", the other is
+    "how much this screen will send".
+  - Layout keeps usage on the left and action buttons on the right: hover-in buttons only eat empty space to the
+    right instead of shoving the numbers around; a `min-height` reserves the row so message height does not jump.
+  - `App.vue` owns fetching and distribution (`sessionUsageMap` / `turnUsageMap`), refreshed after loading history
+    and after every turn; caches are cleared/migrated when a conversation is deleted or a draft becomes real, so
+    numbers are never attributed to the wrong conversation.
+  - When no `turnId` matches, the whole usage block is omitted (rather than showing `¥0`), so no fake numbers.
+- **Write-timing handling**: the backend persists usage in the Flux `doFinally`, which can land after the frontend
+  receives `done` → fetch immediately **and** re-fetch once after 800 ms; the re-fetch only fires when the turn
+  still has no data, so it costs no extra requests in the normal case.
+
+### 🗑️ Cascade cleanup of cost records on conversation delete (behaviour change)
+
+- **Background**: the cost dashboard groups by conversation, and the original "no foreign key — keep historical
+  bills after a conversation is deleted" design was meant for long-term accounting. In practice it left
+  `conversation#N` ghost rows in the dashboard: unclickable (the conversation is gone) and impossible to identify.
+- **Change**: `ConversationServiceImpl.deleteConversation()` now calls `deleteByConversationId()` explicitly
+  (in its own try/catch — cleanup failure does not block the deletion itself); `SystemController`'s
+  "reset all data" table list now includes `llm_token_usage`.
+- **Impact**: deleting a conversation also deletes its cost detail, and cross-conversation time/model totals no
+  longer include it. Export first if you need long-term cost auditing.
+
+### ⚙️ Context-mode entry point consolidated (UX adjustment)
+
+- Settings no longer shows the "local preference → context mode" block — it wrote the very same
+  `settingsStore.contextMode` as the chat model picker, so two entry points looked like per-page settings while
+  actually overwriting each other.
+- The single entry point is now the chat "model picker" modal (`ChatModelPicker.vue`); the three modes
+  `full` / `balanced` / `compact` stay in sync with the backend `ContextMode` enum, and the "⚡ compact" badge in
+  the chat footer is unchanged.
+
+### ✅ Verification
+
+- Backend: `mvn -q compile -DskipTests` passes.
+- v3: `npx vue-tsc --noEmit -p tsconfig.app.json` reports zero errors; the classic frontend has no new type errors.
+- `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` verified on H2; the dev database confirms the `turn_id` column exists.
+
+### 📚 Documentation and version numbers
+
+- Version bumped in: `pom.xml` (artifact `code-craft-3.1.0.jar`), classic/v3 `package.json` + lock,
+  Electron `version` and the `extraResources` jar path, and the MCP handshake version
+  `CodeCraftMcpServer.SERVER_VERSION`.
+- Docs: README(_EN) badge; a new "per-turn cost roll-up" convention in ARCHITECTURE(_EN); version headers in
+  TOOL_SYSTEM(_EN) / DEEPSEEK_SERVICE_IMPL(_EN) / LLM_PROVIDER_SYSTEM(_EN); build command samples in
+  DEV_QUICKREF / RELEASE_CHECKLIST(_EN); the FAQ version sample — all unified to v3.1.0.
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required**: the `turn_id` column is added automatically at startup on old databases
+  (if that fails, per-turn display degrades but conversations keep working).
+- **Desktop packages must be rebuilt / reinstalled**: the embedded jar has changed (new endpoint and DDL).
+- **Existing conversations**: cost rows from v3.0.9 and earlier have no `turn_id`, so older messages show no
+  per-turn usage, though the conversation-level total in the composer footer still includes them.
+- No configuration changes; `application.yml` needs no migration.
+
+---
+
 ## [3.0.9] - 2026-11-13 (rebuilt on 2026-11-14)
 
 > A dual-track release: cost governance + long-task experience. Four cost/context measures (three-tier context modes,

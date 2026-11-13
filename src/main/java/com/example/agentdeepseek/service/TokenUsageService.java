@@ -6,6 +6,7 @@ import com.example.agentdeepseek.mapper.LlmTokenUsageMapper;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
 import com.example.agentdeepseek.model.vo.TokenUsageGroupVO;
 import com.example.agentdeepseek.model.vo.TokenUsageSummaryVO;
+import com.example.agentdeepseek.model.vo.TokenUsageTurnVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -130,6 +131,35 @@ public class TokenUsageService {
             log.warn("会话用量明细查询失败: conversationId={}, err={}", conversationId, e.getMessage());
             return List.of();
         }
+    }
+
+    /**
+     * 会话内按「轮次」聚合（聊天页每条 AI 回复下方的成本 / 命中率 / token）
+     * <p>
+     * 查询失败（例如老库未成功迁移 turn_id 列）时返回空列表而非抛错：
+     * 聊天页的用量展示是增强信息，不能因为统计不可用而让整个页面报错。
+     * </p>
+     */
+    public List<TokenUsageTurnVO> turnUsage(Long conversationId) {
+        if (conversationId == null) {
+            return List.of();
+        }
+        List<TokenUsageTurnVO> list;
+        try {
+            list = usageMapper.summarizeByTurn(conversationId);
+        } catch (Exception e) {
+            log.warn("按轮次统计失败: conversationId={}, err={}", conversationId, e.getMessage());
+            return List.of();
+        }
+        if (list == null) {
+            return List.of();
+        }
+        for (TokenUsageTurnVO vo : list) {
+            long denom = vo.getCacheHitTokens() + vo.getCacheMissTokens();
+            vo.setCacheHitRate(denom > 0 ? (double) vo.getCacheHitTokens() / denom : -1d);
+            vo.setCostEstimate(round6(vo.getCostEstimate()));
+        }
+        return list;
     }
 
     // ==================== 内部方法 ====================

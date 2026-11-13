@@ -412,6 +412,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 log.debug("添加conversation.user_id列失败，可能已经存在: {}", e.getMessage());
             }
 
+            /*
+              成本可观测：llm_token_usage 增加 turn_id（老库迁移兜底）。
+              schema.sql 里已有同样意图的语句，但那里依赖 continue-on-error 的方言容忍；
+              这里再显式尝试一次并留日志 —— 只有它成功，聊天页才能按「一轮对话」聚合成本。
+              失败不阻塞启动：insert 侧还有「不带 turn_id」的降级路径（见 persistTokenUsageSafely）。
+            */
+            try {
+                jdbcTemplate.execute("ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS turn_id VARCHAR(64)");
+                log.debug("llm_token_usage.turn_id 列就绪");
+            } catch (Exception e) {
+                log.debug("添加llm_token_usage.turn_id列失败（可能已存在）: {}", e.getMessage());
+            }
+
             // 添加user_id索引（如果不存在）
             try {
                 jdbcTemplate.execute("ALTER TABLE conversation ADD INDEX idx_user_id (user_id)");
@@ -3720,7 +3733,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 })
                 // 成本可观测：流终止（正常完成 / 取消 / 异常）统一落库，保证每次请求一条记录
                 .doFinally(signalType -> persistTokenUsageSafely(
-                        conversationId, iteration, usageProvider, usageModel, usageRef.get()));
+                        conversationId, (String) apiRequest.get("_turnId"), iteration,
+                        usageProvider, usageModel, usageRef.get()));
     }
 
     /**
@@ -3729,24 +3743,40 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 刻意保证「任何异常都不影响对话主流程」——观测是旁路能力，绝不能因为写库失败而中断会话。
      * 日志同时输出结构化摘要，便于在没有前端看板时直接从 app.log 里读成本。
      * </p>
+     *
+     * @param turnId 前端生成的轮次 ID（可空）：工具循环把一次提问拆成多次请求，
+     *               只有它能把多次请求归并成「这一轮对话花了多少」，聊天页按它展示每轮成本
      */
-    private void persistTokenUsageSafely(Long conversationId, int iteration, String provider,
-                                         String model, TokenUsageParser.UsageSnapshot snapshot) {
+    private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
+                                         String provider, String model,
+                                         TokenUsageParser.UsageSnapshot snapshot) {
         if (snapshot == null || snapshot.getTotalTokens() <= 0) {
             return;
         }
         try {
             LlmTokenUsage entity = tokenUsageParser.toEntity(
-                    conversationId, null, iteration, provider, model, snapshot);
-            llmTokenUsageMapper.insert(entity);
-            log.info("[成本] 会话={} 轮次={} 模型={} 输入={}(命中{}/未命中{}) 输出={}(思考{}) 估算费用=¥{}",
-                    conversationId, iteration, model,
+                    conversationId, turnId, null, iteration, provider, model, snapshot);
+            try {
+                llmTokenUsageMapper.insert(entity);
+            } catch (Exception insertError) {
+                /*
+                  老库兜底：llm_token_usage.turn_id 可能没迁移成功（方言差异 / 手工改过表）。
+                  此时带 turn_id 的 insert 会整条失败 —— 若直接放弃，成本看板会静默失去全部数据，
+                  比「按轮信息缺失」严重得多。这里降级为不带 turn_id 写入：本轮仍计入会话/时间汇总。
+                */
+                entity.setTurnId(null);
+                llmTokenUsageMapper.insertWithoutTurn(entity);
+                log.warn("turn_id 列不可用，用量已降级写入（本轮成本不参与按轮展示）: conversationId={}, err={}",
+                        conversationId, insertError.getMessage());
+            }
+            log.info("[成本] 会话={} 轮次={} 迭代={} 模型={} 输入={}(命中{}/未命中{}) 输出={}(思考{}) 估算费用=¥{}",
+                    conversationId, turnId, iteration, model,
                     snapshot.getPromptTokens(), snapshot.getCacheHitTokens(), snapshot.getCacheMissTokens(),
                     snapshot.getCompletionTokens(), snapshot.getReasoningTokens(),
                     String.format("%.6f", entity.getCostEstimate()));
         } catch (Exception e) {
-            log.warn("用量记录落库失败（不影响对话主流程）: conversationId={}, iteration={}, err={}",
-                    conversationId, iteration, e.getMessage());
+            log.warn("用量记录落库失败（不影响对话主流程）: conversationId={}, turnId={}, iteration={}, err={}",
+                    conversationId, turnId, iteration, e.getMessage());
         }
     }
 

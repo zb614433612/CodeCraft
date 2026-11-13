@@ -156,3 +156,43 @@ export function formatTokenCount(tokenCount: number | undefined): string {
   // 保留一位小数
   return `${kValue.toFixed(1)}K`
 }
+
+/* ============================ 真实用量展示（成本 / 缓存 / token） ============================ */
+
+/**
+ * 真实 token 数缩写（K / M）
+ *
+ * <p>与 {@link formatTokenCount} 的区别：那个是「上下文估算」口径，只到 K，
+ * 而一次工具循环的真实输入动辄几十万，必须支持 M 才不出现「1234.5K」这种读不出量级的写法。</p>
+ */
+export function formatUsageTokens(count: number | undefined): string {
+  const n = Math.max(0, Math.round(count || 0))
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}K`
+  return String(n)
+}
+
+/**
+ * 金额展示：¥0.0123
+ *
+ * <p>极小值显示 {@code <¥0.0001} 而不是「¥0.0000」：单轮命中缓存的成本常在 1e-5 量级，
+ * 直接按 4 位小数会全部变成 0，看起来像「没花钱 / 统计坏了」。</p>
+ */
+export function formatCost(cost: number | undefined): string {
+  const n = Number.isFinite(cost as number) ? (cost as number) : 0
+  if (n <= 0) return '¥0'
+  if (n < 0.0001) return '<¥0.0001'
+  if (n < 1) return `¥${n.toFixed(4)}`
+  return `¥${n.toFixed(2)}`
+}
+
+/**
+ * 缓存命中率展示：98%
+ *
+ * <p>负数（后端约定的 -1）表示 Provider 没返回缓存字段，显示「—」而不是 0%：
+ * 「0%」会被读成「缓存完全没命中」，是错误结论。</p>
+ */
+export function formatHitRate(rate: number | undefined): string {
+  if (rate === undefined || rate === null || rate < 0) return '—'
+  return `${Math.round(rate * 100)}%`
+}

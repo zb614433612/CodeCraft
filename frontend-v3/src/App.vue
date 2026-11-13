@@ -279,6 +279,9 @@ import {
 /* 工具输出截断：保头也保尾（尾部带 [TOOL_RESULT] 增删行数与 ---TASK_JSON--- 任务清单） */
 import { clipToolDetail } from './utils/tool-render'
 import { estimateTokenCount } from './utils/tokenCalculator'
+/* ---- 成本可观测：会话 / 单轮真实用量（聊天页每轮成本 + 输入区底部会话合计） ---- */
+import { getUsageSummary, getUsageTurns } from './api/token-usage'
+import type { TokenUsageSummary, TokenUsageTurn } from './api/token-usage'
 /* ---- F05 子Agent面板：fork 记录读库 + 委托调用心跳 ---- */
 import { listSubAgents } from './api/sub-agent'
 import {
@@ -738,6 +741,11 @@ function dropConversationState(key: string) {
   if (m9) subAgentMap.value = m9
   const m10 = dropKey(delegateMap.value)
   if (m10) delegateMap.value = m10
+  // 用量缓存：会话删了就没必要留着（数字只对那个会话有意义）
+  const m11 = dropKey(sessionUsageMap.value)
+  if (m11) sessionUsageMap.value = m11 as Record<string, TokenUsageSummary>
+  const m12 = dropKey(turnUsageMap.value)
+  if (m12) turnUsageMap.value = m12 as Record<string, Record<string, TokenUsageTurn>>
   streamAborts.delete(key)
   pendingUuidMap.delete(key)
   // 会话都没了，针对它的子Agent轮询也必须停（否则定时器会一直空转）
@@ -779,6 +787,11 @@ function migrateConversationKey(from: string, to: string) {
   if (m9) subAgentMap.value = m9
   const m10 = move(delegateMap.value)
   if (m10) delegateMap.value = m10
+  // 用量缓存：首轮对话时草稿 key 已经拉过一次数据和聚合结果，不迁移就要等下次刷新才显示
+  const m11 = move(sessionUsageMap.value)
+  if (m11) sessionUsageMap.value = m11 as Record<string, TokenUsageSummary>
+  const m12 = move(turnUsageMap.value)
+  if (m12) turnUsageMap.value = m12 as Record<string, Record<string, TokenUsageTurn>>
   // 轮询定时器跟着会话 key 迁移，否则草稿 key 下的定时器会失去归属
   if (subAgentTimers.has(from)) {
     window.clearInterval(subAgentTimers.get(from)!)
@@ -1573,6 +1586,105 @@ function refreshContextTokens(key = activeConversationId.value) {
   contextTokensMap.value = { ...contextTokensMap.value, [key]: total }
 }
 
+/* ============================ 真实用量（成本 / 缓存命中 / token） ============================ */
+
+/**
+ * 会话 → 整个会话的真实用量汇总（后端 {@code llm_token_usage} 全生命周期聚合）。
+ *
+ * <p>key 是会话 id 字符串（与 messagesMap 一致）。为什么不用 computed 直接算：
+ * 这是服务端聚合结果，含分页之外的历史轮次与工具循环内每一轮，前端无法自行累加。</p>
+ */
+const sessionUsageMap = ref<Record<string, TokenUsageSummary>>({})
+
+/**
+ * 会话 → turnId → 本轮用量。
+ *
+ * <p>一轮对话在工具循环里会发起多次请求（后端按 turnId 聚合），
+ * 拉到后按 turnId 贴到对应 AI 消息上，ChatMessage 底部据此展示「本轮 ¥x · 缓存 x% · x tokens」。</p>
+ */
+const turnUsageMap = ref<Record<string, Record<string, TokenUsageTurn>>>({})
+
+/**
+ * 把已拉到的按轮用量贴到消息对象上（只贴 assistant）。
+ *
+ * <p>就地赋值而非重建数组：消息是响应式代理，改属性即可触发视图更新；
+ * 重建数组会让 ChatMessage 全部重新渲染（几十条 × 上千节点，切会话肉眼可见卡顿）。</p>
+ */
+function applyTurnUsage(key: string) {
+  const byTurn = turnUsageMap.value[key]
+  if (!byTurn) return
+  const list = messagesMap.value[key]
+  if (!list?.length) return
+  for (const msg of list) {
+    if (msg.role !== 'assistant') continue
+    const hit = msg.turnId ? byTurn[msg.turnId] : undefined
+    // 命中就贴，未命中且已有值说明该轮被重新生成/删除，清掉旧数字避免张冠李戴
+    if (hit) msg.usage = hit
+    else if (msg.usage) msg.usage = undefined
+  }
+}
+
+/**
+ * 拉「按轮聚合」用量并贴到消息上。
+ *
+ * <p>一次请求覆盖整个会话（后端 GROUP BY turn_id），不是每条消息各查一次。</p>
+ */
+async function refreshTurnUsage(key = activeConversationId.value) {
+  if (!key) return
+  const convId = keyToSessionId(key)
+  if (!convId) return
+  try {
+    const list = await getUsageTurns(convId)
+    const byTurn: Record<string, TokenUsageTurn> = {}
+    for (const item of list ?? []) {
+      if (item.turnId) byTurn[item.turnId] = item
+    }
+    turnUsageMap.value = { ...turnUsageMap.value, [key]: byTurn }
+    applyTurnUsage(key)
+  } catch {
+    // 静默：用量是增强信息，接口异常不能让聊天页报错（后端老库无 turn_id 列时也会走这里）
+  }
+}
+
+/**
+ * 拉「会话级」汇总用量（输入区底部那行「会话 ¥x · 缓存 x% · x tokens」）。
+ */
+async function refreshSessionUsage(key = activeConversationId.value) {
+  if (!key) return
+  const convId = keyToSessionId(key)
+  if (!convId) return
+  try {
+    // range 传 all：会话口径由 conversationId 决定，range 只是必填参数的兜底
+    const summary = await getUsageSummary('all', convId)
+    if (summary) {
+      sessionUsageMap.value = { ...sessionUsageMap.value, [key]: summary }
+    }
+  } catch {
+    // 静默失败：统计不可用不该影响发消息
+  }
+}
+
+/**
+ * 一轮结束后刷新用量（立即 + 一次延时补拉）。
+ *
+ * <p>为什么需要延时：后端在 SSE 流终止的 {@code doFinally} 里才把 usage 落库，
+ * 前端收到 done 事件时那条记录可能还没写进去 —— 立即拉会拿到「少一轮」的结果。
+ * 800ms 足够覆盖一次本地 insert；补拉只在「这一轮还没数据」时才发，避免无谓请求。</p>
+ */
+function refreshUsageAfterTurn(key: string) {
+  void refreshTurnUsage(key)
+  void refreshSessionUsage(key)
+  window.setTimeout(() => {
+    // 会话被删掉/切走后不再补拉
+    if (!messagesMap.value[key]) return
+    const list = messagesMap.value[key] ?? []
+    const lastAssistant = [...list].reverse().find(m => m.role === 'assistant')
+    if (lastAssistant && lastAssistant.turnId && lastAssistant.usage) return
+    void refreshTurnUsage(key)
+    void refreshSessionUsage(key)
+  }, 800)
+}
+
 /** 币种符号：后端返回 CNY/USD 之类的 ISO code */
 function currencySymbol(currency?: string): string {
   const code = (currency || '').toUpperCase()
@@ -1650,6 +1762,9 @@ const conversation = computed<ConversationDetail>(() => {
     contextMode: chatContextMode.value,
     // 余额来自 GET /llm-providers/{code}/balance，静默查询，查不到就不显示（见 loadChatBalance）
     balance: chatBalanceText.value || undefined,
+    // 整个会话的真实用量：来自 llm_token_usage 汇总（见 refreshSessionUsage），
+    // 与 stats.contextTokens（前端估算的当前上下文）是两个口径，输入区底部并排展示
+    usage: sessionUsageMap.value[activeConversationId.value],
     updatedAt: item ? new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '',
     stats: messages.value.length
       ? {
@@ -1748,6 +1863,9 @@ async function loadConversationMessages(conversationId: string, before?: number 
     restoreTasksFromMessages(convId, key)
     // 上下文估算随消息变化，加载完重算一次（正文 + 思考 + 工具返回）
     refreshContextTokens(key)
+    // 真实用量：会话汇总 + 按轮明细（历史消息的「本轮成本」靠这一步点亮）
+    void refreshSessionUsage(key)
+    void refreshTurnUsage(key)
     // 历史消息里的「回滚改动」按钮要靠快照列表点亮（异步，不阻塞消息渲染）
     void matchSnapshotsForMessages(convId, key)
     // 子Agent（F05）：历史会话也要能看到 fork 出来的子Agent，读库一次即可
@@ -3020,6 +3138,12 @@ async function onSend(text: string) {
     streamAborts.delete(key)
     // 本轮正文 / 思考 / 工具返回都已落定，重算上下文估算（流式期间刻意不逐帧算）
     refreshContextTokens(finalKey)
+    /*
+      真实用量：本轮成本 / 缓存命中 / token。
+      立即拉一次保证「不卡」，再延时补一次兜住「usage 落库晚于最后一个 SSE 事件」的时序差
+      （后端在 Flux 的 doFinally 里写库，见 refreshUsageAfterTurn 的说明）。
+    */
+    refreshUsageAfterTurn(finalKey)
     // 本轮可能产生了代码快照：拉一次快照列表，把「回滚本轮改动」按钮点亮
     const convId = keyToSessionId(finalKey)
     if (convId) {
