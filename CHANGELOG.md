@@ -91,6 +91,15 @@
 - **真因**：`http-client.ts` 的 `fireUnauthorized()` 依赖外部注册的 handler，handler 尚未注册（如页面初始化早期）时直接 return，401 被静默吞掉；且路由 `afterEach` 没有兜底复查。
 - **修复**：`fireUnauthorized` 在 handler 缺失时改为 `location.hash` 兜底跳转登录；`router/index.ts` 的 `afterEach` 增加漏网校验（`isTokenRevoked()` 仍为真且处在业务页则强制回登录）。
 
+### 🏗️ CI 构建失败（修复）
+
+- **现象**：v3.0.9 推送 tag 后 `build-windows` 与两个 `build-macos` job 均在「Electron 打包」步骤失败（`build-linux` 正常），`create-release` 被跳过，没有产出任何安装包。
+- **真因**：`electron-builder` 默认开启 `npmRebuild`，会对生产依赖里的原生模块执行 `@electron/rebuild`。本轮新增的 `node-pty` 因此被 `node-gyp` 强制重编译，而构建机没有可用的 Visual Studio / 编译链，直接失败：
+  `preparing moduleName=node-pty arch=x64` → `Error: Could not find any Visual Studio installation to use` → `node-gyp failed to rebuild '.../node_modules/node-pty'`。
+- **修复**：`electron/package.json` 的 `build` 字段新增 `"npmRebuild": false`。`node-pty` 1.1.0 基于 N-API（ABI 跨 Electron 版本稳定），且自带 `prebuilds/win32-x64`、`prebuilds/win32-arm64`、`prebuilds/darwin-x64`、`prebuilds/darwin-arm64` 预编译产物，**无需针对 Electron 重建**；Linux 无 prebuild，仍由 `npm install` 阶段的 node-gyp 就地编译。
+- **加固**：workflow 的 Linux 依赖步骤显式安装 `build-essential` + `python3`（node-pty 无 linux prebuild，必须依赖本机编译工具链）；Windows / macOS 打包步骤改为 `set -o pipefail` + `tee` 落日志，并新增 `if: failure()` 的日志 artifact 上传——GitHub Actions 的日志页未登录不可见，避免后续排查再次受阻。
+- **验证**：把 v3.0.9 tag 干净克隆到临时目录，补入 Maven 产物与 jlink JRE 后按 CI 原命令复跑：日志显示 `skipped dependencies rebuild  reason=npmRebuild is set to false`，成功产出 `CodeCraft Setup 3.0.9.exe`，且 `app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/pty.node` 已正确解包。
+
 ### 🔢 版本号同步
 
 - 后端：`3.0.8` → `3.0.9`（`pom.xml`，产物 `code-craft-3.0.9.jar`）

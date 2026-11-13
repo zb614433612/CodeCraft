@@ -158,6 +158,27 @@ This document records all important version changes of the CodeCraft project.
 - **Fix**: `fireUnauthorized` now falls back to a `location.hash` redirect when the handler is missing; `router/index.ts`'s
   `afterEach` re-checks (`isTokenRevoked()` still true while on a business page forces a return to login).
 
+### 🏗️ CI Build Failure (Fix)
+
+- **Symptom**: after pushing the v3.0.9 tag, `build-windows` and both `build-macos` jobs failed at the "Electron packaging"
+  step (`build-linux` passed), `create-release` was skipped and no installer was produced.
+- **Root cause**: `electron-builder` enables `npmRebuild` by default, which runs `@electron/rebuild` over native production
+  dependencies. The newly added `node-pty` was therefore force-recompiled by `node-gyp`, and build machines have no usable
+  Visual Studio / compiler toolchain:
+  `preparing moduleName=node-pty arch=x64` → `Error: Could not find any Visual Studio installation to use` →
+  `node-gyp failed to rebuild '.../node_modules/node-pty'`.
+- **Fix**: added `"npmRebuild": false` to the `build` section of `electron/package.json`. `node-pty` 1.1.0 is N-API based
+  (ABI stable across Electron versions) and ships `prebuilds/win32-x64`, `prebuilds/win32-arm64`, `prebuilds/darwin-x64`
+  and `prebuilds/darwin-arm64` binaries, so **no rebuild is required**; Linux has no prebuild and still compiles in place
+  via node-gyp during `npm install`.
+- **Hardening**: the Linux dependency step now installs `build-essential` + `python3` explicitly (node-pty has no linux
+  prebuild and depends on the local toolchain); the Windows / macOS packaging steps now use `set -o pipefail` + `tee` to
+  persist logs, plus an `if: failure()` artifact upload — GitHub Actions logs are not visible without signing in, which
+  blocked the investigation of this very failure.
+- **Verified**: a clean clone of tag v3.0.9 (with the Maven artifact and jlink JRE added) re-ran the exact CI commands:
+  the log shows `skipped dependencies rebuild  reason=npmRebuild is set to false`, `CodeCraft Setup 3.0.9.exe` is produced,
+  and `app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/pty.node` is correctly unpacked.
+
 ### 🔢 Version Sync
 
 - Backend: `3.0.8` → `3.0.9` (`pom.xml`, artifact `code-craft-3.0.9.jar`)

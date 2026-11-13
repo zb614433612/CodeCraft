@@ -23,6 +23,7 @@
     "directories": {
       "output": "release"
     },
+    "npmRebuild": false,
     "afterPack": "afterPack.js",
     "asarUnpack": [
       "**/node_modules/node-pty/**"

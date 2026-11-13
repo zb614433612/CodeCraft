@@ -69,13 +69,31 @@ jobs:
             echo 内置 JRE 已存在，跳过
           )
 
+      # ⚠️ 严禁移除 electron/package.json 中的 build.npmRebuild=false
+      # 原因：node-pty 自带 win32/darwin prebuilds 且基于 N-API（跨 Electron 版本 ABI 稳定），
+      # 而 electron-builder 默认会执行 @electron/rebuild，调 node-gyp 强制重编译 node-pty，
+      # 在未装 Visual Studio / Xcode 命令行工具的构建机上必然失败，表现为：
+      #   preparing moduleName=node-pty arch=x64
+      #   Error: Could not find any Visual Studio installation to use
+      #   node-gyp failed to rebuild '.../node_modules/node-pty'
       - name: Electron 打包 (Windows)
+        shell: bash
         run: |
           cd electron
           npm install
-          npx electron-builder --win
+          set -o pipefail
+          npx electron-builder --win 2>&1 | tee ../builder-win.log
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      # GitHub 的 Actions 日志页需登录才可见，失败时把完整日志留成 artifact 便于排查
+      - name: 上传构建日志 (Windows)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-windows
+          path: builder-win.log
+          if-no-files-found: ignore
 
       - name: 上传产物 (Windows)
         uses: actions/upload-artifact@v4
@@ -184,9 +202,19 @@ jobs:
         run: |
           cd electron
           # 只构建当前 job 的目标架构；electron/jre 即本机原生裁剪出的对应架构
-          npx electron-builder --mac --${{ matrix.arch }}
+          # 依赖 build.npmRebuild=false：node-pty 使用自带 darwin prebuild，不走 node-gyp 重编译
+          set -o pipefail
+          npx electron-builder --mac --${{ matrix.arch }} 2>&1 | tee ../builder-macos-${{ matrix.arch }}.log
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: 上传构建日志 (macOS ${{ matrix.arch }})
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-macos-${{ matrix.arch }}
+          path: builder-macos-${{ matrix.arch }}.log
+          if-no-files-found: ignore
 
       - name: 验证签名与 JRE 架构 (macOS ${{ matrix.arch }})
         run: |
@@ -261,7 +289,9 @@ jobs:
       - name: 安装 Linux 构建依赖
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libfuse2 rpm
+          # libfuse2 / rpm：electron-builder 生成 AppImage 与 deb 需要
+          # build-essential + python3：node-pty 没有 linux prebuild，npm install 阶段要靠 node-gyp 就地编译
+          sudo apt-get install -y -qq libfuse2 rpm build-essential python3
           echo "✅ 系统依赖已就绪"
 
       - name: 验证构建产物
