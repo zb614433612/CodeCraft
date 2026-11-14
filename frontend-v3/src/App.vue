@@ -1472,6 +1472,23 @@ const chatProviderCode = computed(() => {
 })
 
 /**
+ * 上传图片时使用的 Provider code —— **只取「确定的值」，绝不含 isDefault / 列表首个兜底**。
+ *
+ * <p>为什么不能用 `chatProviderCode`：它末位会兜底成 `providerList[0]`，而本项目里
+ * `is_default` 两个 Provider 都是 0，于是兜底结果就是 id 最小的 **deepseek**。
+ * 后端此前又用 `getFirstProviderCode()` 做同样的猜测，两者叠加的后果是：
+ * 用户在**火山方舟**下粘贴的图片被静默上传到 **DeepSeek 官网云端文件库**
+ * （实测 `file_asset` 记录：provider_code=deepseek / storage_type=cloud / file_id=file-api-xxx）。</p>
+ *
+ * <p>上传图片是「把用户文件送出本机」的操作，口径必须比对话更严：
+ * 只有用户明确切换过 Provider（`chatProviderOverride`）或 Agent 明确绑定了 Provider，
+ * 才算「用户选过」；否则传空串让后端走本地存储 + base64 注入，谁家云端都不碰。</p>
+ */
+const chatUploadProviderCode = computed(
+  () => chatProviderOverride.value || currentAgent.value?.providerCode || ''
+)
+
+/**
  * 上下文模式（全量 / 精简）。
  *
  * <p>唯一真相源是 `settingsStore.contextMode`（pinia persist → localStorage），
@@ -1741,10 +1758,21 @@ async function loadChatBalance(force = false) {
       : ''
   } catch {
     /*
-      静默失败：只记录「这个 Provider 已经查过」，不清空上一次成功的数据。
-      网络抖动 / 后端临时不可用不该让余额从界面上凭空消失（经典版同样是「失败保留上一次值」）。
+      静默失败：不弹 toast、不写错误条（聊天页余额只是辅助信息，否则缺 AK/SK 的 Provider
+      会让每次进聊天页都蹦错误提示）。
+
+      但「保留上一次值」必须区分两种情况 —— 这正是用户实际踩到的 bug：
+        · 同一个 Provider 查询失败（网络抖动 / 后端临时不可用）→ 保留旧值，
+          避免余额从界面上凭空消失（与经典版一致）；
+        · **切换了 Provider** 之后查询失败 → 必须清空。
+          否则上一个 Provider 的数字会一直挂在界面上，用户会以为那是当前 Provider 的余额。
+          实测场景：火山方舟的 extraConfig 为空（没配账号级 AK/SK），
+          QueryBalanceAcct 必然失败 → 界面显示的其实是 DeepSeek 官网的余额。
     */
-    chatBalanceCode.value = code
+    if (chatBalanceCode.value !== code) {
+      chatBalanceText.value = ''
+      chatBalanceCode.value = code
+    }
   }
 }
 
@@ -3433,7 +3461,12 @@ async function uploadChatImage(file: File) {
     uploading: true
   })
   try {
-    const res = await uploadFileAsset(file, { source: 'paste' })
+    const res = await uploadFileAsset(file, {
+      source: 'paste',
+      // 只传「确定的 Provider」：未明确选择时传 undefined → 后端走本地存储 + base64 注入，
+      // 绝不因为兜底猜 Provider 而把图片传到用户没选的平台云端
+      providerCode: chatUploadProviderCode.value || undefined
+    })
     if (res.code !== 200 || !res.data) throw new Error(res.message || '上传失败')
     const target = attachments.value.find(a => a.id === tempId)
     if (target) {
@@ -5048,7 +5081,11 @@ async function onFileUpload(files: File[]) {
   let ok = 0
   for (const file of files) {
     try {
-      const res = await uploadFileAsset(file, { source: 'upload' })
+      const res = await uploadFileAsset(file, {
+        source: 'upload',
+        // 同粘贴路径：只传「确定的 Provider」，未选择则走本地存储（不猜、不上传别家云端）
+        providerCode: chatUploadProviderCode.value || undefined
+      })
       if (res.code === 200) ok += 1
       else errors.push(`${file.name}：${res.message || '上传失败'}`)
     } catch (err) {
@@ -5107,9 +5144,22 @@ async function onFileDelete(id: number | string) {
 
 /** 拉取云端文件清单（账号级；与本地记录比对标注「已登记 / 仅云端」） */
 async function loadCloudFiles() {
+  /*
+    云端文件是「账号级视图」：必须明确要看哪一家 Provider 的账号 —— **不能猜**。
+    后端已移除 getFirstProviderCode 兜底（那个兜底会取 id 最小的 Provider，本项目是 deepseek），
+    猜错就会把别家平台的文件当成自己的列出来，甚至删到别家平台的文件。
+  */
+  const providerCode = chatUploadProviderCode.value
+  if (!providerCode) {
+    cloudFiles.value = null
+    toast.info('请先选择 Provider', {
+      description: '云端文件列表属于账号级视图，需先确定查看哪一家 Provider 的云端文件'
+    })
+    return
+  }
   cloudLoading.value = true
   try {
-    const res = await listCloudFiles()
+    const res = await listCloudFiles(providerCode)
     const data = res.data as CloudFileListData | null
     cloudFiles.value = data
       ? {

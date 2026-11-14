@@ -5,6 +5,80 @@
 
 ---
 
+## [3.1.4] - 2026-11-14
+
+> **3.1.3 的补丁版**：修复上一版**降级分支写了却永远不生效**的严重缺陷。
+> 3.1.3 号称「火山等未适配 Files API 的 Provider 也能传图、不上传云端」，
+> 但因前置的 `getFirstProviderCode()` 兜底猜测未删除，`client == null` 这个分支**从未被执行**——
+> 用户在火山方舟下粘贴的图片，实际仍被静默上传到 **DeepSeek 官网云端文件库**。
+> 本版把「猜 Provider」这一模式从全部 5 个入口彻底移除，并修复余额显示的「张冠李戴」。
+> 纯后端 + 前端逻辑修复，**需重启后端**；未改数据库结构。
+
+### 🔥 图片上传：删掉「猜 Provider」（P0，真 Bug）
+
+- **症状**：用户在火山方舟（`volcengine`）下粘贴图片，数据库记录为
+  `provider_code=deepseek`、`storage_type=cloud`、`file_id=file-api-xxx` ——
+  图片被送进了**用户并未选择的平台**的云端文件库，既消耗别家额度，也是数据外发。
+- **根因（3.1.3 的实际漏洞）**：降级逻辑的**前置条件**没处理干净。3.1.3 的代码是：
+
+  ```java
+  // 3.1.3 —— 降级分支写了，但永远进不去
+  String code = (providerCode == null || providerCode.isBlank())
+          ? llmClientManager.getFirstProviderCode()   // ← 猜成 id 最小的 Provider（deepseek）
+          : providerCode;
+  FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
+  if (client == null) {                 // ← resolve("deepseek") 返回非 null，此分支死代码
+      return uploadLocalImage(...);
+  }
+  ```
+
+  前端 `uploadFileAsset()` 当时**没有传 `providerCode`**，于是后端一路猜到 `deepseek`，
+  `resolveClientByCode("deepseek")` 返回可用的 DeepSeek 客户端，降级分支形同虚设。
+- **修复原则**：「**用户没选，就不许替他选**」。上传图片是把用户文件送出本机的操作，
+  口径必须比对话更严。
+  - `upload`：未指定 Provider → **直接本地存储**（`storage_type=local`、`file_id=null`），不触碰任何云端；
+  - `uploadLocalBytes`（截图工具等内部入口）：同样不再猜，未指定即本地存储；
+  - 明确指定但未适配 Files API（如火山 `volcengine`）→ 仍是本地存储 + base64 注入。
+- **顺带修掉 3 处同类隐患**（这几个更危险，都是「猜错 Provider」直接作用在账户级数据上）：
+  - `listCloudFiles`：云端文件是**账号级视图**，猜错会把别家平台的文件当成自己的列出来。
+    现要求必须显式指定 Provider，否则明确报错而不是默默查错账号；
+  - `deleteCloudFile`：**删除不可逆**，猜错 Provider 会删到别家平台的文件。同样要求显式指定；
+  - `supported()`：能力判断兜底成 `deepseek` 时界面显示「支持 Files API」，
+    而用户实际在用火山（不支持）—— 这正是「界面说能传、实际传不了/传错平台」的源头。
+    未指定时返回 `supported=false` + `providerCode=null`。
+- **前端配套**（`frontend-v3/src/App.vue`）：
+  - 新增 `chatUploadProviderCode`，只取「用户明确切换过的」或「Agent 明确绑定的 Provider」，
+    **不含 `isDefault` / 列表首个兜底**（本项目两个 Provider 的 `is_default` 都是 0，
+    兜底结果就是 id 最小的 deepseek）；
+  - 粘贴（`source: 'paste'`）与上传（`source: 'upload'`）两处都补传该值；
+  - 云端文件查询同样改为显式传 Provider，未确定时提示「请先选择 Provider」。
+- **验证要点**：重启后粘贴图片，`file_asset` 应出现 `storage_type=local`、`file_id=null`。
+
+### 💰 余额显示：切换 Provider 后不再「张冠李戴」
+
+- **症状**：切到火山方舟后，界面上显示的仍是 **DeepSeek 官网的余额**。
+- **两个独立原因，缺一不可**：
+  1. **火山余额本身查不到**：`huoshan` 的扩展配置为空（`extra_config={}`），
+     而火山余额走费用中心 `QueryBalanceAcct`，需要**账号级 AccessKey/SecretKey + V4 签名**
+     （与方舟 API Key 是两套凭据）→ 必然抛异常；
+  2. **前端把旧值留在了界面上**：原逻辑 `catch` 后一律「保留上一次成功值」，
+     于是切 Provider + 查询失败 = 界面一直挂着一个**属于另一个 Provider** 的数字。
+- **修复**：区分两种情况——
+  - 同一个 Provider 查询失败（网络抖动 / 后端临时不可用）→ **保留旧值**，避免余额凭空消失；
+  - **切换了 Provider 之后失败** → **清空**，绝不显示别家的数字。
+- **注意**：该接口查的是**账户资金余额**，不是 Coding Plan 套餐剩余次数；
+  想看套餐额度请到火山控制台。缺 AK/SK 时正确行为是「显示为空」而非报错弹窗。
+
+### 🔧 升级说明
+
+- **需重启后端**（配置与逻辑变更）；未改数据库结构，无需迁移。
+- 桌面端需重新打包（jar 内含新逻辑与新前端 `v3-static`）。
+- 存量脏数据：此前被传到 DeepSeek 云端的图片（`file_asset` 中 `storage_type=cloud`
+  且 `provider_code=deepseek` 的记录）不会自动迁移，如不需要可在文件页删除。
+- 想看到火山余额需自行配置：Provider「扩展配置」填入账号级 `accessKey` / `secretKey`。
+
+---
+
 ## [3.1.3] - 2026-11-14
 
 > 视觉与稳定性修复版：修掉三处**「界面与后端都说不行、其实早就行」**的能力误判

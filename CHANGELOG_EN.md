@@ -5,6 +5,95 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.4] - 2026-11-14
+
+> **Patch release for 3.1.3**, fixing a serious flaw where the previous version's fallback branch
+> **was written but could never execute**. 3.1.3 claimed "Providers without Files API support
+> (e.g. Volcengine Ark) can now upload images without touching any cloud", but because the preceding
+> `getFirstProviderCode()` guess was never removed, the `client == null` branch **was dead code** —
+> images pasted under Volcengine Ark were still silently uploaded to **DeepSeek's official cloud file
+> library**. This release removes the "guess the Provider" pattern from all five entry points and
+> fixes the balance display showing another Provider's numbers.
+> Backend + frontend logic fixes only; **backend restart required**; no schema changes.
+
+### 🔥 Image upload: the "guess the Provider" pattern is gone (P0, real bug)
+
+- **Symptom**: with Volcengine Ark (`volcengine`) selected, a pasted image produced DB rows with
+  `provider_code=deepseek`, `storage_type=cloud`, `file_id=file-api-xxx` — the image was sent to a
+  platform's cloud file library that **the user never chose**, burning another vendor's quota and
+  sending data off-device.
+- **Actual root cause (the 3.1.3 hole)**: the fallback's **precondition** was left in place:
+
+  ```java
+  // 3.1.3 — the fallback was written, but unreachable
+  String code = (providerCode == null || providerCode.isBlank())
+          ? llmClientManager.getFirstProviderCode()   // ← guesses the lowest-id Provider (deepseek)
+          : providerCode;
+  FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
+  if (client == null) {                 // ← resolve("deepseek") is non-null, so this never runs
+      return uploadLocalImage(...);
+  }
+  ```
+
+  The frontend `uploadFileAsset()` **did not send `providerCode`** at the time, so the backend
+  guessed `deepseek`, got a usable DeepSeek client, and the fallback stayed dead.
+- **Principle**: **if the user did not choose, we must not choose for them**. Uploading an image
+  ships a user file off the machine, so the rule must be stricter than for chat requests.
+  - `upload`: no Provider specified → **store locally** (`storage_type=local`, `file_id=null`),
+    never touching any cloud;
+  - `uploadLocalBytes` (screenshot tool and other internal callers): same — no guessing;
+  - Provider specified but without Files API support (e.g. Volcengine `volcengine`) → still local
+    storage + base64 injection.
+- **Three more hazards of the same kind fixed** (these are worse — guessing acts on account-level data):
+  - `listCloudFiles`: cloud files are an **account-level view**; a wrong guess lists another vendor's
+    files as your own. It now requires an explicit Provider and fails loudly instead of silently
+    querying the wrong account;
+  - `deleteCloudFile`: **deletion is irreversible**; a wrong guess deletes another vendor's files.
+    Explicit Provider now required;
+  - `supported()`: when the guess fell back to `deepseek`, the UI said "Files API supported" while
+    the user was actually on Ark (unsupported) — this is exactly the source of "the UI says it can
+    upload, but it cannot / it goes to the wrong platform". Now returns `supported=false` with
+    `providerCode=null` when unspecified.
+- **Frontend counterpart** (`frontend-v3/src/App.vue`):
+  - new `chatUploadProviderCode`, which only takes "the Provider the user explicitly switched to"
+    or "the Provider bound to the Agent" — **no `isDefault` / first-in-list fallback** (both Providers
+    in this project have `is_default = 0`, so that fallback resolves to the lowest-id deepseek);
+  - both paste (`source: 'paste'`) and upload (`source: 'upload'`) now send it;
+  - cloud-file queries also pass the Provider explicitly, prompting "select a Provider first" otherwise.
+- **How to verify**: after restart, paste an image and check that `file_asset` shows
+  `storage_type=local` and `file_id=null`.
+
+### 💰 Balance display: no more showing another Provider's numbers
+
+- **Symptom**: after switching to Volcengine Ark, the UI still displayed **DeepSeek's** balance.
+- **Two independent causes, both required**:
+  1. **Ark's balance cannot be queried at all**: `huoshan` has an empty extension config
+     (`extra_config={}`), while Ark balances come from the billing-center `QueryBalanceAcct`, which
+     needs **account-level AccessKey/SecretKey with V4 signing** (a different credential set from the
+     Ark API Key) → it always throws;
+  2. **The frontend kept the stale value**: the old `catch` unconditionally "kept the last successful
+     value", so switching Provider + a failed query left a number on screen that **belonged to a
+     different Provider**.
+- **Fix**: distinguish two cases —
+  - same Provider fails (network blip / backend temporarily unavailable) → **keep the old value**,
+    so the balance does not vanish;
+  - **after switching Provider** and the query fails → **clear it**, never show another vendor's number.
+- **Note**: this endpoint returns the **cash account balance**, not Coding Plan remaining quota;
+  check the Volcengine console for plan usage. Without AK/SK the correct behaviour is an **empty
+  display**, not an error toast.
+
+### 🔧 Upgrade notes
+
+- **Backend restart required** (config and logic changes); no schema changes, no migration.
+- Desktop build must be re-packaged (the jar carries the new logic and the new `v3-static` frontend).
+- Legacy rows: images previously pushed to DeepSeek's cloud (`file_asset` rows with
+  `storage_type=cloud` and `provider_code=deepseek`) are not migrated automatically; delete them from
+  the file page if unwanted.
+- To see the Ark balance, configure the Provider's extension config with account-level
+  `accessKey` / `secretKey`.
+
+---
+
 ## [3.1.3] - 2026-11-14
 
 > A vision-and-stability fix release. It removes three cases of **"the UI and the backend both say it

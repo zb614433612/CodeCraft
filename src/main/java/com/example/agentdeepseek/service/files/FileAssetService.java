@@ -159,10 +159,19 @@ public class FileAssetService {
             return uploadLocalDocument(file, userId, source, originalName);
         }
 
-        // 3. Provider 解析（缺省首个 Provider）
-        String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
-        if (code == null || code.isBlank()) {
-            throw new IllegalStateException("没有可用的 LLM Provider，无法上传");
+        // 3. 图片存储策略：只有「调用方明确指定 Provider」且「该 Provider 已适配 Files API」时才走云端上传。
+        //
+        //    ⚠️ 这里**绝不能**用 getFirstProviderCode() 兜底猜 Provider。历史教训（实测数据）：
+        //    前端 uploadFileAsset 未传 providerCode 时，兜底取到 id 最小的 Provider（deepseek），
+        //    于是用户在**火山方舟**下粘贴的图片被静默上传到 **DeepSeek 官网云端文件库**
+        //    （file_asset 记录：provider_code=deepseek / storage_type=cloud / file_id=file-api-xxx），
+        //    既花掉另一家平台的额度，也把用户图片送出了他并未选择的平台。
+        //    正确语义是「用户没选，就不许替他选」——未指定一律本地存储。
+        String code = (providerCode == null || providerCode.isBlank()) ? null : providerCode;
+        if (code == null) {
+            // 未指定 Provider → 仅本地存储（安全默认）。注入阶段由 FileVisionService.buildFileBlocks
+            // 的 supportsFiles=false 分支读本地副本转 base64 image_url 块，多模态对话照常可用。
+            return uploadLocalImage(file, userId, null, source, originalName, mimeType);
         }
         FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
         if (client == null) {
@@ -326,7 +335,8 @@ public class FileAssetService {
             throw new IllegalStateException("资产记录保存失败: " + e.getMessage(), e);
         }
 
-        log.info("图片资产上传成功（本地存储，Provider 未适配 Files API）: id={}, filename={}, size={}, mime={}, provider={}",
+        // 注意：provider 为 null 表示「调用方未指定」（不是「不支持」），两种情况都落到本地存储
+        log.info("图片资产已保存（仅本地存储，未上传任何云端）: id={}, filename={}, size={}, mime={}, provider={}",
                 asset.getId(), originalName, file.getSize(), mimeType, providerCode);
         return toVO(asset);
     }
@@ -365,13 +375,11 @@ public class FileAssetService {
             throw new IllegalArgumentException("不支持的文件格式（仅 JPEG/PNG/GIF/WebP）");
         }
 
-        // 3. Provider 解析（缺省首个 Provider；未适配 Files API 时 client=null → 走本地存储降级）
-        String code = (providerCode == null || providerCode.isBlank())
-                ? llmClientManager.getFirstProviderCode() : providerCode;
-        if (code == null || code.isBlank()) {
-            throw new IllegalStateException("没有可用的 LLM Provider，无法上传");
-        }
-        FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
+        // 3. Provider 解析：未指定 → 一律本地存储（**不猜 Provider**，理由同 upload 方法内的长注释：
+        //    按 id 最小兜底会取到 deepseek，把图片静默上传到用户没选的平台云端）。
+        //    明确指定但未适配 Files API 时 client=null，同样跳过远端上传 → 走本地存储降级。
+        String code = (providerCode == null || providerCode.isBlank()) ? null : providerCode;
+        FilesApiClient client = (code == null) ? null : filesApiClientManager.resolveClientByCode(code);
 
         // 4. 本地副本落盘（失败即返回，不做远端调用）
         String storedName;
@@ -606,10 +614,12 @@ public class FileAssetService {
      * @return 云端文件列表 + 本地比对统计
      */
     public CloudFileListVO listCloudFiles(String providerCode) {
-        // 1) Provider 解析（与上传同一套规则）
-        String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
-        if (code == null || code.isBlank()) {
-            throw new IllegalStateException("没有可用的 LLM Provider，无法查询云端文件");
+        // 1) Provider 解析：**不猜**。云端文件是「账号级」视图，猜错 Provider 会把别家平台的文件列出来
+        //    （兜底取首个 Provider 通常是 deepseek，用户在火山下会以为看到的是自己的火山云端文件）。
+        //    要查看云端文件，必须由调用方明确指定是哪一家的。
+        String code = (providerCode == null || providerCode.isBlank()) ? null : providerCode;
+        if (code == null) {
+            throw new IllegalStateException("请指定 Provider 后再查询云端文件（云端文件列表属于账号级视图，不能猜测 Provider）");
         }
         FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
         if (client == null) {
@@ -719,10 +729,10 @@ public class FileAssetService {
             throw new IllegalArgumentException("fileId 格式非法（长度超限）");
         }
 
-        // 2) Provider 解析（与上传/查询同一套规则）
-        String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
-        if (code == null || code.isBlank()) {
-            throw new IllegalStateException("没有可用的 LLM Provider，无法删除云端文件");
+        // 2) Provider 解析：**不猜**（删除是不可逆操作，猜错 Provider 会删到别家平台的文件）
+        String code = (providerCode == null || providerCode.isBlank()) ? null : providerCode;
+        if (code == null) {
+            throw new IllegalStateException("请指定 Provider 后再删除云端文件（不能猜测 Provider）");
         }
         FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
         if (client == null) {
@@ -758,7 +768,10 @@ public class FileAssetService {
      * 当前 Provider 是否支持 Files API（供前端能力判断）
      */
     public Map<String, Object> supported(String providerCode) {
-        String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
+        // **不猜**：能力判断若兜底成首个 Provider（通常是 deepseek），界面会显示「支持 Files API」，
+        // 而用户实际在用火山方舟（不支持）—— 这正是「界面说能传、实际传不了/传错平台」的源头。
+        // 未指定时明确返回 supported=false + providerCode=null，让界面显示为「未确定」。
+        String code = (providerCode == null || providerCode.isBlank()) ? null : providerCode;
         boolean ok = code != null && filesApiClientManager.supportsFilesApi(code);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("supported", ok);
