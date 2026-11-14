@@ -114,12 +114,17 @@ function visionStateOf(key: string, model: string): CapabilityState | null {
     return DEEPSEEK_VISION_MODEL.test(model) ? 'on' : 'warn'
   }
   if (VOLCENGINE_TEMPLATES.includes(key)) {
-    // 方舟上的 deepseek 系是纯文本；豆包 seed 系列与 vision / vl / vlm 命名支持图像
-    if (model.startsWith('deepseek')) return 'warn'
+    // 方舟上的 deepseek 系已分化（实测 2026-11，与后端 ModelCapabilityConfig 逐条对齐）：
+    //   deepseek-v4.1-flash / v4.1-flash-economy → 支持图像（图片真实计入 prompt_tokens）
+    //   deepseek-v4-pro / v4-flash               → 纯文本（图片被静默丢弃，模型自称「没有图片」）
+    // 其余豆包 seed / glm-5.3-flash（原生多模态）/ kimi-k3.1-pro（多模态旗舰）等支持图像。
+    if (/v4-pro|v4-flash/.test(model)) return 'warn'
+    if (model.startsWith('deepseek')) return /v4\.1/.test(model) ? 'on' : 'warn'
     return 'on'
   }
   if (key === 'mimo' || key === 'xiaomi-mimo') {
-    return /v2\.5|vision|-vl/.test(model) ? 'on' : 'warn'
+    // v2.5 系列与 Omni（全模态）支持图像，更早纯文本模型不支持
+    return /v2\.5|vision|-vl|omni/.test(model) ? 'on' : 'warn'
   }
   if (key === 'minimax' || key.startsWith('minimax')) {
     // M2 / M2.1 / M2.5 / M2.7 为纯文本；M3 与 VL / abab-vl 支持图像
@@ -127,8 +132,10 @@ function visionStateOf(key: string, model: string): CapabilityState | null {
     return /m3|vision|-vl|abab/.test(model) ? 'on' : 'warn'
   }
   if (key === 'qwen' || key === 'dashscope' || key === 'tongyi') {
-    // Qwen-VL / Qwen3-VL / Omni 支持图像；qwen-plus / qwen-max 等纯文本不支持
-    return /-vl|vl-|omni|vision/.test(model) ? 'on' : 'warn'
+    // Qwen-VL / Qwen3-VL / Omni 支持图像；Plus 系列自 qwen3.6-plus 起官方声明支持图片理解
+    // （百炼文档：「推荐模型：qwen3.7-plus（支持图片理解）、qwen3.6-plus（支持图片理解）」）。
+    // qwen-max 各代差异较大，不确定时不放行，避免「界面说能发图、实际图片被丢弃」。
+    return /-vl|vl-|omni|vision|plus/.test(model) ? 'on' : 'warn'
   }
   if (key === 'ollama') {
     // 本地模型的视觉能力取决于权重文件：llava / *-vl / *vl* / vision / gemma3 / minicpm-v / moondream / llama4。

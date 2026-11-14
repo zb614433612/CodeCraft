@@ -159,14 +159,17 @@ public class FileAssetService {
             return uploadLocalDocument(file, userId, source, originalName);
         }
 
-        // 3. Provider 解析（缺省首个 Provider；未适配返回 null → 明确报错，不静默降级）
+        // 3. Provider 解析（缺省首个 Provider）
         String code = (providerCode == null || providerCode.isBlank()) ? llmClientManager.getFirstProviderCode() : providerCode;
         if (code == null || code.isBlank()) {
             throw new IllegalStateException("没有可用的 LLM Provider，无法上传");
         }
         FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
         if (client == null) {
-            throw new IllegalStateException("当前 Provider（" + code + "）不支持 Files API，无法上传");
+            // Provider 未适配 Files API（如火山方舟 volcengine / 第三方兼容中转）→ 降级「仅本地存储」。
+            // 不向任何平台的云端文件库上传用户图片；注入阶段由 FileVisionService.buildFileBlocks
+            // 的 supportsFiles=false 分支读取本地副本转 base64 image_url 块，多模态对话照常可用。
+            return uploadLocalImage(file, userId, code, source, originalName, mimeType);
         }
 
         // 4. 本地副本先落盘（流拷贝；失败即返回，不做远端调用）
@@ -272,6 +275,62 @@ public class FileAssetService {
         return toVO(asset);
     }
 
+    /**
+     * 上传图片资产（仅本地存储，无远端调用）
+     * <p>
+     * 用于 Provider <b>未适配 Files API</b> 的场景（如火山方舟 {@code volcengine} 模板、
+     * 第三方 OpenAI 兼容中转）：图片只落本地副本，{@code storage_type=local}、{@code file_id=null}，
+     * <b>不向任何平台的云端文件库上传用户图片</b>。
+     * </p>
+     * <p>
+     * 注入阶段由 {@link FileVisionService#buildFileBlocks} 的 {@code supportsFiles=false} 分支
+     * 读取本地副本转 base64 {@code image_url} 块（带 32MB 总大小上限与块缓存），多模态对话照常可用。
+     * 删除时 {@link #delete} 会因 {@code isLocalStorage} 跳过远端调用，不会产生孤儿远端文件。
+     * </p>
+     *
+     * @param file         上传文件（已通过魔数校验，MIME 为 JPEG/PNG/GIF/WebP）
+     * @param userId       当前用户ID
+     * @param providerCode 目标 Provider code（保留记录，便于按 Provider 归类查询）
+     * @param source       来源（upload/paste）
+     * @param originalName 原始文件名（调用方已保证非空）
+     * @param mimeType     已检测出的图片 MIME
+     * @return 资产视图（含 previewUrl）
+     */
+    private FileAssetVO uploadLocalImage(MultipartFile file, Long userId, String providerCode,
+                                         String source, String originalName, String mimeType) {
+        // 1. 本地副本落盘（失败即返回，不做记录）
+        String storedName;
+        try {
+            storedName = fileAssetStore.save(file, extensionOf(mimeType));
+        } catch (IOException e) {
+            throw new IllegalStateException("本地保存失败: " + e.getMessage(), e);
+        }
+
+        // 2. 写记录（失败补偿删本地副本）
+        FileAsset asset = new FileAsset();
+        asset.setFileId(null);
+        asset.setProviderCode(providerCode);
+        asset.setUserId(userId);
+        asset.setFilename(originalName);
+        asset.setMimeType(mimeType);
+        asset.setSize(file.getSize());
+        asset.setLocalPath(storedName);
+        asset.setStorageType("local");
+        asset.setSource("paste".equalsIgnoreCase(source) ? "paste" : "upload");
+        asset.setStatus("active");
+        asset.setCreatedAt(LocalDateTime.now());
+        try {
+            fileAssetMapper.insert(asset);
+        } catch (Exception e) {
+            fileAssetStore.deleteQuietly(storedName);
+            throw new IllegalStateException("资产记录保存失败: " + e.getMessage(), e);
+        }
+
+        log.info("图片资产上传成功（本地存储，Provider 未适配 Files API）: id={}, filename={}, size={}, mime={}, provider={}",
+                asset.getId(), originalName, file.getSize(), mimeType, providerCode);
+        return toVO(asset);
+    }
+
     // ==================== 上传（服务端内部调用：本地文件/字节） ====================
 
     /**
@@ -306,16 +365,13 @@ public class FileAssetService {
             throw new IllegalArgumentException("不支持的文件格式（仅 JPEG/PNG/GIF/WebP）");
         }
 
-        // 3. Provider 解析（与 upload 一致：缺省首个 Provider；未适配明确报错，不静默降级）
+        // 3. Provider 解析（缺省首个 Provider；未适配 Files API 时 client=null → 走本地存储降级）
         String code = (providerCode == null || providerCode.isBlank())
                 ? llmClientManager.getFirstProviderCode() : providerCode;
         if (code == null || code.isBlank()) {
             throw new IllegalStateException("没有可用的 LLM Provider，无法上传");
         }
         FilesApiClient client = filesApiClientManager.resolveClientByCode(code);
-        if (client == null) {
-            throw new IllegalStateException("当前 Provider（" + code + "）不支持 Files API，无法上传");
-        }
 
         // 4. 本地副本落盘（失败即返回，不做远端调用）
         String storedName;
@@ -325,44 +381,48 @@ public class FileAssetService {
             throw new IllegalStateException("本地保存失败: " + e.getMessage(), e);
         }
 
-        // 5. 远端上传（以本地副本为源；失败清理本地副本）
-        FileObject remote;
-        try {
-            FileUploadRequest request = FileUploadRequest.of(fileAssetStore.resolve(storedName));
-            request.setFilename(originalName);
-            remote = client.upload(request);
-        } catch (Exception e) {
-            fileAssetStore.deleteQuietly(storedName);
-            throw new IllegalStateException("远端上传失败: " + e.getMessage(), e);
+        // 5. 远端上传（仅 Provider 已适配 Files API 时执行；未适配则跳过 → 不触碰任何云端文件库）
+        FileObject remote = null;
+        if (client != null) {
+            try {
+                FileUploadRequest request = FileUploadRequest.of(fileAssetStore.resolve(storedName));
+                request.setFilename(originalName);
+                remote = client.upload(request);
+            } catch (Exception e) {
+                fileAssetStore.deleteQuietly(storedName);
+                throw new IllegalStateException("远端上传失败: " + e.getMessage(), e);
+            }
         }
 
         // 6. 写记录（失败时补偿：尽力删除远端 + 本地，避免孤儿）
         FileAsset asset = new FileAsset();
-        asset.setFileId(remote.getFileId());
+        asset.setFileId(remote == null ? null : remote.getFileId());
         asset.setProviderCode(code);
         asset.setUserId(userId);
         asset.setFilename(originalName);
         asset.setMimeType(mimeType);
         asset.setSize((long) bytes.length);
         asset.setLocalPath(storedName);
-        asset.setStorageType("cloud");
+        asset.setStorageType(remote == null ? "local" : "cloud");
         asset.setSource((source == null || source.isBlank()) ? "upload" : source);
         asset.setStatus("active");
         asset.setCreatedAt(LocalDateTime.now());
         try {
             fileAssetMapper.insert(asset);
         } catch (Exception e) {
-            try {
-                client.delete(remote.getFileId());
-            } catch (Exception ex) {
-                log.warn("补偿删除远端文件失败: fileId={} - {}", remote.getFileId(), ex.getMessage());
+            if (remote != null) {
+                try {
+                    client.delete(remote.getFileId());
+                } catch (Exception ex) {
+                    log.warn("补偿删除远端文件失败: fileId={} - {}", remote.getFileId(), ex.getMessage());
+                }
             }
             fileAssetStore.deleteQuietly(storedName);
             throw new IllegalStateException("资产记录保存失败: " + e.getMessage(), e);
         }
 
-        log.info("本地字节上传成功（服务端内部）: id={}, fileId={}, filename={}, size={}, provider={}, source={}",
-                asset.getId(), asset.getFileId(), originalName, bytes.length, code, asset.getSource());
+        log.info("本地字节上传成功（服务端内部）: id={}, fileId={}, filename={}, size={}, provider={}, storage={}, source={}",
+                asset.getId(), asset.getFileId(), originalName, bytes.length, code, asset.getStorageType(), asset.getSource());
         return toVO(asset);
     }
 

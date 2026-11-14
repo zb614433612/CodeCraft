@@ -5,6 +5,91 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.3] - 2026-11-14
+
+> A vision-and-stability fix release. It removes three cases of **"the UI and the backend both say it
+> is unsupported, when in fact it has been supported all along"** (Ark's `deepseek-v4.1-flash` is a
+> native multimodal model, yet a blanket `deepseek` prefix rule blocked it), opens up the dead end
+> where **a Provider without Files API support could not upload images at all**, and attacks the
+> **two root causes of disconnects in long-context sessions**: a 120s response-header timeout that is
+> too short, and a 1M context cap that meant compaction never triggered.
+> Backend + both frontends + Electron changed; **backend restart required**; no schema changes.
+
+### 🖼️ Vision capability: three misjudgements fixed (core)
+
+- **Volcengine Ark (real bug, user-visible)**: the old rule `exclude-prefixes: ["deepseek"]` treated
+  **every** `deepseek*` model as non-vision. But Ark's deepseek family has since forked — measured by
+  posting an `image_url` block straight to `/api/coding/v3`:
+
+  | Model | `prompt_tokens` | Verdict |
+  |---|---|---|
+  | `deepseek-v4.1-flash` | 35 → **224** (image really counted) | ✅ supported |
+  | `deepseek-v4.1-flash-economy` | **218** (image really counted) | ✅ supported |
+  | `deepseek-v4-pro` | only **86**; model says "no image provided" | ❌ text-only |
+  | `deepseek-v4-flash` | image silently dropped | ❌ text-only |
+
+  Now expressed as "version include + text-only-branch exclude":
+  `include: ["vision","-vl","vlm","v4.1"]`, `exclude: ["v4-pro","v4-flash"]`.
+  ⚠️ `excludeKeywords` **takes precedence over** `includeKeywords`, and `v4.1-flash` does not contain
+  the contiguous substring `v4-flash`, so the economy variant is not caught by the exclusion.
+- **Qwen**: the old rule "`qwen-plus` / `qwen-max` are always text-only" is obsolete — Bailian's docs
+  explicitly list "`qwen3.7-plus` (**supports image understanding**), `qwen3.6-plus` (**supports image
+  understanding**)" as recommended models. Added the `plus` keyword; `qwen-max` differs per generation,
+  so **no confirmation means no allowance** — better than "the UI says it can send images while the
+  image is actually discarded".
+- **Xiaomi MiMo**: added the `omni` keyword (the omni series was previously misjudged as text-only).
+- **Front and back defences kept in sync**: `ModelCapabilityConfig` (backend gate, throwing
+  `IllegalStateException` from `DeepSeekServiceImpl`) and
+  `frontend-v3/src/utils/provider-capability.ts` (three-state UI badge) must stay aligned row by row.
+  Changing only one side yields "UI says images are allowed, backend rejects them" or the reverse.
+  Both sides were updated here.
+
+### 📤 Image upload: no longer a dead end for Providers without Files API
+
+- **Background**: both `FileAssetService.upload` and `uploadLocalBytes` **threw** when
+  `FilesApiClientManager` returned `null` ("current Provider does not support Files API, cannot upload").
+  Files API is only adapted for `deepseek` and `anthropic` — so with **Volcengine Ark** (`volcengine`)
+  or any third-party compatible gateway, **images could not be uploaded at all**, making the
+  multimodal capability purely nominal.
+- **Fix**: added `uploadLocalImage`; both upload entry points now degrade to **local-only storage**
+  (`storage_type=local`, `file_id=null`) when `client == null`, and **do not upload the user's images to
+  any platform's cloud file library**. At injection time, the `supportsFiles=false` branch of
+  `FileVisionService.buildFileBlocks` reads the local copy and converts it to a base64 `image_url`
+  block (reusing the existing 32MB total cap and block cache).
+- **Deletion is safe**: `delete()` already branches on `isLocalStorage`, so local assets skip the
+  remote call and never leave orphaned cloud files behind.
+- **`uploadLocalBytes` reworked the same way**: `remote` is now nullable, and the compensating delete,
+  `storageType` decision, and logging all branch on whether a cloud upload actually happened
+  (internal entry points such as the screenshot tool benefit as well).
+
+### ⏱️ Long-context disconnect fixes (two root causes)
+
+- **Root cause 1: `responseTimeout` of 120s is too short** (`LLMWebClientManager`). This parameter
+  governs **"request sent → response headers received"**, not the overall stream duration. At
+  100k–500k tokens of context, a shared plan pool (e.g. Ark Coding Plan) routinely needs more than
+  two minutes just for prefill + queueing, so Netty drops the connection and the UI shows an
+  inexplicable disconnect (logs usually carry `PrematureCloseException` / `ReadTimeout`). Raised to
+  **300s**, aligned with `AbstractLLMClient.DEFAULT_STREAM_TIMEOUT`; once headers arrive the
+  business-layer stream timeout takes over.
+- **Root cause 2: `max-context-tokens: 1000000` meant compaction never triggered**. The compaction
+  thresholds are percentages of this value (`0.7` / `0.85` / `0.95`), so 1M means **warning only at
+  700k tokens and compaction only at 850k**. The practical effect: context grows unbounded, compaction
+  never runs, and eventually every request uploads several MB of JSON and disconnects every time.
+  Changed to **300000** (≈210k warning / 255k compaction / 285k drop), matching what a mainstream
+  coding agent can actually carry in one request. ⚠️ This is "the **stable ceiling**", not the model's
+  context window.
+
+### 🔧 Upgrade notes
+
+- **Backend restart required** (config and constant changes); no schema changes, no migration.
+- Desktop build must be re-packaged (the jar carries the new logic).
+- If you previously switched to another Provider because image upload failed, you can move back to
+  Volcengine Ark and send images normally after this upgrade.
+- For long-context usage, verify in a **new conversation**: an existing oversized context does not
+  shrink automatically just because the ceiling was lowered.
+
+---
+
 ## [3.1.2] - 2026-11-14
 
 > The second cost-governance release. The previous version made cost *visible*; this one acts on the numbers.

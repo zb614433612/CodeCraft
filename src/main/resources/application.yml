@@ -356,8 +356,21 @@ deepseek:
   # 【已废弃】旧的 reasoning 回传开关，仅在 context-mode 为空时用于兼容（false 等价于 full）。
   # 新配置请直接使用上面的 context-mode，不要再改这一项。
   # strip-history-reasoning: false
-  # 上下文最大 token 数（DeepSeek 模型为 1M）
-  max-context-tokens: 1000000
+  # 上下文最大 token 数 —— 注意这是「实际可稳定跑通的上限」，不是模型窗口上限。
+  #
+  # 为什么不写 1000000（各家常宣称的 1M 窗口）：
+  #   压缩阈值是按本值百分比算的（0.7 / 0.85 / 0.95）。配 100 万时，
+  #   要到 70 万 token 才预警、85 万才压缩 —— 而每次请求真的带 70 万 token 时：
+  #     ① 请求体可达数 MB，上行传输本身就慢；
+  #     ② 服务端 prefill + 排队极易超过 120s 响应头超时 → 连接被断开（表现为「断连」）；
+  #     ③ 共享套餐池（火山 Coding Plan 等）按 token 分段计次，长上下文会成倍吃额度。
+  #   结果就是「越用越慢、越用越容易断」，且压缩永远不触发。
+  #
+  # 取值建议（按最常见的编码/Agent 场景实测）：
+  #   300000 —— 默认。约 21 万预警、25.5 万压缩、28.5 万丢弃，单请求延迟与额度消耗可控。
+  #   请按主力 Provider 的实际承载能力调整；若确实需要长文档一次性处理，
+  #   优先走「单轮直接投喂 + 事后压缩」，而不是把阈值抬高。
+  max-context-tokens: 300000
   # 上下文智能压缩配置
   compaction:
     enabled: true              # 是否启用智能压缩
@@ -868,16 +881,19 @@ llm:
     # 内置默认规则与历史硬编码行为完全等价，一般无需配置；新增视觉模型时加关键词即可。
     default-allow-vision: true
     # 需要覆盖内置规则时，取消下面的注释并按需调整（未配置时使用代码内置默认）：
+    # ⚠ 火山方舟的 deepseek 系已分化，切勿再用 exclude-prefixes: ["deepseek"] 一刀切：
+    #   deepseek-v4.1-flash / v4.1-flash-economy 支持图像（图片真实计入 prompt_tokens）；
+    #   deepseek-v4-pro / v4-flash 纯文本（图片被静默丢弃，模型自称「没有图片」）。
     # vision-rules:
     #   deepseek:
     #     include-keywords: ["flash", "vision", "-vl"]
     #     default-allow: false
     #   "volcengine,ark,doubao":
-    #     include-keywords: ["vision", "-vl", "vlm"]
-    #     exclude-prefixes: ["deepseek"]
+    #     include-keywords: ["vision", "-vl", "vlm", "v4.1"]
+    #     exclude-keywords: ["v4-pro", "v4-flash"]
     #     default-allow: true
     #   "mimo,xiaomi-mimo":
-    #     include-keywords: ["v2.5", "vision", "-vl"]
+    #     include-keywords: ["v2.5", "vision", "-vl", "omni"]
     #     default-allow: false
     #   minimax:
     #     include-keywords: ["m3", "vision", "-vl", "abab"]
@@ -885,5 +901,5 @@ llm:
     #     exclude-prefixes: ["m2"]
     #     default-allow: false
     #   "qwen,dashscope,tongyi":
-    #     include-keywords: ["-vl", "vl-", "omni", "vision"]
+    #     include-keywords: ["-vl", "vl-", "omni", "vision", "plus"]
     #     default-allow: false

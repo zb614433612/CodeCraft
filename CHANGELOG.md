@@ -5,6 +5,73 @@
 
 ---
 
+## [3.1.3] - 2026-11-14
+
+> 视觉与稳定性修复版：修掉三处**「界面与后端都说不行、其实早就行」**的能力误判
+>（火山方舟的 `deepseek-v4.1-flash` 明明是原生多模态，却被 `deepseek` 前缀一刀切拦下），
+> 打通「Provider 没适配 Files API 就完全不能传图」的死路，并针对**长上下文场景的两个断连根因**
+> 动刀：响应头超时 120s 太短、上下文上限配成 100 万导致压缩永不触发。
+> 后端 + 两套前端 + Electron 均有改动，**需重启后端**；未改数据库结构。
+
+### 🖼️ 视觉能力判定：三处误判修复（核心）
+
+- **火山方舟（真 Bug，用户可感知）**：旧规则 `exclude-prefixes: ["deepseek"]` 把**所有** `deepseek*` 模型
+  一刀切判为不支持图像。但方舟上的 deepseek 系早已分化 —— 实测（直接向 `/api/coding/v3` 发 `image_url` 块）：
+
+  | 模型 | `prompt_tokens` | 结论 |
+  |---|---|---|
+  | `deepseek-v4.1-flash` | 35 → **224**（图片真实计入） | ✅ 支持 |
+  | `deepseek-v4.1-flash-economy` | **218**（图片真实计入） | ✅ 支持 |
+  | `deepseek-v4-pro` | 仅 **86**，模型自称「没有图片提供」 | ❌ 纯文本 |
+  | `deepseek-v4-flash` | 图片被静默丢弃 | ❌ 纯文本 |
+
+  改为「版本号 include + 纯文本支 exclude」：`include: ["vision","-vl","vlm","v4.1"]`、
+  `exclude: ["v4-pro","v4-flash"]`。⚠️ `excludeKeywords` **优先于** `includeKeywords`，
+  且 `v4.1-flash` 不含连续子串 `v4-flash`，因此 economy 版不会被误伤。
+- **通义千问**：旧规则「`qwen-plus` / `qwen-max` 一律纯文本」已随模型换代失效 ——
+  百炼文档明确写「推荐模型：`qwen3.7-plus`（**支持图片理解**）、`qwen3.6-plus`（**支持图片理解**）」。
+  补 `plus` 关键词；`qwen-max` 各代差异大，**不确认就不放行**，避免「界面说能发图、实际图片被丢弃」。
+- **小米 MiMo**：补 `omni` 关键词（全模态系列此前被漏判为纯文本）。
+- **前后端双重防线同步**：`ModelCapabilityConfig`（后端拦截，`DeepSeekServiceImpl` 抛
+  `IllegalStateException`）与 `frontend-v3/src/utils/provider-capability.ts`（界面三态）
+  必须逐条对齐，任一侧漏改都会出现「界面显示可发图、后端直接报错」或反之。本次两处同步修改。
+
+### 📤 图片上传：Provider 未适配 Files API 时不再死路
+
+- **背景**：`FileAssetService.upload` 与 `uploadLocalBytes` 在 `FilesApiClientManager` 返回 `null` 时
+  **直接抛异常**（「当前 Provider 不支持 Files API，无法上传」）。而 Files API 只适配了
+  `deepseek` / `anthropic` 两个模板 —— 也就是说用**火山方舟**（`volcengine`）或第三方兼容中转时，
+  **图片根本传不上去**，多模态能力形同虚设。
+- **修复**：新增 `uploadLocalImage`，两个上传入口在 `client == null` 时降级为**仅本地存储**
+  （`storage_type=local`、`file_id=null`），**不向任何平台的云端文件库上传用户图片**。
+  注入阶段由 `FileVisionService.buildFileBlocks` 的 `supportsFiles=false` 分支读取本地副本转
+  base64 `image_url` 块（沿用原有 32MB 总大小上限与块缓存）。
+- **删除安全**：`delete()` 已有 `isLocalStorage` 分支，local 资产跳过远端调用，不会产生孤儿远端文件。
+- **`uploadLocalBytes` 同步改造**：`remote` 改为可空，补偿删除、`storageType` 判定、日志均按
+  是否真正上传过云端分支处理（截图工具等内部入口同样受益）。
+
+### ⏱️ 长上下文断连修复（两条根因）
+
+- **根因一：`responseTimeout` 120s 太短**（`LLMWebClientManager`）。该参数管的是
+  **「发出请求 → 收到响应头」**，不是流式整体时长。上下文涨到十几万～几十万 token 时，
+  共享套餐池（如火山 Coding Plan）仅 prefill + 排队就常超过 2 分钟，Netty 直接掐断连接，
+  前端表现为「莫名其妙断连」（日志多为 `PrematureCloseException` / `ReadTimeout`）。改为 **300s**，
+  与 `AbstractLLMClient.DEFAULT_STREAM_TIMEOUT` 对齐；响应头到达后由业务层流式超时接管。
+- **根因二：`max-context-tokens: 1000000` 让压缩永不触发**。压缩阈值是按本值算百分比的
+  （`0.7` / `0.85` / `0.95`），配 100 万意味着 **70 万 token 才预警、85 万才压缩**。
+  实际表现是上下文一路涨、压缩机制从未启动，直到每次请求都要上传数 MB JSON 而次次断开。
+  改为 **300000**（约 21 万预警 / 25.5 万压缩 / 28.5 万丢弃），与主流编码 Agent 单请求的
+  实际承载能力匹配。⚠️ 该值是「**可稳定跑通的上限**」，不是模型窗口上限。
+
+### 🔧 升级说明
+
+- **需重启后端**（配置项与常量变更）；未改数据库结构，无需迁移。
+- 桌面端需重新打包（jar 内含新逻辑）。
+- 若此前因图片上传报错而改用别家 Provider，升级后可切回火山方舟并正常发图。
+- 长上下文场景建议**开新会话**验证：旧会话已积累的超大上下文不会因上限下调而自动缩水。
+
+---
+
 ## [3.1.2] - 2026-11-14
 
 > 成本治理版本（二）：上一版把成本变成看得见的数字，这一版是对着数字动刀。

@@ -111,16 +111,24 @@ public class ModelCapabilityConfig {
         deepseek.setDefaultAllow(false);
         rules.put("deepseek", deepseek);
 
-        // 火山方舟：方舟上的 deepseek 系文本模型不支持图像；豆包 seed / vision / vl 支持；其余宽松放行
+        // 火山方舟：方舟上的 deepseek 系已分化，不能用 "deepseek" 前缀一刀切（会误伤多模态版本）。
+        // 实测（2026-11，/api/coding/v3 直接发 image_url 块）：
+        //   · deepseek-v4.1-flash          → 支持，图片真实计入 prompt_tokens（35 → 224）
+        //   · deepseek-v4.1-flash-economy  → 支持，图片真实计入 prompt_tokens（218）
+        //   · deepseek-v4-pro              → 不支持，prompt_tokens 仅 86，模型自称「没有图片提供」
+        //   · deepseek-v4-flash            → 不支持（官方未声明多模态，图片被静默丢弃）
+        // 因此用「版本号 + 排除纯文本支」的组合：include 命中 v4.1，exclude 挡住 v4-pro / v4-flash。
+        // ⚠ excludeKeywords 优先于 include，且 "v4.1-flash" 不含连续子串 "v4-flash"，故 economy 版不会被误伤。
+        // 豆包 seed / glm-5.3-flash（原生多模态）/ kimi-k3.1-pro（多模态旗舰）等由 defaultAllow 宽松放行。
         VisionRule ark = new VisionRule();
-        ark.setIncludeKeywords(new ArrayList<>(List.of("vision", "-vl", "vlm")));
-        ark.setExcludePrefixes(new ArrayList<>(List.of("deepseek")));
+        ark.setIncludeKeywords(new ArrayList<>(List.of("vision", "-vl", "vlm", "v4.1")));
+        ark.setExcludeKeywords(new ArrayList<>(List.of("v4-pro", "v4-flash")));
         ark.setDefaultAllow(true);
         rules.put("volcengine,ark,doubao", ark);
 
-        // 小米 MiMo：v2.5 系列原生多模态，更早纯文本模型不支持
+        // 小米 MiMo：v2.5 系列与 Omni（全模态）支持，更早纯文本模型不支持
         VisionRule mimo = new VisionRule();
-        mimo.setIncludeKeywords(new ArrayList<>(List.of("v2.5", "vision", "-vl")));
+        mimo.setIncludeKeywords(new ArrayList<>(List.of("v2.5", "vision", "-vl", "omni")));
         mimo.setDefaultAllow(false);
         rules.put("mimo,xiaomi-mimo", mimo);
 
@@ -132,9 +140,12 @@ public class ModelCapabilityConfig {
         minimax.setDefaultAllow(false);
         rules.put("minimax", minimax);
 
-        // 通义千问：Qwen-VL / Omni 系列支持；qwen-plus / qwen-max 等纯文本不支持
+        // 通义千问：Qwen-VL / Omni 系列支持；Plus 系列自 qwen3.6-plus 起官方声明支持图片理解
+        // （百炼文档原文：「推荐模型：qwen3.7-plus（支持图片理解）、qwen3.6-plus（支持图片理解）」）。
+        // 旧注释所说「qwen-plus 一律纯文本」已随模型换代失效，故补 plus 关键词；
+        // qwen-max 各代差异较大，不确定时不放行（避免"界面说能发图、实际图片被丢弃"）。
         VisionRule qwen = new VisionRule();
-        qwen.setIncludeKeywords(new ArrayList<>(List.of("-vl", "vl-", "omni", "vision")));
+        qwen.setIncludeKeywords(new ArrayList<>(List.of("-vl", "vl-", "omni", "vision", "plus")));
         qwen.setDefaultAllow(false);
         rules.put("qwen,dashscope,tongyi", qwen);
 

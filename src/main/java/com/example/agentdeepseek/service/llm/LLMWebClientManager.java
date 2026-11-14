@@ -143,7 +143,13 @@ public class LLMWebClientManager {
 
         HttpClient httpClient = HttpClient.create(connectionProvider)
                 .protocol(HttpProtocol.H2, HttpProtocol.HTTP11)
-                .responseTimeout(Duration.ofSeconds(120))
+                // responseTimeout 管的是「发出请求 → 收到响应头」这段，不是流式整体时长。
+                // 长上下文（十几万~几十万 token）在共享套餐池（如火山 Coding Plan）里，
+                // 仅 prefill + 排队就常超过 2 分钟，120s 会让 Netty 主动断开连接，
+                // 前端表现为「莫名其妙的断连」（日志多为 PrematureCloseException / ReadTimeout）。
+                // 取 300s 与 AbstractLLMClient.DEFAULT_STREAM_TIMEOUT 对齐：
+                // 响应头到达后由业务层的流式超时接管，这里只兜底「迟迟不给响应头」的挂死场景。
+                .responseTimeout(Duration.ofSeconds(300))
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
                 .option(ChannelOption.SO_KEEPALIVE, true);
 
