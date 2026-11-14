@@ -26,6 +26,11 @@
       <span v-if="dirty && !effectiveReadonly" class="cc-code-ed__dirty">未保存</span>
       <span v-if="sizeVerdict.tooLarge" class="cc-code-ed__limit" :title="sizeVerdict.reason">只读</span>
       <span class="cc-code-ed__spacer" />
+      <!--
+        外部动作插槽（如「用默认程序打开」「在文件夹中显示」）：
+        由父级按运行环境决定要不要放（浏览器环境没有这些能力），不放时完全不占位。
+      -->
+      <slot name="actions" />
       <button
         class="cc-icon-btn cc-icon-btn--sm"
         :title="searchOpen ? '关闭查找（Esc）' : '查找（Ctrl+F）'"

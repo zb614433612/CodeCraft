@@ -1,7 +1,7 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v3.1.0 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.1.1 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -531,7 +531,7 @@ src/main/java/com/example/agentdeepseek/
 12. **聊天消息接口**: 一律走 `GET /conversation/{id}/messages/page`（按轮游标），不要再用全量 `GET /conversation/{id}/messages` 渲染长会话。
 13. **自动更新**: 版本号以 `pom.xml` 为唯一源（`scripts/sync-version.*` 同步到 electron），发布时 GitHub Releases 的资产名需匹配 `CodeCraft-Setup-{version}.exe` / `CodeCraft-{version}.dmg` / `CodeCraft-{version}.AppImage`。
 14. **上下文模式三档（v3.0.9）**: `deepseek.context-mode` = `full` / `balanced`（默认）/ `compact`。`balanced` **在构建阶段就不写 reasoning**（而非事后裁剪），保证前缀天然稳定、每轮零额外失效；`compact` 才摘要工具结果（会触发一次缓存重建）。旧配置 `stripHistoryReasoning` 由 `DeepSeekConfig.resolveContextMode()` 自动映射，无需迁移。改动上下文构建逻辑前先读这条——**任何 system / tools 变化都会让前缀缓存全量失效**，回本周期在 98% 命中率下长达 100~150 轮。
-15. **Token 成本采集口径（v3.0.9）**: SSE 采集点必须放在 `doOnNext`（**不能放在 `takeWhile` 之后**，否则末尾 usage 帧被截断丢弃）；落库用 `doFinally`（正常/异常/取消都能落账）。计价走 `llm.pricing` 配置（含缓存命中价），不在代码里写单价。
+15. **Token 成本采集口径（v3.0.9 / v3.1.1 扩展）**: SSE 采集点必须放在 `doOnNext`（**不能放在 `takeWhile` 之后**，否则末尾 usage 帧被截断丢弃）；落库用 `doFinally`（正常/异常/取消都能落账）。计价走 `llm.pricing` 配置（含缓存命中价），不在代码里写单价。**usage 有三个协议**，由 `LLMClient#getUsageProtocol()` 声明、`TokenUsageParser#parseFrame` 分派：`openai`（单帧 usage）、`anthropic`（输入侧只在 `message_start`、输出侧在 `message_delta`，**必须跨帧合并**）、`ollama`（NDJSON 的 `done=true` 收尾行）。`stream_options.include_usage` 由 `requiresStreamUsageOption()` **按 Provider 精确开启**（官方 GPT / 千问 / 方舟 / MiniMax / MiMo 需要，DeepSeek 默认就返回，第三方兼容服务刻意不加以免 400）。**未在 `llm.pricing.models` 配单价的模型一律不估算**（`cost_estimate` 落 NULL，汇总带 `pricedRequestCount`，前端显示「—」）—— 绝不回退默认价，错误的成本比没有成本更危险。
 16. **前缀缓存指纹（v3.0.9）**: `ContextFingerprint` 每轮请求前比对 `system + tools` 哈希，变化即 WARN。缓存失效不报错、只涨价，这是唯一能把「静默变贵」变成「日志可见」的抓手——新增/修改工具 schema 时留意这条日志。
 17. **工具定义合并（v3.0.9）**: `git_*`（6 个）→ `git`、`screen_capture` + `desktop_control` → `desktop`。**纯委托**实现（按 action 路由到原子工具实例，参数透传），旧工具类仍注册在 `ToolRegistry` 供历史消息引用，`normalizeToolNames()` 负责旧名兼容。合并的目的是压缩每轮下发的 schema 与减少模型的选择空间，不是减少注册项。
 18. **Electron 终端 PTY（v3.0.9）**: 终端在 Electron 内走 `node-pty` 真伪终端（`electron/pty-manager.js`，IPC 通道，不监听本地端口）；浏览器降级走 `/project/exec`。`node-pty` 是原生模块，**必须 `asarUnpack`**，且 `before-quit` 必须调 `disposeAllSessions()`（否则残留 shell 拖住退出）。自带 win32/darwin prebuilds、**无 linux prebuild**，Linux 打包机需 node-gyp 工具链。

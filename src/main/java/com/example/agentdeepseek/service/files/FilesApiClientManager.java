@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * </ul>
  *
  * <h3>多厂商扩展指引</h3>
+ * <p><b>本类只是「新增 Provider 适配」总清单中的 B6 项</b>（文件上传能力），
+ * 完整清单见 {@code LLMClient} 类头的 A/B/C/D 四组 —— 新增 Provider 时别只看这里。</p>
  * <ol>
  *   <li>新增厂商：实现 FilesApiClient（或继承 AbstractFilesApiClient）→ 在本类 switch 中注册 template；</li>
  *   <li>字段差异处理：一律在客户端内归一到 FileObject

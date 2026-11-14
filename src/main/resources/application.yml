@@ -751,12 +751,18 @@ llm:
   # 单位：元 / 百万 tokens。⚠️ 仅用于本地成本结构可视化，**不是账单**，最终以官方平台为准。
   # 必须区分「缓存命中 / 未命中 / 输出」三者：deepseek-v4-pro 命中与未命中相差约 120 倍，
   # 用单一"输入均价"算出来的数字会完全误导优化方向。
+  #
+  # ⚠️ 未配置单价的模型 **不做成本估算**（cost_estimate 落 NULL）：前台隐藏金额，
+  #    只显示 token 与缓存命中率。为什么不再回退默认价——历史实现把所有未匹配模型
+  #    一律按 DeepSeek 价计算，GPT / Claude 会得到一个看似合理、实则完全错误的数字；
+  #    错误的成本比没有成本更危险，它会误导「该不该换模型」这类决策。
   pricing:
-    default:                   # 未在 models 中命中的模型使用此单价
-      cache-hit-input: 0.025
-      cache-miss-input: 3.0
-      output: 6.0
-    models:                    # 支持精确匹配与前缀匹配（如配置 deepseek 可命中 deepseek-v4-pro）
+    # 全局兜底价（默认不启用）：仅在「确定所有未知模型都同一价」时才取消注释启用。
+    # default:
+    #   cache-hit-input: 0.025
+    #   cache-miss-input: 3.0
+    #   output: 6.0
+    models:                    # 精确匹配优先，其次前缀匹配（配置 deepseek 可命中 deepseek-v4-pro）
       deepseek-v4-pro:
         cache-hit-input: 0.025
         cache-miss-input: 3.0
@@ -765,6 +771,39 @@ llm:
         cache-hit-input: 0.02
         cache-miss-input: 1.0
         output: 2.0
+      # ===== 其它 Provider：填入官方价格后立即生效，无需改代码/重启以外的操作 =====
+      # 不填 = 该 Provider 只统计 token 与缓存命中率、不显示金额（这正是「没有成本数据就不显示」的默认行为）。
+      # 注意：
+      #   1) 美国区计价的服务（OpenAI 官方 / Anthropic 官方）请先按汇率换算成「元 / 百万 tokens」；
+      #   2) Anthropic 的 cache_creation_input_tokens 用 cache-write-input 单独计价，
+      #      缺省时按 cache-miss-input 计（官方约为普通输入的 1.25 倍）；
+      #   3) key 支持前缀匹配，如配置 `gpt` 即可命中 gpt-4o / gpt-5 / gpt-6-mini。
+      #
+      # claude:
+      #   cache-hit-input: 0.0        # 缓存读取
+      #   cache-write-input: 0.0      # 缓存写入（≈ 普通输入 × 1.25）
+      #   cache-miss-input: 0.0       # 普通输入
+      #   output: 0.0
+      # gpt:
+      #   cache-hit-input: 0.0
+      #   cache-miss-input: 0.0
+      #   output: 0.0
+      # qwen:
+      #   cache-hit-input: 0.0
+      #   cache-miss-input: 0.0
+      #   output: 0.0
+      # doubao:
+      #   cache-hit-input: 0.0
+      #   cache-miss-input: 0.0
+      #   output: 0.0
+      # minimax:
+      #   cache-hit-input: 0.0
+      #   cache-miss-input: 0.0
+      #   output: 0.0
+      # mimo:
+      #   cache-hit-input: 0.0
+      #   cache-miss-input: 0.0
+      #   output: 0.0
   # ==================== 模型能力声明（配置驱动，替代硬编码模型名白名单） ====================
   # 为什么配置化：旧实现把 o1/o3/o4/gpt-5 硬编码在适配器里，新模型（如 gpt-6）上线后会被判成
   # 非推理模型 → 输出上限压到 8192（思考链被截断）、non-thinking 关不掉、minimal 档失效、

@@ -119,10 +119,28 @@ function renderFileList(content: string): string {
     .map(row => {
       const cls = row.type === '+' ? 'is-add' : row.type === '-' ? 'is-del' : row.type === '~' ? 'is-mod' : ''
       const badge = row.type === '+' ? '新增' : row.type === '-' ? '删除' : row.type === '~' ? '修改' : '文件'
+      /*
+        路径渲染成可点击链接（data-cc-path）：文件清单是 LLM 最常列改动的位置，
+        以前这里是纯 <span>，用户看到清单还得自己去文件树里找 —— 与正文里的芯片能力不一致。
+        点击同样由 ChatView 的点击委托接管，走「解析 → 打开工作区标签 / 抽屉预览」。
+
+        只有「看起来像路径」的行才做链接（含分隔符或带扩展名）：
+        清单里偶尔混进说明文字，给它们套链接会让点击落到一个不存在的文件上。
+      */
+      const pathText = row.path || ''
+      const looksLikePath = /[\\/]/.test(pathText) || /\.[A-Za-z0-9]{1,10}$/.test(pathText)
+      const kind = isImagePath(pathText) ? 'image' : 'file'
+      const pathHtml = !pathText
+        ? ''
+        : looksLikePath
+          ? `<a class="cc-filelist__path cc-file-link" href="${escapeAttr(pathText)}" ` +
+            `data-cc-path="${escapeAttr(pathText)}" data-cc-kind="${kind}" ` +
+            `title="点击打开：${escapeAttr(pathText)}">${escapeHtml(pathText)}</a>`
+          : `<span class="cc-filelist__path">${escapeHtml(pathText)}</span>`
       return (
         `<div class="cc-filelist__row ${cls}">` +
         `<span class="cc-filelist__badge">${badge}</span>` +
-        `<span class="cc-filelist__path">${escapeHtml(row.path)}</span>` +
+        pathHtml +
         (row.summary ? `<span class="cc-filelist__sum">${escapeHtml(row.summary)}</span>` : '') +
         `</div>`
       )
@@ -236,6 +254,17 @@ function isLocalFilePath(p: string, allowBareName = false): boolean {
   return !!bare && FILE_EXT_STRICT_RE.test(bare[2])
 }
 
+/**
+ * 是否为 http(s) 链接（整段都是链接，不含空白）。
+ *
+ * <p>用途：LLM 经常把网址写成行内代码 `` `https://example.com` ``，
+ * 反引号会让 markdown-it 走 `code_inline` 分支，linkify 不生效 —— 用户点不动。
+ * 这里识别出来后在渲染阶段还原成普通外链。</p>
+ */
+function isHttpUrl(p: string): boolean {
+  return /^https?:\/\/[^\s<>"'`]+$/i.test(p)
+}
+
 /** 已知可预览扩展名（纯文本里识别路径用，必须含路径分隔符，避免误伤普通单词） */
 const PATH_EXT =
   'java|kt|kts|groovy|xml|yml|yaml|properties|json|json5|js|mjs|cjs|ts|tsx|jsx|vue|css|less|scss|sass|html|htm|md|markdown|txt|log|sql|py|rb|go|rs|c|cc|cpp|cxx|h|hpp|cs|php|swift|sh|bash|zsh|bat|cmd|ps1|gradle|toml|ini|conf|cfg|env|png|jpe?g|gif|webp|bmp|svg|ico|pdf|docx?|xlsx?|pptx?|csv|zip|tar|gz|jar|war|mp4|mp3|wav|mov'
@@ -323,7 +352,25 @@ function makePathLinkOpen(TokenCtor: any, path: string, kind: 'file' | 'image') 
     ['data-cc-path', path],
     ['data-cc-kind', kind],
     ['class', kind === 'image' ? 'cc-media-chip' : 'cc-file-link'],
-    ['title', kind === 'image' ? '点击预览图片' : '点击预览文件']
+    ['title', kind === 'image' ? `点击查看图片：${path}` : `点击打开：${path}`]
+  ]
+  return open
+}
+
+/**
+ * 构造外链 link_open token（新窗口打开）。
+ *
+ * <p>为什么不用 markdown-it 默认的链接渲染：渲染器里已经有一层「本地路径优先」的分支，
+ * 直接复用 ctx 会绕开它；显式构造 token 更稳，也能保证 `rel="noopener noreferrer"` 一定存在。</p>
+ */
+function makeExternalLinkOpen(TokenCtor: any, url: string) {
+  const open = new TokenCtor('link_open', 'a', 1)
+  open.attrs = [
+    ['href', url],
+    ['class', 'cc-url-link'],
+    ['target', '_blank'],
+    ['rel', 'noopener noreferrer'],
+    ['title', `在新窗口打开：${url}`]
   ]
   return open
 }
@@ -429,6 +476,18 @@ function applyLocalPathLinks(instance: MarkdownIt): void {
           if (isLocalFilePath(content)) {
             const kind: 'file' | 'image' = isImagePath(content) ? 'image' : 'file'
             out.push(makePathLinkOpen(TokenCtor, content, kind))
+            const textToken = new TokenCtor('text', '', 0)
+            textToken.content = content
+            textToken.level = token.level
+            out.push(textToken)
+            out.push(new TokenCtor('link_close', 'a', -1))
+          } else if (isHttpUrl(content)) {
+            /*
+              行内代码里的网址：LLM 常写成 `https://example.com`，
+              反引号让 linkify 不生效，用户点不动。这里补成真正的外链。
+              Electron 下主进程会把 target=_blank 交给系统浏览器（main.js 的 setWindowOpenHandler）。
+            */
+            out.push(makeExternalLinkOpen(TokenCtor, content))
             const textToken = new TokenCtor('text', '', 0)
             textToken.content = content
             textToken.level = token.level

@@ -137,6 +137,17 @@ public class QwenClient extends AbstractLLMClient {
         return params;
     }
 
+    /**
+     * 阿里云百炼（DashScope）/ 千问的 OpenAI 兼容模式<b>默认不返回</b>流式用量，
+     * 官方文档要求显式设置 {@code stream_options={"include_usage": true}}，
+     * 用量随后出现在 {@code data: [DONE]} 之前那个 {@code choices} 为空的收尾帧里。
+     * 不开启则成本看板对千问模型完全没有数据。
+     */
+    @Override
+    protected boolean requiresStreamUsageOption() {
+        return true;
+    }
+
     @Override
     protected void customizeRequest(Map<String, Object> request,
                                     List<Map<String, Object>> messages,

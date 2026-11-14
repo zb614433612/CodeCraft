@@ -16,16 +16,148 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * LLMClient 抽象基类
- * <p>
- * 提供流式/非流式调用的通用实现，子类只需关注：
- * </p>
- * <ol>
- *   <li>{@link #buildRequestBody} — 构建 Provider 特有的请求体</li>
- *   <li>{@link #getChatEndpoint()} — API 端点路径</li>
- *   <li>{@link #extractContentFromStreamChunk} / {@link #extractReasoningFromStreamChunk} — SSE 解析</li>
- *   <li>{@link #extractContentFromBlockingResponse} — 阻塞响应解析</li>
- * </ol>
+ * LLMClient 抽象基类 —— <b>适配器「钩子总表」</b>
+ *
+ * <p>基类已实现通用链路：请求体骨架、流式 / 阻塞发送、超时、SSE 拆帧、
+ * 错误体提取、认证头注入。子类只需实现 <b>1 个 abstract 方法</b> + 按需覆写 <b>8 个钩子</b>。</p>
+ *
+ * <p><b>关键认知</b>：这些钩子的默认值几乎全是「关闭 / 通用」，
+ * <b>漏覆写不会编译报错、不会抛异常，只会静默缺能力</b>（成本看板空、发图 400、第二轮 400）。
+ * 新增适配器时请对着下面第 3 节的矩阵，找最像的现有适配器照抄。</p>
+ *
+ * <p>完整适配流程（含散落在其它类里的分支）见 {@link LLMClient} 类头的 A/B/C/D 四组清单。</p>
+ *
+ * <h3>1. 必须实现（abstract）</h3>
+ * <ul>
+ *   <li>{@link #buildThinkingParams(String)} —— 把归一化后的 5 档思考档位
+ *       （none/low/medium/high/max 或空串 auto）翻译成该厂商的字段。
+ *       <b>不要</b>在这里比较原始字符串（{@code thinking_low} 等），归一化已在
+ *       {@link #normalizeThinkingMode} 完成。</li>
+ * </ul>
+ *
+ * <h3>2. 可覆写钩子（默认值 → 何时覆写 → 漏了怎样）</h3>
+ * <table border="1">
+ *   <caption>钩子总表</caption>
+ *   <tr><th>钩子</th><th>默认值</th><th>何时覆写</th><th>漏掉的症状</th></tr>
+ *   <tr>
+ *     <td>{@link #getChatEndpoint()}</td>
+ *     <td>{@code /v1/chat/completions}</td>
+ *     <td>端点不是 OpenAI 风格（如 Anthropic {@code /v1/messages}、Ollama {@code /api/chat}），
+ *         或需要从 baseUrl 推导（含 {@code /anthropic} 前缀等）</td>
+ *     <td>404</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #getUsageProtocol()}</td>
+ *     <td>{@code openai}</td>
+ *     <td>用量不在 OpenAI 的 {@code usage} 对象里：
+ *         Anthropic 拆 {@code message_start}/{@code message_delta}、Ollama 在 {@code done=true} 行</td>
+ *     <td>成本看板无数据（解析器按错误协议取不到字段）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #requiresStreamUsageOption()}</td>
+ *     <td>{@code false}（不下发 {@code stream_options}）</td>
+ *     <td>厂商<b>默认不返回</b>流式 usage、必须显式 {@code include_usage}：
+ *         OpenAI 官方 / 千问 / 方舟 / MiniMax / MiMo</td>
+ *     <td>该 Provider 的成本永远为空</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #requiresReasoningPadding()}</td>
+ *     <td>{@code false}（不注入 {@code reasoning_content}）</td>
+ *     <td>厂商使用 {@code reasoning_content} 字段体系且<b>强校验</b>（DeepSeek 系）</td>
+ *     <td>thinking 模型 400：{@code reasoning_content must be passed back}</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #getRequestHeaders()}</td>
+ *     <td>空 Map</td>
+ *     <td>协议有<b>必需</b>头（Anthropic 的 {@code anthropic-version}）</td>
+ *     <td>端点对了但 400 / 401</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #customizeRequest}</td>
+ *     <td>空实现</td>
+ *     <td>需要塞厂商专有字段（{@code enable_search}、{@code thinking.budget_tokens}、
+ *         {@code max_completion_tokens} 等）</td>
+ *     <td>厂商能力用不上（搜索 / 深思考 / 长输出）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #buildRequestBody}</td>
+ *     <td>通用骨架（model/messages/stream/temperature/tools/thinking）</td>
+ *     <td>协议结构与 OpenAI 差异过大（Anthropic：system 顶层化、工具 schema 改写），
+ *         需整体重写</td>
+ *     <td>请求体格式不对，直接 400</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #stripImageDetail}</td>
+ *     <td>不处理</td>
+ *     <td>厂商不认 OpenAI 的 {@code image_url.detail} 字段（Qwen / MiniMax / MiMo 会剔除）</td>
+ *     <td>发图 400（未知字段）</td>
+ *   </tr>
+ * </table>
+ *
+ * <h3>3. 现有适配器适配矩阵（新增时找最像的抄）</h3>
+ * <table border="1">
+ *   <caption>钩子覆写现状（✓ = 已覆写 / 已开启；— = 用默认值）</caption>
+ *   <tr>
+ *     <th>适配器</th><th>requestTemplate</th><th>usage<br>协议</th><th>stream<br>_options</th>
+ *     <th>reasoning<br>占位</th><th>自定义<br>端点</th><th>专属头</th><th>备注</th>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code DeepSeekClient}</td><td>deepseek</td><td>openai</td><td>—</td>
+ *     <td>✓</td><td>—</td><td>—</td>
+ *     <td>usage 原生返回，故不开 stream_options</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code GptClient}</td><td>gpt / gpt-official / chatgpt</td><td>openai</td><td>✓</td>
+ *     <td>—</td><td>✓</td><td>—</td>
+ *     <td>官方专精：max_completion_tokens + reasoning_effort 全档</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code OpenAIClient}</td><td>openai / custom</td><td>openai</td><td>—</td>
+ *     <td>—</td><td>✓</td><td>—</td>
+ *     <td><b>公共契约</b>：故意不下发厂商专有参数，避免第三方网关 400</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code AnthropicClient}</td><td>anthropic</td><td>anthropic</td><td>—</td>
+ *     <td>—</td><td>✓</td><td>✓</td>
+ *     <td>Messages 协议：system 顶层化 + 图片块转换 + maxTokens 可配</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code OllamaClient}</td><td>ollama</td><td>ollama</td><td>—</td>
+ *     <td>—</td><td>✓</td><td>—</td>
+ *     <td>NDJSON，图片转 {@code messages[].images[]}</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code QwenClient}</td><td>qwen / dashscope / tongyi</td><td>openai</td><td>✓</td>
+ *     <td>✓</td><td>✓</td><td>—</td>
+ *     <td>enable_thinking / enable_search / 剔除 image detail</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code VolcengineArkClient}</td><td>volcengine / ark / doubao</td><td>openai</td><td>✓</td>
+ *     <td>✓</td><td>✓</td><td>—</td>
+ *     <td>方舟 thinking.type + reasoning_effort 白名单 + imageDetail</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code MiniMaxClient}</td><td>minimax*</td><td>openai</td><td>✓</td>
+ *     <td>✓</td><td>—</td><td>—</td>
+ *     <td>历史坑：{@code thinking_low} 曾被 default 分支关掉思考</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code MiMoClient}</td><td>mimo / xiaomi-mimo</td><td>openai</td><td>✓</td>
+ *     <td>✓</td><td>—</td><td>—</td>
+ *     <td>多模态；余额需浏览器 Cookie</td>
+ *   </tr>
+ * </table>
+ *
+ * <h3>4. 除本类之外还要改的地方</h3>
+ * <p>适配器只负责「请求与响应的协议翻译」；以下能力由<b>别的类</b>独立判定，
+ * 新增 Provider 时必须一并检查（详见 {@link LLMClient} 的 B / C 组清单）：</p>
+ * <ul>
+ *   <li>图片识别能力（模型级）→ {@code ModelCapabilityRules} + {@code application.yml}</li>
+ *   <li>文件上传 → {@code FilesApiClientManager}</li>
+ *   <li>联网搜索 → {@code SearchTool}</li>
+ *   <li>余额查询 → {@code ProviderBalanceService}</li>
+ *   <li>注册 / 选型 → {@code LLMClientManager}</li>
+ * </ul>
  */
 @Slf4j
 public abstract class AbstractLLMClient implements LLMClient {
@@ -192,6 +324,16 @@ public abstract class AbstractLLMClient implements LLMClient {
         // 子类可进一步定制
         customizeRequest(request, messages, model, temperature, thinkingMode, stream, tools);
 
+        // ===== 流式用量统计：按 Provider 能力下发 stream_options.include_usage =====
+        // 为什么必须「按 Provider」而不是统一加：这是 OpenAI 的扩展字段，
+        //   - 官方 / 千问 / 方舟 / MiniMax / MiMo 明确支持，不下发就**永远拿不到 usage**（成本看板全空）；
+        //   - 第三方中转站 / 自建网关可能严格校验未知字段而 400（OpenAIClient 因此保持不下发）；
+        //   - Anthropic / Ollama 压根不是这套协议，加了是脏字段。
+        // 所以默认关闭，由明确支持的适配器覆盖 requiresStreamUsageOption() 打开。
+        if (stream && requiresStreamUsageOption()) {
+            request.putIfAbsent("stream_options", buildIncludeUsageOption());
+        }
+
         // ★ 请求出口兜底：assistant 消息的 reasoning_content 字段绝不能缺失
         //   DeepSeek 对 thinking 模型强校验该字段（缺失即 400），且**关闭思考时同样校验**
         //   （关闭思考时模型天然没有思考内容，字段更容易缺失）。这里按 Provider 能力补齐空串占位。
@@ -206,6 +348,50 @@ public abstract class AbstractLLMClient implements LLMClient {
         }
 
         return request;
+    }
+
+    /**
+     * 是否需要下发 {@code stream_options.include_usage} 才能拿到流式 usage。
+     *
+     * <p>按官方文档，以下 Provider 在流式请求中<b>默认不返回</b> {@code usage}，
+     * 必须显式开启（返回位置是 {@code data: [DONE]} 之前那个 {@code choices} 为空的收尾帧）：</p>
+     * <ul>
+     *   <li>OpenAI 官方（{@code gpt} 模板）</li>
+     *   <li>阿里云百炼 / 千问（{@code qwen} 模板）——官方文档明确「默认不返回用量」</li>
+     *   <li>火山方舟（{@code volcengine} 模板）</li>
+     *   <li>MiniMax（{@code minimax} 模板）</li>
+     *   <li>小米 MiMo（{@code mimo} 模板）</li>
+     * </ul>
+     *
+     * <p>不覆盖（保持 {@code false}）的：</p>
+     * <ul>
+     *   <li>{@code DeepSeekClient} —— 官方行为是「无论是否设置，
+     *       {@code [DONE]} 之前的最后一个块都会给出完整用量」，加了只是徒增每帧字节</li>
+     *   <li>{@code OpenAIClient}（公共契约）—— 面向任意第三方兼容服务，
+     *       未知字段在严格校验的网关上会 400；宁可没有成本数据，也不能把请求打挂</li>
+     *   <li>{@code AnthropicClient} / {@code OllamaClient} —— 不是 OpenAI 协议，另有协议承载</li>
+     * </ul>
+     */
+    protected boolean requiresStreamUsageOption() {
+        return false;
+    }
+
+    /**
+     * 构造 {@code stream_options} 参数（独立方法便于单元测试与子类复用）
+     */
+    protected static Map<String, Object> buildIncludeUsageOption() {
+        Map<String, Object> streamOptions = new HashMap<>();
+        streamOptions.put("include_usage", true);
+        return streamOptions;
+    }
+
+    /**
+     * Provider 专属请求头，默认无。
+     * <p>子类若所在协议有<b>必需</b>头（如 Anthropic 的 {@code anthropic-version}）应覆盖。</p>
+     */
+    @Override
+    public Map<String, String> getRequestHeaders() {
+        return Map.of();
     }
 
     /**

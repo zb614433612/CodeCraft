@@ -97,6 +97,31 @@ public class AnthropicClient extends AbstractLLMClient {
         return chatEndpoint;
     }
 
+    /**
+     * Anthropic 的用量不在单个 {@code usage} 对象里，而是<b>拆成两处</b>：
+     * <ul>
+     *   <li>{@code message_start} 事件：{@code message.usage} 给出
+     *       {@code input_tokens} / {@code cache_read_input_tokens} / {@code cache_creation_input_tokens}
+     *       （只在这里出现，收尾帧拿不到）</li>
+     *   <li>{@code message_delta} 事件：{@code usage.output_tokens} 的最终累计值</li>
+     * </ul>
+     * 因此解析必须跨帧合并，不能只看最后一帧。
+     */
+    @Override
+    public String getUsageProtocol() {
+        return "anthropic";
+    }
+
+    /**
+     * Anthropic Messages 协议<b>要求</b>必须携带 {@code anthropic-version}，缺失直接 400。
+     * <p>主对话链路与工具循环用 {@code webClient.post()} 直连发送、不经过
+     * {@link #streamChat}，因此该头必须由适配器声明、发送点统一挂载。</p>
+     */
+    @Override
+    public Map<String, String> getRequestHeaders() {
+        return Map.of("anthropic-version", API_VERSION);
+    }
+
     // ==================== 端点解析（公共契约核心） ====================
 
     /**

@@ -13,7 +13,16 @@
     <div v-if="loading" class="cc-wsv__state">读取中…</div>
     <div v-else-if="error" class="cc-wsv__state is-error">
       <p class="cc-wsv__state-text">{{ error }}</p>
-      <button class="cc-btn cc-btn--ghost" @click="load">重试</button>
+      <div class="cc-wsv__state-ops">
+        <button class="cc-btn cc-btn--ghost" @click="load">重试</button>
+        <!--
+          解析失败时也保留「用系统程序打开」：
+          路径可能是工作目录之外的绝对路径，本应用解析不到但系统能打开；
+          或者 AI 写的路径少了前缀，用户想自己在资源管理器里确认。
+        -->
+        <button v-if="canSystem" class="cc-btn cc-btn--ghost" @click="openInSystem">用默认程序打开</button>
+        <button v-if="canReveal" class="cc-btn cc-btn--ghost" @click="revealInFolder">在文件夹中显示</button>
+      </div>
     </div>
     <CodeEditor
       v-else
@@ -22,7 +31,27 @@
       :original="original"
       :saving="saving"
       @save="save"
-    />
+    >
+      <!-- 桌面端专属：用系统关联程序打开 / 在资源管理器中定位（浏览器环境不渲染） -->
+      <template #actions>
+        <button
+          v-if="canSystem"
+          class="cc-icon-btn cc-icon-btn--sm"
+          title="用默认程序打开（VS Code 等，由文件关联决定）"
+          @click="openInSystem"
+        >
+          <svg class="cc-i cc-i--sm"><use href="#i-link" /></svg>
+        </button>
+        <button
+          v-if="canReveal"
+          class="cc-icon-btn cc-icon-btn--sm"
+          title="在文件夹中显示"
+          @click="revealInFolder"
+        >
+          <svg class="cc-i cc-i--sm"><use href="#i-folder" /></svg>
+        </button>
+      </template>
+    </CodeEditor>
   </div>
 </template>
 
@@ -31,6 +60,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import CodeEditor from './CodeEditor.vue'
 import { readProjectFile, writeProjectFile } from '../api/project'
 import { describeMissingFile, resolveFileTarget } from '../utils/file-path'
+import { canOpenWithSystem, canRevealInFolder, openPathWithSystem, revealInFileManager } from '../utils/shell'
 import { toast } from '../utils/toast'
 
 const props = defineProps<{
@@ -50,6 +80,35 @@ const original = ref('')
 const saving = ref(false)
 /** 解析后的真实路径（读 / 写都用它，避免相对路径被后端按 user.dir 拼接） */
 const resolvedPath = ref('')
+
+/**
+ * 交给系统壳的路径：优先用解析后的路径。
+ * 相对路径只有拼上工作目录才可能被系统打开（主进程只接受绝对路径），
+ * 所以这里绝不能直接传 props.path。
+ */
+const targetPath = computed(() => resolvedPath.value || props.path)
+
+/** 桌面端专属能力判定（浏览器环境两者皆 false → 对应按钮不渲染） */
+const canSystem = canOpenWithSystem()
+const canReveal = canRevealInFolder()
+
+/** 用系统默认程序打开（VS Code / 系统编辑器，取决于文件关联） */
+async function openInSystem() {
+  const ok = await openPathWithSystem(targetPath.value)
+  if (!ok) {
+    toast.warning('无法用默认程序打开', {
+      description: '文件不存在、路径不是绝对路径，或系统没有关联程序'
+    })
+  }
+}
+
+/** 在资源管理器 / Finder 中定位该文件 */
+async function revealInFolder() {
+  const ok = await revealInFileManager(targetPath.value)
+  if (!ok) {
+    toast.warning('无法在文件夹中定位', { description: '文件不存在或路径不是绝对路径' })
+  }
+}
 
 const dirty = computed(() => content.value !== original.value)
 

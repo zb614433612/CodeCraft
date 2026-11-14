@@ -24,11 +24,16 @@ import java.util.List;
  *   <li>会话分组补充会话名（便于看板直接展示）</li>
  * </ul>
  * </p>
- * <p>
- * <b>口径说明</b>：{@code costEstimate} 是落库时按当时单价算出的累加值（准确）；
- * 派生费用拆分（hit/miss/output）用默认单价近似计算，仅用于观察成本结构占比，
- * 与账单无一致义务。
- * </p>
+ *
+ * <h3>成本口径（v3.1.1 起）</h3>
+ * <ul>
+ *   <li>{@code costEstimate} 是落库时按<b>该模型当时单价</b>算出的累加值；模型没有配置单价时
+ *       落 {@code NULL}（SUM 自动忽略），并计入 {@code pricedRequestCount} 之外的请求</li>
+ *   <li>{@code pricedRequestCount == 0 && requestCount > 0} 表示「这批请求都没配单价」，
+ *       前端应显示「—」而不是 ¥0，避免把「不知道」误读成「免费」</li>
+ *   <li>派生费用拆分（hit/miss/output）用参照单价近似计算，仅用于观察成本结构占比，
+ *       与账单无一致义务——所以它不参与金额结论，只在 {@code breakdownAvailable=false} 时隐藏</li>
+ * </ul>
  */
 @Slf4j
 @Service
@@ -70,7 +75,7 @@ public class TokenUsageService {
         if (vo == null) {
             vo = new TokenUsageSummaryVO();
         }
-        enrichSummary(vo);
+        enrichSummary(vo, resolveReferencePrice(range, conversationId));
         return vo;
     }
 
@@ -166,15 +171,67 @@ public class TokenUsageService {
 
     /**
      * 填充汇总派生指标（命中率 + 三段费用拆分）
+     *
+     * @param price 参照单价（可为 null：表示范围内没有任何模型配置单价，
+     *              此时三段拆分为 0 且 {@code breakdownAvailable=false}，前端隐藏结构条）
      */
-    private void enrichSummary(TokenUsageSummaryVO vo) {
+    private void enrichSummary(TokenUsageSummaryVO vo, TokenPricingConfig.PriceItem price) {
         int denom = (int) (vo.getCacheHitTokens() + vo.getCacheMissTokens());
         vo.setCacheHitRate(denom > 0 ? (double) vo.getCacheHitTokens() / denom : -1d);
 
-        TokenPricingConfig.PriceItem price = pricingConfig.resolve(null);
+        if (price == null) {
+            vo.setCacheHitCost(0d);
+            vo.setCacheMissCost(0d);
+            vo.setOutputCost(0d);
+            vo.setBreakdownAvailable(false);
+            return;
+        }
         vo.setCacheHitCost(round6(vo.getCacheHitTokens() / 1_000_000d * price.getCacheHitInput()));
         vo.setCacheMissCost(round6(vo.getCacheMissTokens() / 1_000_000d * price.getCacheMissInput()));
         vo.setOutputCost(round6(vo.getCompletionTokens() / 1_000_000d * price.getOutput()));
+        vo.setBreakdownAvailable(true);
+    }
+
+    /**
+     * 解析「用于费用结构拆分的参照单价」。
+     *
+     * <p>优先用全局兜底价（{@code llm.pricing.default}）；未配置时退化为
+     * 「本次统计范围内第一个配了单价的模型」——否则混合模型场景下结构条会全 0，
+     * 而总金额却有值，自相矛盾。</p>
+     *
+     * <p>只在没有全局兜底价时才额外查一次模型列表，常见单 Provider 场景无额外开销。</p>
+     */
+    private TokenPricingConfig.PriceItem resolveReferencePrice(String range, Long conversationId) {
+        TokenPricingConfig.PriceItem globalPrice = pricingConfig.resolve(null);
+        if (globalPrice != null) {
+            return globalPrice;
+        }
+        try {
+            if (conversationId != null) {
+                List<LlmTokenUsage> recent = usageMapper.selectRecentByConversationId(conversationId, 20);
+                if (recent != null) {
+                    for (LlmTokenUsage usage : recent) {
+                        TokenPricingConfig.PriceItem price = pricingConfig.resolve(usage.getModel());
+                        if (price != null) {
+                            return price;
+                        }
+                    }
+                }
+                return null;
+            }
+            List<TokenUsageGroupVO> byModel = usageMapper.summarizeByModel(resolveFrom(range));
+            if (byModel != null) {
+                for (TokenUsageGroupVO group : byModel) {
+                    TokenPricingConfig.PriceItem price = pricingConfig.resolve(group.getGroupKey());
+                    if (price != null) {
+                        return price;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("解析参照单价失败（忽略，结构条将隐藏）: {}", e.getMessage());
+        }
+        return null;
     }
 
     /**

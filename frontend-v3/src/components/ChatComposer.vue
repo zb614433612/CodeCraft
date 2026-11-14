@@ -2,7 +2,8 @@
   聊天输入区（v2 Composer）
   ----------------------------------------------------------------------------
   设计目标：只保留 4 个常驻控件 —— 附件（+）/ 输入框 / 模型 / 发送（生成中变停止）。
-  低频信息（上下文 Token、余额）降级为右下角 12px 极浅小字，不占控件位。
+  低频信息（上下文 / 余额 / 消耗 ¥x · N tokens / 缓存命中率）降级为底部 11.5px 极浅小字，
+  按「上下文 → 余额 → 消耗 → 缓存」固定顺序排列，不占控件位。
   数据接缝：
     v-model            -> 输入文本
     model / models     -> 模型选择（来自 Provider 接口）
@@ -128,7 +129,7 @@
         </div>
       </div>
 
-      <!-- 状态小字：上下文 / 整会话用量 / 余额 -->
+      <!-- 状态小字：上下文 / 余额 / 消耗 ¥x · N tokens / 缓存命中率（顺序固定，与经典版对齐） -->
       <div class="cc-composer__foot">
         <!-- 口径：已加载消息的正文 + 思考过程 + 工具返回，前端字符估算（后端未透传真实 usage）。
              精简模式下口径会变（历史轮次不计思考、工具只算摘要），故加一枚徽章说明当前口径。 -->
@@ -137,18 +138,25 @@
           :title="contextTitle"
         >上下文 <b>{{ contextTokens }}</b></span>
         <span v-if="compactMode" class="cc-ctx-badge" :title="compactTip">⚡ 精简</span>
-        <!--
-          整会话真实用量：与上面「上下文」是两个口径，必须能分辨 —
-          上下文的单位是「当前这一屏要送多少 token」，这里的单位是「这个会话历史累计烧了多少」。
-        -->
-        <span v-if="hasUsage && contextTokens" class="cc-dot" />
-        <span v-if="hasUsage" class="cc-composer__usage" :title="usageTitle">
-          会话 <b>{{ sessionCost }}</b>
-          <span class="cc-usage-sep">·</span>缓存 <b>{{ sessionHitRate }}</b>
-          <span class="cc-usage-sep">·</span><b>{{ sessionTokens }}</b> tokens
-        </span>
-        <span v-if="(contextTokens || hasUsage) && balance" class="cc-dot" />
+        <!-- 余额排在用量之前：它是「还能花多少」，属于前提；用量是「已经花了多少」。 -->
+        <span v-if="(contextTokens || compactMode) && balance" class="cc-dot" />
         <span v-if="balance">余额 <b>{{ balance }}</b></span>
+        <!--
+          整会话真实用量：与「上下文」是两个口径，必须能分辨 —
+          上下文的单位是「当前这一屏要送多少 token」，这里的单位是「这个会话历史累计烧了多少」。
+          金额与 token 合成一段（消耗 ¥x · N tokens），缓存命中率单独放最后。
+        -->
+        <span v-if="hasUsage && (contextTokens || compactMode || balance)" class="cc-dot" />
+        <span v-if="hasUsage" class="cc-composer__usage" :title="usageTitle">
+          <!-- 金额段按需渲染：模型未配单价时后端拿不到 cost，宁可不显示也不能显示 ¥0 -->
+          <template v-if="sessionCost">
+            消耗 <b>{{ sessionCost }}</b>
+            <span class="cc-usage-sep">·</span>
+          </template>
+          <b>{{ sessionTokens }}</b> tokens
+        </span>
+        <span v-if="hasUsage" class="cc-dot" />
+        <span v-if="hasUsage" :title="usageTitle">缓存 <b>{{ sessionHitRate }}</b></span>
       </div>
     </div>
   </div>
@@ -158,7 +166,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { openLightbox } from '../utils/lightbox'
 /* 真实用量展示：与消息底部共用同一套格式化口径（金额 / 命中率 / token 缩写） */
-import { formatCost, formatHitRate, formatUsageTokens } from '../utils/tokenCalculator'
+import { formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
 
 export interface Attachment {
   id: string
@@ -187,8 +195,13 @@ export interface SessionUsage {
   cacheHitTokens?: number
   cacheMissTokens?: number
   reasoningTokens?: number
-  /** 估算费用（元） */
+  /** 估算费用（元）；模型未配置单价时为 0，需配合 pricedRequestCount 判断是否显示 */
   costEstimate: number
+  /**
+   * 「有单价、可估算成本」的请求条数。
+   * <p>为 0 表示会话里所有模型都没配单价 → 不显示金额，只显示 token 与缓存命中率。</p>
+   */
+  pricedRequestCount?: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
 }
@@ -356,9 +369,23 @@ const compactTip = '精简模式：历史轮次的思考过程已移除、工具
 
 /* ============================ 整会话真实用量 ============================ */
 
-/** 有数据才显示（0 token 时不渲染「会话 ¥0 · 缓存 — · 0 tokens」这种噪音） */
+/** 有数据才显示（0 token 时不渲染「¥0 · 缓存 — · 0 tokens」这种噪音） */
 const hasUsage = computed(() => !!props.usage && (props.usage.totalTokens > 0 || props.usage.costEstimate > 0))
-const sessionCost = computed(() => formatCost(props.usage?.costEstimate))
+
+/**
+ * 会话金额是否可用。
+ *
+ * <p>与消息级判定同源：后端只为配过单价的模型算钱，没配时 cost 是 NULL。
+ * 此时不渲染金额段（只留 token 与缓存命中率），避免「¥0」被读成「免费」。</p>
+ */
+const sessionCostAvailable = computed(() => {
+  const u = props.usage
+  if (!u) return false
+  return isCostAvailable(u.pricedRequestCount, u.costEstimate)
+})
+const sessionCost = computed(() =>
+  sessionCostAvailable.value ? formatCost(props.usage?.costEstimate) : ''
+)
 const sessionHitRate = computed(() => formatHitRate(props.usage?.cacheHitRate))
 const sessionTokens = computed(() => formatUsageTokens(props.usage?.totalTokens))
 
@@ -367,7 +394,9 @@ const usageTitle = computed(() => {
   const u = props.usage
   if (!u) return ''
   const parts = [
-    `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    sessionCostAvailable.value
+      ? `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`
+      : '本会话费用未估算：所用模型尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）',
     `输入 ${formatUsageTokens(u.promptTokens || 0)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens || 0)} / 未命中 ${formatUsageTokens(u.cacheMissTokens || 0)}）`,
     `输出 ${formatUsageTokens(u.completionTokens || 0)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens || 0)}）`,
     `缓存命中率 ${formatHitRate(u.cacheHitRate)}`

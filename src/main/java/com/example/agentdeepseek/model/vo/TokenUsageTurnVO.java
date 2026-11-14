@@ -44,6 +44,18 @@ public class TokenUsageTurnVO {
     /** 估算费用（元，落库时已按单价算好，这里直接累加） */
     private double costEstimate;
 
+    /**
+     * 本轮「有单价、可估算成本」的请求条数。
+     * <p>
+     * 与 {@link #requestCount} 一起判断金额是否可信：
+     * <ul>
+     *   <li>{@code pricedRequestCount == 0} → 该模型未配置单价，前端<b>不显示金额</b>（只显示 token / 缓存）</li>
+     *   <li>{@code 0 < pricedRequestCount < requestCount} → 部分轮次无单价，金额是下限</li>
+     * </ul>
+     * </p>
+     */
+    private long pricedRequestCount;
+
     /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段，无数据 */
     private double cacheHitRate;
 }

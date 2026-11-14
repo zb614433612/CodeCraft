@@ -58,6 +58,29 @@ export async function resolveProjectFilePath(root: string, path: string): Promis
 }
 
 /**
+ * 按关键字搜索项目文件（文件树搜索框、聊天里路径解析失败时的兜底）。
+ *
+ * <p>后端忽略大小写匹配「文件名」或「相对路径」，排序为
+ * 文件名全等 → 文件名前缀 → 文件名包含 → 仅路径包含；
+ * 自动跳过 .git / node_modules / target 等目录，避免把构建产物刷满结果。</p>
+ *
+ * @param root    项目根目录（绝对路径）
+ * @param keyword 关键字（空串后端直接返回空列表）
+ * @param limit   返回条数上限（默认 100，后端最多 300）
+ */
+export async function searchProjectFiles(
+  root: string,
+  keyword: string,
+  limit = 100
+): Promise<ApiResponse<string[]>> {
+  const params = new URLSearchParams()
+  if (root) params.set('root', root)
+  params.set('keyword', keyword)
+  params.set('limit', String(limit))
+  return request<string[]>(`/project/search?${params}`)
+}
+
+/**
  * 读取项目/本地文件原始字节并转为 blob URL（图片、PDF 等二进制预览用）
  * 说明：<img src> 无法携带鉴权头，故用 fetch 带 Authorization 拉取 blob 再转 objectURL
  * 调用方需在合适时机对返回的 URL 调用 URL.revokeObjectURL 释放

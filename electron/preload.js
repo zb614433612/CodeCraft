@@ -7,6 +7,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setWindowOpacity: (value) => ipcRenderer.invoke('window:setOpacity', value),
   // 用系统默认浏览器打开外部链接（网页标签页的「在浏览器中打开」按钮）
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  // 用系统默认程序打开本地文件（文件标签的「用默认程序打开」按钮；VS Code 等由文件关联决定）
+  // 主进程侧只接受已存在的绝对路径，失败返回 false（前端 toast 提示）
+  openPath: (targetPath) => ipcRenderer.invoke('shell:openPath', targetPath),
+  // 在系统文件管理器中定位文件（资源管理器 / Finder 选中该文件）
+  showItemInFolder: (targetPath) => ipcRenderer.invoke('shell:showItemInFolder', targetPath),
   // 监听启动进度（启动画面 loading.html 专用）：
   // 回调接收 { percent, message, error, done }；返回取消监听函数
   onStartupProgress: (callback) => {

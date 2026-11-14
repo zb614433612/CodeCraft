@@ -94,6 +94,15 @@ public class MiMoClient extends AbstractLLMClient {
      * 确保 MiMo 始终使用 max_completion_tokens 字段。
      * </p>
      */
+    /**
+     * 小米 MiMo 的 OpenAI 兼容接口在流式请求中需要 {@code stream_options.include_usage}
+     * 才会给出最终 usage；用量含 {@code prompt_tokens_details.cached_tokens}（隐式缓存命中）。
+     */
+    @Override
+    protected boolean requiresStreamUsageOption() {
+        return true;
+    }
+
     @Override
     protected void customizeRequest(Map<String, Object> request,
                                      List<Map<String, Object>> messages,

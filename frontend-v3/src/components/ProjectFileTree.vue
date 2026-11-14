@@ -44,8 +44,51 @@
       </button>
     </div>
 
+    <!--
+      搜索行：树是「按目录懒加载」的，只有已展开的部分在内存里，
+      本地过滤必然漏（深层文件搜不到），所以走 /project/search 全量搜索。
+      输入即搜（250ms 防抖），命中后点击结果 → 打开文件（与文件树点击同一条链路）。
+    -->
+    <div class="cc-ftree__search">
+      <svg class="cc-i cc-i--sm cc-ftree__search-icon"><use href="#i-search" /></svg>
+      <input
+        ref="searchInput"
+        v-model="keyword"
+        class="cc-ftree__search-input"
+        type="text"
+        placeholder="搜索文件…（Esc 清空）"
+        spellcheck="false"
+        @keydown.esc.prevent="clearSearch"
+      />
+      <button v-if="keyword" class="cc-icon-btn cc-icon-btn--sm" title="清空搜索（Esc）" @click="clearSearch">
+        <svg class="cc-i cc-i--sm" style="transform: rotate(45deg)"><use href="#i-plus" /></svg>
+      </button>
+    </div>
+
     <div v-if="!localRoot" class="cc-ftree__state">还没有选择目录，点上方路径条挑一个要浏览的目录</div>
     <div v-else-if="error" class="cc-ftree__state is-error">{{ error }}</div>
+
+    <!-- 搜索结果：命中列表（文件名 + 所在目录），点击直接打开 -->
+    <div v-else-if="searching" class="cc-ftree__list is-search">
+      <div v-if="searchLoading" class="cc-ftree__state">搜索中…</div>
+      <div v-else-if="searchError" class="cc-ftree__state is-error">{{ searchError }}</div>
+      <template v-else-if="searchResults.length">
+        <div
+          v-for="hit in searchResults"
+          :key="hit"
+          class="cc-tree__row cc-tree__row--search"
+          :title="hit"
+          @click="onSearchPick(hit)"
+        >
+          <svg class="cc-i cc-i--sm cc-ftree__caret is-hidden"><use href="#i-chev" /></svg>
+          <svg class="cc-i cc-i--sm" style="color: var(--text-4)"><use href="#i-file" /></svg>
+          <span class="cc-ftree__name">{{ hitName(hit) }}</span>
+          <span class="cc-ftree__dir">{{ hitDir(hit) }}</span>
+        </div>
+        <div class="cc-ftree__search-foot">共 {{ searchResults.length }} 个结果（最多 100 个）</div>
+      </template>
+      <div v-else class="cc-ftree__state">没有匹配的文件</div>
+    </div>
 
     <template v-else>
       <div class="cc-ftree__list" :class="{ 'is-editing': activeFile && !externalOpen }">
@@ -97,8 +140,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, ref, watch } from 'vue'
-import { getDirChildren, readProjectFile, writeProjectFile, type DirectoryEntry } from '../api/project'
+import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
+import {
+  getDirChildren,
+  readProjectFile,
+  searchProjectFiles,
+  writeProjectFile,
+  type DirectoryEntry
+} from '../api/project'
+import { absolutizePath, baseNameOf } from '../utils/file-path'
 import { toast } from '../utils/toast'
 import { confirm } from '../utils/confirm'
 import DirectoryPicker from './DirectoryPicker.vue'
@@ -145,6 +195,111 @@ const error = ref('')
 const childrenCache = new Map<string, DirectoryEntry[]>()
 /** 当前展开的目录路径集合 */
 const expanded = ref(new Set<string>())
+
+/* ============================ 文件搜索 ============================ */
+/*
+  为什么不用「本地过滤已加载的 rows」：
+    树是按目录懒加载的（点开一层拉一层），rows 里只有已展开的目录内容，
+    用户搜一个没展开过的深层文件永远搜不到 —— 搜索框会变成「有时灵有时不灵」。
+    所以直接走后端 /project/search 全量扫描（跳过 .git / node_modules / target）。
+*/
+
+/** 搜索关键字：trim 后非空即切到「结果视图」 */
+const keyword = ref('')
+const searchInput = ref<HTMLInputElement | null>(null)
+const searchLoading = ref(false)
+const searchError = ref('')
+const searchResults = ref<string[]>([])
+/** 请求序号：快速输入时旧响应可能后到，用它丢弃过期结果 */
+let searchSeq = 0
+/** 防抖定时器（输入每变一次都重新计时） */
+let searchTimer = 0
+
+const searching = computed(() => keyword.value.trim().length > 0)
+
+/** 命中的文件名（结果行的主文本） */
+function hitName(path: string): string {
+  return baseNameOf(path)
+}
+
+/** 命中文件所在目录（结果行的次要文本；根目录下的文件返回空串） */
+function hitDir(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const idx = normalized.lastIndexOf('/')
+  return idx > 0 ? normalized.slice(0, idx) : ''
+}
+
+async function runSearch(kw: string) {
+  if (!localRoot.value) {
+    searchResults.value = []
+    searchError.value = '还没有选择目录'
+    return
+  }
+  const seq = ++searchSeq
+  searchLoading.value = true
+  searchError.value = ''
+  try {
+    const res = await searchProjectFiles(localRoot.value, kw, 100)
+    if (seq !== searchSeq) return
+    searchResults.value = (res?.data || []).filter((p): p is string => typeof p === 'string' && !!p)
+  } catch (err) {
+    if (seq !== searchSeq) return
+    searchResults.value = []
+    searchError.value = err instanceof Error ? err.message : '搜索失败'
+  } finally {
+    if (seq === searchSeq) searchLoading.value = false
+  }
+}
+
+/** 清空搜索并回到文件树视图（不主动聚焦，供切目录等被动场景使用） */
+function resetSearch() {
+  if (searchTimer) window.clearTimeout(searchTimer)
+  keyword.value = ''
+  searchResults.value = []
+  searchError.value = ''
+  searchLoading.value = false
+  searchSeq++
+}
+
+/** 用户主动清空（Esc / 点 ×）：清空后把焦点留在输入框，方便重新输入 */
+function clearSearch() {
+  resetSearch()
+  searchInput.value?.focus()
+}
+
+/** 搜索结果点击：与树里点文件走同一条打开链路（相对路径先补成绝对路径） */
+function onSearchPick(hit: string) {
+  const target = absolutizePath(hit, localRoot.value)
+  /*
+    选中即完成：先清空搜索再打开。
+    否则搜索视图会一直盖着文件树，而「就地编辑」模式下编辑器也被搜索分支挡住 ——
+    表现为「点了结果却什么都没看到」。
+  */
+  resetSearch()
+  if (props.externalOpen) {
+    emit('open-file', target)
+    return
+  }
+  void openFile(target)
+}
+
+watch(keyword, () => {
+  const kw = keyword.value.trim()
+  if (searchTimer) window.clearTimeout(searchTimer)
+  if (!kw) {
+    searchResults.value = []
+    searchError.value = ''
+    searchLoading.value = false
+    searchSeq++
+    return
+  }
+  searchTimer = window.setTimeout(() => void runSearch(kw), 250)
+})
+
+onBeforeUnmount(() => {
+  if (searchTimer) window.clearTimeout(searchTimer)
+  searchSeq++
+})
 
 const activeFile = ref('')
 const fileContent = ref('')
@@ -198,6 +353,9 @@ function refresh() {
   childrenCache.clear()
   expanded.value = new Set()
   void rebuild()
+  // 正在搜索时刷新：结果也要跟着重算（文件可能刚被新建 / 删除）
+  const kw = keyword.value.trim()
+  if (kw) void runSearch(kw)
 }
 
 /** 切换到用户在目录选择器里挑的目录 */
@@ -206,7 +364,8 @@ async function onPickRoot(path: string) {
   // 换目录意味着当前编辑区会被卸载，先处理未保存的修改
   if (!(await tryCloseEditor())) return
   localRoot.value = path
-  // 根目录已变，旧缓存与展开状态全部失效
+  // 根目录已变，旧缓存、展开状态与搜索结果全部失效
+  resetSearch()
   refresh()
   /*
     再把选择交给上层：它知道当前 Agent 是谁，能把这目录写进会话工作目录（并通过确认框
@@ -324,6 +483,8 @@ watch(
     localRoot.value = value
     childrenCache.clear()
     expanded.value = new Set()
+    // 搜索关键字属于「旧目录」的上下文，换 Agent 后必须清掉，否则会拿新根去搜旧关键字
+    resetSearch()
     closeEditor()
     void rebuild()
   },

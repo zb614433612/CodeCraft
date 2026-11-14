@@ -200,16 +200,21 @@ public class GptClient extends AbstractLLMClient {
             request.remove("temperature");
         }
 
-        // ===== 4. 流式调用附带用量统计（官方支持 stream_options.include_usage）=====
-        if (stream) {
-            Map<String, Object> streamOptions = new HashMap<>();
-            streamOptions.put("include_usage", true);
-            request.putIfAbsent("stream_options", streamOptions);
-        }
+        // ===== 4. 流式用量统计由基类统一下发（见 requiresStreamUsageOption）=====
 
         // ===== 5. 清理其他适配器残留的内部标记 =====
         request.remove("_remove_temperature");
         request.remove("_remove_top_p");
+    }
+
+    /**
+     * OpenAI 官方流式请求默认<b>不返回</b> usage，必须显式开启
+     * {@code stream_options.include_usage} —— 否则 {@code data: [DONE]} 前
+     * 不会出现携带用量统计的收尾帧，成本看板将完全没有官方模型数据。
+     */
+    @Override
+    protected boolean requiresStreamUsageOption() {
+        return true;
     }
 
     /**

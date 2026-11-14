@@ -49,11 +49,33 @@
         </button>
       </div>
 
+      <!-- 变更筛选（本地过滤：只影响列表显示，不影响「全部暂存」的作用范围） -->
+      <div v-if="changes.length" class="change-search">
+        <SearchOutlined class="change-search-icon" />
+        <input
+          v-model="changeKeyword"
+          type="text"
+          placeholder="筛选变更文件…（Esc 清空）"
+          spellcheck="false"
+          @keydown.esc="changeKeyword = ''"
+        />
+        <span v-if="changeKeyword" class="change-search-count">{{ filteredChanges.length }}/{{ changes.length }}</span>
+        <CloseCircleOutlined
+          v-if="changeKeyword"
+          class="change-search-clear"
+          title="清空筛选（Esc）"
+          @click="changeKeyword = ''"
+        />
+      </div>
+
       <!-- 4. 变更列表 -->
       <div class="change-list">
         <div v-if="loading" class="loading-text">加载中...</div>
         <div v-else-if="changes.length === 0" class="empty-text">工作区干净，无变更</div>
-        <div v-for="change in changes" :key="change.file" class="change-item">
+        <div v-else-if="filteredChanges.length === 0" class="empty-text">
+          没有匹配「{{ changeKeyword }}」的变更
+        </div>
+        <div v-for="change in filteredChanges" :key="change.file" class="change-item">
           <label class="change-checkbox">
             <input
               type="checkbox"
@@ -215,7 +237,9 @@ import {
   InboxOutlined,
   SwapOutlined,
   TagsOutlined,
-  PlusOutlined
+  PlusOutlined,
+  SearchOutlined,
+  CloseCircleOutlined
 } from '@ant-design/icons-vue'
 import {
   getGitStatus,
@@ -254,6 +278,21 @@ const branch = ref('')
 const changes = ref<GitChange[]>([])
 const loading = ref(false)
 const commitMessage = ref('')
+
+/**
+ * 变更列表筛选关键字。
+ *
+ * <p>本地过滤（Git 变更通常几十个）：输入即出结果，不发请求；
+ * 也不改变「全部暂存 / 全部取消暂存」的语义（那两个按钮始终作用于全量）。</p>
+ */
+const changeKeyword = ref('')
+
+/** 过滤后的变更列表（文件路径匹配，忽略大小写；空关键字 = 全量） */
+const filteredChanges = computed(() => {
+  const kw = changeKeyword.value.trim().toLowerCase()
+  if (!kw) return changes.value
+  return changes.value.filter(c => (c.file || '').toLowerCase().includes(kw))
+})
 
 /** 各异步操作的防重入标记（空串表示空闲） */
 const syncBusy = ref<'' | 'pull' | 'push' | 'fetch'>('')
@@ -916,6 +955,36 @@ watch(() => props.projectRoot, (val) => {
 .toolbar-btn:hover:not(:disabled) { border-color: #1677ff; color: #1677ff; }
 .toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* 变更筛选行（本地过滤，只影响列表显示） */
+.change-search {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  margin: 6px 8px;
+  padding: 0 6px;
+  border: 1px solid var(--border, #eef2f7);
+  border-radius: 4px;
+  background: var(--bg-card, #fff);
+  transition: border-color 0.2s;
+}
+.change-search:focus-within { border-color: #1677ff; }
+.change-search-icon { flex: none; font-size: 12px; color: var(--text-3, #8c8c8c); }
+.change-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text-1, #333);
+}
+.change-search input::placeholder { color: var(--text-3, #bbb); }
+.change-search-count { flex: none; font-size: 11px; color: var(--text-3, #8c8c8c); }
+.change-search-clear { flex: none; font-size: 12px; color: var(--text-3, #bbb); cursor: pointer; }
+.change-search-clear:hover { color: #1677ff; }
+
 .change-list {
   flex: 1 1 auto;
   min-height: 48px;
@@ -1272,6 +1341,19 @@ watch(() => props.projectRoot, (val) => {
 }
 [data-theme="dark"] .commit-hint {
   color: #22c55e;
+}
+/* 变更筛选行暗色适配 */
+[data-theme="dark"] .change-search {
+  border-color: #2a2838;
+  background: #1a1925;
+}
+[data-theme="dark"] .change-search input {
+  color: #e6e6f0;
+}
+[data-theme="dark"] .change-search-icon,
+[data-theme="dark"] .change-search-count,
+[data-theme="dark"] .change-search-clear {
+  color: #9696aa;
 }
 /* 暗色滚动条 */
 [data-theme="dark"] .changes-section::-webkit-scrollbar-thumb,

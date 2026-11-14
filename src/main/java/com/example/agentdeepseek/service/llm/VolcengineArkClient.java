@@ -192,6 +192,16 @@ public class VolcengineArkClient extends AbstractLLMClient {
         return params;
     }
 
+    /**
+     * 火山方舟的流式响应仅在设置 {@code stream_options.include_usage} 时，
+     * 才会在最后一帧给出 usage（官方文档：usage arrives in the final chunk when you
+     * set stream_options.include_usage）。不开启则拿不到豆包/方舟托管模型的用量。
+     */
+    @Override
+    protected boolean requiresStreamUsageOption() {
+        return true;
+    }
+
     @Override
     protected void customizeRequest(Map<String, Object> request,
                                     List<Map<String, Object>> messages,

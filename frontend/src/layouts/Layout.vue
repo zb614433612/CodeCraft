@@ -104,6 +104,7 @@ import {
   RobotOutlined,
   MessageOutlined,
   LineChartOutlined,
+  BarChartOutlined,
   UserOutlined,
   FormOutlined,
   SafetyOutlined,
@@ -173,7 +174,7 @@ const visibleMenuGroups = computed(() => menuGroups.value.filter(g => g.items.le
 
 // 图标名称到组件的映射
 const iconMap: Record<string, any> = {
-  RobotOutlined, MessageOutlined, LineChartOutlined,
+  RobotOutlined, MessageOutlined, LineChartOutlined, BarChartOutlined,
   CodeOutlined, SettingOutlined, UserOutlined,
   SafetyOutlined, FormOutlined, ClockCircleOutlined,
   FileTextOutlined, LinkOutlined, ToolOutlined, DeleteOutlined, ApiOutlined,

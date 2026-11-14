@@ -34,6 +34,19 @@ import java.util.Set;
  * <h3>能力判定原则</h3>
  * <p>按 Provider 的「请求模板 + 实际 baseUrl 域名 + 凭证有效性」综合判定，而不是只看 providerCode 名称
  * ——用户自定义 code（如 my-deepseek）时仍能正确识别。</p>
+ *
+ * <h3>新增 Provider 适配（本类是总清单的 B8 项）</h3>
+ * <p>新增厂商的余额/额度支持要做两件事，缺一不可：</p>
+ * <ol>
+ *   <li><b>后端</b>：在 {@link #queryBalance} 的 if 链补一个 {@code isXxx} 判定 +
+ *       对应的 {@code queryXxxBalance} / {@code parseXxxBalance}（签名或字段差异大的，
+ *       抽独立 BillingClient，参考 {@link VolcengineBillingClient}）；</li>
+ *   <li><b>前端</b>：在 {@code frontend-v3/src/utils/provider-capability.ts} 的
+ *       {@code deriveCapabilities().balance} 补同样判定 —— 它决定余额按钮显隐与提示文案，
+ *       不改则界面永远显示「不支持余额查询」。</li>
+ * </ol>
+ * <p>注意「缺凭证」要判 {@code warn}（支持接口但没配好）而不是 {@code off}（平台没这个接口），
+ * 否则用户不知道去补凭证。完整适配清单见 {@code LLMClient} 类头的 B8 项。</p>
  */
 @Slf4j
 @Service

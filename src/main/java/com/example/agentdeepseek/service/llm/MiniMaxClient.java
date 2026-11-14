@@ -94,6 +94,16 @@ public class MiniMaxClient extends AbstractLLMClient {
      * 且与 AbstractLLMClient 默认的 reasoning 解析（delta.reasoning_content）天然兼容。
      * </p>
      */
+    /**
+     * MiniMax 的 OpenAI 兼容端点在流式请求中需要 {@code stream_options.include_usage}
+     * 才会返回用量；且其中间帧可能携带 {@code usage: null}，真正的数值只在收尾帧。
+     * （解析侧对 {@code usage: null} 已做忽略处理，不会被空值覆盖。）
+     */
+    @Override
+    protected boolean requiresStreamUsageOption() {
+        return true;
+    }
+
     @Override
     protected void customizeRequest(Map<String, Object> request,
                                      List<Map<String, Object>> messages,

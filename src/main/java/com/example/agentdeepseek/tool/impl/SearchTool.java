@@ -46,6 +46,17 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>结构增强：每条结果附带真实域名（Bing 跳转链已解包）；</li>
  *   <li>同 query 短时缓存，降低重复请求与被反爬概率。</li>
  * </ol>
+ *
+ * <h3>官方搜索 API 优先（新增 Provider 适配时必看）</h3>
+ * <p>在通用抓取之前，先尝试当前 Provider 的官方搜索接口（结构化结果，质量远高于抓 HTML）：
+ * 火山引擎联网搜索 → MiniMax（Coding Plan）→ DeepSeek 官方 {@code /v1/tools/search}。
+ * 任一命中即直接返回，只有全部不可用才降级到 Bing / 百度 / Jina / 本地抓取。</p>
+ *
+ * <p><b>新增 Provider 若也有官方搜索 API，必须在本类搜索链路里补一段 if 分支</b>
+ * （判据用 {@code xxxSearchApi.isAvailable()}，依赖凭证从 Provider 的 {@code extraConfig} 读取），
+ * 否则新 Provider 的联网会静默降级成通用抓取。完整适配清单见
+ * {@code LLMClient} 类头的 B7 项；前端展示判据在 {@code provider-capability.ts}
+ * 的 {@code deriveCapabilities().search}。</p>
  */
 @Slf4j
 @Component

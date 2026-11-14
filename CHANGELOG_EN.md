@@ -5,6 +5,175 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.1] - 2026-11-14
+
+> The metering-and-discoverability release. Cost visibility grows from "DeepSeek only" to **every provider**
+> (three usage protocols, each enabled per provider), and any model without a configured unit price is
+> **never estimated** (the UI shows "—" instead of a wrong ¥0). It also ships an A/B/C/D adaptation checklist
+> for adding a provider, so that **silent missing features** ("chat works, but costs are blank / images 400 /
+> the balance button is greyed out") get caught before merge. File paths and URLs in chat are now
+> **clickable**, and both the file tree and the Git panel gained a search box.
+> Backend + both frontends + Electron are changed; a **backend restart is required**, and desktop packages
+> must be rebuilt (two new system-open IPC channels).
+
+### 💱 Multi-provider usage collection and pricing (core)
+
+- **Background**: the v3.0.9 cost dashboard was only really usable with DeepSeek — other providers' streaming
+  responses carry no usage at all, so "cost visibility" was blank exactly where it matters most (third-party
+  models that bill per token and cost more). The root cause is **protocol differences**: some return usage in a
+  single frame, some require an opt-in flag in the request, and some split input and output across two frames.
+- **Protocol dispatch**: `LLMClient` gained `getUsageProtocol()` (`openai` / `anthropic` / `ollama`) and
+  `getRequestHeaders()`; `AbstractLLMClient` gained `requiresStreamUsageOption()` + `buildIncludeUsageOption()`;
+  `TokenUsageParser` was rewritten around `parseFrame(previous, sseData, protocol)` with **cross-frame merging**
+  (returning a `UsageSnapshot` with new `cacheCreationTokens` and `protocol` fields).
+- **Measured behaviour per provider**:
+  - DeepSeek: returns usage by default (`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`), unchanged;
+  - OpenAI official (the `gpt` template): already sent `stream_options.include_usage`; now routed through the
+    shared hook instead of being reassembled inside the adapter;
+  - Qwen / Bailian, Volcengine Ark, MiniMax, MiMo: **none of them return usage by default** — all four now
+    explicitly enable `stream_options.include_usage`;
+  - Anthropic: a completely different shape (`message_start` carries only the input side, `message_delta` the
+    output side), handled by cross-frame merging under the `anthropic` protocol;
+  - Ollama: the NDJSON trailer with `done=true` carries `prompt_eval_count` / `eval_count`, handled by the
+    `ollama` protocol;
+  - The generic `openai` template (third-party gateways / vLLM): **deliberately does not send** `stream_options`
+    — gateways that strictly reject unknown fields answer 400, and the price of that is no usage for most of
+    them. **Better to have no number than to break the main path.**
+- **Pricing policy (behaviour change, important)**: a model without an entry in `llm.pricing.models` is
+  **never estimated**; there is no fallback to a default price. The previous implementation billed GPT / Claude
+  at DeepSeek's rates, and **a wrong cost is more dangerous than no cost** — it makes switching models look cheap.
+  - `TokenPricingConfig.resolve()` returns `null` when nothing matches; `PriceItem` gained `cacheWriteInput`
+    (Anthropic cache writes).
+  - `LlmTokenUsage.costEstimate` is now a nullable `Double`; the three aggregate VOs gained `pricedRequestCount`
+    and `TokenUsageSummaryVO` gained `breakdownAvailable`; the Mapper aggregate SQL now includes
+    `COUNT(cost_estimate)`.
+  - Frontends gained `isCostAvailable()`: with no pricing the money segment is not rendered at all (shows "—"),
+    and the three-part cost breakdown bar hides itself based on `breakdownAvailable`.
+- **Anthropic semantics fixed**: `input_tokens` **excludes** cache reads and writes, so total input =
+  `input_tokens` + `cache_read` + `cache_creation`; cache writes are priced separately via `cache-write-input`.
+  Also added the missing `anthropic-version` request header on the main path (its absence is an immediate 400).
+- **Collection gap closed**: the **plain chat path with no tool calls** had no usage collection at all (only the
+  tool loop was recording); it now collects usage and persists it in `doFinally`.
+- **Verified**: new `TokenUsageMultiProtocolTest` (40 assertions) covering frame parsing for all three protocols,
+  cross-frame merging, cache-field semantics, and the null-price return.
+
+### 📘 Provider adaptation checklist (maintainability)
+
+- **Background**: adding a provider touches a dozen scattered places, and the worst part is that **omissions do
+  not raise errors** — chat works, but the cost dashboard is blank, images 400, the balance button is greyed out,
+  and search silently falls back to Bing. These never show up during development, only for users.
+- **The `LLMClient` class header is now the single entry point**, grouped by consequence: A must-write (it simply
+  will not run without it), B capability switches (no error, just silent missing features), C scattered points
+  (the real code lives in four other classes), D frontend and tests (whether the user can see the capability).
+- **`AbstractLLMClient` class header** gained a hook table (default / when to override / what breaks if missed)
+  plus a current-state matrix of 9 adapters × 6 hooks.
+- **`LLMClientManager.createClient`** gained a "three things when registering" note (case branch, a row in the
+  selection table that spells out "do not use for", and the frontend dropdown).
+- **Back-references at the scattered points**: `FilesApiClientManager` (B6 file upload), `SearchTool` (B7 web
+  search), `ProviderBalanceService` (B8 balance query) and `ModelCapabilityRules` (B5 vision / B9 output cap)
+  now name their checklist item in their own class header.
+- **Frontend**: `provider-capability.ts` lists the "5 places to sync" in its header; the template dropdown in
+  `ProviderEditDrawer.vue` gained the previously missing **MiMo**.
+- **Docs**: section 9.1 of `docs/LLM_PROVIDER_SYSTEM(_EN).md` was rewritten as a full SOP with a 9-item
+  pre-commit checklist. **When comments and docs disagree, the code wins** — comments sit in front of whoever
+  changes the code, docs do not.
+
+### 🔍 File search and click-through paths
+
+- **New backend endpoint `GET /api/project/search`** (`root` / `keyword` / `limit`): case-insensitive match on
+  file name or relative path, ordered by four tiers (exact name > name prefix > name contains > path contains),
+  ties broken by shorter path first; reuses the existing exclusion rules (`node_modules` / `target` / `.git` /
+  static-asset prefixes); scans at most 50,000 files, returns 100 by default (300 max), truncates keywords
+  beyond 200 characters.
+- **Both frontends' file trees gained a search box**: v3 uses a 250 ms debounce, a monotonically increasing
+  request id to drop stale responses, and Esc to clear; results show "file name + containing directory", and
+  clicking **leaves search mode before opening** (otherwise the search list keeps covering the tree, which reads
+  as "clicking does nothing"). The classic frontend searches the whole project through the backend and reuses the
+  existing `openLocalFileTab` path.
+- **Why not filter client-side**: the v3 tree loads lazily per directory and the classic tree caps depth at 10
+  levels, so a local filter necessarily misses deep files — "sometimes it finds it, sometimes it doesn't", which
+  is worse than not finding it at all.
+- **The Git panel filters locally**: change lists are usually a few dozen entries, so there is no request to
+  make, and it must not alter the "stage all / unstage all" semantics (an `N/M` counter distinguishes
+  "working tree clean" from "no matches").
+- **Clickable paths**: `utils/file-path.ts` in v3 was rewritten as a **three-stage resolver** — absolute paths
+  are read directly → `/project/resolve` suffix matching (tolerating a path fragment from the LLM) → a
+  `/project/search` fallback by file name; it strips `:12` line suffixes, wrapping quotes / backticks /
+  angle brackets, `.../` and `…/` elisions, and `file://`.
+- **Markdown rendering**: `renderFileList` turns lines that *look like* paths into `data-cc-path` links
+  (explanatory prose inside a list is not linked, so clicks never land on a non-existent file); http(s) URLs
+  inside inline code are restored as external links.
+- **Two new Electron IPC channels**: `shell:openPath` / `shell:showItemInFolder`; the main process verifies the
+  path is an **existing absolute path** and `shell.openPath` must return an empty string to count as success.
+  The renderer gained `utils/shell.ts`, `CodeEditor` gained a named `actions` slot, and the file view exposes
+  "open with default app" and "reveal in folder" (with a toast on failure).
+  **Security boundary**: these paths come from LLM output, so `shell.openPath` must not be treated as a
+  universal opener.
+- **Verified**: new `ProjectSearchTest` (15 assertions) covering the four ranking tiers, casing, three exclusion
+  categories, empty / null / missing root, and limit clamping.
+
+### 🎨 Cost dashboard discoverability and theming
+
+- **The classic menu was unreachable (bug)**: `sys_menu` id=19 was inserted with `menu_type='SETTING'`, while the
+  classic sidebar only queries `LINK / AI / TOOL / SYSTEM / MANAGE` — the page and route existed, but the group
+  never rendered. `schema.sql` now uses `SYSTEM`, plus an **idempotent migration UPDATE** (guarded by
+  `name='成本看板'` so it never overwrites a manual adjustment or a reused id); the classic `Layout.vue` `iconMap`
+  gained `BarChartOutlined`.
+- **Broken colours in dark mode / with a background image (bug)**: both pages referenced **variables that do not
+  exist** (`--bg-1` / `--bg-2` / `--primary`), so they always fell back to hard-coded colours. v3 now uses
+  `--card` / `--bg-sub` / `--card-2` / `--border-strong` / `--accent` / `--ok` / `--warn` / `--danger` with the
+  standard `.cc-page-scroll → .cc-page-inner → .cc-page-head` skeleton; the classic page uses
+  `--bg-card` / `--bg-hover` / `--text-*` / `--border` / `--accent` and adds frosted-glass plus dark-mode
+  overrides under `html.has-app-bg`.
+- v3 gained an `i-chart` icon, and the cost dashboard menu icon changed from `i-log` to `i-chart` (a log icon was
+  semantically wrong).
+
+### 🧹 Composer status line re-layout (UX change)
+
+- Classic chat composer: balance / context / session usage moved out of the footer into a **dedicated line above
+  the input box** — previously they shared a `flex-wrap: nowrap` row with five other controls (send, attach, …)
+  and got squeezed as soon as the window narrowed.
+- Both frontends now use the same order: "**context → balance → spend ¥x · N tokens → cache x%**", 11 px,
+  dot-separated, values bolded.
+- The wording changed from "session" to "**spend**": session is a scope, spend is an amount, and the former reads
+  like a count of sessions.
+- The balance label still varies per provider (quota / balance) so quota-based providers such as MiniMax are not
+  mislabelled.
+- Removed three dead style blocks: `.balance-chip` / `.context-tokens` / `.session-usage`.
+
+### ✅ Verification
+
+- Backend `mvn -q compile -DskipTests` passes.
+- v3 `npx vue-tsc --noEmit -p tsconfig.app.json` reports zero errors; `npm run build` passes.
+- Classic typecheck shows no new errors; `npm run build` passes.
+- Unit tests: `TokenUsageMultiProtocolTest` 40/40, `ProjectSearchTest` 15/15.
+
+### 📚 Docs and version numbers
+
+- Version synced: `pom.xml` (artifact `code-craft-3.1.1.jar`), classic/v3 `package.json` + lock, Electron
+  `version` and the `extraResources` jar path, and the MCP handshake version `CodeCraftMcpServer.SERVER_VERSION`.
+- `ARCHITECTURE(_EN)` item 15 was extended to cover "three usage protocols + never estimate without a price";
+  section 9.1 of `LLM_PROVIDER_SYSTEM(_EN)` was rewritten as the full provider SOP.
+- Version headers of 8 deep-dive docs, the build command samples in `DEV_QUICKREF` / `RELEASE_CHECKLIST(_EN)`,
+  the FAQ version sample and the `README(_EN)` badge — all unified to v3.1.1.
+- Also cleaned up 73 / 66 duplicated BOMs accumulated at the head of `ARCHITECTURE(_EN).md` (editing residue that
+  does not affect rendering but pollutes diffs).
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required**: new `/api/project/search` endpoint plus changed cost-collection and pricing logic.
+- **Desktop packages must be rebuilt / reinstalled**: two new system-open IPC channels (on old builds the buttons
+  hide themselves instead of erroring).
+- **Money display changes (expected)**: only DeepSeek ships with built-in prices. With GPT / Claude / Qwen / Ark /
+  MiniMax the chat page and the dashboard show "—" **by design** (not a collection failure). To see amounts, fill
+  in the real prices under `application.yml → llm.pricing.models` following the commented template; **do not** add
+  a `default` fallback price just to make numbers appear.
+- **No manual DB migration**: the cost-dashboard menu type is fixed by the idempotent `schema.sql` UPDATE that runs
+  at startup.
+- No breaking configuration changes.
+
+---
+
 ## [3.1.0] - 2026-11-14
 
 > The cost-visibility release. v3.0.9 made cost **reviewable after the fact**; this version makes it

@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -309,6 +310,126 @@ public class ProjectServiceImpl implements ProjectService {
             result = result.subList(0, RESOLVE_MAX_CANDIDATES);
         }
         log.debug("路径解析: partial={}, 候选数量={}", target, result.size());
+        return result;
+    }
+
+    /** searchFiles 单次遍历的文件数上限：超大仓库（几十万文件）不能把接口拖成几秒 */
+    private static final int SEARCH_MAX_SCAN_FILES = 50000;
+
+    @Override
+    public List<String> searchFiles(String rootPath, String keyword, int limit) {
+        if (keyword == null) {
+            return List.of();
+        }
+        String kw = keyword.trim();
+        if (kw.isEmpty()) {
+            return List.of();
+        }
+        // 关键字长度收敛：搜索框最多几十个字符，超长串只可能来自异常调用
+        if (kw.length() > 200) {
+            kw = kw.substring(0, 200);
+        }
+        int max = Math.max(1, Math.min(300, limit <= 0 ? 100 : limit));
+
+        String root = (rootPath == null || rootPath.trim().isEmpty())
+                ? ProjectRootContext.get()
+                : rootPath;
+        root = root.replace('\\', '/');
+        if (root.endsWith("/")) {
+            root = root.substring(0, root.length() - 1);
+        }
+        Path rootDir = Paths.get(root);
+        if (!Files.isDirectory(rootDir)) {
+            return List.of();
+        }
+
+        final String lowerKw = kw.toLowerCase(Locale.ROOT);
+        // 四档命中分桶：返回时按「文件名全等 → 文件名前缀 → 文件名包含 → 仅路径包含」依次取用
+        List<String> exact = new ArrayList<>();
+        List<String> prefix = new ArrayList<>();
+        List<String> nameHit = new ArrayList<>();
+        List<String> pathHit = new ArrayList<>();
+        int[] scanned = {0};
+
+        try {
+            Files.walkFileTree(rootDir, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (!dir.equals(rootDir)) {
+                        String name = dir.getFileName() != null ? dir.getFileName().toString() : "";
+                        // 与 resolveFilePath 共用同一套排除规则：.git / node_modules / target 整棵子树跳过
+                        if (EXCLUDED_NAMES.contains(name)) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
+                        String rel = rootDir.relativize(dir).toString().replace('\\', '/');
+                        for (String excluded : EXCLUDED_PREFIXES) {
+                            if (rel.startsWith(excluded)) {
+                                return FileVisitResult.SKIP_SUBTREE;
+                            }
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (scanned[0] >= SEARCH_MAX_SCAN_FILES) {
+                        return FileVisitResult.TERMINATE;
+                    }
+                    scanned[0]++;
+                    String fileName = file.getFileName() != null ? file.getFileName().toString() : "";
+                    String lowerName = fileName.toLowerCase(Locale.ROOT);
+                    String rel = rootDir.relativize(file).toString().replace('\\', '/');
+                    String lowerRel = rel.toLowerCase(Locale.ROOT);
+
+                    if (lowerName.equals(lowerKw)) {
+                        exact.add(rel);
+                    } else if (lowerName.startsWith(lowerKw)) {
+                        prefix.add(rel);
+                    } else if (lowerName.contains(lowerKw)) {
+                        nameHit.add(rel);
+                    } else if (lowerRel.contains(lowerKw)) {
+                        pathHit.add(rel);
+                    }
+                    // 四桶全满：再扫也不会有位置，直接收工
+                    if (exact.size() >= max && prefix.size() >= max
+                            && nameHit.size() >= max && pathHit.size() >= max) {
+                        return FileVisitResult.TERMINATE;
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE; // 个别文件不可访问不影响整体搜索
+                }
+            });
+        } catch (IOException e) {
+            log.warn("搜索文件失败: root={}, keyword={}", root, kw, e);
+        }
+
+        // 同级按路径长度升序：浅层 / 短路径更可能是用户要找的那个
+        Comparator<String> byLength = Comparator
+                .comparingInt(String::length)
+                .thenComparing(Comparator.naturalOrder());
+        exact.sort(byLength);
+        prefix.sort(byLength);
+        nameHit.sort(byLength);
+        pathHit.sort(byLength);
+
+        List<String> result = new ArrayList<>(max);
+        for (List<String> bucket : List.of(exact, prefix, nameHit, pathHit)) {
+            for (String rel : bucket) {
+                if (result.size() >= max) {
+                    break;
+                }
+                result.add(rel);
+            }
+            if (result.size() >= max) {
+                break;
+            }
+        }
+        log.debug("文件搜索: keyword={}, 扫描={}, 命中={}", kw, scanned[0], result.size());
         return result;
     }
 

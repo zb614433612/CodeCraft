@@ -1311,14 +1311,37 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     : requestBody;
             // 使用当前 Provider 的 WebClient（替换原来的 this.webClient）
             WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
-            return Flux.concat(sessionEvent, activeWebClient.post()
+            // ===== 成本可观测：无工具路径同样采集 usage =====
+            // 历史实现只给「工具循环」记账，纯聊天（未下发工具）完全不落库 —— 结果就是
+            // 短对话在成本看板上是 0，用户以为免费。这里补齐同一套采集口径。
+            java.util.concurrent.atomic.AtomicReference<TokenUsageParser.UsageSnapshot> chatUsageRef =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            final String chatUsageProtocol = ctxClient != null
+                    ? ctxClient.getUsageProtocol() : TokenUsageParser.PROTOCOL_OPENAI;
+            final String chatUsageModel = (String) apiRequest.get("model");
+            WebClient.RequestBodySpec chatRequestSpec = activeWebClient.post()
                     .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
-                    .contentType(MediaType.APPLICATION_JSON)
+                    .contentType(MediaType.APPLICATION_JSON);
+            // Provider 必需头（如 Anthropic 的 anthropic-version），直连发送不会自动带上
+            if (ctxClient != null) {
+                ctxClient.getRequestHeaders().forEach(chatRequestSpec::header);
+            }
+            return Flux.concat(sessionEvent, chatRequestSpec
                     .bodyValue(preparedBody)
                     .accept(MediaType.TEXT_EVENT_STREAM) // 接受text/event-stream
                     .retrieve()
                     .bodyToFlux(String.class)
                     .doOnNext(chunk -> {
+                        // 采集 usage（Anthropic 跨帧合并 / Ollama 收尾行 / OpenAI 单帧）
+                        try {
+                            TokenUsageParser.UsageSnapshot snap = tokenUsageParser
+                                    .parseFrame(chatUsageRef.get(), chunk, chatUsageProtocol);
+                            if (snap != null) {
+                                chatUsageRef.set(snap);
+                            }
+                        } catch (Exception e) {
+                            log.trace("usage 帧解析异常（忽略）: {}", e.getMessage());
+                        }
                         // 收集响应块
                         responseBuilder.append(chunk);
                     })
@@ -1365,7 +1388,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         log.error("DeepSeek API流式调用失败（已转换为前端友好错误事件）: {}", error.getMessage());
                         LLMErrorFormatter.FriendlyError friendlyError = LLMErrorFormatter.format(error);
                         return Flux.just(LLMErrorFormatter.toTaskErrorEventJson(friendlyError), "[DONE]");
-                    }));
+                    })
+                    // 成本可观测：流终止（正常完成 / 取消 / 异常）统一落库，
+                    // 与工具循环同一口径，保证「每次真实请求 = 一条用量记录」。
+                    // iteration 传 0：本路径没有工具循环，只有一次请求。
+                    .doFinally(signalType -> persistTokenUsageSafely(
+                            conversationId, (String) apiRequest.get("_turnId"), 0,
+                            providerCode, chatUsageModel, chatUsageRef.get())));
         }
     }
 
@@ -3083,11 +3112,23 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         java.util.concurrent.atomic.AtomicReference<TokenUsageParser.UsageSnapshot> usageRef =
                 new java.util.concurrent.atomic.AtomicReference<>();
         final String usageProvider = ctxClient != null ? ctxClient.getProviderCode() : null;
+        // 用量协议：Anthropic 把输入侧/输出侧拆在两帧、Ollama 走 NDJSON 收尾行，
+        // 统一按 OpenAI 的 usage 对象解析会让这两类 Provider 永远统计为 0。
+        final String usageProtocol = ctxClient != null
+                ? ctxClient.getUsageProtocol() : TokenUsageParser.PROTOCOL_OPENAI;
         final String usageModel = (String) apiRequest.get("model");
 
-        return activeWebClient.post()
+        WebClient.RequestBodySpec requestSpec = activeWebClient.post()
                 .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
-                .contentType(MediaType.APPLICATION_JSON)
+                .contentType(MediaType.APPLICATION_JSON);
+        // ★ Provider 必需头（如 Anthropic 的 anthropic-version）：
+        //   本方法用 webClient 直连发送、不经 AbstractLLMClient#streamChat，
+        //   WebClient 又只注入了认证头，缺必需头会直接 400（端点对、请求被拒）。
+        if (ctxClient != null) {
+            ctxClient.getRequestHeaders().forEach(requestSpec::header);
+        }
+
+        return requestSpec
                 .bodyValue(preparedBody)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .retrieve()
@@ -3099,11 +3140,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         log.info("[Perf] conversationId={}, iteration={}, LLM首字节到达, TTFB={}ms",
                                 conversationId, iteration, ttfbMs);
                     }
-                    // 成本可观测：捕获 usage 帧（本轮请求只会有一帧携带，位于 data: [DONE] 之前）
+                    // 成本可观测：捕获 usage 帧（OpenAI 一帧完整；Anthropic 需跨帧合并，
+                    // 故用 parseFrame 承接上一帧结果，避免输入侧 token 被后到的输出帧冲掉）
                     // 放在 doOnNext 而非 flatMap 内，是因为 flatMap 之后有 takeWhile，
                     // 工具调用一旦完整会提前终止链路，导致尾部 usage 帧被丢弃。
                     try {
-                        TokenUsageParser.UsageSnapshot snap = tokenUsageParser.parse(chunk);
+                        TokenUsageParser.UsageSnapshot snap =
+                                tokenUsageParser.parseFrame(usageRef.get(), chunk, usageProtocol);
                         if (snap != null) {
                             usageRef.set(snap);
                         }

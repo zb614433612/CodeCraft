@@ -1466,6 +1466,49 @@ ipcMain.handle('shell:openExternal', async (_event, url) => {
 })
 
 /**
+ * IPC handler：用系统默认程序打开本地文件 / 目录
+ * 由渲染进程在文件标签的「用默认程序打开」按钮调用（VS Code、系统编辑器等由文件关联决定）。
+ *
+ * <p>安全约束：只接受**已存在的绝对路径**。渲染进程传来的路径来自 LLM 输出，
+ * 必须挡掉「不存在 / 相对路径 / 协议串」这类输入，避免把 shell.openPath 当万能打开器。
+ * 打不开时返回 false，由前端 toast 提示（例如没有关联程序）。</p>
+ *
+ * @param {string} targetPath - 绝对路径
+ * @returns {Promise<boolean>} 是否成功交给系统
+ */
+ipcMain.handle('shell:openPath', async (_event, targetPath) => {
+  if (typeof targetPath !== 'string' || !targetPath.trim()) return false
+  if (!path.isAbsolute(targetPath)) return false
+  try {
+    if (!fs.existsSync(targetPath)) return false
+    // shell.openPath 的返回值是「错误信息字符串」，空串才代表成功
+    const err = await shell.openPath(targetPath)
+    return !err
+  } catch (e) {
+    console.warn('用默认程序打开失败:', e.message)
+    return false
+  }
+})
+
+/**
+ * IPC handler：在系统文件管理器中定位文件（资源管理器 / Finder 选中该文件）
+ * @param {string} targetPath - 绝对路径
+ * @returns {Promise<boolean>} 是否成功发起定位
+ */
+ipcMain.handle('shell:showItemInFolder', async (_event, targetPath) => {
+  if (typeof targetPath !== 'string' || !targetPath.trim()) return false
+  if (!path.isAbsolute(targetPath)) return false
+  try {
+    if (!fs.existsSync(targetPath)) return false
+    shell.showItemInFolder(targetPath)
+    return true
+  } catch (e) {
+    console.warn('在文件夹中显示失败:', e.message)
+    return false
+  }
+})
+
+/**
  * IPC handler：设置整个窗口的整体透明度
  * 由渲染进程在用户调节「外观设置 - 整体透明度」时调用
  * @param {number} value - 0.2 ~ 1（这里做边界保护；部分 Linux 窗口管理器不支持，失败静默）

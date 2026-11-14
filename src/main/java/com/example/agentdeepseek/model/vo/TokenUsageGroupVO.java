@@ -39,6 +39,12 @@ public class TokenUsageGroupVO {
     /** 估算费用（元） */
     private double costEstimate;
 
+    /**
+     * 该组内「有单价、可估算成本」的请求条数。
+     * <p>为 0 表示该组的模型都没配置单价，前端应隐藏金额而不是显示 ¥0。</p>
+     */
+    private long pricedRequestCount;
+
     /** 缓存命中率（0~1）；-1 表示无数据 */
     private double cacheHitRate;
 }

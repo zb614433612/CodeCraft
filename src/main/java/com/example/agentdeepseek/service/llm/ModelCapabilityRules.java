@@ -23,6 +23,17 @@ import java.util.Map;
  * </p>
  * <p><b>匹配规则</b>：模型名（已归一：取 {@code /} 之后最后一段、转小写）按<b>前缀</b>匹配。
  * 例如配置 {@code gpt-5} 可命中 {@code gpt-5.4-mini}，配置 {@code gpt-6} 可命中 {@code gpt-6-turbo}。</p>
+ *
+ * <p><b>新增 Provider 适配时</b>：本类承担总清单的 B5（图片识别能力判定）与 B9（输出上限 /
+ * 推理模型判定）。通常<b>不需要改 Java 代码</b>，只改 {@code application.yml}：</p>
+ * <ul>
+ *   <li>{@code llm.model-capabilities.reasoning-model-prefixes} —— 新推理模型前缀
+ *       （命中后剔除 temperature、改用大额度输出）；</li>
+ *   <li>{@code llm.model-capabilities.vision-rules.<providerCode>} —— 视觉支持与否；</li>
+ *   <li>{@code llm.model-capabilities.default-allow-vision} —— 无规则时的兜底（默认宽松放行）。</li>
+ * </ul>
+ * <p>前端副本在 {@code provider-capability.ts} 的 {@code VISION_TEMPLATES / visionStateOf}，
+ * 两边判定必须一致，否则会出现「界面说能发图、后端却拒绝」或反之。</p>
  */
 @Slf4j
 public final class ModelCapabilityRules {

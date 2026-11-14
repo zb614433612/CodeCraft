@@ -88,6 +88,20 @@ public class ProjectController {
         return ApiResponse.success(projectService.resolveFilePath(root, path));
     }
 
+    @GetMapping("/search")
+    @Operation(summary = "按关键字搜索项目文件",
+            description = "在项目内模糊搜索文件（忽略大小写）：文件名全等 > 文件名前缀 > 文件名包含 > 仅路径包含；"
+                    + "自动跳过 .git / node_modules / target 等目录，返回相对路径列表（默认 100 条，最多 300 条）")
+    public ApiResponse<List<String>> searchFiles(
+            @Parameter(description = "项目根目录路径，为空则使用当前项目目录")
+            @RequestParam(defaultValue = "") String root,
+            @Parameter(description = "关键字（匹配文件名或相对路径）")
+            @RequestParam String keyword,
+            @Parameter(description = "返回条数上限，默认 100，最多 300")
+            @RequestParam(defaultValue = "100") int limit) {
+        return ApiResponse.success(projectService.searchFiles(root, keyword, limit));
+    }
+
     @GetMapping("/raw")
     @Operation(summary = "读取文件原始字节", description = "返回文件原始字节流（图片/PDF 等二进制预览用），Content-Type 按扩展名推断")
     public ResponseEntity<byte[]> rawFile(

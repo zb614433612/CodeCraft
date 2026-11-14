@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v3.1.0 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.1.1 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -689,26 +689,79 @@ POST /api/llm-providers
 
 ## 九、扩展指南
 
-### 9.1 添加新的 Provider 实现
+### 9.1 添加新的 Provider 实现（完整 SOP）
 
-1. 在 `service/llm/` 目录下创建新的客户端类，继承 `AbstractLLMClient` 或直接实现 `LLMClient` 接口
-2. 实现所有抽象方法：
-   - `buildRequestBody()` - 构建 Provider 特定格式的请求体
-   - `streamChat()` - 流式调用
-   - `blockingChat()` - 阻塞调用
-   - `extractContentFromStreamChunk()` - 解析流式响应
-   - `extractReasoningFromStreamChunk()` - 解析思考过程
-   - `extractContentFromBlockingResponse()` - 解析阻塞响应
-3. 在 `LLMClientManager.createClient()` 方法中添加新的 case：
+> **代码里的唯一总入口**：`LLMClient` 接口类头的「新增 Provider 适配清单」（A/B/C/D 四组）。
+> 本节是它的文档版，用于评审与交接；两者若有出入，**以代码注释为准**。
+>
+> 核心认知：**A 组不做跑不通；B 组不做不报错，只静默缺功能**。
+> 典型症状对照：对话能跑通，但「成本看板没金额 / 发图 400 / 余额按钮灰掉 / 联网只走 Bing」
+> —— 都不是 Bug，是 B 组漏项。
+
+#### A. 必写代码（不做就跑不通）
+
+| # | 做什么 | 位置 / 说明 |
+|---|--------|-------------|
+| A1 | 新建 `XxxClient extends AbstractLLMClient` | 不建议直接实现 `LLMClient`：基类已实现流式/阻塞发送、超时、SSE 拆帧、错误体提取 |
+| A2 | 实现 `buildThinkingParams(String thinkingMode)` | **唯一的 abstract 方法**。入参只会是 `normalizeThinkingMode` 归一化后的 5 档（none/low/medium/high/max）或空串 auto，**不要**比较 `thinking_low` 这类原始字符串 |
+| A3 | 实现 3 个解析方法 | `extractContentFromStreamChunk`（正文增量）/ `extractReasoningFromStreamChunk`（思考链，无则 null）/ `extractContentFromBlockingResponse`（非流式正文） |
+| A4 | 确认工具调用**增量结构** | 主链路 `DeepSeekServiceImpl` 固定按 OpenAI 的 `choices[].delta.tool_calls`（index/id/arguments 增量拼接）解析，**协议不同必须在适配器内转换**，否则「能聊天、一调工具就断」 |
+| A5 | 注册到 `LLMClientManager.createClient` | 加 `case "<template>"`（建议同时接受历史别名）；并在类头「模板选型总览」表补一行，写清「适用 / **不要用于**」 |
+
+#### B. 能力开关（不写不报错，功能静默缺失）
+
+| # | 能力 | 覆写 / 配置 | 漏掉的症状 |
+|---|------|-------------|-----------|
+| B1 | 流式 usage（成本） | `getUsageProtocol()` + `requiresStreamUsageOption()` + `application.yml → llm.pricing.models.<模型>` | 成本看板金额全空、聊天页显示「—」 |
+| B2 | reasoning_content 回传 | `requiresReasoningPadding()`（DeepSeek 系必开） | thinking 模型第二轮起 400：`reasoning_content must be passed back` |
+| B3 | 必需请求头 | `getRequestHeaders()`（如 Anthropic 的 `anthropic-version`） | 端点写对了但 400/401 |
+| B4 | 端点路径 | `getChatEndpoint()`（默认 `/v1/chat/completions`） | 404 |
+| B5 | 图片识别 | `application.yml → llm.model-capabilities.vision-rules`（模型级判定）+ 适配器内块协议转换（`image_url → image/source`、剔除不认的 `detail`） | 发图 400 / 图片被静默丢弃 |
+| B6 | 文件上传（Files API） | 实现 `FilesApiClient` + 在 `FilesApiClientManager.createClient` 注册 template | 只能走 inline base64，大文件超限报错 |
+| B7 | 联网搜索 | `SearchTool` 里「官方搜索 API 优先」的 if 链（火山 / MiniMax / DeepSeek） | 只剩通用抓取（Bing / 百度 / Jina），拿不到平台结构化结果 |
+| B8 | 余额 / 额度查询 | `ProviderBalanceService.queryBalance` 的 if 链（必要时新增 BillingClient） | 余额按钮提示「不支持余额查询」 |
+| B9 | 输出上限 / 推理模型判定 | `llm.model-capabilities`（reasoning-model-prefixes 等）+ `extraConfig.maxTokens` | 输出被截断，或推理模型被塞 temperature 遭拒 |
+
+#### C. 散点速查（最容易漏：改完适配器还要改这些）
+
+| 能力 | 后端（唯一真相源） | 前端（展示副本，必须同步） |
+|------|--------------------|------------------------------|
+| 成本 / usage | `LLMClient.getUsageProtocol`、`AbstractLLMClient.requiresStreamUsageOption`、`TokenUsageParser`、`llm.pricing` | 无需前端分支：由后端 `pricedRequestCount` 自动决定是否显示金额 |
+| 图片识别 | `ModelCapabilityRules.supportsVisionModel`、`FileVisionService` | v3 `utils/provider-capability.ts`：`VISION_TEMPLATES` + `visionStateOf()` |
+| 联网搜索 | `SearchTool` | 同上文件 `deriveCapabilities().search` + `searchHint()` |
+| 余额查询 | `ProviderBalanceService` | 同上文件 `deriveCapabilities().balance` |
+| 模板下拉 / 标签 | `LLMClientManager` 的 switch 与选型表 | v3 `ProviderEditDrawer.vue`（`TEMPLATE_OPTIONS`）+ `templateLabel()` / `providerIconTone()`；旧版 `ConfigView.vue` / `ProviderConfigView.vue` / `CodeAssistantView.vue`（`BALANCE_TEMPLATES`） |
+
+#### D. 前端与测试
+
+1. **v3 前端**：`ProviderEditDrawer.vue` 的 `TEMPLATE_OPTIONS` 加选项（否则用户选不到新模板）；
+   `provider-capability.ts` 按 C 组同步 5 处（文件头有清单）。
+2. **旧版前端**：`ConfigView.vue` / `ProviderConfigView.vue` 的 `templateLabel` / `templateStyle` / 下拉；
+   `CodeAssistantView.vue` 的 `BALANCE_TEMPLATES`（余额按钮显隐）。
+3. **单测**：仿 `GptAdapterTest` / `QwenAdapterTest` / `VolcengineAdapterTest` / `MiniMaxAdapterTest`
+   写请求体断言；视觉参与 `AdapterVisionMatrixTest`；新 usage 协议参与 `TokenUsageMultiProtocolTest`。
+
+#### E. 自检清单（提交前逐条打勾）
+
+- [ ] `mvn -q compile -DskipTests` 通过
+- [ ] 新 Provider 能正常对话（A1~A3）
+- [ ] 触发一次工具调用，`tool_calls` 与 `role=tool` 正常配对（A4）
+- [ ] 成本看板出现金额，或确认「未配单价」按设计显示「—」（B1）
+- [ ] 开思考跑两轮不 400（B2）
+- [ ] 发一张图（B5）
+- [ ] 余额按钮可用或按预期提示（B8）
+- [ ] v3 下拉能选到新模板（D1）
+- [ ] 已在 `LLMClient` 清单与本文档登记新模板
+
+#### F. 代码示例
 
 ```java
 case "new_provider" -> {
     var wc = webClientManager.getOrCreate(config);
-    yield new NewProviderClient(wc, objectMapper, config.getCode());
+    yield new NewProviderClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
+            readExtraInt(config, "maxTokens"));
 }
 ```
-
-4. 在前端 `ProviderConfigView.vue` 的 `templateLabel()` 和 `templateStyle()` 方法中添加新的样式映射
 
 ### 9.2 自定义请求模板
 

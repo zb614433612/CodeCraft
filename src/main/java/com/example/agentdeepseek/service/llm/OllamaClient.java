@@ -60,6 +60,19 @@ public class OllamaClient extends AbstractLLMClient {
         return CHAT_ENDPOINT;
     }
 
+    /**
+     * Ollama 不是 OpenAI 协议：用量以 NDJSON 的 {@code done=true} 收尾行承载，
+     * 字段是 {@code prompt_eval_count}（输入）/ {@code eval_count}（输出）/
+     * {@code prompt_eval_cached_count}（缓存命中，较新版本才有）。
+     *
+     * <p>注意：Ollama 跑在本机 / 内网，<b>没有按 token 计费</b>，
+     * 因此这类记录只统计 token 与命中率，不做成本估算。</p>
+     */
+    @Override
+    public String getUsageProtocol() {
+        return "ollama";
+    }
+
     // ==================== 请求体构建 ====================
 
     @Override

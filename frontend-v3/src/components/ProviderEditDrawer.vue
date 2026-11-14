@@ -319,6 +319,13 @@ const emit = defineEmits<{
   (e: 'query-balance', code: string): void
 }>()
 
+/**
+ * 请求模板下拉选项。
+ *
+ * ⚠️ 后端新增适配器时必须在这里加一行（否则界面上根本选不到新模板），
+ *    并同步 utils/provider-capability.ts 的 5 处能力推导（见该文件头注释）。
+ *    模板取值必须与后端 LLMClientManager.createClient 的 switch 分支一致。
+ */
 const TEMPLATE_OPTIONS = [
   { value: 'deepseek', label: 'DeepSeek（兼容 OpenAI）' },
   { value: 'volcengine', label: '火山方舟（豆包｜图片 / 搜索 / 余额）' },
@@ -327,6 +334,7 @@ const TEMPLATE_OPTIONS = [
   { value: 'openai', label: 'OpenAI（任意兼容服务）' },
   { value: 'anthropic', label: 'Anthropic（Messages 兼容）' },
   { value: 'minimax', label: 'MiniMax' },
+  { value: 'mimo', label: 'MiMo（小米｜多模态）' },
   { value: 'ollama', label: 'Ollama（本地）' },
   { value: 'custom', label: '自定义' }
 ]

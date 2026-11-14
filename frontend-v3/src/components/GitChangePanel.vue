@@ -77,11 +77,31 @@
         </button>
       </div>
 
+      <!--
+        变更筛选：Git 变更数量通常几十个以内，本地过滤即可（不发请求、即时响应）。
+        只影响「列表显示」，不影响「全部暂存 / 全部取消暂存」的作用范围（仍是全量）。
+      -->
+      <div v-if="hasChanges" class="cc-git__search">
+        <svg class="cc-i cc-i--sm cc-git__search-icon"><use href="#i-search" /></svg>
+        <input
+          v-model="changeKeyword"
+          class="cc-git__search-input"
+          type="text"
+          placeholder="筛选变更文件…（Esc 清空）"
+          spellcheck="false"
+          @keydown.esc.prevent="changeKeyword = ''"
+        />
+        <span v-if="changeKeyword" class="cc-git__search-count">{{ filteredChanges.length }}/{{ changes.length }}</span>
+        <button v-if="changeKeyword" class="cc-icon-btn cc-icon-btn--sm" title="清空筛选（Esc）" @click="changeKeyword = ''">
+          <svg class="cc-i cc-i--sm" style="transform: rotate(45deg)"><use href="#i-plus" /></svg>
+        </button>
+      </div>
+
       <!-- 中部滚动区：变更列表 + diff + 折叠区 -->
       <div class="cc-git__scroll">
         <!-- 变更列表 -->
         <div class="cc-git__changes">
-          <div v-for="c in status.changes || []" :key="c.file" class="cc-git__row">
+          <div v-for="c in filteredChanges" :key="c.file" class="cc-git__row">
             <input
               type="checkbox"
               class="cc-git__check"
@@ -101,7 +121,10 @@
               <svg class="cc-i cc-i--sm"><use href="#i-undo" /></svg>
             </button>
           </div>
-          <div v-if="!(status.changes || []).length" class="cc-git__state">工作区干净，没有待提交的改动</div>
+          <div v-if="!changes.length" class="cc-git__state">工作区干净，没有待提交的改动</div>
+          <div v-else-if="!filteredChanges.length" class="cc-git__state">
+            没有匹配「{{ changeKeyword }}」的变更
+          </div>
         </div>
 
         <!-- diff 预览：DiffViewer 负责渲染与逐块/逐行撤销，请求仍由本组件发（只有这里知道 projectRoot） -->
@@ -318,6 +341,21 @@ const changes = computed<GitChange[]>(() => status.value?.changes ?? [])
 const hasChanges = computed(() => changes.value.length > 0)
 const stagedCount = computed(() => changes.value.filter(c => c.status === 'staged').length)
 const hasStaged = computed(() => stagedCount.value > 0)
+
+/**
+ * 变更列表筛选关键字。
+ *
+ * <p>只在本地过滤（Git 变更最多几十个），不做接口请求：输入即出结果，
+ * 也不会因为筛选而改变「全部暂存 / 全部取消暂存」的作用范围（那两者始终是全量操作）。</p>
+ */
+const changeKeyword = ref('')
+
+/** 过滤后的变更列表（文件路径匹配，忽略大小写；空关键字时等于全量） */
+const filteredChanges = computed<GitChange[]>(() => {
+  const kw = changeKeyword.value.trim().toLowerCase()
+  if (!kw) return changes.value
+  return changes.value.filter(c => (c.file || '').toLowerCase().includes(kw))
+})
 
 const branchLabel = computed(() => {
   if (!props.root) return '—'

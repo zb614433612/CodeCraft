@@ -2131,12 +2131,16 @@ html[data-theme="dark"] .cc-stop-btn:hover {
   border-color: var(--danger);
 }
 
-/* 底部小字（上下文 / 余额） */
+/* 底部小字（上下文 / 余额 / 消耗 / 缓存）
+   四项顺序固定；窄窗口允许换行 —— 加了「消耗 ¥x · N tokens」后总长度比原来长，
+   不换行会把最后一项挤出可视区（容器是 flex-end 对齐，溢出发生在左侧同样看不到）。 */
 .cc-composer__foot {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   justify-content: flex-end;
+  flex-wrap: wrap;
+  row-gap: 4px;
   margin-top: 7px;
   font-size: var(--fs-xs);
   color: var(--text-4);
@@ -2144,7 +2148,7 @@ html[data-theme="dark"] .cc-stop-btn:hover {
 .cc-composer__foot .cc-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-4); }
 .cc-composer__foot b { color: var(--text-3); font-weight: 600; }
 /*
-  整会话真实用量（成本 · 缓存命中率 · token 总量）。
+  整会话真实用量（金额 · token 总量），缓存命中率作为独立一项跟在后面。
   与左边「上下文 X」并排但语义不同：那个是「这一屏要送多少」，这个是「历史累计烧了多少」，
   所以中间用圆点分隔，并保持同一行不换行（数字位数多时允许缩略，避免把余额挤出视野）。
 */
@@ -6146,6 +6150,9 @@ html[data-theme="dark"] .cc-code .hljs-bullet { color: #ffa657; }
 .cc-filelist__row.is-del .cc-filelist__badge { background: var(--danger-lt); color: var(--danger); border-color: transparent; }
 .cc-filelist__row.is-mod .cc-filelist__badge { background: var(--warn-lt); color: var(--warn); border-color: transparent; }
 .cc-filelist__path { color: var(--text-1); word-break: break-all; }
+/* filelist 里的路径是链接（点击打开文件）：排版沿用上面一行，只补可点反馈 */
+a.cc-filelist__path { text-decoration: none; cursor: pointer; }
+a.cc-filelist__path:hover { color: var(--accent); text-decoration: underline; }
 .cc-filelist__sum { margin-left: auto; color: var(--text-3); font-family: inherit; }
 
 /* ---- 命令执行（```cmd / ```terminal） ---- */
@@ -6230,6 +6237,9 @@ html[data-theme="dark"] .cc-code .hljs-bullet { color: #ffa657; }
 .cc-media-chip:hover { background: var(--accent-lt); border-color: var(--accent-ring); }
 .cc-chip-icon { font-size: 11px; }
 .cc-chip-name { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行内代码里的网址（markdown 渲染时还原成外链）：长 URL 允许折行，避免撑破气泡 */
+.cc-url-link { color: var(--accent); text-decoration: none; word-break: break-all; }
+.cc-url-link:hover { text-decoration: underline; }
 
 /* ---- 工具调用区（与思考区分离） ---- */
 .cc-tools { display: flex; flex-direction: column; gap: var(--sp-1); }
@@ -6430,6 +6440,52 @@ html[data-theme="dark"] .cc-code .hljs-bullet { color: #ffa657; }
 .cc-ftree__caret.is-hidden { visibility: hidden; }
 .cc-ftree__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---- 文件搜索行（搜索结果复用 .cc-tree__row 的行高与 hover） ---- */
+.cc-ftree__search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--card);
+  transition: border-color var(--tr), background var(--tr);
+}
+.cc-ftree__search:focus-within { border-color: var(--accent-ring); background: var(--card-2); }
+.cc-ftree__search-icon { flex: none; color: var(--text-4); }
+.cc-ftree__search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--font, inherit);
+  font-size: 12px;
+  color: var(--text-1);
+}
+.cc-ftree__search-input::placeholder { color: var(--text-4); }
+/* 结果行：文件名在左，所在目录靠右并省略（长路径不挤掉文件名） */
+.cc-tree__row--search { gap: 6px; }
+.cc-ftree__dir {
+  margin-left: auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-4);
+}
+.cc-ftree__search-foot {
+  padding: 6px var(--sp-2);
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--text-4);
+}
+
 .cc-ftree__editor {
   flex: 1 1 62%;
   min-height: 0;
@@ -6612,6 +6668,35 @@ html[data-theme="dark"] .cc-code .hljs-bullet { color: #ffa657; }
 
 /* 两排等宽操作按钮：远程同步（拉取/推送/获取）、暂存区（全部暂存/取消/储藏） */
 .cc-git__ops { flex: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+
+/* 变更筛选行：本地过滤，只影响列表显示，不影响「全部暂存 / 取消暂存」的作用范围 */
+.cc-git__search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--card);
+  transition: border-color var(--tr), background var(--tr);
+}
+.cc-git__search:focus-within { border-color: var(--accent-ring); background: var(--card-2); }
+.cc-git__search-icon { flex: none; color: var(--text-4); }
+.cc-git__search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--font, inherit);
+  font-size: 12px;
+  color: var(--text-1);
+}
+.cc-git__search-input::placeholder { color: var(--text-4); }
+.cc-git__search-count { flex: none; font-size: 10.5px; color: var(--text-4); font-variant-numeric: tabular-nums; }
 .cc-git__op {
   display: inline-flex;
   align-items: center;
@@ -8499,6 +8584,8 @@ body.cc-split-drag-v * { cursor: row-resize !important; user-select: none !impor
 .cc-wsv__state.is-error { color: var(--danger); }
 .cc-wsv__state.is-hint { color: var(--text-3); }
 .cc-wsv__state-text { max-width: 380px; line-height: 1.6; white-space: pre-line; word-break: break-all; }
+/* 错误态的动作区（重试 / 用默认程序打开 / 在文件夹中显示）：窄面板下允许换行 */
+.cc-wsv__state-ops { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: var(--sp-2); }
 
 .cc-wimg { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: var(--sp-4); overflow: auto; }
 .cc-wimg__btn { display: block; border-radius: var(--r-sm); cursor: zoom-in; }

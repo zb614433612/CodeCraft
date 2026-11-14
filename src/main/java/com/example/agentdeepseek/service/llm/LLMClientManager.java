@@ -408,7 +408,20 @@ public class LLMClientManager {
     }
 
     /**
-     * 创建 Client 实例
+     * 创建 Client 实例 —— <b>新增 Provider 模板的【注册点】</b>
+     *
+     * <p>新增适配器时这里要做三件事，缺一不可：</p>
+     * <ol>
+     *   <li>在下面的 {@code switch} 加 {@code case "<template>"}。模板名大小写不敏感，
+     *       建议同时接受历史别名（如 {@code ark / doubao}、{@code dashscope / tongyi}），
+     *       否则老配置升级后会掉进 {@code default} 分支；</li>
+     *   <li>在本类头的「模板选型总览」表补一行，写清「适用 / <b>不要用于</b>」；</li>
+     *   <li>把适配器的<b>完整适配清单</b>过一遍（usage / 图片 / 文件上传 / 联网搜索 / 余额 /
+     *       前端下拉）—— 见 {@code LLMClient} 类头 A/B/C/D 四组清单。</li>
+     * </ol>
+     *
+     * <p><b>注意</b>：{@code default} 分支会静默回退到 {@code DeepSeekClient} 而非抛异常，
+     * 所以模板名写错时表现为「请求能发出去但 400」，很难定位。请先在选型表登记再写分支。</p>
      */
     private LLMClient createClient(ProviderConfig config) {
         String template = config.getRequestTemplate();

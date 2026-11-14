@@ -336,8 +336,11 @@
               class="message-usage"
               :title="usageTitleOf(msg.usage)"
             >
-              <span class="message-usage-cost">{{ formatCost(msg.usage.costEstimate) }}</span>
-              <span class="message-usage-sep">·</span>
+              <!-- 金额段按需渲染：模型未配置单价时后端拿不到 cost，宁可不显示也不能显示 ¥0 -->
+              <template v-if="isCostAvailable(msg.usage.pricedRequestCount, msg.usage.costEstimate)">
+                <span class="message-usage-cost">{{ formatCost(msg.usage.costEstimate) }}</span>
+                <span class="message-usage-sep">·</span>
+              </template>
               <span>缓存 {{ formatHitRate(msg.usage.cacheHitRate) }}</span>
               <span class="message-usage-sep">·</span>
               <span>{{ formatUsageTokens(msg.usage.totalTokens) }} tokens</span>
@@ -704,6 +707,39 @@
             </template>
           </div>
         </div>
+        <!--
+          状态小字：上下文 / 余额 / 消耗 ¥x · N tokens / 缓存命中率。
+          位置刻意放到输入框「上方」而不是底部工具栏 —— 底部还要放执行 / 模型 / 任务 / 改动 /
+          更多五个控件，两排信息挤在同一行时窄窗口会互相顶掉（flex-wrap:nowrap）。
+          四项统一成 11px 弱化色 + 圆点分隔，余额不再单独做黄色胶囊，
+          避免出现「胶囊 11px 加粗 + 灰字 11px + 12px 常规」三种样式混排。
+        -->
+        <div v-if="balanceText || currentMessages.length > 0" class="input-status">
+          <span
+            v-if="currentMessages.length > 0"
+            class="status-item"
+            title="按已加载消息估算：正文 + 思考过程 + 工具返回（非后端真实用量）"
+          >
+            上下文 <b>{{ formatTokenCount(totalContextTokens) }}</b>
+            <span
+              v-if="settingsStore.contextMode === 'compact'"
+              class="context-mode-badge"
+              title="精简模式：非本轮工具调用和思考过程已精简"
+            >⚡ 精简</span>
+          </span>
+          <template v-if="balanceText">
+            <span v-if="currentMessages.length > 0" class="status-sep">·</span>
+            <span class="status-item" :title="balanceTitle">{{ balanceChipLabel }} <b>{{ balanceText }}</b></span>
+          </template>
+          <template v-if="hasSessionUsage">
+            <span v-if="currentMessages.length > 0 || balanceText" class="status-sep">·</span>
+            <span class="status-item" :title="sessionUsageTitle">
+              <template v-if="sessionCostText">消耗 <b>{{ sessionCostText }}</b> · </template><b>{{ sessionTokensText }}</b> tokens
+            </span>
+            <span class="status-sep">·</span>
+            <span class="status-item" :title="sessionUsageTitle">缓存 <b>{{ sessionHitRateText }}</b></span>
+          </template>
+        </div>
         <div class="input-wrapper">
           <a-dropdown :trigger="['click']" placement="topLeft" :disabled="hasRunningTask">
             <a-button
@@ -879,20 +915,6 @@
                 </a-select>
               </div>
             </div>
-          </div>
-          <div class="footer-right" v-if="balanceText || currentMessages.length > 0">
-            <span v-if="balanceText" class="balance-chip" :title="balanceTitle">💰 {{ balanceChipLabel }} {{ balanceText }}</span>
-            <span v-if="currentMessages.length > 0" class="context-tokens">
-              上下文 Token: {{ formatTokenCount(totalContextTokens) }}
-              <span v-if="settingsStore.contextMode === 'compact'" class="context-mode-badge" title="精简模式：非本轮工具调用和思考过程已精简">⚡ 精简</span>
-            </span>
-            <!--
-              整会话真实用量：与「上下文 Token」是两个口径 ——
-              上面那个是「当前这一屏要送多少」，这个是「本会话历史累计烧了多少」（含分页之外的全部轮次）。
-            -->
-            <span v-if="sessionUsageText" class="session-usage" :title="sessionUsageTitle">
-              {{ sessionUsageText }}
-            </span>
           </div>
         </div>
         <!-- 任务清单下拉面板 -->
@@ -1092,7 +1114,7 @@ import { listSnapshots, previewRollback, executeRollback, getSessionChanges, rol
 import { getUsageSummary, getUsageTurns, type TokenUsageSummary, type TokenUsageTurn } from '@/api/token-usage'
 import { useSettingsStore } from '@/store/settings'
 import { renderMarkdown, renderMarkdownLight } from '@/utils/markdown'
-import { estimateTokenCount, formatTokenCount, formatCost, formatHitRate, formatUsageTokens } from '@/utils/tokenCalculator'
+import { estimateTokenCount, formatTokenCount, formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '@/utils/tokenCalculator'
 import {
   CodeOutlined,
   DeleteOutlined,
@@ -3804,19 +3826,42 @@ const currentSessionUsage = computed<TokenUsageSummary | null>(
   () => sessionUsageMap.value[currentConversationId.value] ?? null
 )
 
-/** 底部小字：有数据才显示，避免「会话 ¥0 · 缓存 — · 0 tokens」的噪音 */
-const sessionUsageText = computed(() => {
+/** 是否有会话级真实用量（成本要能被看见才会被优化；全 0 不渲染，避免「¥0 · 0 tokens」噪音） */
+const hasSessionUsage = computed(() => {
   const u = currentSessionUsage.value
-  if (!u || (u.totalTokens <= 0 && u.costEstimate <= 0)) return ''
-  return `会话 ${formatCost(u.costEstimate)} · 缓存 ${formatHitRate(u.cacheHitRate)} · ${formatUsageTokens(u.totalTokens)} tokens`
+  return !!u && (u.totalTokens > 0 || u.costEstimate > 0)
 })
+
+/**
+ * 会话累计用量拆成三段渲染（而不是拼一个字符串）：
+ * 输入区上方那排要按「上下文 → 余额 → 消耗 → 缓存」固定顺序排，
+ * 拼成整串就没法把金额与 token 放同一段、缓存放最后了。
+ */
+/**
+ * 会话金额是否可用。
+ *
+ * <p>后端只为配过单价的模型算钱，没配时 cost 是 NULL —— 若渲染成 ¥0，
+ * 会被读成「这个 Provider 免费」，因此无价时不显示金额。</p>
+ */
+const sessionCostAvailable = computed(() => {
+  const u = currentSessionUsage.value
+  if (!u) return false
+  return isCostAvailable(u.pricedRequestCount, u.costEstimate)
+})
+const sessionCostText = computed(() =>
+  sessionCostAvailable.value ? formatCost(currentSessionUsage.value?.costEstimate) : ''
+)
+const sessionTokensText = computed(() => formatUsageTokens(currentSessionUsage.value?.totalTokens))
+const sessionHitRateText = computed(() => formatHitRate(currentSessionUsage.value?.cacheHitRate))
 
 /** 底部小字悬停说明：讲清结构与「估算非账单」 */
 const sessionUsageTitle = computed(() => {
   const u = currentSessionUsage.value
   if (!u) return ''
   const lines = [
-    `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    sessionCostAvailable.value
+      ? `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`
+      : '本会话费用未估算：所用模型尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）',
     `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens)} / 未命中 ${formatUsageTokens(u.cacheMissTokens)}）`,
     `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens)}）`,
     `缓存命中率 ${formatHitRate(u.cacheHitRate)}`
@@ -3828,8 +3873,11 @@ const sessionUsageTitle = computed(() => {
 
 /** 单条消息的用量悬停说明（构成 + 轮次说明） */
 function usageTitleOf(u: TokenUsageTurn): string {
+  const costAvailable = isCostAvailable(u.pricedRequestCount, u.costEstimate)
   const lines = [
-    `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    costAvailable
+      ? `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`
+      : '本轮费用未估算：该模型尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）',
     `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens)} / 未命中 ${formatUsageTokens(u.cacheMissTokens)}）`,
     `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens)}）`,
     `缓存命中率 ${formatHitRate(u.cacheHitRate)}`
@@ -8474,13 +8522,6 @@ watch(currentConversationId, (newId) => {
   font-size: 10px;
 }
 
-/* ===== 整会话真实用量（输入区底部：与「上下文 Token」并排） ===== */
-.session-usage {
-  font-variant-numeric: tabular-nums;
-  cursor: help;
-  white-space: nowrap;
-}
-
 /* ===== 思考过程 ===== */
 .thinking-section {
   margin-bottom: 12px;
@@ -9027,7 +9068,7 @@ watch(currentConversationId, (newId) => {
 /* ===== 输入底部 ===== */
 .input-footer {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
   margin-top: 10px;
   flex-wrap: nowrap;
@@ -9046,29 +9087,39 @@ watch(currentConversationId, (newId) => {
   min-width: 0;
   overflow: visible;
 }
-.footer-right {
+
+/* ===== 输入框上方状态小字（上下文 / 余额 / 消耗 / 缓存） =====
+   与底部控件分成两排：底部一行已放执行 / 模型 / 任务 / 改动 / 更多 5 个控件，
+   状态信息再挤进同一行会被压到换行或截断（.input-footer 是 flex-wrap: nowrap）。
+   四项统一 11px 弱化色 + 圆点分隔，数值用 <b> 提亮一档：
+   既保证「一眼扫得到数字」，又不会像原来的黄色余额胶囊那样比正文还抢眼。 */
+.input-status {
   display: flex;
   align-items: center;
-  flex-shrink: 0;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 0 2px;
+  color: var(--text-4);
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  min-height: 16px;
+}
+.input-status .status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   white-space: nowrap;
 }
-.context-tokens {
+.input-status .status-item b {
   color: var(--text-3);
-  font-size: 11px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.balance-chip {
-  margin-right: 10px;
-  padding: 1px 8px;
-  border-radius: 10px;
-  font-size: 11px;
   font-weight: 600;
-  color: #d48806;
-  background: rgba(250, 173, 20, 0.12);
-  border: 1px solid rgba(250, 173, 20, 0.32);
-  white-space: nowrap;
-  cursor: default;
+}
+.input-status .status-sep {
+  color: var(--text-4);
+  opacity: 0.55;
 }
 .context-mode-badge {
   margin-left: 6px;
@@ -9962,11 +10013,6 @@ watch(currentConversationId, (newId) => {
 [data-theme="dark"] .mode-selector {
   background: #1a1925;
   border-color: #2a2838;
-}
-[data-theme="dark"] .balance-chip {
-  color: #fbbf24;
-  background: rgba(251, 191, 36, 0.12);
-  border-color: rgba(251, 191, 36, 0.3);
 }
 [data-theme="dark"] .mode-selector:hover {
   border-color: rgba(139, 92, 246, 0.35);

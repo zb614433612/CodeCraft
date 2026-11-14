@@ -207,8 +207,11 @@
         顺序放在操作按钮之前：按钮 hover 渐显时只会向右挤占空白，不会把这段文字来回推动。
       -->
       <span v-if="message.usage" class="cc-msg-ai__usage" :title="usageTitle">
-        <span class="cc-msg-ai__usage-item">{{ usageCost }}</span>
-        <span class="cc-msg-ai__usage-dot" />
+        <!-- 金额段按需渲染：模型未配置单价时后端拿不到 cost，宁可不显示也不能显示 ¥0 -->
+        <template v-if="usageCost">
+          <span class="cc-msg-ai__usage-item">{{ usageCost }}</span>
+          <span class="cc-msg-ai__usage-dot" />
+        </template>
         <span class="cc-msg-ai__usage-item">缓存 <b>{{ usageHitRate }}</b></span>
         <span class="cc-msg-ai__usage-dot" />
         <span class="cc-msg-ai__usage-item"><b>{{ usageTokens }}</b> tokens</span>
@@ -248,7 +251,7 @@ import { renderMarkdown, renderMarkdownLight } from '../utils/markdown'
 import { isImageAvatar, avatarFallback } from '../utils/avatar'
 import { toolHeadline } from '../utils/tool-render'
 /* 真实用量展示：金额 / 命中率 / token 缩写的统一口径（与底部会话统计共用） */
-import { formatCost, formatHitRate, formatUsageTokens } from '../utils/tokenCalculator'
+import { formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
 import type { TaskItem } from '../utils/task-list'
 /* 用户消息附件：图片点开灯箱、文档走 blob 下载（<a href> 无法带鉴权头） */
 import { openLightbox } from '../utils/lightbox'
@@ -379,8 +382,14 @@ export interface TurnUsage {
   cacheHitTokens?: number
   cacheMissTokens?: number
   reasoningTokens?: number
-  /** 估算费用（元） */
+  /** 估算费用（元）；模型未配置单价时为 0，需配合 pricedRequestCount 判断是否显示 */
   costEstimate: number
+  /**
+   * 本轮「有单价、可估算成本」的请求条数。
+   * <p>为 0 表示该模型没有配置单价，此时不显示金额（只显示 token / 缓存命中率），
+   * 否则会把「不知道多少钱」渲染成「¥0」，令人误以为免费。</p>
+   */
+  pricedRequestCount?: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
 }
@@ -435,7 +444,21 @@ const emit = defineEmits<{
  * <p>为什么不在组件里自己请求：一个会话有几十条 AI 回复，逐条请求会把接口打爆；
  * 父级一次拿到整个会话的按轮聚合结果，再按 turnId 分发，只需 1 次网络往返。</p>
  */
-const usageCost = computed(() => formatCost(props.message.usage?.costEstimate))
+/**
+ * 金额是否可用。
+ *
+ * <p>后端只为「{@code llm.pricing.models} 里配过单价的模型」计算费用，未配置时
+ * {@code cost_estimate} 落 NULL。此时若照样渲染 {@code ¥0}，会被读成「这个模型免费」——
+ * 因此改用 {@code pricedRequestCount} 判定，无价就整段不渲染，只留 token 与缓存命中率。</p>
+ */
+const usageCostAvailable = computed(() => {
+  const u = props.message.usage
+  if (!u) return false
+  return isCostAvailable(u.pricedRequestCount, u.costEstimate)
+})
+const usageCost = computed(() =>
+  usageCostAvailable.value ? formatCost(props.message.usage?.costEstimate) : ''
+)
 const usageHitRate = computed(() => formatHitRate(props.message.usage?.cacheHitRate))
 const usageTokens = computed(() => formatUsageTokens(props.message.usage?.totalTokens))
 
@@ -444,7 +467,9 @@ const usageTitle = computed(() => {
   const u = props.message.usage
   if (!u) return ''
   const parts = [
-    `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`,
+    usageCostAvailable.value
+      ? `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`
+      : '本轮费用未估算：该模型尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）',
     `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens || 0)} / 未命中 ${formatUsageTokens(u.cacheMissTokens || 0)}）`,
     `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens || 0)}）`,
     `缓存命中率 ${formatHitRate(u.cacheHitRate)}`

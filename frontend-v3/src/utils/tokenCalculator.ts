@@ -196,3 +196,27 @@ export function formatHitRate(rate: number | undefined): string {
   if (rate === undefined || rate === null || rate < 0) return '—'
   return `${Math.round(rate * 100)}%`
 }
+
+/**
+ * 该批用量数据「能不能算出金额」。
+ *
+ * <p><b>为什么需要它</b>：后端只在 {@code llm.pricing.models} 里配置过单价的模型才计算费用，
+ * 未配置时 {@code cost_estimate} 落 NULL。如果前端直接把总额渲染成 {@code ¥0}，
+ * 用户会读成「这个 Provider 免费」，从而做出错误判断（错误的成本比没有成本更危险）。</p>
+ *
+ * <p>判定依据是「有单价记录的条数」{@code pricedRequestCount}：
+ * 为 0 表示一次都没配上价 → 不显示金额；字段缺失（旧后端）时退回「照旧显示」。</p>
+ *
+ * @param pricedRequestCount 有单价、可估算成本的请求条数
+ * @param costEstimate       估算费用（元）
+ */
+export function isCostAvailable(
+  pricedRequestCount: number | undefined,
+  costEstimate: number | undefined
+): boolean {
+  if (pricedRequestCount === undefined || pricedRequestCount === null) {
+    // 旧后端没有该字段：保持原有行为，避免升级瞬间所有金额消失
+    return Number.isFinite(costEstimate as number)
+  }
+  return pricedRequestCount > 0
+}

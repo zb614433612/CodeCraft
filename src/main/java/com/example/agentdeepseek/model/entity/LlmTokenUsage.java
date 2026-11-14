@@ -70,8 +70,15 @@ public class LlmTokenUsage {
     /** 思考链 token（completion_tokens_details.reasoning_tokens） */
     private int reasoningTokens;
 
-    /** 估算费用（元），按 Provider 单价计算 */
-    private double costEstimate;
+    /**
+     * 估算费用（元），按<b>该模型配置的单价</b>计算。
+     * <p>
+     * <b>null 的语义是「该模型没有配置单价，本端不估算」，不是「花了 0 元」。</b>
+     * 前端据此隐藏金额、只显示 token 与缓存命中率——把未知成本显示成 ¥0
+     * 会让用户误以为这个 Provider 免费。
+     * </p>
+     */
+    private Double costEstimate;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

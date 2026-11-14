@@ -707,7 +707,7 @@ CREATE TABLE IF NOT EXISTS llm_token_usage (
   cache_hit_tokens INT DEFAULT 0 COMMENT '缓存命中输入 token（prompt_cache_hit_tokens）',
   cache_miss_tokens INT DEFAULT 0 COMMENT '缓存未命中输入 token（prompt_cache_miss_tokens）',
   reasoning_tokens INT DEFAULT 0 COMMENT '思考链 token（completion_tokens_details.reasoning_tokens）',
-  cost_estimate DECIMAL(14,6) DEFAULT 0 COMMENT '估算费用（元），按 provider 单价计算',
+  cost_estimate DECIMAL(14,6) DEFAULT 0 COMMENT '估算费用（元），按该模型单价计算；NULL=模型未配置单价，不估算（≠免费）',
   created_at DATETIME NOT NULL COMMENT '创建时间',
   INDEX idx_usage_conversation (conversation_id),
   INDEX idx_usage_turn (conversation_id, turn_id),
@@ -726,11 +726,20 @@ ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS turn_id VARCHAR(64);
 ALTER TABLE llm_token_usage ADD COLUMN turn_id VARCHAR(64);
 
 -- ============================================================
--- 新增 SETTING 菜单：成本看板（LLM 用量与费用统计，只读页面）
+-- 新增 SYSTEM 菜单：成本看板（LLM 用量与费用统计，只读页面）
 -- 数据来源 llm_token_usage 表；不含敏感信息，故管理员与普通用户都开放
+-- ⚠️ menu_type 必须是 SYSTEM：经典版 Layout 只请求 LINK / AI / TOOL / SYSTEM / MANAGE
+--    五组（见 frontend/src/layouts/Layout.vue 的 MENU_GROUPS），
+--    写 SETTING 会导致该菜单在任何分组下都不渲染 —— 页面和路由都在，但用户点不到。
 -- ============================================================
 INSERT IGNORE INTO sys_menu (id, name, path, icon, parent_id, sort_order, menu_type) VALUES
-(19, '成本看板', '/token-usage', 'BarChartOutlined', NULL, 13, 'SETTING');
+(19, '成本看板', '/token-usage', 'BarChartOutlined', NULL, 13, 'SYSTEM');
+
+-- 老库迁移：早期把成本看板写成了 SETTING（旧版侧栏没有该分组，菜单不可见），这里改回 SYSTEM。
+-- 只在「id 与名称都对得上、且当前值仍是 SETTING」时改：
+-- 避免覆盖管理员在「菜单权限」里手工调整过的类型，也避免 id 被其它菜单复用时的误伤。
+UPDATE sys_menu SET menu_type = 'SYSTEM', sort_order = 13
+WHERE id = 19 AND name = '成本看板' AND menu_type = 'SETTING';
 
 -- 管理员分配成本看板菜单
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)

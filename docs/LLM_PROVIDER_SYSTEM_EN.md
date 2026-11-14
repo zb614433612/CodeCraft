@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v3.1.0 | Updated: 2026-11-14 | Audience: Developers / AI Collaborators
+> Version: v3.1.1 | Updated: 2026-11-14 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---
@@ -691,26 +691,83 @@ POST /api/llm-providers
 
 ## 9. Extension Guide
 
-### 9.1 Adding a New Provider Implementation
+### 9.1 Adding a New Provider Implementation (Full SOP)
 
-1. Create a new client class in the `service/llm/` directory, extending `AbstractLLMClient` or directly implementing `LLMClient` interface
-2. Implement all abstract methods:
-   - `buildRequestBody()` - Build Provider-specific request body
-   - `streamChat()` - Streaming call
-   - `blockingChat()` - Blocking call
-   - `extractContentFromStreamChunk()` - Parse streaming response
-   - `extractReasoningFromStreamChunk()` - Parse reasoning process
-   - `extractContentFromBlockingResponse()` - Parse blocking response
-3. Add new case in `LLMClientManager.createClient()` method:
+> **The single source of truth in code** is the "New Provider Adaptation Checklist" (groups A/B/C/D)
+> in the Javadoc of the `LLMClient` interface. This section is its documentation mirror, used for
+> review and handover; **if they ever diverge, trust the code**.
+>
+> Key insight: **skipping group A means it won't work; skipping group B won't raise any error,
+> it just silently loses features.**
+> Symptom mapping: chat works, but "cost dashboard shows no amount / image upload returns 400 /
+> balance button is greyed out / web search only falls back to Bing" — none of these are bugs,
+> they are missing group-B items.
+
+#### A. Mandatory code (won't work without it)
+
+| # | What to do | Location / notes |
+|---|-----------|------------------|
+| A1 | Create `XxxClient extends AbstractLLMClient` | Do not implement `LLMClient` directly: the base class already handles streaming/blocking send, timeouts, SSE framing and error-body extraction |
+| A2 | Implement `buildThinkingParams(String thinkingMode)` | **The only abstract method.** Input is always one of the 5 canonical levels (none/low/medium/high/max) or an empty string (auto) produced by `normalizeThinkingMode` — **never** compare raw strings such as `thinking_low` here |
+| A3 | Implement the 3 parsing methods | `extractContentFromStreamChunk` / `extractReasoningFromStreamChunk` (null when absent) / `extractContentFromBlockingResponse` |
+| A4 | Verify the **tool-call delta structure** | `DeepSeekServiceImpl` parses tool calls strictly as OpenAI `choices[].delta.tool_calls` (index/id/arguments incremental merge). **Adapters with a different protocol must convert internally**, otherwise it "chats fine but breaks on the first tool call" |
+| A5 | Register in `LLMClientManager.createClient` | Add a `case "<template>"` (accept historical aliases too) and add a row to the class-level "Template Selection Matrix" stating **both "use for" and "do NOT use for"** |
+
+#### B. Capability switches (no error when missing, features silently disappear)
+
+| # | Capability | Override / config | Symptom when missing |
+|---|-----------|-------------------|----------------------|
+| B1 | Streaming usage (cost) | `getUsageProtocol()` + `requiresStreamUsageOption()` + `application.yml → llm.pricing.models.<model>` | Cost dashboard shows no amount; chat page shows "—" |
+| B2 | reasoning_content pass-back | `requiresReasoningPadding()` (mandatory for DeepSeek-family) | 400 from round 2 on: `reasoning_content must be passed back` |
+| B3 | Required headers | `getRequestHeaders()` (e.g. Anthropic `anthropic-version`) | Correct endpoint but 400/401 |
+| B4 | Endpoint path | `getChatEndpoint()` (default `/v1/chat/completions`) | 404 |
+| B5 | Vision / image input | `application.yml → llm.model-capabilities.vision-rules` (model-level) + in-adapter block conversion (`image_url → image/source`, drop unsupported `detail`) | Image request 400 / image silently dropped |
+| B6 | File upload (Files API) | Implement `FilesApiClient` + register in `FilesApiClientManager.createClient` | Only inline base64 available; large files fail |
+| B7 | Web search | The "official search API first" if-chain in `SearchTool` (Volcengine / MiniMax / DeepSeek) | Only generic scraping left, no platform structured results |
+| B8 | Balance / quota query | The if-chain in `ProviderBalanceService.queryBalance` (add a BillingClient if needed) | Balance button says "not supported" |
+| B9 | Output limit / reasoning-model detection | `llm.model-capabilities` (reasoning-model-prefixes etc.) + `extraConfig.maxTokens` | Output truncated, or temperature rejected on reasoning models |
+
+#### C. Scattered touch points (the most-missed part)
+
+| Capability | Backend (source of truth) | Frontend (mirror, must stay in sync) |
+|-----------|---------------------------|--------------------------------------|
+| Cost / usage | `LLMClient.getUsageProtocol`, `AbstractLLMClient.requiresStreamUsageOption`, `TokenUsageParser`, `llm.pricing` | No frontend branch needed: `pricedRequestCount` decides whether to show the amount |
+| Vision | `ModelCapabilityRules.supportsVisionModel`, `FileVisionService` | v3 `utils/provider-capability.ts`: `VISION_TEMPLATES` + `visionStateOf()` |
+| Web search | `SearchTool` | Same file: `deriveCapabilities().search` + `searchHint()` |
+| Balance query | `ProviderBalanceService` | Same file: `deriveCapabilities().balance` |
+| Template dropdown / label | `LLMClientManager` switch and selection matrix | v3 `ProviderEditDrawer.vue` (`TEMPLATE_OPTIONS`) + `templateLabel()` / `providerIconTone()`; legacy `ConfigView.vue` / `ProviderConfigView.vue` / `CodeAssistantView.vue` (`BALANCE_TEMPLATES`) |
+
+#### D. Frontend and tests
+
+1. **v3 frontend**: add an entry to `TEMPLATE_OPTIONS` in `ProviderEditDrawer.vue` (otherwise users
+   cannot select the new template); sync the 5 spots in `provider-capability.ts` (listed in its header).
+2. **Legacy frontend**: `templateLabel` / `templateStyle` / dropdown in `ConfigView.vue` and
+   `ProviderConfigView.vue`; `BALANCE_TEMPLATES` in `CodeAssistantView.vue`.
+3. **Unit tests**: follow `GptAdapterTest` / `QwenAdapterTest` / `VolcengineAdapterTest` /
+   `MiniMaxAdapterTest` for request-body assertions; vision goes into `AdapterVisionMatrixTest`;
+   new usage protocols go into `TokenUsageMultiProtocolTest`.
+
+#### E. Self-check list (tick before committing)
+
+- [ ] `mvn -q compile -DskipTests` passes
+- [ ] The new provider chats correctly (A1–A3)
+- [ ] One tool call executes with `tool_calls` / `role=tool` properly paired (A4)
+- [ ] Cost dashboard shows an amount, or "—" as designed when no price is configured (B1)
+- [ ] Two rounds with thinking enabled, no 400 (B2)
+- [ ] Send an image (B5)
+- [ ] Balance button works or shows the expected hint (B8)
+- [ ] The new template is selectable in the v3 dropdown (D1)
+- [ ] Registered in both the `LLMClient` checklist and this document
+
+#### F. Code example
 
 ```java
 case "new_provider" -> {
     var wc = webClientManager.getOrCreate(config);
-    yield new NewProviderClient(wc, objectMapper, config.getCode());
+    yield new NewProviderClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
+            readExtraInt(config, "maxTokens"));
 }
 ```
-
-4. Add new style mapping in frontend `ProviderConfigView.vue`'s `templateLabel()` and `templateStyle()` methods
 
 ### 9.2 Custom Request Template
 

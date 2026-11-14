@@ -72,7 +72,9 @@ public interface LlmTokenUsageMapper {
             + "COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens, "
             + "COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss_tokens, "
             + "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, "
-            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate "
+            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate, "
+            // COUNT(列) 只数非空值：= 0 表示这批记录都没有单价，金额不可用（≠ 花了 0 元）
+            + "COUNT(cost_estimate) AS priced_request_count "
             + "FROM llm_token_usage WHERE conversation_id = #{conversationId}")
     TokenUsageSummaryVO summarizeByConversation(@Param("conversationId") Long conversationId);
 
@@ -86,7 +88,8 @@ public interface LlmTokenUsageMapper {
             + "COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens, "
             + "COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss_tokens, "
             + "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, "
-            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate "
+            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate, "
+            + "COUNT(cost_estimate) AS priced_request_count "
             + "FROM llm_token_usage WHERE created_at >= #{from} AND created_at < #{to}")
     TokenUsageSummaryVO summarizeByTimeRange(@Param("from") LocalDateTime from,
                                              @Param("to") LocalDateTime to);
@@ -100,7 +103,8 @@ public interface LlmTokenUsageMapper {
             + "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
             + "COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens, "
             + "COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss_tokens, "
-            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate "
+            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate, "
+            + "COUNT(cost_estimate) AS priced_request_count "
             + "FROM llm_token_usage WHERE created_at >= #{from} "
             + "GROUP BY model ORDER BY SUM(cost_estimate) DESC")
     List<TokenUsageGroupVO> summarizeByModel(@Param("from") LocalDateTime from);
@@ -114,7 +118,8 @@ public interface LlmTokenUsageMapper {
             + "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
             + "COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens, "
             + "COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss_tokens, "
-            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate "
+            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate, "
+            + "COUNT(cost_estimate) AS priced_request_count "
             + "FROM llm_token_usage WHERE created_at >= #{from} "
             + "GROUP BY conversation_id ORDER BY SUM(cost_estimate) DESC LIMIT #{limit}")
     List<TokenUsageGroupVO> summarizeTopConversations(@Param("from") LocalDateTime from,
@@ -161,7 +166,8 @@ public interface LlmTokenUsageMapper {
             + "COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens, "
             + "COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss_tokens, "
             + "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, "
-            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate "
+            + "COALESCE(SUM(cost_estimate), 0) AS cost_estimate, "
+            + "COUNT(cost_estimate) AS priced_request_count "
             + "FROM llm_token_usage WHERE conversation_id = #{conversationId} AND turn_id IS NOT NULL "
             + "GROUP BY turn_id ORDER BY MIN(id) ASC")
     List<TokenUsageTurnVO> summarizeByTurn(@Param("conversationId") Long conversationId);

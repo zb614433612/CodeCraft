@@ -22,6 +22,8 @@ export interface TokenUsageSummary {
   reasoningTokens: number
   /** 估算总费用（元） */
   costEstimate: number
+  /** 「有单价、可估算成本」的请求条数；0 表示金额不可用（显示「—」而非 ¥0） */
+  pricedRequestCount: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
   /** 命中部分估算费用（元） */
@@ -30,6 +32,8 @@ export interface TokenUsageSummary {
   cacheMissCost: number
   /** 输出部分估算费用（元） */
   outputCost: number
+  /** 三段费用拆分是否可用（false 时隐藏费用结构图） */
+  breakdownAvailable: boolean
 }
 
 /** 分组统计（按模型 / 按会话） */
@@ -43,6 +47,8 @@ export interface TokenUsageGroup {
   cacheHitTokens: number
   cacheMissTokens: number
   costEstimate: number
+  /** 组内「有单价、可估算成本」的请求条数；0 表示该组金额不可用 */
+  pricedRequestCount: number
   cacheHitRate: number
 }
 
@@ -60,7 +66,8 @@ export interface TokenUsageDetail {
   cacheHitTokens: number
   cacheMissTokens: number
   reasoningTokens: number
-  costEstimate: number
+  /** 估算费用（元）；null = 该模型未配置单价，不估算（≠ 免费） */
+  costEstimate: number | null
   createdAt: string
 }
 
@@ -77,6 +84,8 @@ export interface TokenUsageTurn {
   reasoningTokens: number
   /** 估算费用（元） */
   costEstimate: number
+  /** 本轮「有单价、可估算成本」的请求条数；0 表示金额不可用 */
+  pricedRequestCount: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
 }

@@ -5,6 +5,130 @@
 
 ---
 
+## [3.1.1] - 2026-11-14
+
+> 计量与定位版本：把「成本可见」从 DeepSeek 一家扩展到**全部 Provider**（三套 usage 协议 + 按 Provider 精确开启），
+> 未配单价的模型一律**不估算**（显示「—」，而不是错误的 ¥0）；给「新增 Provider」立了一份 A/B/C/D 四组适配清单，
+> 把「能聊天但成本全空 / 发图 400 / 余额按钮灰掉」这类**静默缺功能**挡在合并之前；聊天里的文件路径与网址改为
+> **可点击直达**，右侧文件树与 Git 面板新增搜索框。后端 + 两套前端 + Electron 均有改动，**需重启后端**；
+> 桌面端需重新打包（新增两个系统打开相关 IPC）。
+
+### 💱 多 Provider 用量采集与计价（核心）
+
+- **背景**：v3.0.9 的成本看板其实只对 DeepSeek 真实可用——其他 Provider 的流式响应里根本没有 usage，
+  于是「成本可见」在最需要它的地方（按量计费更贵的第三方模型）反而是空白。根因是**协议不同**：
+  有的在单帧返回、有的必须请求时开启开关、有的把输入输出拆在两帧里。
+- **协议分派**：`LLMClient` 新增 `getUsageProtocol()`（`openai` / `anthropic` / `ollama`）与 `getRequestHeaders()`；
+  `AbstractLLMClient` 新增 `requiresStreamUsageOption()` + `buildIncludeUsageOption()`；`TokenUsageParser` 重写为
+  `parseFrame(previous, sseData, protocol)`，支持**跨帧合并**（返回 `UsageSnapshot`，新增 `cacheCreationTokens`、
+  `protocol` 字段）。
+- **各 Provider 实测行为与对策**：
+  - DeepSeek：默认返回 usage（含 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`），行为不变；
+  - OpenAI 官方（`gpt` 模板）：早已开启 `stream_options.include_usage`，本次改为走统一钩子，不再在适配器里重复拼装；
+  - 千问 / 百炼、火山方舟、MiniMax、MiMo：**默认都不返回**，必须显式开启 `stream_options.include_usage` —— 四处全部补齐；
+  - Anthropic：格式完全不同（`message_start` 只给输入侧、`message_delta` 给输出侧），走 `anthropic` 协议跨帧合并；
+  - Ollama：NDJSON 收尾行 `done=true` 携带 `prompt_eval_count` / `eval_count`，走 `ollama` 协议；
+  - `openai` 通用模板（第三方中转站 / vLLM）：**刻意不下发** `stream_options` —— 严格校验未知字段的网关会直接 400，
+    代价是这类服务多数拿不到 usage。**宁可没有数字，也不能把主链路打挂**。
+- **计价策略（行为变更，重要）**：未在 `llm.pricing.models` 配单价的模型**一律不估算**，不再回退到默认价。
+  历史实现给 GPT / Claude 按 DeepSeek 的价算，**错误的成本比没有成本更危险**——它会让人误以为「换个模型也不贵」。
+  - `TokenPricingConfig.resolve()` 未匹配返回 `null`；`PriceItem` 新增 `cacheWriteInput`（Anthropic 缓存写入）。
+  - `LlmTokenUsage.costEstimate` 改为可空 `Double`；三个汇总 VO 新增 `pricedRequestCount`，
+    `TokenUsageSummaryVO` 新增 `breakdownAvailable`；Mapper 聚合 SQL 统一补 `COUNT(cost_estimate)`。
+  - 前端新增 `isCostAvailable()`：无定价时金额段整块不渲染（显示「—」），费用结构三段条按 `breakdownAvailable` 隐藏。
+- **Anthropic 语义修正**：`input_tokens` **不含**缓存读写，总输入 = `input_tokens` + `cache_read` + `cache_creation`；
+  缓存写入单独按 `cache-write-input` 计价。顺带补上主链路缺失的 `anthropic-version` 请求头（缺了直接 400）。
+- **采集补全**：**无工具纯聊天路径**原先完全没有 usage 采集（只有工具循环在记账），本次补齐采集 + `doFinally` 落库。
+- **验证**：新增 `TokenUsageMultiProtocolTest`（40 项断言），覆盖三套协议的帧解析、跨帧合并、缓存字段语义、缺价返回 null。
+
+### 📘 新增 Provider 适配清单（可维护性）
+
+- **背景**：每接一个 Provider 要改的地方散在十几处，最坑的是**漏了不报错**——对话能跑通，但成本看板没金额、
+  发图 400、余额按钮灰掉、联网只剩 Bing。这类问题不会在开发时暴露，只会在用户那里暴露。
+- **`LLMClient` 类头重写为「适配唯一总入口」**，按后果分四组：A 必写（不做跑不通）、B 能力开关（不做不报错、
+  静默缺功能）、C 散点速查（真正要改的代码在另外 4 个类里）、D 前端与测试（决定用户看不看得到）。
+- **`AbstractLLMClient` 类头**补「钩子总表」（默认值 / 何时覆写 / 漏了会怎样）+ 9 个适配器 × 6 个钩子的现状矩阵。
+- **`LLMClientManager.createClient`** 加「注册三件事」注释（case 分支、选型表补行并写清「不要用于」、前端下拉）。
+- **反向引用到散点**：`FilesApiClientManager`（B6 文件上传）、`SearchTool`（B7 联网搜索）、
+  `ProviderBalanceService`（B8 余额查询）、`ModelCapabilityRules`（B5 图片 / B9 输出上限）各自类头标注所属清单项。
+- **前端**：`provider-capability.ts` 头部列出「必同步 5 处」；`ProviderEditDrawer.vue` 的模板下拉补上遗漏的 **MiMo**。
+- **文档**：`docs/LLM_PROVIDER_SYSTEM(_EN).md` 第 9.1 节重写为完整 SOP（含提交前 9 项自检清单）。
+  **代码注释与文档不一致时以代码为准**——注释在改代码的人眼前，文档不在。
+
+### 🔍 文件搜索与路径直达
+
+- **后端新增 `GET /api/project/search`**（`root` / `keyword` / `limit`）：忽略大小写匹配文件名或相对路径，
+  排序四档优先级（文件名全等 > 文件名前缀 > 文件名包含 > 仅路径包含），同级按路径长度升序；
+  复用既有排除规则（`node_modules` / `target` / `.git` / 静态资源前缀等），扫描上限 50000 文件，
+  默认返回 100 条（最多 300），关键字超 200 字符截断。
+- **两套前端文件树都加了搜索框**：v3 为 250ms 防抖 + 递增序号丢弃过期响应 + Esc 清空，结果显示「文件名 + 所在目录」，
+  点击后**先退出搜索再打开**（否则搜索视图会一直盖住文件树，表现为「点了没反应」）；
+  经典版走后端全量搜索，点击复用既有 `openLocalFileTab` 链路。
+- **为什么不前端过滤**：v3 文件树按目录懒加载、经典版树深上限 10 层，本地过滤必然漏掉深层文件，
+  表现为「有时搜得到、有时搜不到」——这比搜不到更糟。
+- **Git 面板用本地过滤**：变更数量通常几十个，无需请求，且不能改变「全部暂存 / 取消暂存」的全量语义
+  （显示 `N/M` 计数区分「工作区干净」与「无匹配」）。
+- **路径可点击**：v3 `utils/file-path.ts` 重写为**三级解析**——绝对路径直接读 → `/project/resolve` 后缀匹配
+  （容忍 LLM 只给出路径片段）→ `/project/search` 按文件名兜底；兼容去行号 `:12`、包裹引号 / 反引号 / 尖括号、
+  `.../` 与 `…/` 省略前缀、`file://`。
+- **Markdown 渲染**：`renderFileList` 给「看起来像路径」的行加 `data-cc-path` 可点击链接（清单里的说明文字不套链接，
+  避免点到不存在的文件）；行内代码中的 http(s) 网址还原为外链。
+- **Electron 新增 IPC**：`shell:openPath` / `shell:showItemInFolder`，主进程校验**必须是已存在的绝对路径**，
+  `shell.openPath` 返回空串才算成功；渲染进程新增 `utils/shell.ts` 统一封装；`CodeEditor` 增加 `actions` 具名插槽，
+  文件视图接入「用默认程序打开」「在文件夹中显示」（带失败 toast 兜底）。
+  **安全边界**：路径来自 LLM 输出，不能把 `shell.openPath` 当万能打开器。
+- **验证**：新增 `ProjectSearchTest`（15 项断言），覆盖四档优先级、大小写、三类排除目录、空 / null / 根不存在、limit 收敛。
+
+### 🎨 成本看板可发现性与主题适配
+
+- **经典版菜单点不到（Bug）**：`sys_menu` id=19 写成 `menu_type='SETTING'`，而经典版侧栏只请求
+  `LINK / AI / TOOL / SYSTEM / MANAGE` 五组 —— 页面和路由都在，分组却永远不渲染。
+  `schema.sql` 改为 `SYSTEM`，并附**幂等迁移 UPDATE**（带 `name='成本看板'` 条件，避免 id 被复用或管理员手工调整被覆盖）；
+  旧版 `Layout.vue` 的 `iconMap` 补 `BarChartOutlined`。
+- **暗色 / 背景图下配色错乱（Bug）**：两套页面都引用了**不存在的变量**（`--bg-1` / `--bg-2` / `--primary`），
+  永远走 fallback 写死色。v3 改用 `--card` / `--bg-sub` / `--card-2` / `--border-strong` / `--accent` / `--ok` / `--warn` / `--danger`，
+  骨架统一为 `.cc-page-scroll → .cc-page-inner → .cc-page-head`；经典版改用 `--bg-card` / `--bg-hover` / `--text-*` / `--border` / `--accent`，
+  并补 `html.has-app-bg` 下的毛玻璃与暗色覆盖。
+- v3 新增 `i-chart` 图标，成本看板菜单图标由 `i-log` 改为 `i-chart`（原来用的是日志图标，语义不符）。
+
+### 🧹 输入区信息分层（体验调整）
+
+- 经典版聊天输入区：余额 / 上下文 / 会话用量从 footer 移到输入框上方**独立一行**——原来与发送、附件等 5 个控件
+  挤在 `flex-wrap: nowrap` 的行里，窗口一窄就被压变形。
+- 两套前端统一为「**上下文 → 余额 → 消耗 ¥x · N tokens → 缓存 x%**」，11px、圆点分隔、数值加粗。
+- 术语由「会话」改为「**消耗**」：会话是范围，消耗是金额，前者容易被理解成「会话数」。
+- 余额标签保留按 Provider 区分（额度 / 余额），避免 MiniMax 这类 quota 型 Provider 显示错误文案。
+- 清理 `.balance-chip` / `.context-tokens` / `.session-usage` 三套已无引用的遗留样式。
+
+### ✅ 验证
+
+- 后端 `mvn -q compile -DskipTests` 通过。
+- v3 `npx vue-tsc --noEmit -p tsconfig.app.json` 零错误、`npm run build` 通过。
+- 经典版 typecheck 无新增错误、`npm run build` 通过。
+- 单测：`TokenUsageMultiProtocolTest` 40/40、`ProjectSearchTest` 15/15。
+
+### 📚 文档与版本号
+
+- 版本号同步：`pom.xml`（产物 `code-craft-3.1.1.jar`）、经典版 / v3 前端 `package.json` + lock、
+  Electron `version` 与 `extraResources` jar 路径、MCP Server 握手版本 `CodeCraftMcpServer.SERVER_VERSION`。
+- `ARCHITECTURE(_EN)` 第 15 条扩展为「usage 三协议 + 未配单价不估算」；
+  `LLM_PROVIDER_SYSTEM(_EN)` 第 9.1 节重写为新增 Provider 完整 SOP。
+- 8 份深度文档版本头、`DEV_QUICKREF` / `RELEASE_CHECKLIST(_EN)` 打包命令示例、`FAQ` 版本示例、
+  `README(_EN)` 徽章 —— 统一到 v3.1.1。
+- 顺手清理 `ARCHITECTURE(_EN).md` 首部累积的 73 / 66 个重复 BOM（历史编辑残留，不影响渲染但污染 diff）。
+
+### ⬆️ 升级说明
+
+- **后端需重启**：新增 `/api/project/search` 接口；成本采集与计价逻辑变更。
+- **桌面端需重新打包 / 重新安装**：新增两个系统打开相关 IPC（旧包上对应按钮自动隐藏，不会报错）。
+- **金额显示变化（预期内）**：只有 DeepSeek 内置了单价。切到 GPT / Claude / 千问 / 火山 / MiniMax 等 Provider 时，
+  聊天页与成本看板金额显示「—」属**设计行为**（不是采集失败）。需要看金额就按 `application.yml → llm.pricing.models`
+  里的注释模板填写实际单价；**不要**为了「让数字显示出来」而填一个 `default` 兜底价。
+- **老库无需手工改表**：成本看板菜单类型由启动时执行的 `schema.sql` 幂等 UPDATE 自动修正。
+- 无破坏性配置变更。
+
+---
+
 ## [3.1.0] - 2026-11-14
 
 > 成本可见性版本：v3.0.9 让成本「事后可查」，本版让它「边用边可见」——每条 AI 回复下方**常显**

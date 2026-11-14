@@ -32,8 +32,20 @@ public class TokenUsageSummaryVO {
     /** 思考链 token（已包含在 completionTokens 内） */
     private long reasoningTokens;
 
-    /** 估算费用（元，SQL 侧已按记录内的 cost_estimate 累加） */
+    /** 估算费用（元，SQL 侧已按记录内的 cost_estimate 累加；无单价记录不计入） */
     private double costEstimate;
+
+    /**
+     * 「有单价、可估算成本」的请求条数。
+     * <p>
+     * 用它区分「真的花了 0 元」和「不知道多少钱」：
+     * <ul>
+     *   <li>{@code pricedRequestCount == 0 && requestCount > 0} → 金额不可用，前端显示「—」</li>
+     *   <li>{@code pricedRequestCount < requestCount} → 部分请求未配置单价，金额是下限</li>
+     * </ul>
+     * </p>
+     */
+    private long pricedRequestCount;
 
     // ==================== 派生字段（服务层计算） ====================
 
@@ -48,4 +60,13 @@ public class TokenUsageSummaryVO {
 
     /** 输出部分估算费用（元） */
     private double outputCost;
+
+    /**
+     * 三段费用拆分是否可用。
+     * <p>
+     * 为 {@code false} 时（统计范围内没有任何模型配置单价）三段费用恒为 0，
+     * 前端应隐藏「费用结构」图，避免显示一条全 0 的假结构。
+     * </p>
+     */
+    private boolean breakdownAvailable;
 }

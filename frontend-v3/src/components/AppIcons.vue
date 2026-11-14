@@ -39,6 +39,8 @@
     <!-- AI 浏览器：地球+经纬线，与大模型/网页语义一致 -->
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17" /><path d="M12 3.5c2.5 2.6 3.8 5.5 3.8 8.5s-1.3 5.9-3.8 8.5c-2.5-2.6-3.8-5.5-3.8-8.5S9.5 6.1 12 3.5z" /></symbol>
     <symbol id="i-log" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></symbol>
+    <!-- 成本看板：柱状图（与运行日志的 i-log 区分，避免两个入口同图标） -->
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20h16" /><rect x="6" y="12" width="3.4" height="6" rx="1" /><rect x="12" y="8" width="3.4" height="10" rx="1" /><rect x="18" y="4" width="3.4" height="14" rx="1" /></symbol>
     <symbol id="i-disk" viewBox="0 0 24 24"><path d="M4 5a2 2 0 012-2h9l5 5v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5z" /><path d="M8 3v6h7M8 21v-6h8v6" /></symbol>
     <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" /><path d="M16 5.5a3.2 3.2 0 010 6M18 20c0-2-.7-3.8-2-5" /></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 018 0v3" /></symbol>
