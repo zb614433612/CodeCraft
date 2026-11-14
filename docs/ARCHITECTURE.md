@@ -1,7 +1,7 @@
-﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
+﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v3.1.1 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.1.2 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---
@@ -537,6 +537,9 @@ src/main/java/com/example/agentdeepseek/
 18. **Electron 终端 PTY（v3.0.9）**: 终端在 Electron 内走 `node-pty` 真伪终端（`electron/pty-manager.js`，IPC 通道，不监听本地端口）；浏览器降级走 `/project/exec`。`node-pty` 是原生模块，**必须 `asarUnpack`**，且 `before-quit` 必须调 `disposeAllSessions()`（否则残留 shell 拖住退出）。自带 win32/darwin prebuilds、**无 linux prebuild**，Linux 打包机需 node-gyp 工具链。
 19. **长耗时命令后台化（v3.0.9）**: `command(action=exec)` 超时**不杀进程**，转后台任务（返回任务 ID），配合 `wait` / `logs` / `stop`。`timeout` 参数语义已改为**仅对 `wait` 生效**。同 cwd + 同命令有去重拦截；一次性任务（上限 10）与长期服务（上限 5）分池计数；结束输出保留 30 分钟。应急回退：`command.exec.background-after-seconds: 0`。
 20. **按轮成本归并（v3.1.0）**: 一次用户提问在工具循环里会拆成多次 API 请求，成本只有按 `turn_id` 归并才能对应「这一轮花了多少」。`turn_id` 由前端生成、随 `ChatRequest.turnId` 下发（与代码快照、重新生成共用同一 id），存入 `llm_token_usage.turn_id`，按轮查询走 `GET /api/token-usage/turns`。**存量数据没有 `turn_id`，只计入会话 / 时间维度汇总** —— 不要事后回填到某一轮，否则该轮成本虚高。带 `turn_id` 的 insert 失败必须降级为不带该列写入：宁可丢「按轮展示」，不能让整条成本记账静默中断。删除会话会级联删除该会话的成本明细（`ConversationServiceImpl` 显式调用，不靠外键）。
+21. **上下文压缩的估算口径（v3.1.2）**: 异步预压缩的 token 估算**必须基于「应用压缩记录之后」的有效消息**（`applyCompactionRecords` → `toApiMessages` → `TokenEstimator.estimateMessages`），绝不能直接累加 DB 全量原文。历史被压缩后 DB 原文仍然存在，用全量原文估算会让 ratio 只增不减、永久超过阈值，导致「每次请求后都压缩 → 每次压缩都改写前缀 → 缓存 100% 失效」（实测 15 次压缩中 9 次全量未命中，约 130 万 miss token）。另外三条硬约束：① TOOL 消息的 API `content` 取自 `reasoning` 字段（工具结果存在这里），**不受 `stripHistoryReasoning` 影响**，把它当思考链剥掉会严重低估（工具结果是上下文大头）；② 传给 `compact()` 的列表必须与它内部「重新查库 + 应用压缩记录」的列表**逐条对齐**，否则 `compressStart/compressEnd` 会压错区间；③ 压缩收益为负（摘要 ≥ 原文）必须跳过 —— 白白改变前缀只会损失一次全量缓存。改动 `CompactionService` 前先读这条。
+22. **工具结果体积预算（v3.1.2）**: 单条工具结果的裁剪规则**只在 `util/ToolResultBudget` 一处定义**（配置 `tool.result-budget.*`，按工具分级：`file_explorer`/`web_fetch`/`browser` 16000 字符，`command`/`web_search`/`execute_sql`/`http_request` 10000，其余 12000），由 `ToolExecutor#buildToolMessages` 在**写入前**执行一次 —— 落库（`saveToolMessage`）与发送 LLM 用的是**同一份**裁剪后内容。四条硬约束：① **禁止在别处新增私有阈值常量**（历史上 `ToolExecutor.MAX_TOOL_RESULT_CHARS` 与 `ContextBuilder.MAX_TOOL_CONTENT_CHARS` 各写一套 30000，规则一旦漂移就变成「落库 A 形态、发给 LLM B 形态」）；② **必须幂等**：截断文本带 `…[CC-TRUNC]` 标记，已带标记的内容原样返回，否则每轮重建历史时截断位置漂移 → 前缀缓存全量失效；③ `ContextBuilder.trimToolLoopToBudget` 的超限兜底**复用同一实例**，只对「存量超预算数据」生效一次，不做二次改写；④ 截断处必须附带「如何取回被省略部分」的指引（`file_explorer` 的 `start_line`/`end_line`、`command` 的 `action=logs`、`execute_sql` 的 `WHERE`/`LIMIT`）—— 静默砍掉一半内容会让模型基于残缺信息下结论或盲目重跑同一工具，那比不截断更贵。
+23. **grep 输出必须合并重叠上下文窗口（v3.1.2）**: `FileExplorerTool.renderGrepHits` 按文件分组后用 `TreeMap<行号, 行内容>` 去重再输出，相邻/重叠的 `context_lines` 窗口只保留一份，行号不连续处插 `...`。旧实现对 `contextBefore`/`contextAfter` 的**每一行都写同一个行号**（`lineNum - size` / `lineNum + 1`），既让模型按错行号去读文件，又让输出看起来像「大量重复内容」，掩盖了真实原因。实测命中密集的 grep 结果里超过一半是窗口重叠造成的重复，纯烧 cache-miss token（命中/未命中单价相差约 50 倍）。
 
 ---
 

@@ -240,7 +240,7 @@ npm install
 1. **桌面客户端**：左下角头像 → 个人信息上方菜单，或「设置 → 版本与更新」（路由 `/about`）；
 2. **浏览器**：打开 `http://localhost:8084/v3/#/about`（经典版在「系统设置」）；
 3. **命令行**：`GET /api/system/version`（登录后）返回
-   `{"name":"CodeCraft","version":"3.1.1","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
+   `{"name":"CodeCraft","version":"3.1.2","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
 
 **为什么有两个版本号**：
 | 显示项 | 来源 | 什么时候会不一致 |
@@ -248,7 +248,7 @@ npm install
 | 客户端版本 | 安装包（`electron/package.json` 的 `version`，运行时 `app.getVersion()`） | 只替换了 `codecraft.jar` 但没重装客户端（例如手动换 jar 调试） |
 | 后端版本 | jar（`pom.xml` 的 `<version>`，经 `GET /api/system/version` 读取） | 同上 |
 
-界面**故意不合并**这两个数字：合并后一旦出现「客户端 3.1.0 + 后端 3.1.1」这种半升级状态，问题会被掩盖。
+界面**故意不合并**这两个数字：合并后一旦出现「客户端 3.1.1 + 后端 3.1.2」这种半升级状态，问题会被掩盖。
 
 **浏览器里点「检查更新」只弹提示，是缺陷吗**：
 不是。自动更新依赖 Electron 主进程提供的 `electronAPI.update`（`electron/update-manager.js`），

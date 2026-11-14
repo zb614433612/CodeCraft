@@ -474,29 +474,90 @@ public class FileExplorerTool implements Tool {
             sb.append("  5. 如果是正则搜索，尝试 regex=false 做纯文本搜索\n");
             sb.append("  6. 目标文件为特殊后缀（非常见文本类型）时，用 include 参数显式指定该类型（如 '*.log'）即可搜索\n");
         } else {
-            String currentFile = null;
-            int fileMatchCount = 0;
-            for (GrepHit r : hits) {
-                if (!r.filePath.equals(currentFile)) {
-                    if (currentFile != null) sb.append("    ... ").append(fileMatchCount).append(" 处匹配\n");
-                    sb.append(r.filePath).append("\n");
-                    currentFile = r.filePath;
-                    fileMatchCount = 0;
-                }
-                fileMatchCount++;
-                for (String line : r.contextBefore) {
-                    sb.append("  ").append(String.format("%5d", r.lineNum - r.contextBefore.size())).append(" - ").append(escapeLine(line)).append("\n");
-                }
-                sb.append("  ").append(String.format("%5d", r.lineNum)).append(" > ").append(escapeLine(r.lineContent)).append("\n");
-                for (String line : r.contextAfter) {
-                    sb.append("  ").append(String.format("%5d", r.lineNum + 1)).append(" - ").append(escapeLine(line)).append("\n");
-                }
-            }
-            if (currentFile != null && fileMatchCount > 0) {
-                sb.append("    ... ").append(fileMatchCount).append(" 处匹配\n");
-            }
+            sb.append(renderGrepHits(hits));
         }
         return sb.toString();
+    }
+
+    /**
+     * 渲染 grep 命中结果：按文件分组 + <b>合并重叠的上下文窗口</b>
+     *
+     * <h3>为什么必须合并（不合并会白烧一半 token）</h3>
+     * <p>
+     * 每个命中都带 {@code context_lines} 行上下文。当命中在文件里密集出现时
+     * （例如在 500 行文件里搜 {@code token|usage} 命中 20 处、context_lines=5），
+     * 相邻命中的上下文窗口会大量重叠，同一行被重复输出 2~5 次。
+     * 实测一条 grep 结果 2 万字符里，超过一半是这种重复。
+     * </p>
+     * <p>
+     * 合并后：同一行只出现一次；跨越不连续区间时插入 {@code ...} 表示省略，
+     * 且不影响「哪一行是匹配行」（用 {@code >} 标记）的语义。
+     * </p>
+     *
+     * <h3>历史 Bug 修复</h3>
+     * <p>
+     * 旧实现对 {@code contextBefore} / {@code contextAfter} 的<b>每一行都写同一个行号</b>
+     * （{@code r.lineNum - r.contextBefore.size()} / {@code r.lineNum + 1}），
+     * 导致输出里出现「5 - 内容A / 5 - 内容B / 5 - 内容C」这种错误行号，
+     * 模型按行号去读会读到错的位置。此处改为逐行递增的真实行号。
+     * </p>
+     *
+     * <p>包级可见 + 静态：便于单测直接构造 {@link GrepHit} 验证行号与合并行为。</p>
+     */
+    static String renderGrepHits(List<GrepHit> hits) {
+        if (hits == null || hits.isEmpty()) return "";
+
+        StringBuilder sb = new StringBuilder();
+        String currentFile = null;
+        int fileMatchCount = 0;
+        // 行号 → 行内容（TreeMap 保证按行号升序输出）
+        TreeMap<Integer, GrepLine> lineMap = new TreeMap<>();
+
+        for (GrepHit r : hits) {
+            if (!r.filePath.equals(currentFile)) {
+                if (currentFile != null) {
+                    appendGrepFileBlock(sb, lineMap);
+                    sb.append("    ... ").append(fileMatchCount).append(" 处匹配\n");
+                }
+                sb.append(r.filePath).append("\n");
+                currentFile = r.filePath;
+                fileMatchCount = 0;
+                lineMap.clear();
+            }
+            fileMatchCount++;
+
+            // 上下文首行的真实行号 = 匹配行号 - 上文行数（处理文件开头不足 ctxLines 的情况）
+            int beforeStart = r.lineNum - r.contextBefore.size();
+            for (int k = 0; k < r.contextBefore.size(); k++) {
+                lineMap.putIfAbsent(beforeStart + k, new GrepLine(r.contextBefore.get(k), false));
+            }
+            // 匹配行优先级最高：覆盖同号上下文行
+            lineMap.put(r.lineNum, new GrepLine(r.lineContent, true));
+            for (int k = 0; k < r.contextAfter.size(); k++) {
+                lineMap.putIfAbsent(r.lineNum + 1 + k, new GrepLine(r.contextAfter.get(k), false));
+            }
+        }
+        if (currentFile != null && fileMatchCount > 0) {
+            appendGrepFileBlock(sb, lineMap);
+            sb.append("    ... ").append(fileMatchCount).append(" 处匹配\n");
+        }
+        return sb.toString();
+    }
+
+    /** 输出单个文件的行块；行号不连续处插 {@code ...} 表示中间被省略 */
+    private static void appendGrepFileBlock(StringBuilder sb, TreeMap<Integer, GrepLine> lineMap) {
+        Integer prev = null;
+        for (Map.Entry<Integer, GrepLine> entry : lineMap.entrySet()) {
+            if (prev != null && entry.getKey() > prev + 1) {
+                sb.append("    ...\n");
+            }
+            GrepLine line = entry.getValue();
+            sb.append("  ").append(String.format("%5d", entry.getKey()))
+                    .append(line.match ? " > " : " - ")
+                    .append(escapeLine(line.text))
+                    .append("\n");
+            prev = entry.getKey();
+        }
     }
 
     private List<GrepHit> searchGrep(Path searchRoot, Pattern pattern, PathMatcher includeMatcher,
@@ -751,7 +812,8 @@ public class FileExplorerTool implements Tool {
         return String.format("%.1fM", bytes / (1024.0 * 1024));
     }
 
-    private String escapeLine(String line) {
+    /** 行内空白归一：制表符转两空格、去掉 CR/LF（grep 输出与格式解析共用） */
+    static String escapeLine(String line) {
         return line.replace("\t", "  ").replace("\r", "").replace("\n", "");
     }
 
@@ -782,6 +844,15 @@ public class FileExplorerTool implements Tool {
     // ==================== 内部数据类 ====================
 
     private record FileEntry(String path, long size) {}
-    private record GrepHit(String filePath, int lineNum, String lineContent,
-                           List<String> contextBefore, List<String> contextAfter) {}
+
+    /**
+     * 单条 grep 命中。
+     * <p>包级可见（非 private）是为了让单测能直接构造它来验证
+     * {@link #renderGrepHits(List)} 的行号与窗口合并行为。</p>
+     */
+    record GrepHit(String filePath, int lineNum, String lineContent,
+                   List<String> contextBefore, List<String> contextAfter) {}
+
+    /** grep 渲染用的单行：内容 + 是否匹配行（合并窗口后同一行只保留一份） */
+    private record GrepLine(String text, boolean match) {}
 }

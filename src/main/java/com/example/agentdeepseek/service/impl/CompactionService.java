@@ -55,6 +55,25 @@ public class CompactionService {
     /** 会话是否正在预压缩中（防止重复触发） */
     private final Set<Long> precompressingConversations = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 异步预压缩触发阈值（token 占 max-context-tokens 的比例）。
+     * <p>
+     * 取 0.60，低于同步压缩阈值（0.85），目的是「提前、小步」压缩，避免等上下文涨到
+     * 85% 才一次性全量重算——压缩后首次请求必然全量未命中，压缩时上下文越小越省钱。
+     * </p>
+     */
+    private static final double ASYNC_PRECOMPRESS_THRESHOLD = 0.60;
+
+    /**
+     * 两次压缩之间的最小间隔（毫秒）。
+     * <p>
+     * 每次压缩都会改变上下文前缀、导致一次 O(历史长度) 的全量未命中（命中 0.02 vs
+     * 未命中 1.0 元/百万）。压缩本身只在「后续还能跑很多轮」时才划算，因此设最小间隔，
+     * 保证压缩后至少有几轮能吃到缓存，而不是压缩完立刻再压一次。
+     * </p>
+     */
+    private static final long MIN_COMPACT_INTERVAL_MS = 120_000L;
+
     @Autowired
     public CompactionService(DeepSeekConfig deepSeekConfig,
                              CompactionMapper compactionMapper,
@@ -232,11 +251,21 @@ public class CompactionService {
         int summaryTokens = TokenEstimator.estimate(summary);
         int savings = originalTokens - summaryTokens;
 
+        // ★ 收益保护：压缩后不比原来小，就根本不值得压缩。
+        // 每次压缩都会让 applyCompactionRecords 注入的摘要改变索引 1 附近的内容，
+        // 进而导致下一次请求的整段前缀失效（50 倍价差）。若压缩本身没有正收益，
+        // 就是纯亏：既损失了历史细节，又白白丢掉一次全量缓存。
+        if (savings <= 0) {
+            log.info("压缩跳过：无收益（原始 {} tokens → 摘要 {} tokens），保持上下文不变以复用前缀缓存",
+                    originalTokens, summaryTokens);
+            return -1;
+        }
+
         // 6. 保存压缩记录到 DB
-        CompactionRecord record = new CompactionRecord(conversationId, summary, startMsgId, endMsgId, Math.max(savings, 0));
+        CompactionRecord record = new CompactionRecord(conversationId, summary, startMsgId, endMsgId, savings);
         compactionMapper.insert(record);
         log.info("压缩完成：conversationId={}, 压缩 {} 条消息, 节省 {} tokens, recordId={}",
-                conversationId, toCompress.size(), Math.max(savings, 0), record.getId());
+                conversationId, toCompress.size(), savings, record.getId());
 
         // 7. 将之前已有的、被本压缩完全覆盖的旧压缩记录标记为废弃
         // 废弃条件：旧记录的消息区间 [start, end] 完全落在本次压缩区间 [startMsgId, endMsgId] 内
@@ -259,7 +288,12 @@ public class CompactionService {
         // 8. 在内存消息列表中，用压缩摘要替换原始消息
         replaceWithCompaction(messages, compressStart, compressEnd, summary);
 
-        return TokenEstimator.estimateMessages(messages);
+        // 压缩前后真实对比：这是判断「压缩到底亏不亏」的唯一可靠观测点。
+        // 注意 afterTokens 必然低于 beforeTokens（savings > 0 已在前置校验），否则说明口径有偏差。
+        int afterTokens = TokenEstimator.estimateMessages(messages);
+        log.info("压缩前后对比：conversationId={}, {} tokens → {} tokens（消息 {} 条 → {} 条）",
+                conversationId, beforeTokens, afterTokens, compressEnd - compressStart, messages.size());
+        return afterTokens;
     }
 
     /**
@@ -290,18 +324,48 @@ public class CompactionService {
                     return; // 消息太少，无需压缩
                 }
 
-                // 粗略估算 token（用 DB 消息长度估算）
-                int estimatedTokens = estimateDbMessages(messages);
+                // ★★★ P0 修复（缓存全量失效的根因）★★★
+                // 原实现调用 estimateDbMessages(messages)：无差别累加 DB 里「全部原始消息」的
+                // content + reasoning，完全忽略已经落库的压缩记录。
+                // 后果：历史一旦被压缩过，DB 原文仍然存在，估算值只增不减 ——
+                //   实测 430 万字符 ≈ 215 万 token，而 max-context-tokens = 100 万，
+                //   ratio 永久 ≈ 2.15 > 0.60，于是「每一次请求返回后」都触发一次预压缩。
+                // 每次压缩都会产出新的摘要文本并被 applyCompactionRecords 注入到索引 1 附近，
+                // 导致下一次请求的整段前缀全部改变 → 前缀缓存 100% 失效（命中单价 0.02 vs
+                // 未命中 1.0 元/百万，50 倍价差），实测 15 次压缩中 9 次造成全量失效。
+                //
+                // 修正：先按「真实请求的组装顺序」处理 —— 排序 + 应用已有压缩记录 —— 再估算。
+                // 这样估算口径与 ContextBuilder.buildMessagesFromHistory 下发给模型的上下文一致，
+                // 压缩记录覆盖掉的历史不会再被重复计入。
+                messages.sort(Comparator.comparing(ConversationMessage::getCreatedAt,
+                        Comparator.nullsLast(Comparator.naturalOrder())));
+                applyCompactionRecords(conversationId, messages);
+
+                // 与 ContextBuilder 一致的 API 口径估算（含 TOOL 消息的工具结果、tool_calls 开销）
+                List<Map<String, Object>> apiMessages =
+                        toApiMessages(messages, deepSeekConfig.isStripHistoryReasoning());
+                int estimatedTokens = TokenEstimator.estimateMessages(apiMessages);
                 int maxTokens = deepSeekConfig.getMaxContextTokens();
                 double ratio = (double) estimatedTokens / maxTokens;
 
                 // 异步预压缩阈值比同步更低：超过 60% 就开始预压缩
-                if (ratio >= 0.60) {
-                    log.info("异步预压缩触发：conversationId={}, 估算 tokens={}, 比例={}",
+                if (ratio >= ASYNC_PRECOMPRESS_THRESHOLD) {
+                    // ★ 防抖动：刚压缩过就跳过。
+                    // 即便估算口径已修正，边界情况下（摘要 + 保护带本身就接近阈值）仍可能在
+                    // 相邻两轮连续压缩。每压缩一次前缀就变一次、缓存就全量失效一次，
+                    // 而压缩本身收益有限，因此设一个最小间隔，让「压缩 → 复用缓存」至少跑几轮。
+                    if (isRecentlyCompacted(conversationId)) {
+                        log.debug("异步预压缩跳过：距上次压缩不足 {} 秒，conversationId={}",
+                                MIN_COMPACT_INTERVAL_MS / 1000, conversationId);
+                        return;
+                    }
+
+                    log.info("异步预压缩触发：conversationId={}, 估算 tokens={}（已应用压缩记录）, 比例={}",
                             conversationId, estimatedTokens, ratio);
 
-                    // 构建 API 格式消息列表来调用 compact（内部会重新查 DB）
-                    List<Map<String, Object>> apiMessages = buildApiMessages(messages);
+                    // 传入「已应用压缩记录」的消息列表：compact() 内部会重新查 DB 并再次应用压缩记录，
+                    // 两者逐条对齐后 compressStart/compressEnd 索引才有意义
+                    // （原实现传的是未压缩的全量列表，索引与 compact 内部不一致，会压错区间）。
                     compact(conversationId, apiMessages, providerCode);
                 }
             } catch (Exception e) {
@@ -310,6 +374,36 @@ public class CompactionService {
                 precompressingConversations.remove(conversationId);
             }
         }, precompressExecutor);
+    }
+
+    /**
+     * 判断该会话是否刚刚压缩过（防抖动）。
+     * <p>
+     * 取当前生效记录中最新的 createdAt 与当前时间比较；无记录则视为「未压缩过」。
+     * </p>
+     */
+    private boolean isRecentlyCompacted(Long conversationId) {
+        try {
+            List<CompactionRecord> records = compactionMapper.selectActiveByConversationId(conversationId);
+            if (records == null || records.isEmpty()) {
+                return false;
+            }
+            LocalDateTime latest = null;
+            for (CompactionRecord record : records) {
+                LocalDateTime createdAt = record.getCreatedAt();
+                if (createdAt != null && (latest == null || createdAt.isAfter(latest))) {
+                    latest = createdAt;
+                }
+            }
+            if (latest == null) {
+                return false;
+            }
+            long elapsedMs = java.time.Duration.between(latest, LocalDateTime.now()).toMillis();
+            return elapsedMs >= 0 && elapsedMs < MIN_COMPACT_INTERVAL_MS;
+        } catch (Exception e) {
+            log.debug("检查最近压缩时间失败（忽略该保护）: {}", e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -476,36 +570,68 @@ public class CompactionService {
     }
 
     /**
-     * 将 ConversationMessage 列表转为 API 格式的 Map 列表（用于 token 估算）
+     * 将 ConversationMessage 列表转为「与真实请求逐条对齐」的 API 格式消息列表。
+     * <p>
+     * <b>为什么必须逐条对齐（一一映射，不跳过、不净化）</b>：{@link #compact} 内部会重新
+     * {@code selectByConversationId} 并 {@link #applyCompactionRecords}，然后用
+     * {@code compressStart / compressEnd} 索引在这份列表上定位压缩区间。调用方传入的列表
+     * 必须与之逐条对应，否则会压错区间（甚至压到保护带）。
+     * </p>
+     * <p>
+     * <b>口径必须与 ContextBuilder 一致</b>：
+     * <ul>
+     *   <li>TOOL 消息的 API {@code content} 取自 {@code reasoning} 字段（工具结果存在该字段），
+     *       且<b>不受 stripHistoryReasoning 影响</b>——它存的是工具结果，不是思考链。
+     *       原实现把它当 {@code reasoning_content} 直接丢弃，导致工具结果（本系统上下文的
+     *       绝对大头）完全不计入估算，估算值严重偏低。</li>
+     *   <li>ASSISTANT 消息的 {@code tool_calls} 也有 token 开销，需计入。</li>
+     * </ul>
+     * </p>
+     *
+     * @param messages               已经过排序 + {@link #applyCompactionRecords} 处理的 DB 消息
+     * @param stripHistoryReasoning  是否剔除历史思考链（balanced / compact 模式为 true）
+     * @return API 格式消息列表，与入参逐条对应
      */
-    private List<Map<String, Object>> buildApiMessages(List<ConversationMessage> messages) {
+    static List<Map<String, Object>> toApiMessages(List<ConversationMessage> messages,
+                                                   boolean stripHistoryReasoning) {
         List<Map<String, Object>> result = new ArrayList<>();
+        if (messages == null) {
+            return result;
+        }
         for (ConversationMessage msg : messages) {
             Map<String, Object> map = new HashMap<>();
-            map.put("role", msg.getRole().getValue());
-            if (msg.getContent() != null) map.put("content", msg.getContent());
-            // 【口径一致】与真实请求保持一致：stripHistoryReasoning=true 时 reasoning 不下发，
-            // 此处 token 估算也一并不计，避免「多估 → 提前触发压缩」而损失历史细节（准确性优先）。
-            if (msg.getReasoning() != null && !deepSeekConfig.isStripHistoryReasoning()) {
-                map.put("reasoning_content", msg.getReasoning());
+            MessageRole role = msg.getRole();
+
+            // 角色缺失时保底占位，绝不能让条数变少（否则索引错位）
+            if (role == null) {
+                map.put("role", "system");
+                result.add(map);
+                continue;
             }
-            if (msg.getToolCalls() != null) map.put("tool_calls", msg.getToolCalls());
+
+            map.put("role", role.getValue());
+
+            if (role == MessageRole.TOOL) {
+                // 工具结果存在 reasoning 字段（content 通常为 NULL）
+                String content = msg.getReasoning() != null ? msg.getReasoning()
+                        : (msg.getContent() != null ? msg.getContent() : "");
+                map.put("content", content);
+            } else {
+                if (msg.getContent() != null) {
+                    map.put("content", msg.getContent());
+                }
+                if (role == MessageRole.ASSISTANT) {
+                    if (msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
+                        map.put("tool_calls", msg.getToolCalls());
+                    }
+                    if (msg.getReasoning() != null && !stripHistoryReasoning) {
+                        map.put("reasoning_content", msg.getReasoning());
+                    }
+                }
+            }
             result.add(map);
         }
         return result;
-    }
-
-    /**
-     * 粗略估算 DB 消息的 token 数（用于异步预压缩判断）
-     */
-    private int estimateDbMessages(List<ConversationMessage> messages) {
-        int total = 0;
-        for (ConversationMessage msg : messages) {
-            total += TokenEstimator.estimate(msg.getContent());
-            total += TokenEstimator.estimate(msg.getReasoning());
-            total += 10; // 消息开销
-        }
-        return total;
     }
 
     /**

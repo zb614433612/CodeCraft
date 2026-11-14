@@ -5,6 +5,85 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.2] - 2026-11-14
+
+> The second cost-governance release. The previous version made cost *visible*; this one acts on the numbers.
+> Real usage data pinned down two sources of **pure waste**: **a wrong compaction estimate that rewrote the
+> prefix on every turn** (cache invalidated over and over), and **unbounded tool-result size** (30k-char cap,
+> plus retroactive rewriting while assembling history).
+> Backend-only changes; a **backend restart is required** and desktop packages must be rebuilt. No DB migration.
+
+### 🔥 Cache-invalidation root cause (P0)
+
+- **Context**: measured 6 turns / 777 requests, 115.8M input tokens, ¥5.62 total, 97.87% reported hit rate —
+  yet **9 of 15 compactions caused a full cache miss**, roughly 1.3M miss tokens (≈¥1.3) of pure waste.
+- **Root cause**: the async pre-compaction estimate **summed raw DB rows and ignored already-stored compaction
+  records**. Compaction does not delete the originals, so the estimate only grew (measured ratio ≈ 1.65,
+  permanently above the 0.60 threshold) and fired after *every* request; `replaceWithCompaction` then swapped
+  `messages[1..N]` wholesale, changing the prefix and invalidating the whole cache.
+- **Fix**: the estimate now runs as "apply compaction records → build API messages → estimate", matching the
+  real request (ratio dropped from 1.65 to 0.05).
+- **Four hard constraints that came with it**:
+  - A TOOL message's API `content` comes from its `reasoning` field (tool results live there) and is
+    **not affected by `stripHistoryReasoning`** — stripping it as a reasoning chain badly underestimates context;
+  - the list passed to `compact()` must be **row-for-row aligned** with the internally rebuilt list, otherwise it
+    compacts the wrong range;
+  - skip compaction when the gain is not positive (summary ≥ original) — no DB write, no prefix change;
+  - a **120-second minimum interval** between compactions, so at least a few turns can hit the cache.
+- **Verified by** `CompactionEstimateTest` (25 assertions), including a reproduction of the "ratio always above
+  threshold" behaviour using the real data shape.
+
+### 📉 Tool-result size budget (P1)
+
+- **Context**: 1,624 tool results totalling 4.66M characters — the dominant source of context growth. The old
+  implementation capped a single result at 30k characters, and the threshold existed **twice** (`ToolExecutor`
+  and `ContextBuilder`); once those drift you get "shape A in the DB, shape B sent to the model".
+- **Single source of truth**: new `util/ToolResultBudget` + `tool.result-budget.*` config with **per-tool budgets**
+  (`file_explorer` / `web_fetch` / `browser` 16000 chars; `command` / `web_search` / `execute_sql` /
+  `http_request` 10000; everything else 12000; `<= 0` means unlimited). The split follows **information density**:
+  logs are ~90% noise, source code is essential — one ruler for both gets both wrong.
+- **Applied once, before writing**: called from `ToolExecutor#buildToolMessages`, so the DB row and the LLM request
+  carry the **same** text. The over-budget fallback in `ContextBuilder` reuses the same instance and only touches
+  legacy over-budget rows once, never rewriting twice.
+- **Idempotent**: truncated text carries a `…[CC-TRUNC]` marker and content already containing it is returned
+  unchanged — the precondition for a prompt cache that keeps hitting.
+- **Retrieval guide included**: the truncation point tells the model **how to get the omitted part**
+  (`start_line`/`end_line` for `file_explorer`, `action=logs` for `command`, `WHERE`/`LIMIT` for `execute_sql`).
+  Silently dropping half the output makes the model conclude from partial data or re-run the same tool, which is
+  more expensive than not truncating at all.
+- **Kill switch**: `tool.result-budget.enabled: false` reverts everything.
+
+### 🔍 grep output: bug fix + window merging
+
+- **Line-number bug (real bug)**: the old implementation wrote **the same line number for every context row**
+  (`lineNum - size` / `lineNum + 1`), producing output like "5 - A / 5 - B / 5 - C". The model would read the
+  wrong lines, while the output *looked* like duplicated content and hid the real cause. Now each row carries its
+  own incrementing line number.
+- **Overlapping windows merged**: every hit carries `context_lines` rows of context, and with dense matches the
+  windows overlap heavily — the same line printed 2~5 times. Measured: `file_explorer` results are 68% of all
+  tool output, of which grep accounts for **286 results / 1.49M characters**, over half of it window overlap.
+  Hits are now grouped per file and de-duplicated through a "line number → text" map, with `...` marking gaps.
+- **Why this is the better lever**: it halves the result **at the source** and **loses nothing** (the removed
+  rows were duplicates), so it does **not** increase the number of turns.
+
+### 📊 Expected impact and how to observe it
+
+- Tool-result size: the new budget saves ~**284k characters (6%)** on existing data; freshly produced grep
+  results drop another **30~50%** thanks to window merging — roughly **10~15%** of context input overall.
+- More important is that the bleeding **stops**: compaction no longer fires every turn and the cache returns to a
+  steady hit pattern.
+- Observe: watch `cache_miss_tokens` on the cost dashboard drop from "tens of thousands per request" to
+  "hundreds / low thousands"; a log line `工具结果超预算已裁剪: tool=...` means the budget is active.
+- **Verified by** new `ToolResultBudgetTest` (34 assertions) and `GrepMergeTest` (20 assertions), covering
+  idempotency, per-tool budgets, retrieval guides, line-number correctness and window-merge boundaries.
+
+### 🔧 Upgrade notes
+
+- **Restart the backend** (new config keys and a new bean); no database changes, no migration.
+- Desktop packages must be rebuilt (the jar carries the new logic).
+
+---
+
 ## [3.1.1] - 2026-11-14
 
 > The metering-and-discoverability release. Cost visibility grows from "DeepSeek only" to **every provider**

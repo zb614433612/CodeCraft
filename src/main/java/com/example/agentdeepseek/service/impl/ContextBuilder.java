@@ -10,6 +10,7 @@ import com.example.agentdeepseek.model.entity.MessageRole;
 import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
 import com.example.agentdeepseek.util.ReasoningPassback;
 import com.example.agentdeepseek.util.TokenEstimator;
+import com.example.agentdeepseek.util.ToolResultBudget;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,16 +41,20 @@ public class ContextBuilder {
     private final ConversationMessageMapper conversationMessageMapper;
     private final CompactionService compactionService;
     private final DeepSeekConfig deepSeekConfig;
+    /** 工具结果体积预算（与 ToolExecutor 共用同一份规则，保证截断幂等、前缀稳定） */
+    private final ToolResultBudget toolResultBudget;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ContextBuilder(ConversationMapper conversationMapper,
                           ConversationMessageMapper conversationMessageMapper,
                           CompactionService compactionService,
-                          DeepSeekConfig deepSeekConfig) {
+                          DeepSeekConfig deepSeekConfig,
+                          ToolResultBudget toolResultBudget) {
         this.conversationMapper = conversationMapper;
         this.conversationMessageMapper = conversationMessageMapper;
         this.compactionService = compactionService;
         this.deepSeekConfig = deepSeekConfig;
+        this.toolResultBudget = toolResultBudget;
     }
 
     // ==================== Agent 类型解析 ====================
@@ -452,13 +457,6 @@ public class ContextBuilder {
                 trimmed, messages.size(), estimatedTokens);
     }
 
-    /** 单条工具结果保留给 LLM 的最大字符数（超出部分首尾截断） */
-    private static final int MAX_TOOL_CONTENT_CHARS = 30000;
-    /** 工具结果截断时保留的头部字符数 */
-    private static final int TOOL_HEAD_KEEP_CHARS = 12000;
-    /** 工具结果截断时保留的尾部字符数 */
-    private static final int TOOL_TAIL_KEEP_CHARS = 3000;
-
     /**
      * 工具循环专用上下文裁剪（兜底策略，防工具循环内消息无限膨胀导致 API 400 超限）
      * <p>
@@ -468,7 +466,13 @@ public class ContextBuilder {
      * - 本方法专门处理工具循环场景：
      *   1. 将最早的历史 tool 消息 content 替换为"[工具 xxx 调用成功/失败]"摘要
      *      （tool_call_id 必须保留，API 格式要求，只替换 content）；
-     *   2. 摘要化后仍超限时，对剩余超大 tool 消息做首尾截断（保留头尾，中间省略）。
+     *   2. 摘要化后仍超限时，对剩余超大 tool 消息做首尾截断。
+     * </p>
+     * <p>
+     * ⚠️ 第 2 步的截断必须复用 {@link ToolResultBudget}（与
+     * {@code ToolExecutor#buildToolMessages} 同一份规则）：
+     * 已在写入前裁剪过的内容会因幂等标记被原样返回，
+     * 只有「存量超预算数据」才会真正被改一次，改完即稳定——这是前缀缓存不失效的前提。
      * </p>
      *
      * @param messages 消息列表（会直接修改）
@@ -540,7 +544,7 @@ public class ContextBuilder {
             compacted++;
         }
 
-        // 4. 仍超限：对剩余超大 tool 消息按从新到旧顺序做首尾截断（保留头尾，省略中间）
+        // 4. 仍超限：对剩余超大 tool 消息按从新到旧顺序做首尾截断（统一走 ToolResultBudget，保证幂等）
         estimated = TokenEstimator.estimateMessages(messages);
         int truncated = 0;
         if (estimated > maxTokens) {
@@ -548,28 +552,19 @@ public class ContextBuilder {
                 Map<String, Object> msg = messages.get(i);
                 if (!"tool".equals(msg.get("role"))) continue;
                 String content = (String) msg.get("content");
-                if (content == null || content.length() <= MAX_TOOL_CONTENT_CHARS) continue;
+                if (content == null || content.isEmpty()) continue;
                 String toolCallId = (String) msg.get("tool_call_id");
                 String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
-                msg.put("content", truncatePreservingHeadTail(content, toolName));
+                String shrunk = toolResultBudget.apply(toolName, content);
+                // 未变化 = 未超预算或已带截断标记（幂等跳过），不重复计数
+                if (shrunk == null || shrunk.equals(content)) continue;
+                msg.put("content", shrunk);
                 truncated++;
                 estimated = TokenEstimator.estimateMessages(messages);
             }
         }
 
         log.info("工具循环裁剪完成：摘要化 {} 条, 截断 {} 条, 剩余估算 {} tokens", compacted, truncated, estimated);
-    }
-
-    /**
-     * 工具结果首尾截断：保留头部（文件头/摘要）和尾部（错误信息/结尾），中间省略
-     */
-    private String truncatePreservingHeadTail(String content, String toolName) {
-        if (content == null || content.length() <= MAX_TOOL_CONTENT_CHARS) return content;
-        int omitted = content.length() - TOOL_HEAD_KEEP_CHARS - TOOL_TAIL_KEEP_CHARS;
-        return content.substring(0, TOOL_HEAD_KEEP_CHARS)
-                + "\n\n...[工具 " + toolName + " 结果过长，已截断：原始 " + content.length()
-                + " 字符，中间省略 " + omitted + " 字符]...\n\n"
-                + content.substring(content.length() - TOOL_TAIL_KEEP_CHARS);
     }
 
     /**
