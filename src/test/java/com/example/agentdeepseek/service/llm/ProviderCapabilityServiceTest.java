@@ -384,13 +384,32 @@ public class ProviderCapabilityServiceTest {
         check("F4 模板为空时按 code 前缀识别出火山", "火山方舟", fallback.getLabel());
         check("F4 兜底后仍能判出绑卡能力（缺 AK/SK → warn）", "warn", fallback.getBalance().getState());
 
-        // F4b 现状局限：平台名在中间的 code 识别不出 → 保守按未知模板处理
+        // F4b 审查修复后的行为：平台名在中间 + 火山域名 → 靠 baseUrl 兜底仍能认出火山
+        //
+        // 改动前这里断言的是「识别不出 → off」，那是当时的**已知局限**（前缀匹配只认
+        // startsWith，且完全没有域名兜底）。审查阶段补了 resolveFor 的 host 兜底后，
+        // 该局限被修掉：baseUrl 明显指向火山，就不该因为用户随手起的 code 而降级成
+        // 「这平台不能查余额」—— off 会让用户误以为功能不存在，而 warn 才是准确表达
+        //（平台支持余额查询，当前缺 AK/SK，配好即可用）。
         ProviderConfig middleCode = new ProviderConfig();
         middleCode.setCode("my-volc");
         middleCode.setBaseUrl("https://ark.cn-beijing.volces.com/api/v3");
         middleCode.setDefaultModel("doubao");
-        check("F4b 现状局限：my-volc 识别不出（按未知模板保守处理）", "off",
+        check("F4b 平台名在中间 + 火山域名 → 域名兜底认出火山（warn 而非 off）", "warn",
                 SERVICE.forProvider(middleCode).getBalance().getState());
+        check("F4b 域名兜底后 label 也是火山方舟", "火山方舟",
+                SERVICE.forProvider(middleCode).getLabel());
+
+        // F4c 真正的「识别不出」仍必须保守：名字不认识 + 域名是第三方中转
+        //     → 不能瞎猜平台，能力维持 off（这正是 Files API 与能力判定的安全底线）
+        ProviderConfig unknownProxy = new ProviderConfig();
+        unknownProxy.setCode("my-gateway");
+        unknownProxy.setBaseUrl("https://proxy.example.com/v1");
+        unknownProxy.setDefaultModel("some-model");
+        check("F4c 未知名字 + 中转域名 → 仍保守判 off（不瞎猜）", "off",
+                SERVICE.forProvider(unknownProxy).getBalance().getState());
+        check("F4c 未知名字 + 中转域名 → 视觉同样保守 off", "off",
+                SERVICE.forProvider(unknownProxy).getVision().getState());
 
         // F5 extraConfig 大小写不敏感
         check("F5 extraConfig 键名大小写不敏感（AccessKey）", "warn",

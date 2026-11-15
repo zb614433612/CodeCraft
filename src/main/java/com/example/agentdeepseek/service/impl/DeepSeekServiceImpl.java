@@ -8,6 +8,8 @@ import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
 import com.example.agentdeepseek.service.llm.LLMErrorFormatter;
 import com.example.agentdeepseek.service.llm.TokenUsageParser;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.example.agentdeepseek.mapper.LlmTokenUsageMapper;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
 import com.example.agentdeepseek.util.ContextFingerprint;
@@ -3837,6 +3839,24 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             if (config == null) {
                 return providerCode;
             }
+            /*
+              审查补强：改用 ProviderRegistry.resolveFor（模板 → 前缀 → code → baseUrl 域名兜底），
+              并返回<b>档案主名</b>作判定键。
+
+              为什么比「直接返回 requestTemplate 字符串」更准：
+                ① 视觉规则的 key 就是「档案主名 + 别名」（见 ModelCapabilityConfig#defaultVisionRules，
+                  如 "volcengine,ark,doubao"），主名必然精确命中；
+                ② 用户把 template 也起成 my-gateway / 我的中转 这类名字时，
+                   旧代码返回 "my-gateway" → findVisionRule 落空 → defaultAllowVision=true → 放行
+                   → 纯文本模型（v4-pro）下图片被<b>静默丢弃</b>。
+                   新代码即使名字识别不出，也能靠 baseUrl 域名认出火山并套用其模型级规则。
+             */
+            ProviderProfile profile = ProviderRegistry.resolveFor(
+                    config.getRequestTemplate(), config.getCode(), config.getBaseUrl());
+            if (profile != null && profile.getTemplate() != null) {
+                return profile.getTemplate();
+            }
+            // 档案识别不出（全新平台）：退回模板字符串，仍可经前缀匹配或全局兜底判定
             String template = config.getRequestTemplate();
             if (template == null || template.isBlank()) {
                 return providerCode;

@@ -132,19 +132,19 @@ public class ProviderCapabilityService {
      * <p>顺序：{@code requestTemplate} 精确匹配 → {@code code} 精确/前缀匹配。
      * 先模板后 code 是因为「模板决定协议与能力」，而 code 是用户自定义的（可能是 {@code volc-deepseek} 这类）。</p>
      */
+    /**
+     * 解析 Provider 对应的档案。
+     *
+     * <p>统一走 {@link ProviderRegistry#resolveFor}：模板精确优先、code 前缀兜底。
+     * 不在这里自己写「template 空才用 code」的分支 —— 那正是此前 6 个消费方各写一遍、
+     * 且都漏掉前缀匹配的根源。</p>
+     */
     private ProviderProfile resolveProfile(ProviderConfig config) {
         if (config == null) {
             return null;
         }
-        String template = config.getRequestTemplate();
-        if (template == null || template.isBlank()) {
-            template = config.getCode();
-        }
-        ProviderProfile byTemplate = ProviderRegistry.findByTemplate(template);
-        if (byTemplate != null) {
-            return byTemplate;
-        }
-        return ProviderRegistry.findByCode(config.getCode());
+        return ProviderRegistry.resolveFor(
+                config.getRequestTemplate(), config.getCode(), config.getBaseUrl());
     }
 
     // ==================== 能力构建 ====================
@@ -195,7 +195,7 @@ public class ProviderCapabilityService {
         vo.setVision(buildVision(profile, config, model));
         vo.setSearch(buildSearch(profile, config));
         vo.setBalance(buildBalance(profile, config));
-        vo.setFilesApi(buildFilesApi(profile));
+        vo.setFilesApi(buildFilesApi(profile, config));
         fillPricing(vo, profile, config);
         return vo;
     }
@@ -244,14 +244,20 @@ public class ProviderCapabilityService {
                     List.of());
         }
 
-        // 双键取严：template（平台真相源）+ code（后端拦截点的实际入参）
-        String template = config != null ? config.getRequestTemplate() : null;
-        if (template == null || template.isBlank()) {
-            template = config != null ? config.getCode() : null;
-        }
-        if (template == null || template.isBlank()) {
-            template = profile.getTemplate();
-        }
+        /*
+          双键取严：主键（档案主名）+ code（后端拦截点的实际入参）。
+
+          ⚠️ 审查修复：主键必须用 profile.getTemplate()（档案主名），不能再用
+          config.getRequestTemplate() 的原始字符串 —— 否则展示与执行会分叉。
+
+          原因：执行侧 DeepSeekServiceImpl#resolveVisionTemplateKey 已改为返回
+          「档案主名」（如 volcengine）。对于 code=my-gateway + 火山域名的配置：
+            执行侧：resolveFor 域名兜底 → "volcengine" → v4-pro 命中 exclude → 拦截
+            展示侧（旧）：supportsVisionModel("my-gateway") → 无规则 → 宽松放行 → 显示 on
+          结果是「界面说能发图，一发就报不支持」，正好是本次重构要消灭的那类错位。
+          统一到档案主名后，两侧查的是同一条规则。
+         */
+        String template = profile.getTemplate();
         String code = config == null ? null : config.getCode();
 
         boolean supportedByTemplate = FileVisionService.supportsVisionModel(template, modelName);
@@ -336,23 +342,70 @@ public class ProviderCapabilityService {
             case DEEPSEEK_OFFICIAL -> {
                 // 官方 /v1/tools/search 免额外凭证，但要求 Base URL 主机严格是 api.deepseek.com。
                 // 走第三方中转时官方接口拿不到 —— 这是历史上把 deepseek 一律判成「不支持」的漏判点。
+                /*
+                  ⚠️ 已知边界（有意保留，不是 bug）：template 与域名指向不同平台时，
+                  这里会偏保守地说「官方搜索不可用」，而 SearchTool 实际可能走了火山搜索。
+
+                  场景：template=deepseek + baseUrl=ark.cn-beijing.volces.com
+                    · 展示层：resolveFor 精确命中 deepseek → 本分支 → 域名不是官方 → warn
+                    · 执行层：SearchTool 先试火山，isVolcengineProvider 的 host 兜底命中 → 真的走火山
+                  即「界面说只能用通用抓取，实际走了火山结构化搜索」。
+
+                  为什么不强行对齐：
+                    ① 这是畸形配置（用户手填 deepseek 模板却指向火山域名），非正常路径；
+                    ② 差异方向是「展示更保守」，不会让用户误以为能用而实际失败 ——
+                       反向错位（说能用、实际不行）才是必须消灭的那类；
+                    ③ 要对齐就得把 SearchTool 的平台优先级链（火山 → MiniMax → DeepSeek）
+                       在展示层再实现一份，等于新增一处必然漂移的副本。
+
+                  注意：余额在同样场景下已通过 balanceCandidateFor 对齐（会显示火山余额），
+                  因此界面不会出现「余额说火山、搜索说 DeepSeek」的自相矛盾描述 ——
+                  本分支的 warn 文案只说「DeepSeek 官方接口不可用」，不否认其他平台。
+                 */
                 String baseUrl = config == null ? null : config.getBaseUrl();
                 if (isOfficialHost(baseUrl)) {
                     return CapabilityItem.on("联网搜索",
                             "Base URL 指向 api.deepseek.com，DeepSeek 官方搜索接口免额外凭证可用");
                 }
-                String shown = baseUrl == null || baseUrl.isBlank() ? "" : "（" + baseUrl + "）";
+                /*
+                  模板级预览（新建抽屉刚选完模板、baseUrl 还没填）不能说「不可用」。
+
+                  旧文案在这种情况下会输出「当前 Base URL 不是 api.deepseek.com，
+                  DeepSeek 官方搜索接口不可用」——用户看到的是「这平台不能用搜索」，
+                  但事实是「填对域名就能用，而且免额外凭证」。文案必须区分
+                  「还没填」与「填错了」两种情形。
+                 */
+                if (baseUrl == null || baseUrl.isBlank()) {
+                    return CapabilityItem.warn("联网搜索",
+                            "平台有官方搜索接口且免额外凭证，Base URL 指向 api.deepseek.com 时即可用；"
+                                    + "未指向官方域名时联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用",
+                            List.of());
+                }
                 return CapabilityItem.warn("联网搜索·通用抓取",
-                        "当前 Base URL" + shown + "不是 api.deepseek.com，"
+                        "当前 Base URL（" + baseUrl + "）不是 api.deepseek.com，"
                                 + "DeepSeek 官方搜索接口不可用，联网只能靠通用抓取（Bing / 百度 / Jina / 本地）",
                         List.of());
             }
-            default -> {
-                return CapabilityItem.warn("联网搜索",
-                        "平台官方联网接口暂未接入判断，联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用",
-                        List.of());
+            case NONE -> {
+                // 不可达：NONE 已在方法开头 return，这里只保证 switch 覆盖全部枚举值
+                return CapabilityItem.off("联网搜索", "该平台未配置官方搜索接口");
             }
         }
+        /*
+          ⚠️ 这行 throw 是「新增枚举漏补 case」的护栏。
+
+          原来这里是 default -> 返回一句「暂未接入判断」，问题在于它把
+          「代码没写完」伪装成「正常结论」：新增 SearchProvider 后界面显示
+          「平台官方联网接口暂未接入判断」，既不报错、也不像故障，没人会去查。
+
+          现在删掉 default、只保留全部枚举 case，并把兜底改成抛异常：
+            · 忘记补 case → 运行到这里立刻 IllegalStateException，一眼看到
+              「有枚举值没被 switch 处理」，附带确切枚举名；
+            · 配合 ProviderCapabilityServiceTest 的枚举遍历断言，
+              这个错误会在 CI 阶段（而不是用户手上）暴露。
+         */
+        throw new IllegalStateException("buildSearch 未处理 SearchProvider." + provider
+                + " —— 新增枚举值后必须在此补充展示文案");
     }
 
     // ==================== ③ 余额查询 ====================
@@ -364,8 +417,46 @@ public class ProviderCapabilityService {
      * （那是套餐计数），只有账号余额能查。</p>
      */
     private CapabilityItem buildBalance(ProviderProfile profile, ProviderConfig config) {
-        BalanceProvider provider = (profile.getBalance() == null || profile.getBalance().getProvider() == null)
-                ? BalanceProvider.NONE : profile.getBalance().getProvider();
+        /*
+          ⚠️ 审查修复：这里必须复用「执行层的判定函数」，不能直接用 profile.getBalance()。
+
+          为什么两者会分叉：
+            · resolveProfile 走 resolveFor，优先级是「名字优先」
+              （template 精确 → template 前缀 → code 前缀 → baseUrl 域名）；
+            · 而真正查余额的 ProviderBalanceService#queryBalance 走 balanceCandidateFor，
+              优先级是「平台顺序优先」（volcengine → deepseek → minimax → mimo → qwen，
+              先试 template 命中，再试 host 兜底，短路返回）。
+
+          典型分歧配置：template=deepseek + baseUrl 指向 ark.cn-beijing.volces.com
+            · 旧展示层：resolveFor 精确命中 deepseek → 显示「DeepSeek 官方余额」
+            · 实际执行：balanceCandidateFor 里 volcengine 排第一且域名命中 → 查的是火山账户
+          两者都显示「可查询」，用户却不知道自己看到的是哪家的钱 —— 属于最难察觉的错位。
+          直接调 balanceCandidateFor，展示与执行就共用同一个判定，结构上不可能再分叉。
+         */
+        /*
+          分两种场景，语义不同（都必须是「真实」的，只是真实的对象不同）：
+
+            ① 模板级预览（config == null）：回答「这个平台具备什么能力」。
+               没有实例配置可供判定（连 baseUrl 都还没有），只能用该模板的档案。
+               此时显示 warn（有接口、配好凭证即可用）是准确的 —— 不能因为
+               「还没填 AK/SK」就说这个平台不支持查余额。
+
+            ② 实例级（config != null）：回答「这台实例点下去会查什么」。
+               必须复用执行层的 balanceCandidateFor，否则展示与执行会分叉
+               （详见下方 switch 前的说明）。
+         */
+        ProviderProfile balanceProfile;
+        if (config == null) {
+            balanceProfile = profile;
+        } else {
+            balanceProfile = ProviderRegistry.balanceCandidateFor(
+                    config.getRequestTemplate(), config.getCode(), config.getBaseUrl());
+        }
+
+        BalanceProvider provider = (balanceProfile == null
+                || balanceProfile.getBalance() == null
+                || balanceProfile.getBalance().getProvider() == null)
+                ? BalanceProvider.NONE : balanceProfile.getBalance().getProvider();
 
         if (provider == BalanceProvider.NONE) {
             return CapabilityItem.off("余额查询", "该平台未接入余额查询接口");
@@ -425,10 +516,14 @@ public class ProviderCapabilityService {
                                 + "填入扩展配置 {\"mimoCookie\":\"...\"}（约 24 小时有效）",
                         List.of("mimoCookie"));
             }
-            default -> {
-                return CapabilityItem.warn("余额查询", "该平台余额查询方式暂未接入判断", List.of());
+            case NONE -> {
+                // 不可达：NONE 已在方法开头 return，这里只保证 switch 覆盖全部枚举值
+                return CapabilityItem.off("余额查询", "该平台未接入余额查询接口");
             }
         }
+        // 同 buildSearch：把「漏补 case」变成显式异常，而不是伪装成「暂未接入判断」
+        throw new IllegalStateException("buildBalance 未处理 BalanceProvider." + provider
+                + " —— 新增枚举值后必须在此补充展示文案");
     }
 
     // ==================== ④ Files API ====================
@@ -442,9 +537,48 @@ public class ProviderCapabilityService {
      *
      * <p>同时这也是一条隐私说明：未适配平台<b>不会</b>把用户文件传上第三方云盘。</p>
      */
-    private CapabilityItem buildFilesApi(ProviderProfile profile) {
-        FilesApiProvider provider = (profile.getFilesApi() == null || profile.getFilesApi().getProvider() == null)
-                ? FilesApiProvider.NONE : profile.getFilesApi().getProvider();
+    private CapabilityItem buildFilesApi(ProviderProfile profile, ProviderConfig config) {
+        /*
+          ⚠️ 审查修复：Files API 的判定必须与「执行层」完全一致 —— 用**精确匹配**，
+          不能用 resolveProfile 的结果（那条路带了前缀与域名兜底）。
+
+          为什么这里要刻意比视觉/余额更严：
+            Files API 决定「用户文件是否上传到第三方云端」，属于数据外发动作。
+            执行层 FilesApiClientManager#createClient 用的是 findByTemplate（精确匹配），
+            口径是「认不出就走本地存储，绝不靠名字猜平台」。
+            而 resolveProfile 走 resolveFor，会把 deepseek-custom 前缀识别成 deepseek。
+
+          若展示层跟随 resolveFor，就会出现：
+            · 界面显示「文件上传·云端：文件可上传到 DeepSeek 云端」
+            · 实际执行 findByTemplate("deepseek-custom") 落空 → 降级本地存储
+          用户以为文件在云端有备份，实际只在本机 —— 描述与事实相反，
+          清理本地缓存后才发现文件没了。这类错位比「功能少一个」严重得多。
+
+          因此这里**主动降级为严格匹配**：宁可显示「仅本地」（保守但真实），
+          也不显示一个不会发生的数据外发承诺。
+         */
+        /*
+          与余额同样的分流逻辑：
+            ① 模板级预览（config == null）：回答「这个平台是否适配了 Files API」，
+               直接用该模板档案。deepseek / anthropic 预览时应显示「云端」。
+            ② 实例级：必须严格匹配，与执行层同口径（宁可显示仅本地）。
+         */
+        ProviderProfile filesProfile;
+        if (config == null) {
+            filesProfile = profile;
+        } else {
+            String template = config.getRequestTemplate();
+            if (template == null || template.isBlank()) {
+                template = config.getCode();
+            }
+            // 精确匹配不到 → 执行层必然降级本地，展示层不能声称支持云端
+            filesProfile = ProviderRegistry.findByTemplate(template);
+        }
+
+        FilesApiProvider provider = (filesProfile == null
+                || filesProfile.getFilesApi() == null
+                || filesProfile.getFilesApi().getProvider() == null)
+                ? FilesApiProvider.NONE : filesProfile.getFilesApi().getProvider();
 
         return switch (provider) {
             case DEEPSEEK -> CapabilityItem.on("文件上传·云端",

@@ -113,11 +113,14 @@ public class TokenUsageParser {
                 // Provider 已被删除 / 未启用：历史数据仍要显示，按单价表沿用旧行为
                 return ProviderProfile.PricingMode.TOKEN;
             }
-            String template = config.getRequestTemplate();
-            if (template == null || template.isBlank()) {
-                template = config.getCode();
-            }
-            ProviderProfile profile = ProviderRegistry.findByTemplate(template);
+            /*
+              用 resolveFor（模板精确 → code 前缀兜底）。旧代码是「template 空才用 code」+ 精确查找，
+              遇到 code=volcengine-custom 这类命名会查不到档案 → 退回 TOKEN
+              → 火山 Coding Plan 又被按 token 估出虚假金额（正是 T4 要根治的那个 bug 的另一条路）。
+             PricingMode 判错会直接产生错误金额，因此这里必须与其他消费方用同一个入口。
+             */
+            ProviderProfile profile = ProviderRegistry.resolveFor(
+                    config.getRequestTemplate(), config.getCode(), config.getBaseUrl());
             if (profile == null) {
                 return ProviderProfile.PricingMode.TOKEN;
             }

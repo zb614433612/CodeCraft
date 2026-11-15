@@ -135,8 +135,14 @@ public class ProviderBalanceService {
           ⚠️ 判定顺序与 host 兜底规则由 balanceCandidateFor 完整保留旧行为，包括
           「template=deepseek 但 baseUrl 指向火山域名 → 走火山余额」这种既成事实，
           迁移时不做任何"顺手优化"，避免同一配置开始查另一个账户。
+
+          额外传入 code：旧逻辑只按 template 精确匹配，而 code 为
+          volcengine-custom 这类「平台名在前缀」的命名会匹配不上 —— 此时能力接口
+          （走 resolveFor 前缀兜底）说「可查询」，这里却说「不支持」，界面与实际就会打架。
+          code 兜底仅在旧逻辑判定为 NONE 时生效，纯增量，不改变任何既有结论。
          */
-        ProviderProfile profile = ProviderRegistry.balanceCandidateFor(template, config.getBaseUrl());
+        ProviderProfile profile = ProviderRegistry.balanceCandidateFor(
+                template, config.getCode(), config.getBaseUrl());
         BalanceProvider provider = (profile == null || profile.getBalance() == null)
                 ? BalanceProvider.NONE
                 : profile.getBalance().getProvider();

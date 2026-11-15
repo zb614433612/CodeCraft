@@ -201,6 +201,47 @@ public class AdapterVisionMatrixTest {
         check("mimo：剔除 detail", "false",
                 String.valueOf(detailPresentAfter(
                         new MiMoClient(null, MAPPER, "mimo"), "mimo-v2.5")));
+
+        declaredVsActualStripDetail();
+    }
+
+    /**
+     * 交叉校验：档案里 {@code VisionSpec.stripImageDetail = true} 的平台，
+     * 测试必须真的验证过对应适配器会剔除 detail。
+     *
+     * <h3>守的是什么</h3>
+     * <p>
+     * {@code stripImageDetail} 字段是<b>描述性声明</b>（不驱动运行时），真正的剔除写在各适配器里。
+     * 于是「档案说剔除、适配器没剔」会成为只在下游暴露的坑（发图 400 未知字段）。
+     * 本断言把两者绑在一起：新增平台并声明 {@code stripImageDetail=true} 后，
+     * 如果没在上面补对应的行为验证，这里会失败并提示补哪一行。
+     * </p>
+     * <p>
+     * <b>为什么这很重要</b>：这正是「方便新增适配器」的实际保障 ——
+     * 新增适配器的人不需要记住所有约束，只要让测试全绿就说明登记完整。
+     * </p>
+     */
+    private static void declaredVsActualStripDetail() {
+        // 上面 detailStrippedAdapters() 已实际验证会剔除 detail 的适配器（按档案主名登记）
+        java.util.Set<String> verified = java.util.Set.of("qwen", "minimax", "mimo");
+
+        java.util.Set<String> declared = new java.util.LinkedHashSet<>();
+        for (com.example.agentdeepseek.service.llm.profile.ProviderProfile profile
+                : com.example.agentdeepseek.service.llm.profile.ProviderRegistry.all()) {
+            com.example.agentdeepseek.service.llm.profile.ProviderProfile.VisionSpec vision = profile.getVision();
+            if (vision != null && vision.isStripImageDetail()) {
+                declared.add(profile.getTemplate());
+            }
+        }
+
+        check("档案声明 stripImageDetail=true 的平台 ⊆ 已实际验证剔除 detail 的适配器"
+                        + "（声明=" + declared + "，已验证=" + verified + "）",
+                "true", String.valueOf(verified.containsAll(declared)));
+
+        // 反向：验证过的适配器应在档案里登记（避免「剔了但档案没记」，查表会误判）
+        check("已实际验证剔除 detail 的适配器 ⊆ 档案声明"
+                        + "（已验证=" + verified + "，声明=" + declared + "）",
+                "true", String.valueOf(declared.containsAll(verified)));
     }
 
     /** 构建请求体后，检查第一个 image_url 块是否还带 detail；同时确认 url 未被破坏 */

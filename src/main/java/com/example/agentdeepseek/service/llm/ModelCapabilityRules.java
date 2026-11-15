@@ -3,6 +3,8 @@ package com.example.agentdeepseek.service.llm;
 import com.example.agentdeepseek.config.ModelCapabilityConfig;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -94,9 +96,22 @@ public final class ModelCapabilityRules {
         if (config.getReasoningMaxOutputTokens() > 0) {
             reasoningMaxOutputTokens = config.getReasoningMaxOutputTokens();
         }
-        // 视觉能力规则（null / 空表时保留内置默认，避免误把"未配置"当成"全部禁止"）
+        /*
+          视觉能力规则（null / 空表时保留内置默认，避免误把"未配置"当成"全部禁止"）。
+
+          ⚠️ 审查修复：不能用 Map.copyOf —— 它返回的是无序不可变 Map，遍历顺序未定义。
+          而 findVisionRule 做前缀匹配时依赖 entrySet 的遍历顺序（注释见
+          ModelCapabilityConfig#defaultVisionRules「顺序必须保持」），
+          一旦顺序被打乱，同一个 code 可能命中不同平台的规则。
+
+          当前 key 集合（deepseek / volcengine,ark,doubao / mimo,xiaomi-mimo /
+          minimax,… / qwen,…）里没有互相为前缀的名字，所以尚未触发；
+          但只要将来新增一个「是现有平台名前缀」的模板（例如引入 mini），
+          就会变成随机命中 —— 这类 bug 复现不稳定、极难排查。
+          改用 LinkedHashMap 保持 yml 里的书写顺序。
+         */
         if (config.getVisionRules() != null && !config.getVisionRules().isEmpty()) {
-            visionRules = Map.copyOf(config.getVisionRules());
+            visionRules = Collections.unmodifiableMap(new LinkedHashMap<>(config.getVisionRules()));
         }
         defaultAllowVision = config.isDefaultAllowVision();
 

@@ -205,8 +205,15 @@ public class VolcengineSearchApiClient {
             ① 模板命中火山系（volcengine / ark / doubao 别名）→ 档案的 search 声明为 VOLCENGINE；
             ② 模板是自定义名、但 baseUrl 域名指向火山 → 用档案的 hostDetection 兜底命中。
           两种情况任一成立即视为火山 Provider，与旧实现的 OR 语义完全相同。
+
+          ⚠️ 审查补漏：① 改用 resolveFor（模板精确 → 前缀 → code 兜底）。
+          旧写法 findByTemplate 只做精确匹配，用户把 code/template 起成
+          volcengine-custom 时判断失败，会静默降级为「不启用火山联网搜索」——
+          明明配了 searchApiKey 却用不了，日志还只有 debug 级别，很难发现。
+          搜索 Key 用错平台不涉及数据外发（只是拿不到平台结构化结果），
+          因此这里可以放宽到前缀识别，与对话侧口径保持一致。
          */
-        ProviderProfile profile = ProviderRegistry.findByTemplate(templateOf(config));
+        ProviderProfile profile = ProviderRegistry.resolveFor(config.getRequestTemplate(), config.getCode());
         if (profile != null && profile.getSearch() != null
                 && profile.getSearch().getProvider() == SearchProvider.VOLCENGINE) {
             return true;
@@ -217,7 +224,7 @@ public class VolcengineSearchApiClient {
                 && volcengine.getHostDetection().matchesHost(host);
     }
 
-    /** 取请求模板标识（为空时用 provider code 兜底，与 LLMClientManager 的选型逻辑保持一致） */
+    /** 取请求模板标识（仅用于日志展示；身份判定已统一走 resolveFor，不再各自拼兜底） */
     private static String templateOf(ProviderConfig config) {
         if (config == null) {
             return null;

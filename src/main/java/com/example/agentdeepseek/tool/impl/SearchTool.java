@@ -55,8 +55,21 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p><b>新增 Provider 若也有官方搜索 API，必须在本类搜索链路里补一段 if 分支</b>
  * （判据用 {@code xxxSearchApi.isAvailable()}，依赖凭证从 Provider 的 {@code extraConfig} 读取），
  * 否则新 Provider 的联网会静默降级成通用抓取。完整适配清单见
- * {@code LLMClient} 类头的 B7 项；前端展示判据在 {@code provider-capability.ts}
- * 的 {@code deriveCapabilities().search}。</p>
+ * {@code LLMClient} 类头的 B7 项。</p>
+ *
+ * <p><b>配套还要改两处</b>（否则「执行能搜、界面说不能搜」）：</p>
+ * <ol>
+ *   <li>{@code ProviderRegistry} 档案的 {@code search} 字段声明 {@code SearchProvider} 新值；</li>
+ *   <li>{@code ProviderCapabilityService.buildSearch} 补对应 {@code case} ——
+ *       该方法末尾有 {@code throw} 护栏，漏补会直接抛异常（而不是静默显示「暂未接入判断」）。</li>
+ * </ol>
+ * <p>⚠️ 本类<b>刻意保留 if 优先级链</b>而非改成查表分发：搜索语义是「按优先级逐个尝试、
+ * 失败降级到下一个」，与「查表选一个实现」不同；且火山客户端内部有「未携带 providerCode 时
+ * 用环境变量/唯一火山 Provider 兜底」的能力，改成查表会丢失该兜底（详见 T8 决策记录）。</p>
+ * <p>
+ * 前端不在此关注范围内：{@code deriveCapabilities().search} 已改为「后端能力接口优先」，
+ * 新平台只要档案与 {@code buildSearch} 补齐，界面自动正确（仅后端不可达时走本地兜底规则）。
+ * </p>
  */
 @Slf4j
 @Component

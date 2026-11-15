@@ -43,18 +43,6 @@ export type CapabilityState = 'on' | 'warn' | 'off'
  */
 export type CapabilityField = 'vision' | 'search' | 'balance' | 'filesApi'
 
-/**
- * 后端能力缓存：<b>同一个档案用两个键索引</b>。
- *
- * <p>为什么同时按 code 与 template 建索引：调用点有时只有 template（新建预览），
- * 有时只有 code（列表行的 Provider 实例）。两个键都存一份，
- * 任何一侧命中都能拿到结论，避免调用方各自写「先用 code 还是先用 template」的分支。</p>
- */
-const capabilityCache = new Map<string, RemoteCapability>()
-
-/** 缓存是否已预热（未预热时 deriveCapabilities 会静默走本地兜底，不报错） */
-let cachePrimed = false
-
 export interface ProviderCapabilities {
   /** 图片识别（多模态图片输入）：模型级三态 */
   vision: CapabilityState
@@ -84,6 +72,12 @@ const VISION_TEMPLATES = [
 
 /** 火山系模板（联网搜索、余额查询都按火山方舟的凭证规则走） */
 export const VOLCENGINE_TEMPLATES = ['volcengine', 'ark', 'doubao']
+
+/** 通义千问系模板（百炼 DashScope / QwenCloud；联网搜索走 enableSearch，余额走阿里云 AK/SK） */
+export const QWEN_TEMPLATES = ['qwen', 'dashscope', 'tongyi']
+
+/** MiniMax 系模板（含区域别名；联网搜索与额度都走 codingPlanKey） */
+export const MINIMAX_TEMPLATES = ['minimax', 'minimax-cn', 'minimax-intl', 'minimax-global']
 
 /** DeepSeek 支持图像的模型关键字（flash / vision / vl 系列，对齐后端判定） */
 const DEEPSEEK_VISION_MODEL = /flash|vision|-vl/
@@ -121,10 +115,19 @@ export function isDeepseekOfficialHost(baseUrl?: string | null): boolean {
  */
 function visionStateOf(key: string, model: string): CapabilityState | null {
   if (!key) return null
-  if (key === 'deepseek') {
+  /*
+    ⚠️ 审查修复：判定改用「精确或前缀」而不是精确 includes。
+
+    后端视觉规则是按前缀匹配的（ModelCapabilityRules.findVisionRule 用
+    code.startsWith(alias)），而这里原先全是精确比较：
+      · volcengine-custom / ark-prod 会漏掉火山规则 → 落到「通用兼容类」→ 返回 on
+      · 于是 deepseek-v4-pro（纯文本）被显示成可发图 —— 正是本项目反复踩的坑
+    前端只在「后端不可达」时才会走到这里，但那时用户更需要准确结论。
+  */
+  if (matchesAnyPrefix(key, ['deepseek'])) {
     return DEEPSEEK_VISION_MODEL.test(model) ? 'on' : 'warn'
   }
-  if (VOLCENGINE_TEMPLATES.includes(key)) {
+  if (matchesAnyPrefix(key, VOLCENGINE_TEMPLATES)) {
     // 方舟上的 deepseek 系已分化（实测 2026-11，与后端 ModelCapabilityConfig 逐条对齐）：
     //   deepseek-v4.1-flash / v4.1-flash-economy → 支持图像（图片真实计入 prompt_tokens）
     //   deepseek-v4-pro / v4-flash               → 纯文本（图片被静默丢弃，模型自称「没有图片」）
@@ -133,16 +136,16 @@ function visionStateOf(key: string, model: string): CapabilityState | null {
     if (model.startsWith('deepseek')) return /v4\.1/.test(model) ? 'on' : 'warn'
     return 'on'
   }
-  if (key === 'mimo' || key === 'xiaomi-mimo') {
+  if (matchesAnyPrefix(key, ['mimo', 'xiaomi-mimo'])) {
     // v2.5 系列与 Omni（全模态）支持图像，更早纯文本模型不支持
     return /v2\.5|vision|-vl|omni/.test(model) ? 'on' : 'warn'
   }
-  if (key === 'minimax' || key.startsWith('minimax')) {
+  if (matchesAnyPrefix(key, MINIMAX_TEMPLATES)) {
     // M2 / M2.1 / M2.5 / M2.7 为纯文本；M3 与 VL / abab-vl 支持图像
     if (/-m2/.test(model) || model.startsWith('m2')) return 'warn'
     return /m3|vision|-vl|abab/.test(model) ? 'on' : 'warn'
   }
-  if (key === 'qwen' || key === 'dashscope' || key === 'tongyi') {
+  if (matchesAnyPrefix(key, QWEN_TEMPLATES)) {
     // Qwen-VL / Qwen3-VL / Omni 支持图像；Plus 系列自 qwen3.6-plus 起官方声明支持图片理解
     // （百炼文档：「推荐模型：qwen3.7-plus（支持图片理解）、qwen3.6-plus（支持图片理解）」）。
     // qwen-max 各代差异较大，不确定时不放行，避免「界面说能发图、实际图片被丢弃」。
@@ -220,10 +223,43 @@ export function hasExtraValue(extra: Record<string, unknown>, keys: string[]): b
 // ==================== 后端能力缓存（T10 核心） ====================
 
 /**
- * 把后端能力档案写入缓存（按 code 与 template 双键索引）。
+ * 实例级档案（<b>带凭证判定</b>）：key = providerCode。
  *
- * <p>调用方通常是 App.vue 在加载 Provider 列表后 fire-and-forget 调用，
- * 因此这里必须<b>永不抛异常</b>：后端不可达时静默保留本地兜底，界面照常可用。</p>
+ * <p>来自 {@code GET /api/llm-providers/capabilities}，state 已结合该实例的真实凭证算出，
+ * 因此可能出现「火山 search=warn（缺 searchApiKey）」这类因人而异的结论。</p>
+ */
+const providerCapabilityCache = new Map<string, RemoteCapability>()
+
+/**
+ * 模板级档案（<b>不带凭证判定</b>）：key = template。
+ *
+ * <p>来自 {@code GET /api/llm-providers/templates}，state 表达的是「平台具备什么」，
+ * 缺凭证时统一记 warn（含义是「配好就能用」），不含任何实例配置信息。</p>
+ */
+const templateCapabilityCache = new Map<string, RemoteCapability>()
+
+/** 缓存是否已预热（未预热时 deriveCapabilities 会静默走本地兜底，不报错） */
+let cachePrimed = false
+
+/**
+ * 把后端能力档案写入缓存。
+ *
+ * <h3>⚠️ 为什么必须分「实例级」与「模板级」两层（修复一个真实 bug）</h3>
+ * <p>
+ * 最初把两者塞进同一个 Map，实例档案同时按 {@code code} 与 {@code template} 建索引。
+ * 后果是：<b>同一模板下有多个 Provider 时，template 键会被最后写入的那个实例覆盖</b>，
+ * 而「新建 Provider」场景恰恰只拿得到 template（code 还没填）——
+ * 于是预览区显示的是<b>别人那台实例的凭证状态</b>，例如：
+ * </p>
+ * <ul>
+ *   <li>A 已配好火山的 AK/SK，B 没配；</li>
+ *   <li>新建时选「火山方舟」模板 → 按 template 命中 B 的档案 → 显示「缺 secretKey」；</li>
+ *   <li>正确答案应是「平台支持余额查询，配好 AK/SK 即可用」。</li>
+ * </ul>
+ * <p>
+ * 分两层后职责互不越界：<b>实例级只按 code 索引，模板级只按 template 索引</b>，
+ * 按 template 查永远拿不到实例数据，串台在结构上不可能发生。
+ * </p>
  */
 export function primeCapabilities(
   data: Record<string, RemoteCapability> | RemoteCapability[] | null | undefined
@@ -234,11 +270,16 @@ export function primeCapabilities(
     : Object.values(data)
   for (const item of items) {
     if (!item) continue
-    if (item.providerCode) {
-      capabilityCache.set(String(item.providerCode).trim().toLowerCase(), item)
+    const code = item.providerCode ? String(item.providerCode).trim().toLowerCase() : ''
+    if (code) {
+      // 有 providerCode = 实例级档案，只按 code 索引
+      providerCapabilityCache.set(code, item)
+      continue
     }
-    if (item.template) {
-      capabilityCache.set(String(item.template).trim().toLowerCase(), item)
+    const template = item.template ? String(item.template).trim().toLowerCase() : ''
+    if (template) {
+      // 无 providerCode = 模板级档案，只按 template 索引
+      templateCapabilityCache.set(template, item)
     }
   }
   if (items.length > 0) {
@@ -247,20 +288,25 @@ export function primeCapabilities(
 }
 
 /**
- * 拉取并预热能力缓存（App 启动 / Provider 列表加载后调用）。
+ * 拉取并预热能力缓存（App 加载 Provider 列表后调用）。
  *
- * <p>失败不影响任何功能：缓存为空时 {@link deriveCapabilities} 自动走本地兜底规则。</p>
+ * <h3>⚠️ 为什么两个请求分别 try（修复一个真实 bug）</h3>
+ * <p>
+ * 曾用 {@code Promise.all} 一次性 await：只要其中一个失败（例如旧后端没有
+ * {@code /templates} 接口），另一个<b>成功的数据也进不了缓存</b> —— 整体退化为本地兜底，
+ * 用户看到的全是旧结论。两个接口互相独立，必须各自容错。
+ * </p>
  */
 export async function refreshCapabilities(): Promise<void> {
   try {
-    const [providers, templates] = await Promise.all([
-      getAllProviderCapabilities(),
-      getTemplateCapabilities()
-    ])
-    primeCapabilities(templates)
-    primeCapabilities(providers)
+    primeCapabilities(await getTemplateCapabilities())
   } catch {
-    // 静默：离线 / 旧后端 / 接口 404 都退化为本地兜底，不打扰用户
+    // 旧后端可能没有 /templates：静默，稍后按需再拉
+  }
+  try {
+    primeCapabilities(await getAllProviderCapabilities())
+  } catch {
+    // 离线 / 未登录 / 接口异常：静默退化为本地兜底
   }
 }
 
@@ -272,15 +318,26 @@ export function isCapabilityCachePrimed(): boolean {
 /**
  * 按 code 或 template 取后端能力档案（未命中返回 null）。
  *
- * <p>查找顺序：精确 code → 精确 template → 前缀匹配（兼容 {@code volcengine-custom} 这类自定义 code，
+ * <p>查找顺序：<b>实例级精确 code</b> → <b>模板级精确 template</b> →
+ * 实例级前缀 → 模板级前缀（兼容 {@code volcengine-custom} 这类自定义 code，
  * 与后端 {@code ProviderRegistry.findByCode} 的前缀语义一致）。</p>
  */
 export function capabilityDetailOf(key?: string | null): RemoteCapability | null {
   const text = String(key || '').trim().toLowerCase()
   if (!text) return null
-  const exact = capabilityCache.get(text)
-  if (exact) return exact
-  for (const [cacheKey, item] of capabilityCache) {
+  // ① 实例级精确（带凭证判定，最具体）
+  const instance = providerCapabilityCache.get(text)
+  if (instance) return instance
+  // ② 模板级精确
+  const template = templateCapabilityCache.get(text)
+  if (template) return template
+  // ③ 前缀匹配：实例级优先（具体优先于笼统）
+  for (const [cacheKey, item] of providerCapabilityCache) {
+    if (cacheKey.length > 0 && text.startsWith(cacheKey)) {
+      return item
+    }
+  }
+  for (const [cacheKey, item] of templateCapabilityCache) {
     if (cacheKey.length > 0 && text.startsWith(cacheKey)) {
       return item
     }
@@ -373,41 +430,87 @@ export function deriveCapabilities(
     }
   }
 
-  // ② 后端不可达时的本地兜底规则（与后端实现逐条对齐）
-  const tpl = String(template || code || '').toLowerCase()
+  /*
+    ② 后端不可达时的本地兜底规则。
+
+    ⚠️ 审查修复：这段代码自称「与后端实现逐条对齐」，实际有 4 处偏差，
+    会把用户引向错误结论（虽然只在后端不可达时生效，但那时用户更需要准确信息）。
+    逐条对齐后，降级态与在线态给出的判断才一致。
+
+    ⚠️ 兜底规则的存在意义仅限于「后端没响应」，不要在这里扩展新逻辑 ——
+    真正的规则真相源是后端 ProviderRegistry + ProviderCapabilityService。
+  */
+  const tpl = String(template || code || '').trim().toLowerCase()
   const codeKey = String(code || '').trim().toLowerCase()
   const extra = parseExtraConfig(extraConfig)
 
   const vision = detectVision(template, code, model)
 
   let search: CapabilityState = 'off'
-  if (VOLCENGINE_TEMPLATES.includes(tpl)) {
-    // 联网搜索控制在独立的搜索控制台，Key 与方舟 Ark Key 不通用
-    search = hasExtraValue(extra, ['searchApiKey']) ? 'on' : 'off'
-  } else if (tpl === 'qwen' || tpl === 'dashscope' || tpl === 'tongyi') {
-    search = extra.enableSearch === true || hasExtraValue(extra, ['searchApiKey']) ? 'on' : 'off'
-  } else if (tpl === 'minimax' || tpl.startsWith('minimax')) {
-    search = hasExtraValue(extra, ['codingPlanKey', 'coding_plan_key', 'searchApiKey']) ? 'on' : 'off'
-  } else if (codeKey === 'deepseek' || tpl === 'deepseek') {
+  if (matchesAnyPrefix(tpl, VOLCENGINE_TEMPLATES)) {
+    /*
+      联网搜索控制在独立的搜索控制台，Key 与方舟 Ark Key 不通用。
+      ⚠️ 修正：缺 Key 应为 warn 而不是 off。
+      off 的语义是「平台没有这个接口」，而火山明明有接口、只是没配 Key；
+      显示 off 会让用户以为「火山不能联网搜索」从而放弃配置。
+    */
+    search = hasExtraValue(extra, ['searchApiKey']) ? 'on' : 'warn'
+  } else if (matchesAnyPrefix(tpl, QWEN_TEMPLATES)) {
+    search = extra.enableSearch === true || hasExtraValue(extra, ['searchApiKey']) ? 'on' : 'warn'
+  } else if (matchesAnyPrefix(tpl, MINIMAX_TEMPLATES)) {
+    search = hasExtraValue(extra, ['codingPlanKey', 'coding_plan_key', 'searchApiKey']) ? 'on' : 'warn'
+  } else if (matchesAnyPrefix(tpl, ['deepseek']) || matchesAnyPrefix(codeKey, ['deepseek'])) {
     // DeepSeek 官方 /v1/tools/search 免额外凭证，但要求 Base URL 主机是 api.deepseek.com。
     // 走第三方中转时官方接口拿不到，只剩通用抓取 —— 这正是原来把 deepseek 一律判成「不支持」的漏判点。
     search = isDeepseekOfficialHost(baseUrl) ? 'on' : 'warn'
   }
 
   let balance: CapabilityState = 'off'
-  if (tpl === 'deepseek' || code === 'deepseek') {
+  if (matchesAnyPrefix(tpl, ['deepseek']) || matchesAnyPrefix(codeKey, ['deepseek'])) {
     // DeepSeek 余额接口只需 API Key，无需额外凭证
     balance = 'on'
-  } else if (VOLCENGINE_TEMPLATES.includes(tpl) || tpl === 'qwen' || tpl === 'dashscope') {
-    // 火山费用中心 / 阿里云账户余额：需要账号级 AK + SK（与模型 API Key 是两套凭证）
-    balance = hasExtraValue(extra, ['accessKey', 'secretKey']) ? 'on' : 'warn'
-  } else if (tpl === 'minimax' || tpl.startsWith('minimax')) {
+  } else if (matchesAnyPrefix(tpl, VOLCENGINE_TEMPLATES) || matchesAnyPrefix(tpl, QWEN_TEMPLATES)) {
+    /*
+      火山费用中心 / 阿里云账户余额：需要账号级 AK + SK（与模型 API Key 是两套凭证）。
+
+      ⚠️ 修正：必须「成对」判定，不能用 hasExtraValue（任一存在即真）。
+      只配了 accessKey 时后端查询必然失败，而前端显示 on（可查询）——
+      用户点下去只会看到报错，且不知道该补 secretKey。后端 ProviderCapabilityService
+      已改为成对校验并精确指出 missingKeys，这里对齐。
+    */
+    balance = hasPairedCredentials(extra, 'accessKey', 'secretKey') ? 'on' : 'warn'
+  } else if (matchesAnyPrefix(tpl, MINIMAX_TEMPLATES)) {
     balance = hasExtraValue(extra, ['codingPlanKey', 'coding_plan_key']) ? 'on' : 'warn'
-  } else if (tpl === 'mimo' || code === 'mimo') {
+  } else if (matchesAnyPrefix(tpl, ['mimo', 'xiaomi-mimo']) || matchesAnyPrefix(codeKey, ['mimo', 'xiaomi-mimo'])) {
     balance = hasExtraValue(extra, ['mimoCookie']) ? 'on' : 'warn'
   }
 
   return { vision, search, balance }
+}
+
+/** 文本是否命中文案列表中的任一项（精确或前缀；与后端 ProviderRegistry 的前缀语义一致） */
+function matchesAnyPrefix(text: string, prefixes: readonly string[]): boolean {
+  if (!text) return false
+  return prefixes.some(prefix => text === prefix || text.startsWith(prefix))
+}
+
+/**
+ * 扩展配置里是否「成对提供了两个凭证」（键名大小写不敏感，值非空即视为已提供）。
+ *
+ * <p>对应后端 {@code ProviderCapabilityService} 的成对校验：只配一半时必须判 warn，
+ * 否则界面显示「可查询」而点击必然失败。</p>
+ */
+function hasPairedCredentials(extra: Record<string, unknown>, keyA: string, keyB: string): boolean {
+  const normalized = new Map<string, unknown>()
+  for (const [rawKey, value] of Object.entries(extra)) {
+    normalized.set(String(rawKey).trim().toLowerCase(), value)
+  }
+  const present = (name: string): boolean => {
+    const value = normalized.get(name.toLowerCase())
+    if (typeof value === 'string') return value.trim() !== ''
+    return Boolean(value)
+  }
+  return present(keyA) && present(keyB)
 }
 
 /** 图片识别徽章的悬浮说明（三态各自的含义） */
@@ -437,29 +540,52 @@ export function searchHint(
   state: CapabilityState,
   opts: { template?: string | null; code?: string | null; baseUrl?: string | null } = {}
 ): string {
-  const tpl = String(opts.template || opts.code || '').toLowerCase()
+  const tpl = String(opts.template || opts.code || '').trim().toLowerCase()
   const codeKey = String(opts.code || '').trim().toLowerCase()
   const baseUrl = String(opts.baseUrl || '').trim()
+  const isDeepseek = matchesAnyPrefix(codeKey, ['deepseek']) || matchesAnyPrefix(tpl, ['deepseek'])
+  const isVolcengine = matchesAnyPrefix(tpl, VOLCENGINE_TEMPLATES)
+  const isQwen = matchesAnyPrefix(tpl, QWEN_TEMPLATES)
+  const isMiniMax = matchesAnyPrefix(tpl, MINIMAX_TEMPLATES)
 
   if (state === 'on') {
-    if (codeKey === 'deepseek' || tpl === 'deepseek') {
+    if (isDeepseek) {
       return `Base URL 指向 ${DEEPSEEK_OFFICIAL_HOST}，DeepSeek 官方搜索接口免额外凭证可用`
     }
-    if (VOLCENGINE_TEMPLATES.includes(tpl)) return '火山方舟搜索服务已配置（extraConfig.searchApiKey）'
-    if (tpl === 'qwen' || tpl === 'dashscope' || tpl === 'tongyi') {
-      return '通义千问联网搜索已开启（extraConfig.enableSearch 或 searchApiKey）'
-    }
-    if (tpl === 'minimax' || tpl.startsWith('minimax')) {
-      return 'MiniMax 联网搜索已配置（extraConfig.codingPlanKey）'
-    }
+    if (isVolcengine) return '火山方舟搜索服务已配置（extraConfig.searchApiKey）'
+    if (isQwen) return '通义千问联网搜索已开启（extraConfig.enableSearch 或 searchApiKey）'
+    if (isMiniMax) return 'MiniMax 联网搜索已配置（extraConfig.codingPlanKey）'
     return '平台官方联网搜索接口已就绪'
   }
 
+  /*
+    ⚠️ 审查修复：warn 分支必须按平台给文案。
+
+    旧实现无条件返回「当前 Base URL 不是 api.deepseek.com，DeepSeek 官方搜索接口不可用」——
+    那是「只有 DeepSeek 会判 warn」时代的假设。现在火山缺 searchApiKey、千问未开 enableSearch、
+    MiniMax 缺 codingPlanKey 也都是 warn，火山用户会莫名看到一段 DeepSeek 的说明，
+    完全对不上自己的配置。每类平台各说各的缺失项与解决办法。
+  */
   if (state === 'warn') {
-    return (
-      `当前 Base URL${baseUrl ? '（' + baseUrl + '）' : ''}不是 ${DEEPSEEK_OFFICIAL_HOST}，` +
-      'DeepSeek 官方搜索接口不可用，联网只能靠通用抓取（Bing / 百度 / Jina / 本地）'
-    )
+    if (isVolcengine) {
+      return '未配置火山方舟联网搜索 Key（extraConfig.searchApiKey，需在联网搜索控制台单独申请，'
+        + '与方舟 Ark API Key 不通用）。未配置时联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用'
+    }
+    if (isQwen) {
+      return '通义千问联网搜索未开启，在扩展配置设置 {"enableSearch":true} 即可用；'
+        + '未开启时联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用'
+    }
+    if (isMiniMax) {
+      return '未配置 MiniMax Coding Plan Key（extraConfig.codingPlanKey）；'
+        + '未配置时联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用'
+    }
+    if (isDeepseek) {
+      return (
+        `当前 Base URL${baseUrl ? '（' + baseUrl + '）' : ''}不是 ${DEEPSEEK_OFFICIAL_HOST}，` +
+        'DeepSeek 官方搜索接口不可用，联网只能靠通用抓取（Bing / 百度 / Jina / 本地）'
+      )
+    }
+    return '官方联网搜索接口暂不可用（多为缺凭证或域名不符），联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用'
   }
 
   return '该平台未配置官方搜索接口，联网靠通用抓取（Bing / 百度 / Jina / 本地），仍可正常使用'

@@ -192,6 +192,39 @@ public final class ProviderRegistry {
      * @return 余额档案；无任何命中返回 {@code null}（= 不支持余额查询）
      */
     public static ProviderProfile balanceCandidateFor(String template, String baseUrl) {
+        return balanceCandidateFor(template, null, baseUrl);
+    }
+
+    /**
+     * 带 {@code code} 兜底的余额档案解析 —— <b>修复「界面说能查、点下去说不支持」的错位</b>。
+     *
+     * <h3>为什么需要 code 兜底</h3>
+     * <p>
+     * 旧签名只按 {@code template} 精确匹配 + {@code baseUrl} host 兜底。当用户把 code 起成
+     * {@code volcengine-custom}（后端又会把 {@code requestTemplate} 自动填成同一个名字）时：
+     * </p>
+     * <ul>
+     *   <li>能力接口用 {@link #resolveFor} 判定 → 前缀命中火山 → 显示「可查询，缺 AK/SK」；</li>
+     *   <li>{@code queryBalance} 用旧逻辑 → template 精确不中、baseUrl 若是中转域名也不中
+     *       → 抛「不支持余额查询」。</li>
+     * </ul>
+     * <p>
+     * 用户看到「可查询」点下去却报不支持 —— 正是本项目反复强调要避免的「界面与实际不一致」。
+     * </p>
+     *
+     * <h3>⚠️ 判定顺序与既有结论不变</h3>
+     * <p>
+     * 前两段<b>完全照搬旧逻辑</b>（顺序短路 + host 兜底），{@code code} 兜底只在
+     * 「旧逻辑判定为 NONE」时才生效 —— <b>纯增量</b>，不会让任何原本有结论的配置改走另一个账户。
+     * 这也是 {@code BalanceDispatchEquivalenceTest} 仍能全绿的原因（它只传 template+baseUrl，
+     * 不触发新分支）。
+     * </p>
+     *
+     * @param template 请求模板
+     * @param code     Provider 编码（可为 null：保持旧行为）
+     * @param baseUrl  Base URL
+     */
+    public static ProviderProfile balanceCandidateFor(String template, String code, String baseUrl) {
         String host = hostOf(baseUrl);
         for (String name : BALANCE_DETECTION_ORDER) {
             ProviderProfile profile = BY_NAME.get(name);
@@ -200,6 +233,14 @@ public final class ProviderRegistry {
             }
             if (profile.matches(template) || (host != null && profile.getHostDetection().matchesHost(host))) {
                 return profile;
+            }
+        }
+        // 旧逻辑无结论 → 用 code 前缀兜底（与对话侧 resolveFor 的识别口径保持一致）
+        if (code != null && !code.isBlank()) {
+            ProviderProfile byCode = findByCode(code);
+            if (byCode != null && byCode.getBalance() != null
+                    && byCode.getBalance().getProvider() != BalanceProvider.NONE) {
+                return byCode;
             }
         }
         return null;
@@ -216,6 +257,30 @@ public final class ProviderRegistry {
             return null;
         }
     }
+
+    /*
+      ==================== ⚠️ 模板级规格查询（仅测试/自检用，生产代码必须用 resolveFor） ====================
+
+      下面这组便捷方法（pricingModeFor / filesApiFor / searchFor / balanceFor / authFor /
+      adapterTypeFor / usageProtocolFor）语义都是「按模板<b>精确匹配</b>后取某一份规格」，
+      与 findByTemplate 完全一致。它们共同的缺陷是<b>不做前缀、不用 code、不看 baseUrl</b>：
+
+        pricingModeFor("volcengine-custom", "/api/coding/v3") → TOKEN   （实际应为 QUOTA）
+        authFor("mimo-prod")                                  → Authorization + Bearer（实际应为 api-key）
+        filesApiFor("deepseek-custom")                        → 未适配     （实际应为 DeepSeek Files API）
+
+      审查阶段已把<b>全部生产消费方</b>改为 {@link #resolveFor}（模板 → 前缀 → code → baseUrl 兜底），
+      因此本组方法目前只有测试与自检在用。保留的理由：
+        ① 测试需要「给定名字直接取规格」的最短表达式，改用 resolveFor 反而啰嗦；
+        ② 它们等价于「精确查表」这一基础能力，删掉会让测试退化成手写一堆期望常量。
+
+      ⚠️ 两条铁律：
+        1) <b>新增生产代码不要再调用本组方法</b>，一律用 resolveFor 拿到档案后取字段 ——
+           否则「同一个平台，填在 template 还是 code 字段」又会得出两种结论，
+           这正是本轮修掉的那类 bug（改一处、漏一处）。
+        2) <b>不要给本组方法补兜底逻辑</b>。让它们保持「精确匹配」这一单纯语义，
+           兜底只存在于 resolveFor 一处；两套 API 各自进化比合并成一套更危险。
+     */
 
     /** 取档案的计费模式（按 baseUrl 自动区分同一 Provider 的两种计费形态）；未注册返回 {@link PricingMode#TOKEN} */
     public static PricingMode pricingModeFor(String template, String baseUrl) {
@@ -239,6 +304,121 @@ public final class ProviderRegistry {
     public static BalanceSpec balanceFor(String template) {
         ProviderProfile profile = findByTemplate(template);
         return profile == null ? new BalanceSpec() : profile.getBalance();
+    }
+
+    /**
+     * 消费方的<b>统一入口</b>：按「{@code requestTemplate} 精确优先、{@code code} 前缀兜底」解析档案。
+     *
+     * <h3>为什么需要它（修掉一处统一性遗漏）</h3>
+     * <p>
+     * 改动前 6 个消费方各自写同一段逻辑：
+     * </p>
+     * <pre>{@code
+     * if (template == null || template.isBlank()) template = config.getCode();
+     * ProviderProfile p = ProviderRegistry.findByTemplate(template);   // ← 只做精确匹配
+     * }</pre>
+     * <p>
+     * 问题在于 {@code ProviderConfig} 的 {@code requestTemplate} 后端会自动填成 {@code code}
+     * （见 {@code LLMProviderController#create}）。于是用户把 code 起成
+     * {@code volcengine-custom} / {@code deepseek-official} 这类「平台名在前缀」的名字时，
+     * {@code findByTemplate("volcengine-custom")} 精确查不到 → 档案为 {@code null}
+     * → {@code createClient} 回退成 {@code DeepSeekClient}、能力全部判为「未适配」。
+     * </p>
+     * <p>
+     * 本方法补上「code 前缀匹配」这一层，语义与 {@link #findByCode} 一致 ——
+     * <b>同一个名字，不该因为填在 template 还是 code 字段而得到不同结论</b>。
+     * </p>
+     *
+     * <h3>⚠️ 有意见不用于 Files API</h3>
+     * <p>
+     * {@code FilesApiClientManager} <b>刻意不用本方法</b>，仍走精确 {@code findByTemplate}。
+     * 原因：Files API 决定「用户文件是否上传到第三方云端」，属于数据外发动作，
+     * 口径必须比对话更严 —— <b>宁可不识别（降级本地存储）也不能靠前缀猜平台</b>。
+     * 这与 v3.1.4 定下的「用户没选就不许替他选」一致。
+     * </p>
+     *
+     * @param template 请求模板（{@code requestTemplate}，可为空）
+     * @param code     Provider 编码（兜底用，支持前缀匹配）
+     * @return 档案；两者都未命中返回 {@code null}
+     */
+    public static ProviderProfile resolveFor(String template, String code) {
+        // ① template 精确匹配（模板是协议真相源，最高优先级）
+        ProviderProfile byTemplate = findByTemplate(template);
+        if (byTemplate != null) {
+            return byTemplate;
+        }
+        /*
+          ② template 走「前缀语义」再匹配一次。
+
+          这一步是审查时补上的 —— 最初的实现只有 ①③，声称「code 前缀兜底」，
+          但当用户把 template 手动填成 volcengine-custom、code 填成无关名字（如 ark-prod 之外的东西）时，
+          ① 精确落空、③ 又依赖 code，结果仍返回 null。
+          而 template 与 code 共享同一套名字空间（主名 + 别名），
+          所以对 template 复用 findByCode 的前缀语义才是完整的。
+         */
+        ProviderProfile looseTemplate = findByCode(template);
+        if (looseTemplate != null) {
+            return looseTemplate;
+        }
+        // ③ code 兜底（template 为空或确实无法识别时）
+        return findByCode(code);
+    }
+
+    /**
+     * 带 {@code baseUrl} 兜底的档案解析 —— 覆盖「名字完全起不出平台，但域名指向平台」的配置。
+     *
+     * <h3>为什么需要 host 兜底（修掉一类静默失败）</h3>
+     * <p>
+     * 名字空间识别（{@link #resolveFor(String, String)}）只能覆盖「平台名在<b>前缀</b>」的
+     * 自定义命名。用户把 code / template 起成 {@code my-gateway} / {@code 我的中转}
+     * 这类完全不含平台名的名字时，三层名字匹配全部落空 → 返回 {@code null}：
+     * </p>
+     * <ul>
+     *   <li>{@code createClient} → 回退 {@code DeepSeekClient}（对话可能能跑，但协议细节错）；</li>
+     *   <li>{@code TokenUsageParser} → 退回 {@code TOKEN} → <b>套餐制被按 token 估出虚假金额</b>；</li>
+     *   <li>视觉判定 → 拿不到模型级规则 → 落到 {@code defaultAllowVision=true} → <b>纯文本模型发图被静默丢弃</b>。</li>
+     * </ul>
+     * <p>
+     * 而这些配置的 {@code baseUrl} 往往明明白白写着 {@code ark.cn-beijing.volces.com} ——
+     * 域名比用户随手起的名字可靠得多。
+     * </p>
+     *
+     * <h3>安全边界</h3>
+     * <ol>
+     *   <li><b>只在名字完全识别不出时才用</b>：前两层命中就返回，绝不覆盖用户显式选的档案。
+     *       （用户显式写 {@code template=custom} 就一定是 custom，不会被 baseUrl 改写。）</li>
+     *   <li><b>只认平台专属域名</b>：{@code api.deepseek.com} / {@code volces.com} /
+     *       {@code aliyuncs.com} / {@code minimaxi.com} / {@code xiaomimimo.com}，
+     *       它们不会出现在无关服务里，因此不存在「猜错平台」的风险。</li>
+     *   <li><b>第三方中转域名不会被识别</b>（本来也不该被识别）→ 保持降级行为，与改动前一致。</li>
+     * </ol>
+     *
+     * <h3>⚠️ Files API 依旧不用本方法</h3>
+     * <p>
+     * 数据外发动作的口径必须比对话更严（见 {@link #resolveFor(String, String)} 的说明），
+     * {@code FilesApiClientManager} 仍坚持精确匹配 template。
+     * </p>
+     *
+     * @param template 请求模板（可为空）
+     * @param code     Provider 编码（可为空）
+     * @param baseUrl  Base URL（可为空；仅用于最后兜底）
+     * @return 档案；全部未命中返回 {@code null}
+     */
+    public static ProviderProfile resolveFor(String template, String code, String baseUrl) {
+        ProviderProfile byName = resolveFor(template, code);
+        if (byName != null) {
+            return byName;
+        }
+        String host = hostOf(baseUrl);
+        if (host == null) {
+            return null;
+        }
+        for (ProviderProfile profile : PROFILES) {
+            if (profile.getHostDetection() != null && profile.getHostDetection().matchesHost(host)) {
+                return profile;
+            }
+        }
+        return null;
     }
 
     /** 取认证头规格；未注册返回默认（{@code Authorization} + {@code Bearer }） */

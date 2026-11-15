@@ -5,6 +5,139 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.6] - 2026-11-15
+
+> **Refactor review release**: three systematic review passes over the v3.1.5 Provider capability
+> profile unification, fixing **18** leftover defects. All of them share one trait:
+> **they compile fine, pass tests, and only surface for the user**.
+> Six of them share a single root cause: **the same decision was implemented more than once**.
+> This release **requires a backend restart**; no database changes, no data migration.
+
+### 🔥 Fixed: systematic gap in the resolution entry point (P0, all 8 consumers affected)
+
+- **Symptom**: when a Provider's `code` is named `volcengine-custom` / `deepseek-official`
+  (platform name as prefix), a chain of failures follows: the adapter falls back to
+  `DeepSeekClient` (chat returns 400), the auth header falls back to `Authorization+Bearer`
+  (mimo / anthropic inevitably 401), pricing is classified as `TOKEN` (quota plans get fictitious
+  amounts), and vision loses its model-level rules (images are **silently dropped** on text-only models).
+- **Root cause**: 8 consumers each copy-pasted the same snippet
+  `if (template == null) template = code;` + `findByTemplate(template)` —
+  **all of them doing exact matching only**. The backend auto-fills `requestTemplate` with `code`
+  on creation, so such names can never match.
+- **Fix**: introduced `ProviderRegistry.resolveFor(template, code, baseUrl)` as the
+  **single resolution entry point**, with priority:
+  ① exact template → ② template prefix → ③ code prefix → ④ baseUrl host fallback.
+  All 8 consumers now use it (`LLMClientManager` / `LLMWebClientManager` / `TokenUsageParser` /
+  `ProviderCapabilityService` / `ProviderBalanceService` / two search clients /
+  `DeepSeekServiceImpl`).
+
+### 🔥 Fixed: display layer and execution layer "each computing it their own way" (P0, 3 places)
+
+The UI says "balance is queryable / images are supported / files upload to cloud",
+but clicking says otherwise — both sides look fine, they just compute different things:
+
+| Capability | Display layer used | Execution layer used | Consequence |
+|---|---|---|---|
+| Balance | `profile.getBalance()` (name-first) | `balanceCandidateFor` (platform-order-first) | `template=deepseek` + Volc host: UI says DeepSeek, actually queries the **Volc account** |
+| Vision | raw `config.getRequestTemplate()` | profile canonical name | `code=my-gateway` + Volc host: UI says images OK, request gets **blocked** |
+| Files API | `resolveFor` (with prefix fallback) | `findByTemplate` (strict) | `deepseek-custom`: UI says **upload to cloud**, actually local-only |
+
+- **Fix**: the display layer no longer computes on its own; it calls the execution layer's function.
+  Files API deliberately **stays strict** — it decides whether files leave for a third-party cloud,
+  so the bar must be higher: better to display "local only" (conservative but true)
+  than to promise a data egress that never happens.
+
+### 🔥 Fixed: `default ->` disguising "code not written yet" as a "normal conclusion" (2 places)
+
+- **Symptom**: after adding a `SearchProvider` / `BalanceProvider` enum value, the UI showed
+  "platform official API not yet judged" — no error, nothing that looks like a fault,
+  so nobody investigates.
+- **Fix**: removed `default`, made `case NONE` explicit, and added a trailing
+  `throw IllegalStateException` carrying the exact enum name.
+  A missed case turns from "silent degradation" into "immediate exception".
+- **Alongside**: `FilesApiClientManager` / `LLMClientManager` switches never had `default`,
+  so new enum values cause a **compile error**; `AdapterType` is an enum rather than a class-name
+  string, so typos fail at compile time.
+
+### 🔥 Fixed: frontend capability cache cross-talk + data loss on fallback
+
+- **Cross-talk**: instance-level and template-level profiles shared one `Map`, with instance
+  profiles indexed by both `code` and `template`. With several Providers under the same template,
+  the `template` key was **overwritten by whichever instance was written last** — so creating a new
+  Provider (which only has a template) showed **another instance's credential state**.
+  Now split into two maps: instance-level indexed by `code` only, template-level by `template` only.
+- **Data loss**: `refreshCapabilities` used `Promise.all`, so when an older backend lacked
+  `/templates`, the **successful `/capabilities` payload was discarded too**.
+  Now each request is tried independently.
+
+### 🐛 Other fixes
+
+- **`NullPointerException`**: the log-only branch `"custom".equalsIgnoreCase(template.trim())`
+  in `LLMClientManager` **killed the entire chat pipeline** when `template` was null.
+  Now it inspects the profile instead.
+- **`Map.copyOf` loses insertion order**: `ModelCapabilityRules.configure` stored yml rules via
+  `Map.copyOf`, which returns an unordered map, while `findVisionRule`'s prefix matching
+  **depends on iteration order** (the code even documents "order must be preserved").
+  Not yet triggered because no platform name is a prefix of another; changed to `LinkedHashMap`.
+- **`matches()` case inconsistency**: `allNames()` lowercases, `matches()` did not. Aligned.
+- **4 mismatches in the frontend local fallback** (which claimed to be "aligned line by line"):
+  Volc missing key judged `off` (should be `warn`, otherwise users think search is unsupported),
+  AK/SK used "either present" instead of "both present" (a lone AK showed queryable but always failed),
+  identity checks were all exact matches (`volcengine-custom` missed the Volc rules →
+  `v4-pro` shown as image-capable), and MiniMax ignored `searchApiKey`.
+- **`searchHint` wording bug**: the `warn` branch unconditionally said
+  "Base URL is not api.deepseek.com". Once Volc / Qwen / MiniMax missing-key cases also became
+  `warn`, Volc users saw an unrelated DeepSeek explanation. Now each platform gets its own text.
+- **Frontend `label` / `iconTone` ignored backend values**: the backend already returns
+  `display.label` / `display.iconTone`, but the frontend used a local hardcoded map →
+  new platforms showed the raw English template name with an empty color tone.
+  Now "backend first, local fallback".
+
+### 🛡️ Guards added to make "adding an adapter" easier
+
+- **`stripImageDetail` / `blockFormat` are descriptive declarations**: these profile fields
+  **do not drive runtime behavior** (actual conversion lives in each adapter). They were assigned
+  11 times and read zero times — newcomers set them per the docs, assume it works, and get a 400 on
+  image requests. The field comments now explain why, and a **bidirectional containment assertion**
+  (`AdapterVisionMatrixTest.declaredVsActualStripDetail`) fails on any mismatch.
+- **`matchesAnyPrefix` unifies prefix semantics**: frontend identity checks were all exact
+  comparisons while the backend used `startsWith`. Now unified.
+
+### 📚 Documentation
+
+- `docs/LLM_PROVIDER_SYSTEM.md` gains **section 9.1-H "how many places to touch when adding a
+  Provider"** (measured): platform only = **1 file**; plus search / balance = 4;
+  a brand-new adapter = 2 more; **frontend is always 0**.
+  Each step notes "what happens if you forget" (compile error / test failure / exception / silent degradation).
+- `LLMClient` header: A5 now says "the resolution entry point must be unique", plus a new A6 row.
+- `SearchTool` header: corrected the outdated frontend criterion location and added
+  "two more places must change alongside".
+- `ProviderRegistry`: added **responsibility-boundary warnings** to the 7 template-level helpers —
+  they are exact-match (no fallback), production code must use `resolveFor`.
+
+### ✅ Verification
+
+```
+mvn compile / test-compile          ✓
+npm run typecheck                   ✓
+npm run build                       ✓
+
+ProviderRegistrySelfCheck          237
+ProviderResolveConsistencyTest      67  ← new (incl. group F "display == execution", 19)
+ProviderCapabilityServiceTest      132
+AuthHeaderEquivalenceTest          107
+AdapterVisionMatrixTest             55  ← +2 (cross-check guard)
+BalanceDispatchEquivalenceTest      46
+PricingModeGuardTest                27
+TokenUsageMultiProtocolTest         40
+DeepSeekToolsApiClientTest          26
+SearchToolLogicTest                 16
+──────────────────────────────────────
+total                              753 assertions, 0 failed
+```
+
+---
+
 ## [3.1.5] - 2026-11-15
 
 > **Architectural refactor**: consolidates "what capabilities does a Provider have" from

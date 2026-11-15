@@ -448,11 +448,16 @@ public class LLMClientManager {
      */
     private LLMClient createClient(ProviderConfig config) {
         String template = config.getRequestTemplate();
-        if (template == null || template.isBlank()) {
-            template = config.getCode();
-        }
 
-        ProviderProfile.AdapterType adapterType = ProviderRegistry.adapterTypeFor(template);
+        /*
+          用 resolveFor 而不是 findByTemplate：template 为空 / 被后端自动填成 code 时，
+          resolveFor 会退回「按 code 前缀匹配」，这样 code=volcengine-custom 这类
+          「平台名在前缀」的自定义命名也能选对适配器。
+          （findByTemplate 只做精确匹配，会把这类配置一律打成「未登记」。）
+         */
+        ProviderProfile profile = ProviderRegistry.resolveFor(
+                template, config.getCode(), config.getBaseUrl());
+        ProviderProfile.AdapterType adapterType = profile == null ? null : profile.getAdapterType();
         if (adapterType == null) {
             /*
               未登记模板：明确告警 + 保守回退。
@@ -462,10 +467,20 @@ public class LLMClientManager {
              */
             log.warn("Provider [{}] 的模板 [{}] 未在 ProviderRegistry 登记，已回退为 DeepSeekClient；"
                             + "若该平台非 DeepSeek 兼容，请求会 400 —— 请在 ProviderRegistry 补一个档案",
-                    config.getCode(), template);
+                    config.getCode(), template == null || template.isBlank() ? config.getCode() : template);
             var wc = webClientManager.getOrCreate(config);
             return new DeepSeekClient(wc, objectMapper, config.getCode());
         }
+
+        /*
+          是否 custom 档案 —— 用于日志区分（custom 与 openai 复用同一个 OpenAIClient）。
+
+          ⚠️ 这里刻意判「档案的 template」而不是判「入参 template 字符串」：
+          旧实现写的是 `"custom".equalsIgnoreCase(template.trim())`，当 template 为 null
+          （配置里只填了 code）时会抛 NullPointerException —— 一个纯粹的日志分支
+          能把整个对话链路打挂。判档案既安全又能覆盖「code=custom 但 template 为空」的情形。
+         */
+        boolean isCustom = "custom".equals(profile.getTemplate());
 
         return switch (adapterType) {
             case DEEPSEEK -> {
@@ -480,7 +495,7 @@ public class LLMClientManager {
             }
             case OPENAI -> {
                 // 公共契约：任意 OpenAI 兼容服务（Azure / 中转站 / 自建网关 / custom），不下发厂商专有参数
-                if ("custom".equalsIgnoreCase(template.trim())) {
+                if (isCustom) {
                     log.info("自定义 Provider [{}]，使用 OpenAI 兼容基础模式", config.getCode());
                 }
                 var wc = webClientManager.getOrCreate(config);

@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v3.1.5 | 更新：2026-11-15 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.1.6 | 更新：2026-11-15 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -706,7 +706,8 @@ POST /api/llm-providers
 | A2 | 实现 `buildThinkingParams(String thinkingMode)` | **唯一的 abstract 方法**。入参只会是 `normalizeThinkingMode` 归一化后的 5 档（none/low/medium/high/max）或空串 auto，**不要**比较 `thinking_low` 这类原始字符串 |
 | A3 | 实现 3 个解析方法 | `extractContentFromStreamChunk`（正文增量）/ `extractReasoningFromStreamChunk`（思考链，无则 null）/ `extractContentFromBlockingResponse`（非流式正文） |
 | A4 | 确认工具调用**增量结构** | 主链路 `DeepSeekServiceImpl` 固定按 OpenAI 的 `choices[].delta.tool_calls`（index/id/arguments 增量拼接）解析，**协议不同必须在适配器内转换**，否则「能聊天、一调工具就断」 |
-| A5 | **在 `ProviderRegistry` 登记档案** | ⭐ T12 之后**唯一注册点**：填 `template`（主名）/ `aliases`（历史与区域别名）/ `adapterType`（用哪个适配器实现）/ `auth`（认证头名称+前缀，成对填写）。**不要再改** `LLMClientManager.createClient` 的 switch 或 `LLMWebClientManager` 的认证头逻辑 —— 两者都已改为查表分派 |
+| A5 | **在 `ProviderRegistry` 登记档案** | ⭐ T12 之后**唯一注册点**：填 `template`（主名）/ `aliases`（历史与区域别名）/ `adapterType`（用哪个适配器实现）/ `auth`（认证头名称+前缀，成对填写）/ `hostDetection`（平台专属域名，用于名字识别不出时兜底）。**不要再改** `LLMClientManager.createClient` 的 switch 或 `LLMWebClientManager` 的认证头逻辑 —— 两者都已改为查表分派 |
+| A6 | **消费方统一用 `ProviderRegistry.resolveFor(...)` 解析档案** | 三参重载 `resolveFor(requestTemplate, code, baseUrl)` 是**唯一解析入口**，优先级：① template 精确 → ② template 前缀 → ③ code 前缀 → ④ baseUrl 域名兜底。**禁止**再写 `if (template 为空) template = code;` + `findByTemplate(...)` —— 审查阶段发现 8 个消费方都这么写且**全都漏掉前缀匹配**，导致 `code=volcengine-custom` 这类自定义命名会出现：适配器回退 `DeepSeekClient`、认证头退回 `Authorization+Bearer`（mimo 必然 401）、计费判成 `TOKEN`（套餐制被估出虚假金额）、视觉拿不到模型级规则（纯文本模型发图被静默丢弃）。**同一个名字不该因为填在 template 还是 code 字段而结论不同** |
 
 #### B. 能力开关（不写不报错，功能静默缺失）
 
@@ -801,6 +802,59 @@ public class NewProviderClient extends AbstractLLMClient { ... }
 > ⚠️ **不要再**在 `LLMClientManager.createClient` 里加 `case`，也**不要**在
 > `LLMWebClientManager` 里加认证头分支 —— 两处都已改为按档案查表分派。
 > 加了也不会生效，反而会让「档案声明」与「实际行为」重新分裂成两份。
+
+#### H. 新增 Provider 到底要改几处（实测清单）
+
+**A. 只新增一个平台（复用现有协议，如再接入一个 OpenAI 兼容服务）—— 改 1 个文件**
+
+| 步骤 | 文件 | 做法 | 漏了会怎样 |
+|---|---|---|---|
+| 1 | `ProviderRegistry.java` | 加 `buildXxx()` + 在 `PROFILES` 注册，关键字段全填：`template` / `aliases` / `adapterType` / `auth` / `vision` / `search` / `balance` / `filesApi` / `pricingMode` / `display` / `hostDetection` | 走 `resolveFor` 兜底逻辑，可能被识别成别的平台；界面显示「未识别模板」 |
+| 2 | — | **前端 0 处必改** | — |
+
+> 为什么前端不用改：模板下拉（`ProviderEditDrawer`）从 `GET /api/llm-providers/templates` 拉；
+> 展示名/配色（`ProviderRow`）已改为「后端 `display.label` / `display.iconTone` 优先」；
+> 四项能力文案由 `GET /{code}/capabilities` 提供。**只要档案填对，界面自动正确。**
+
+**B. 新增平台且有「官方联网搜索」—— 在 A 基础上再加 3 处**
+
+| 步骤 | 文件 | 做法 | 漏了会怎样 |
+|---|---|---|---|
+| 1 | `SearchTool.java` | 字段 + 构造注入 + `search()` 里的 if 分支（按 `isAvailable()` 判据） | 联网静默降级成通用抓取 |
+| 2 | `ProviderRegistry.java` | `search` 字段声明新 `SearchProvider` 枚举值 | 档案与实际不符 |
+| 3 | `ProviderCapabilityService.buildSearch` | 补 `case` | **方法末尾 `throw` 会直接抛异常**（不再静默显示「暂未接入判断」） |
+
+**C. 新增平台且有「余额查询」—— 在 A 基础上再加 3 处**
+
+| 步骤 | 文件 | 做法 | 漏了会怎样 |
+|---|---|---|---|
+| 1 | `ProviderBalanceService.java` | 加 `queryXxxBalance()` + `queryBalance` 的 switch 补 case | **编译报错**（switch 穷举，无 default） |
+| 2 | `ProviderRegistry.java` | `balance` 字段声明新 `BalanceProvider` 枚举值 | 余额按钮灰掉 |
+| 3 | `ProviderCapabilityService.buildBalance` | 补 `case` | 方法末尾 `throw` 抛异常 |
+
+**D. 新增平台且有「Files API 云端存储」—— 在 A 基础上再加 2 处**
+
+| 步骤 | 文件 | 做法 | 漏了会怎样 |
+|---|---|---|---|
+| 1 | `FilesApiClientManager.createClient` | 加 `case`（配合新建 `XxxFilesApiClient`） | **编译报错**（switch 穷举，无 default） |
+| 2 | `ProviderRegistry.java` | `filesApi` 字段声明新 `FilesApiProvider` 枚举值 | 文件只存本地（不发往云端，属安全降级） |
+
+**E. 写了全新适配器类（协议差异大）—— 再加 2 处**
+
+| 步骤 | 文件 | 做法 | 漏了会怎样 |
+|---|---|---|---|
+| 1 | `ProviderProfile.AdapterType` | 加枚举值 | — |
+| 2 | `LLMClientManager.createClient` | 补 `case` | **编译报错**（switch 穷举，无 default） |
+| 3 | `AdapterVisionMatrixTest` | 若该平台需剔除 `detail`，把平台名加入 `verified` 集合 | 交叉校验断言失败，提示补哪一行 |
+
+**F. 视觉能力：档案里的 `stripImageDetail` / `blockFormat` 是「描述性声明」**
+
+这两个字段**不驱动运行时**，真正的转换写在各适配器内部（原因见 `ProviderProfile` 字段注释）。
+新增适配器时要做两步：① 在适配器里调用 `stripImageDetail` / 实现块转换；② 在档案里登记。
+两者一致性由 `AdapterVisionMatrixTest.declaredVsActualStripDetail()` 守住 ——
+只登记不实现（或反之）会让测试失败。
+
+**总览：仅加平台 = 1 文件；加搜索 = 4 文件；加余额 = 4 文件；全新适配器 = 再加 2 文件。前端恒为 0。**
 
 ### 9.2 自定义请求模板
 

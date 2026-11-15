@@ -5,6 +5,129 @@
 
 ---
 
+## [3.1.6] - 2026-11-15
+
+> **重构复查版**：对 v3.1.5 的 Provider 能力档案统一重构做三轮系统复查，
+> 修掉 **18 处**遗留缺陷 —— 共同特征是「**编译不报错、测试不失败、只在用户那儿暴露**」。
+> 其中 6 处属于同一病根：**同一个判定被写了多份**。
+> 本版**需要重启后端**；未改数据库结构，无数据迁移。
+
+### 🔥 修复：解析入口系统性遗漏（P0，8 个消费方全中）
+
+- **症状**：Provider 的 `code` 起成 `volcengine-custom` / `deepseek-official`
+  这类「平台名在前缀」的名字后，出现一串连锁故障：
+  适配器回退 `DeepSeekClient`（对话 400）、认证头退回 `Authorization+Bearer`
+  （mimo / anthropic 必然 401）、计费判成 `TOKEN`（套餐制被估出虚假金额）、
+  视觉拿不到模型级规则（纯文本模型发图被**静默丢弃**）。
+- **根因**：8 个消费方各自照抄同一段逻辑
+  `if (template == null) template = code;` + `findByTemplate(template)`，
+  **全都只做精确匹配**。而后端创建 Provider 时会把 `requestTemplate` 自动填成 `code`，
+  于是这类命名必然落空。
+- **修复**：新增 `ProviderRegistry.resolveFor(template, code, baseUrl)` 作为**唯一解析入口**，
+  优先级：① template 精确 → ② template 前缀 → ③ code 前缀 → ④ baseUrl 域名兜底。
+  8 个消费方（`LLMClientManager` / `LLMWebClientManager` / `TokenUsageParser` /
+  `ProviderCapabilityService` / `ProviderBalanceService` / 两个搜索客户端 /
+  `DeepSeekServiceImpl`）全部改用。
+
+### 🔥 修复：展示层与执行层「各算一遍」（P0，3 处）
+
+界面上说「能查余额 / 能发图 / 上传云端」，点下去却是另一回事 ——
+两边都"正常"，只是算的不是同一件事：
+
+| 能力 | 展示层原用 | 执行层实际用 | 分歧后果 |
+|---|---|---|---|
+| 余额 | `profile.getBalance()`（名字优先） | `balanceCandidateFor`（平台顺序优先） | `template=deepseek` + 火山域名：界面说查 DeepSeek，实际查**火山账户** |
+| 视觉 | `config.getRequestTemplate()` 原始串 | 档案主名 | `code=my-gateway` + 火山域名：界面说能发图，一发被**拦截** |
+| Files API | `resolveFor`（带前缀兜底） | `findByTemplate`（严格） | `deepseek-custom`：界面说**上传云端**，实际只存本地 |
+
+- **修复**：展示层不再自己算，直接调用执行层的函数。
+  Files API 那处**刻意保持严格**——它决定「文件是否外发到第三方云端」，
+  口径必须更严：宁可显示「仅本地」（保守但真实），
+  也不显示一个不会发生的数据外发承诺。
+
+### 🔥 修复：`default ->` 把「代码没写完」伪装成「正常结论」（2 处）
+
+- **症状**：新增 `SearchProvider` / `BalanceProvider` 枚举值后，界面显示
+  「平台官方接口暂未接入判断」—— 既不报错、也不像故障，没人会去查。
+- **修复**：删掉 `default`、显式写 `case NONE`、末尾加 `throw IllegalStateException`
+  并附带确切枚举名。漏补 case 从「静默降级」变为「立刻抛异常」。
+- **配套**：`FilesApiClientManager` / `LLMClientManager` 的 `switch` 本就无 `default`，
+  新增枚举直接**编译报错**；`AdapterType` 用枚举而非字符串类名，拼错编译期就挂。
+
+### 🔥 修复：前端能力缓存串台 + 降级丢数据
+
+- **串台**：实例级与模板级档案塞进同一个 `Map`，实例档案同时按 `code` 与 `template` 建索引。
+  同一模板下有多个 Provider 时，`template` 键被**最后写入的实例覆盖** ——
+  新建 Provider（只拿得到 template）会显示**别人那台实例的凭证状态**。
+  已拆成两个 Map：实例级只按 `code`、模板级只按 `template`，串台在结构上不可能发生。
+- **丢数据**：`refreshCapabilities` 用 `Promise.all`，旧后端缺 `/templates` 时
+  连 `/capabilities` 的**成功数据也一起丢弃**。已改为两个请求分别 try。
+
+### 🐛 其他修复
+
+- **`NullPointerException`**：`LLMClientManager` 里纯日志分支
+  `"custom".equalsIgnoreCase(template.trim())`，当 `template` 为 null 时
+  **打挂整个对话链路**。已改为判档案。
+- **`Map.copyOf` 丢失插入顺序**：`ModelCapabilityRules.configure` 用 `Map.copyOf` 存 yml 规则，
+  返回无序 Map，而 `findVisionRule` 的前缀匹配**依赖遍历顺序**（注释里写了「顺序必须保持」）。
+  当前平台名无互相为前缀，尚未触发；已改为 `LinkedHashMap`。
+- **`matches()` 大小写不一致**：`allNames()` 会 `toLowerCase`，`matches()` 却没有。
+  已对齐。
+- **前端本地兜底 4 处与后端不一致**（自称「逐条对齐」）：
+  火山缺 Key 判 `off`（应为 `warn`，否则用户以为「火山不能搜索」）、
+  AK/SK 用「任一存在」而非「成对」（只配 AK 显示可查询、点下去必失败）、
+  身份判定全用精确匹配（`volcengine-custom` 漏掉火山规则 → `v4-pro` 显示可发图）、
+  MiniMax 少认 `searchApiKey`。
+- **`searchHint` 文案 bug**：`warn` 分支无条件说「Base URL 不是 api.deepseek.com」。
+  火山 / 千问 / MiniMax 缺 Key 也走 `warn` 后，火山用户会莫名看到一段 DeepSeek 的说明。
+  已改为按平台给文案。
+- **前端 `label` / `iconTone` 未用后端返回值**：后端档案已返回 `display.label` / `display.iconTone`，
+  前端却用本地硬编码 map → 新增平台显示英文 template 名、配色为空。
+  已改为「后端优先，本地兜底」。
+
+### 🛡️ 为「方便新增适配器」加的守卫
+
+- **`stripImageDetail` / `blockFormat` 是「描述性声明」**：这两个档案字段**不驱动运行时**
+  （实际转换在各适配器内），原先赋值 11 次却零读取 —— 新人照文档设置后以为生效，
+  实际发图 400。已在字段注释写清原因，并新增**双向包含断言**
+  （`AdapterVisionMatrixTest.declaredVsActualStripDetail`）：
+  档案声明集合 ⇄ 已实际验证集合，不一致即测试失败。
+- **`matchesAnyPrefix` 统一前缀语义**：前端身份判定原先全是精确比较，
+  后端却是 `startsWith`。已统一。
+
+### 📚 文档
+
+- `docs/LLM_PROVIDER_SYSTEM.md` 新增 **9.1-H 节「新增 Provider 到底要改几处」**（实测清单）：
+  仅加平台 = **1 个文件**；加搜索 / 余额 = 4 个；全新适配器 = 再加 2 个；**前端恒为 0**。
+  并逐项标注「漏了会怎样」（编译报错 / 测试失败 / 异常 / 静默降级）。
+- `LLMClient` 类头 A5 补「解析入口只允许一处」，新增 A6 条。
+- `SearchTool` 类头修正已过时的前端判据位置，补「配套还要改两处」。
+- `ProviderRegistry` 为 7 个模板级便捷方法加**职责边界警告**：
+  它们是精确匹配（不带兜底），生产代码必须用 `resolveFor`。
+
+### ✅ 验证
+
+```
+mvn compile / test-compile          ✓
+npm run typecheck                   ✓
+npm run build                       ✓
+
+ProviderRegistrySelfCheck          237
+ProviderResolveConsistencyTest      67  ← 新增（含 F 组「展示==执行」19 项）
+ProviderCapabilityServiceTest      132
+AuthHeaderEquivalenceTest          107
+AdapterVisionMatrixTest             55  ← +2（交叉守卫）
+BalanceDispatchEquivalenceTest      46
+PricingModeGuardTest                27
+TokenUsageMultiProtocolTest         40
+DeepSeekToolsApiClientTest          26
+SearchToolLogicTest                 16
+──────────────────────────────────────
+合计                               753 项，0 失败
+```
+
+---
+
 ## [3.1.5] - 2026-11-15
 
 > **架构级重构**：把「一个 Provider 有哪些能力」从**散落 4 处的副本**收敛为**后端唯一真相源**，

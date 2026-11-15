@@ -135,18 +135,19 @@ public class MiniMaxCodingPlanClient {
         if (config == null) {
             return false;
         }
-        String template = config.getRequestTemplate();
-        if (template == null || template.isBlank()) {
-            template = config.getCode();
-        }
         /*
           T8：Provider 身份判定改为查 ProviderRegistry 档案。
 
           等价性：① 模板命中 MiniMax 系（minimax / minimax-cn / minimax-intl / minimax-global）
           → 档案的 search 声明为 MINIMAX_PLAN；② 模板是自定义名但域名指向 MiniMax → hostDetection 兜底。
           两条件 OR，与旧实现一致。
+
+          ⚠️ 审查补漏：① 改用 resolveFor（模板精确 → 前缀 → code 兜底）。
+          旧写法先自己拼「template 空则取 code」再精确查，用户把 code/template 起成
+          minimax-custom 时会判断失败 → 明明配了 codingPlanKey 却用不了官方搜索，
+          且日志只有 debug 级别。搜索 Key 用错平台不涉及数据外发，可放宽到前缀识别。
          */
-        ProviderProfile profile = ProviderRegistry.findByTemplate(template);
+        ProviderProfile profile = ProviderRegistry.resolveFor(config.getRequestTemplate(), config.getCode());
         if (profile != null && profile.getSearch() != null
                 && profile.getSearch().getProvider() == SearchProvider.MINIMAX_PLAN) {
             return true;

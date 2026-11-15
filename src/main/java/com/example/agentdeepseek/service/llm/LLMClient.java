@@ -70,7 +70,17 @@ import java.util.Map;
  *         为什么这样设计：旧实现下「档案声明了别名、适配器 switch 却没写」会让配了该别名的
  *         Provider <b>掉进 {@code default} 被当成 DeepSeekClient</b> —— 能力按档案判、对话走错协议，
  *         编译和测试都不报错，只在用户那儿暴露。收进档案后别名与实现同源，漂移在结构上不可能发生。
- *         详见 {@code ProviderProfile#adapterType} 的注释与自检项 {@code ProviderRegistry}.selfCheck()。</td>
+ *         详见 {@code ProviderProfile#adapterType} 的注释与自检项 {@code ProviderRegistry}.selfCheck()。
+ *         <p>
+ *         <b>⚠️ 解析入口只允许一处</b>：登记完档案后，消费方一律调
+ *         {@code ProviderRegistry.resolveFor(requestTemplate, code, baseUrl)} 拿到档案再取字段，
+ *         <b>不要各自写「template 为空则用 code」+ 精确查找</b>。
+ *         审查阶段发现 8 个消费方都重复这段逻辑且<b>全都漏掉前缀匹配</b>，
+ *         于是 {@code code=volcengine-custom} 这类自定义命名会导致：
+ *         适配器回退 {@code DeepSeekClient}、认证头退回 {@code Authorization+Bearer}（mimo 必然 401）、
+ *         计费被判成 {@code TOKEN}（套餐制被估出虚假金额）、视觉拿不到模型级规则（纯文本模型发图被静默丢弃）。
+ *         同一个名字不该因为「填在 template 还是 code 字段」而得到不同结论。
+ *         </p></td>
  *   </tr>
  * </table>
  *

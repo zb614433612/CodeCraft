@@ -181,7 +181,16 @@ public class ProviderProfile {
             return false;
         }
         String key = template.trim().toLowerCase(Locale.ROOT);
-        if (this.template != null && this.template.equals(key)) {
+        /*
+          ⚠️ 审查修复：this.template 也必须小写化后再比较。
+
+          旧写法 `this.template.equals(key)` 只在「注册时写的就是小写」时才正确 ——
+          当前 Registry 里都是手写小写字面量，所以没暴露。但 allNames() 已经对
+          template 做了 toLowerCase，两处处理方式不一致：
+          一旦将来有人（或代码生成器）登记成 "Volcengine"，matches() 会静默返回 false，
+          表现为「名字明明在档案里却识别不出」—— 又是那种编译不报错、只在线上的坑。
+         */
+        if (this.template != null && this.template.trim().toLowerCase(Locale.ROOT).equals(key)) {
             return true;
         }
         return aliases != null && aliases.contains(key);
@@ -408,10 +417,49 @@ public class ProviderProfile {
         /** include / exclude 都未命中时的兜底结果 */
         private boolean defaultAllow = true;
 
-        /** 是否必须剔除 {@code image_url.detail}（Qwen / MiniMax / MiMo 需要） */
+        /**
+         * 是否必须剔除 {@code image_url.detail}（Qwen / MiniMax / MiMo 需要）。
+         *
+         * <h3>⚠️ 这是「描述性声明」，不驱动运行时行为</h3>
+         * <p>
+         * 真正的剔除动作在各适配器的 {@code customizeRequestBody} 里手动调用
+         * {@code AbstractLLMClient.stripImageDetail(messages)} 完成，
+         * <b>本字段目前没有任何代码读取</b>（原意是「查表即知」，避免读代码）。
+         * </p>
+         * <p>
+         * <b>为什么不改成档案驱动</b>：剔除 {@code detail} 是<b>协议行为</b>而不是平台行为 ——
+         * 由「用哪个适配器」决定（QwenClient / MiniMaxClient / MiMoClient 的协议要求），
+         * 不是「哪个平台」决定。同一平台换用 custom 模板走 OpenAIClient 时就不该剔除。
+         * 若让档案驱动，反而会因域名兜底认错平台而漏剔 → 发图 400。
+         * </p>
+         * <p>
+         * <b>新增适配器时要做两步</b>：① 在适配器里调用 {@code stripImageDetail}；
+         * ② 在本字段登记 {@code true} 以便「查表即知」。
+         * 两者的<b>一致性由 {@code AdapterVisionMatrixTest} 的交叉校验断言守住</b>
+         * （声明为 true 却没在测试覆盖集合里，测试会失败）。
+         * </p>
+         */
         private boolean stripImageDetail = false;
 
-        /** 内部块 → 该协议块的转换方式 */
+        /**
+         * 内部块 → 该协议块的转换方式。
+         *
+         * <h3>⚠️ 同样是「描述性声明」，不驱动运行时行为</h3>
+         * <p>
+         * 实际转换写在各适配器内部（{@code AnthropicClient} 在 {@code customizeRequestBody} 里把
+         * image_url 块整体重写成 {@code {"type":"image","source":{...}}}；
+         * {@code OllamaClient} 转 {@code messages[].images[]}）。
+         * <b>本字段没有任何代码读取</b>。
+         * </p>
+         * <p>
+         * <b>为什么不改成档案驱动</b>：Anthropic / Ollama 的块结构与 OpenAI 差异太大
+         * （不是「换个字段名」，而是整个 content 结构重写），抽成通用转换器会变成
+         * 一堆按格式分支的 if 链，比现在各自实现更难读、更容易错。
+         * </p>
+         * <p>
+         * 新增适配器时：先在适配器内实现块转换，再在此登记正确的格式，便于评审时一眼看出协议差异。
+         * </p>
+         */
         private ImageBlockFormat blockFormat = ImageBlockFormat.IMAGE_URL;
     }
 

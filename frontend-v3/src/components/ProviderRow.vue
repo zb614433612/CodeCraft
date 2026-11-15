@@ -89,6 +89,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import {
+  capabilityDetailOf,
   capabilityHintOf,
   deriveCapabilities,
   providerIconTone,
@@ -211,8 +212,27 @@ const searchTitle = computed(() =>
 )
 
 const initial = computed(() => providerInitial(props.provider.code))
-const iconTone = computed(() => providerIconTone(props.provider.requestTemplate))
-const label = computed(() => templateLabel(props.provider.requestTemplate || props.provider.code))
+
+/*
+  展示名与配色改为「后端档案优先，本地兜底」。
+
+  ⚠️ 原先直接调本地 templateLabel / providerIconTone，那两份是硬编码 map，
+  后端档案里明明已经有 display.label / display.iconTone（能力接口已返回），
+  两端各存一份 → 新增 Provider 时必须记得改前端，否则：
+    · 中文名显示成 template 原字符串（如 new_provider 而不是「新平台」）
+    · 配色为空（本地 map 没这个 key）
+  后端优先后，新增平台只需在 ProviderRegistry 的 display 里填好，界面自动正确。
+  本地函数保留作为离线兜底（后端不可达时仍有可读的名字）。
+*/
+const remoteDetail = computed(
+  () => capabilityDetailOf(props.provider.code) ?? capabilityDetailOf(props.provider.requestTemplate)
+)
+const iconTone = computed(
+  () => remoteDetail.value?.iconTone || providerIconTone(props.provider.requestTemplate)
+)
+const label = computed(
+  () => remoteDetail.value?.label || templateLabel(props.provider.requestTemplate || props.provider.code)
+)
 
 /** 模型列表长度（列表接口已解析出 parsedModelList，缺失时才回落到手工解析） */
 const modelCount = computed(() => {

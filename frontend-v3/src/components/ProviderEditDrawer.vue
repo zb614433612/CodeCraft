@@ -248,7 +248,7 @@
 import DrawerResizer from './DrawerResizer.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { getTemplateCapabilities } from '../api/provider-capability'
-import { capabilityHintOf, deriveCapabilities, searchHint, searchLabel, visionHint } from '../utils/provider-capability'
+import { capabilityHintOf, deriveCapabilities, primeCapabilities, searchHint, searchLabel, visionHint } from '../utils/provider-capability'
 import type { ProviderItem } from './ProviderRow.vue'
 
 /** 单币种余额明细（与后端 ProviderBalanceVO.BalanceInfo 对应） */
@@ -371,11 +371,21 @@ const templateOptions = computed<TemplateOption[]>(() =>
  *
  * <p>失败静默：模板下拉回落兜底清单，不影响保存流程。</p>
  */
+/**
+ * 拉取模板清单（幂等：成功后不再重复请求）。
+ *
+ * <p>失败静默：模板下拉回落兜底清单，不影响保存流程。</p>
+ *
+ * <p>顺手把结果喂给能力缓存：本抽屉可能先于 {@code App.vue} 的 Provider 列表加载被打开
+ * （例如从概览页直接进来），此时若只依赖 App 的预热，预览区的 hint 会退化为本地兜底文案。
+ * 模板级档案不含凭证判定，写入后不会影响实例级的结论。</p>
+ */
 async function loadTemplateOptions() {
   if (templateOptionsLoaded.value) return
   try {
     const list = await getTemplateCapabilities()
     if (Array.isArray(list) && list.length) {
+      primeCapabilities(list)
       templateOptionsRemote.value = list.map(item => ({
         value: item.template,
         label: item.label ? `${item.label}（${item.template}）` : item.template

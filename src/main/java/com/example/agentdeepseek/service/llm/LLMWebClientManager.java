@@ -382,10 +382,21 @@ public class LLMWebClientManager {
      * @return 认证规格（{@code headerPrefix} 为 null 表示不加前缀，直接放 apiKey —— <b>不是不发送</b>）
      */
     private ProviderProfile.AuthSpec resolveAuth(ProviderConfig config) {
-        String template = config.getRequestTemplate();
-        if (template == null || template.isBlank()) {
-            template = config.getCode();
+        /*
+          用 resolveFor（模板精确 → code 前缀兜底），而不是「template 空才用 code」+ 精确查找。
+
+          原因：后端创建 Provider 时会把 requestTemplate 自动填成 code（见 LLMProviderController#create），
+          于是 code=volcengine-custom 这类「平台名在前缀」的自定义命名会让精确查找落空，
+          认证头退回默认 Authorization+Bearer —— 对 mimo / anthropic 这类需要专属头的平台
+          就是必然 401。resolveFor 补上了前缀这一层，语义与 findByCode 一致。
+
+          另：这里绝不能自己再写「null 就取 code」的分支 —— 两个字段的优先级只应有一处定义。
+         */
+        ProviderProfile profile = ProviderRegistry.resolveFor(
+                config.getRequestTemplate(), config.getCode(), config.getBaseUrl());
+        if (profile == null || profile.getAuth() == null) {
+            return new ProviderProfile.AuthSpec();
         }
-        return ProviderRegistry.authFor(template);
+        return profile.getAuth();
     }
 }
