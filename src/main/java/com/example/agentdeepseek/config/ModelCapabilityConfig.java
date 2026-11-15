@@ -1,6 +1,8 @@
 package com.example.agentdeepseek.config;
 
 import com.example.agentdeepseek.service.llm.ModelCapabilityRules;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import jakarta.annotation.PostConstruct;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -99,56 +101,57 @@ public class ModelCapabilityConfig {
     }
 
     /**
-     * 内置默认视觉规则（与历史硬编码行为完全等价，升级时零行为变化）
-     * <p>公开给 {@link ModelCapabilityRules} 在"配置未注入"（如单元测试）时作为兜底。</p>
+     * 内置默认视觉规则 —— <b>直接从 {@link ProviderRegistry} 派生</b>（不再在本类硬编码一份）。
+     *
+     * <h3>为什么改成派生（T5）</h3>
+     * <p>
+     * 改动前同一套视觉规则存在<b>三份副本</b>：
+     * </p>
+     * <ol>
+     *   <li>{@code application.yml} 的 {@code llm.model-capabilities.vision-rules}；</li>
+     *   <li><b>本方法</b>里的硬编码默认值（与 ① 内容完全重复）；</li>
+     *   <li>前端 {@code provider-capability.ts} 的 {@code visionStateOf}（5 套正则）。</li>
+     * </ol>
+     * <p>
+     * 后果是「改一处、漏两处」，而漏掉不报错 —— 表现为「界面说能发图，实际图片被静默丢弃」
+     * （火山 {@code deepseek-v4-pro} 就是这么踩出来的）。
+     * 现在默认值只有 {@link ProviderRegistry} 一处，本方法只做「{@code VisionSpec} → {@code VisionRule}」的形状转换。
+     * </p>
+     *
+     * <h3>yml 的定位：可选覆盖层</h3>
+     * <p>
+     * {@code application.yml} 里的 {@code vision-rules} 仍然有效，但语义从「唯一配置」变为
+     * <b>「需要临时覆盖某平台规则时的可选覆盖层」</b>：</p>
+     * <ul>
+     *   <li>yml <b>不配</b>或配空 → 用本方法产出的 Registry 默认值（推荐）；</li>
+     *   <li>yml <b>配了</b> → 以 yml 为准（{@link ModelCapabilityRules#configure} 会整体替换）。</li>
+     * </ul>
+     * <p>
+     * ⚠️ 注意 yml 是<b>整体替换</b>而非逐项合并：配了就要把需要保留的平台全写上，
+     * 否则没写的平台会退回「全局 defaultAllowVision」。
+     * </p>
+     *
+     * <h3>顺序必须保持</h3>
+     * <p>{@link ModelCapabilityRules#findVisionRule} 做的是<b>前缀匹配</b>且按 map 插入顺序遍历，
+     * 因此这里必须按 {@code ProviderRegistry.all()} 的顺序产出（deepseek → 火山 → mimo → minimax → qwen …），
+     * 否则 {@code minimax} 与 {@code mimo} 这类同前缀的 code 可能命中不同规则。</p>
      */
     public static Map<String, VisionRule> defaultVisionRules() {
         Map<String, VisionRule> rules = new LinkedHashMap<>();
-
-        // DeepSeek 官方：flash / vision / vl 系列支持图像理解，chat / reasoner 不支持
-        VisionRule deepseek = new VisionRule();
-        deepseek.setIncludeKeywords(new ArrayList<>(List.of("flash", "vision", "-vl")));
-        deepseek.setDefaultAllow(false);
-        rules.put("deepseek", deepseek);
-
-        // 火山方舟：方舟上的 deepseek 系已分化，不能用 "deepseek" 前缀一刀切（会误伤多模态版本）。
-        // 实测（2026-11，/api/coding/v3 直接发 image_url 块）：
-        //   · deepseek-v4.1-flash          → 支持，图片真实计入 prompt_tokens（35 → 224）
-        //   · deepseek-v4.1-flash-economy  → 支持，图片真实计入 prompt_tokens（218）
-        //   · deepseek-v4-pro              → 不支持，prompt_tokens 仅 86，模型自称「没有图片提供」
-        //   · deepseek-v4-flash            → 不支持（官方未声明多模态，图片被静默丢弃）
-        // 因此用「版本号 + 排除纯文本支」的组合：include 命中 v4.1，exclude 挡住 v4-pro / v4-flash。
-        // ⚠ excludeKeywords 优先于 include，且 "v4.1-flash" 不含连续子串 "v4-flash"，故 economy 版不会被误伤。
-        // 豆包 seed / glm-5.3-flash（原生多模态）/ kimi-k3.1-pro（多模态旗舰）等由 defaultAllow 宽松放行。
-        VisionRule ark = new VisionRule();
-        ark.setIncludeKeywords(new ArrayList<>(List.of("vision", "-vl", "vlm", "v4.1")));
-        ark.setExcludeKeywords(new ArrayList<>(List.of("v4-pro", "v4-flash")));
-        ark.setDefaultAllow(true);
-        rules.put("volcengine,ark,doubao", ark);
-
-        // 小米 MiMo：v2.5 系列与 Omni（全模态）支持，更早纯文本模型不支持
-        VisionRule mimo = new VisionRule();
-        mimo.setIncludeKeywords(new ArrayList<>(List.of("v2.5", "vision", "-vl", "omni")));
-        mimo.setDefaultAllow(false);
-        rules.put("mimo,xiaomi-mimo", mimo);
-
-        // MiniMax：M3 与 VL / abab-vl 支持；M2.x 纯文本
-        VisionRule minimax = new VisionRule();
-        minimax.setIncludeKeywords(new ArrayList<>(List.of("m3", "vision", "-vl", "abab")));
-        minimax.setExcludeKeywords(new ArrayList<>(List.of("-m2")));
-        minimax.setExcludePrefixes(new ArrayList<>(List.of("m2")));
-        minimax.setDefaultAllow(false);
-        rules.put("minimax", minimax);
-
-        // 通义千问：Qwen-VL / Omni 系列支持；Plus 系列自 qwen3.6-plus 起官方声明支持图片理解
-        // （百炼文档原文：「推荐模型：qwen3.7-plus（支持图片理解）、qwen3.6-plus（支持图片理解）」）。
-        // 旧注释所说「qwen-plus 一律纯文本」已随模型换代失效，故补 plus 关键词；
-        // qwen-max 各代差异较大，不确定时不放行（避免"界面说能发图、实际图片被丢弃"）。
-        VisionRule qwen = new VisionRule();
-        qwen.setIncludeKeywords(new ArrayList<>(List.of("-vl", "vl-", "omni", "vision", "plus")));
-        qwen.setDefaultAllow(false);
-        rules.put("qwen,dashscope,tongyi", qwen);
-
+        for (ProviderProfile profile : ProviderRegistry.all()) {
+            ProviderProfile.VisionSpec vision = profile.getVision();
+            if (vision == null || !vision.isHasModelRule()) {
+                continue;   // 无模型级规则的平台（gpt/openai/anthropic/ollama/custom）走全局 defaultAllowVision
+            }
+            VisionRule rule = new VisionRule();
+            rule.setIncludeKeywords(new ArrayList<>(vision.getIncludeKeywords()));
+            rule.setExcludeKeywords(new ArrayList<>(vision.getExcludeKeywords()));
+            rule.setExcludePrefixes(new ArrayList<>(vision.getExcludePrefixes()));
+            rule.setDefaultAllow(vision.isDefaultAllow());
+            // key 用「主名 + 全部别名」逗号拼接，与改动前的 key 形式一致（如 volcengine,ark,doubao），
+            // 保证 findVisionRule 的前缀匹配行为不变
+            rules.put(String.join(",", profile.allNames()), rule);
+        }
         return rules;
     }
 

@@ -2,10 +2,14 @@ package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.config.TokenPricingConfig;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
+import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -61,9 +65,67 @@ public class TokenUsageParser {
     private final ObjectMapper objectMapper;
     private final TokenPricingConfig pricingConfig;
 
-    public TokenUsageParser(ObjectMapper objectMapper, TokenPricingConfig pricingConfig) {
+    /**
+     * Provider 配置查询器（<b>刻意用 {@link ObjectProvider} 延迟获取</b>）。
+     *
+     * <p>为什么不在构造器直接注入 {@code LLMClientManager}：本类被 {@code DeepSeekServiceImpl}
+     * 在流式回调里高频使用，而 {@code LLMClientManager} → {@code LLMWebClientManager} 链条较长；
+     * 用 {@code ObjectProvider} 把解析推迟到真正需要时（且失败时能安全降级为
+     * {@link ProviderProfile.PricingMode#TOKEN}），可避免任何潜在的启动期循环依赖。</p>
+     */
+    private final ObjectProvider<LLMClientManager> llmClientManagerProvider;
+
+    public TokenUsageParser(ObjectMapper objectMapper,
+                            TokenPricingConfig pricingConfig,
+                            ObjectProvider<LLMClientManager> llmClientManagerProvider) {
         this.objectMapper = objectMapper;
         this.pricingConfig = pricingConfig;
+        this.llmClientManagerProvider = llmClientManagerProvider;
+    }
+
+    /**
+     * 解析该 Provider 当前生效的计费模式（决定「要不要估算金额」）。
+     *
+     * <p>链路：{@code provider code} → {@link ProviderConfig}（取 {@code requestTemplate} 与
+     * {@code baseUrl}）→ {@link ProviderRegistry} 档案 → {@code resolvePricingMode(baseUrl)}。</p>
+     *
+     * <p><b>为什么要看 baseUrl</b>：同一个 Provider 可能有两种计费形态 —— 火山方舟普通调用
+     * （{@code /api/v3}）按 token 付费，而 Coding Plan（{@code /api/coding/v3}）是次数套餐。
+     * 仅凭 template 区分不开。</p>
+     *
+     * <p><b>任何一步拿不到时都退回 {@link ProviderProfile.PricingMode#TOKEN}</b>：
+     * 这只是「沿用旧行为（看单价表）」，不会凭空禁用已有的正确金额。</p>
+     *
+     * @param provider Provider 编码（如 {@code huoshan} / {@code deepseek}）
+     */
+    public ProviderProfile.PricingMode resolvePricingMode(String provider) {
+        if (provider == null || provider.isBlank()) {
+            return ProviderProfile.PricingMode.TOKEN;
+        }
+        try {
+            LLMClientManager manager = llmClientManagerProvider == null
+                    ? null : llmClientManagerProvider.getIfAvailable();
+            if (manager == null) {
+                return ProviderProfile.PricingMode.TOKEN;
+            }
+            ProviderConfig config = manager.getProviderConfig(provider);
+            if (config == null) {
+                // Provider 已被删除 / 未启用：历史数据仍要显示，按单价表沿用旧行为
+                return ProviderProfile.PricingMode.TOKEN;
+            }
+            String template = config.getRequestTemplate();
+            if (template == null || template.isBlank()) {
+                template = config.getCode();
+            }
+            ProviderProfile profile = ProviderRegistry.findByTemplate(template);
+            if (profile == null) {
+                return ProviderProfile.PricingMode.TOKEN;
+            }
+            return profile.resolvePricingMode(config.getBaseUrl());
+        } catch (Exception e) {
+            log.debug("解析计费模式失败，按 TOKEN 处理: provider={}, err={}", provider, e.getMessage());
+            return ProviderProfile.PricingMode.TOKEN;
+        }
     }
 
     // ==================== 统一入口（跨帧合并） ====================
@@ -299,7 +361,29 @@ public class TokenUsageParser {
      *         —— 表示「本端无法估算」，由调用方落库存 null，前端不显示金额。
      */
     public Double calculateCost(String model, UsageSnapshot snapshot) {
+        // 兼容入口：不传计费模式时按 TOKEN（沿用旧行为，供既有单测直接调用）
+        return calculateCost(model, snapshot, ProviderProfile.PricingMode.TOKEN);
+    }
+
+    /**
+     * 按单价表计算估算费用，并受<b>计费模式</b>约束。
+     *
+     * <p><b>为什么要多一个 mode 参数</b>：{@link ProviderProfile.PricingMode#QUOTA}（套餐 / 次数制，
+     * 如火山 Coding Plan 200 元 9 万次）与 {@link ProviderProfile.PricingMode#FREE}（本地 Ollama）
+     * <b>根本不存在「元 / 百万 token」单价</b>，因此必须无条件返回 {@code null} —
+     * 即便有人误给这类模型配了单价，也不能产生一个虚假金额。</p>
+     *
+     * @param model    模型名
+     * @param snapshot 用量快照
+     * @param mode     计费模式（null 视为 TOKEN）
+     * @return 费用；不可估算时返回 {@code null}
+     */
+    public Double calculateCost(String model, UsageSnapshot snapshot, ProviderProfile.PricingMode mode) {
         if (snapshot == null) {
+            return null;
+        }
+        // QUOTA / FREE：不是「没配单价」，而是「这个 Provider 不该按 token 估价」
+        if (!pricingConfig.isEstimable(model, mode)) {
             return null;
         }
         TokenPricingConfig.PriceItem price = pricingConfig.resolve(model);
@@ -341,8 +425,9 @@ public class TokenUsageParser {
         entity.setCacheHitTokens(snapshot.getCacheHitTokens());
         entity.setCacheMissTokens(snapshot.getCacheMissTokens());
         entity.setReasoningTokens(snapshot.getReasoningTokens());
-        // null = 该模型未配置单价，不估算（前端隐藏金额，而不是显示一个错的价格）
-        entity.setCostEstimate(calculateCost(model, snapshot));
+        // null = 不可估算（三种原因：未配单价 / 套餐制 / 本地免费），
+        // 前端据此隐藏金额，而不是显示一个错的价格或 ¥0
+        entity.setCostEstimate(calculateCost(model, snapshot, resolvePricingMode(provider)));
         entity.setCreatedAt(LocalDateTime.now());
         return entity;
     }

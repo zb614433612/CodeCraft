@@ -1,6 +1,8 @@
 package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -100,7 +102,11 @@ public class DeepSeekToolsApiClient {
             log.debug("Provider [{}] baseUrl 无法解析，跳过官方工具 API: {}", code, baseUrl);
             return null;
         }
-        if (host == null || !OFFICIAL_HOST.equalsIgnoreCase(host)) {
+        // T8：官方域名判定改为查 ProviderRegistry 档案，避免「api.deepseek.com」硬编码散落多处。
+        // 等价性：档案的 hostDetection.exact 就是该域名，matchesHost 做大小写不敏感的比较。
+        ProviderProfile deepseekProfile = ProviderRegistry.findByTemplate("deepseek");
+        if (host == null || deepseekProfile == null
+                || !deepseekProfile.getHostDetection().matchesHost(host)) {
             return null;
         }
         String apiKey = config.getApiKey();

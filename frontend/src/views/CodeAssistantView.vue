@@ -1549,7 +1549,18 @@ const resolveActiveProvider = (): ProviderConfig | null => {
     : null) || providers[0]
 }
 
-/** 支持余额/额度查询的 Provider 模板（DeepSeek / 火山引擎 / MiniMax / MiMo / 通义千问） */
+/**
+ * 支持余额/额度查询的 Provider 模板（DeepSeek / 火山引擎 / MiniMax / MiMo / 通义千问）
+ *
+ * ⚠️ <b>遗留副本，请勿在此扩展</b>（T11 标注废弃）：
+ * 余额能力的唯一真相源是后端 {@code service/llm/profile/ProviderRegistry}（{@code balance} 声明），
+ * 新版前端（frontend-v3）已改为消费 {@code GET /api/llm-providers/capabilities}，
+ * 不再本地维护能力清单。
+ *
+ * 本清单仅服务旧版（frontend/）界面 —— 旧版没有能力接口消费层，且已逐步被 v3 取代，
+ * 因此这里只做「标注」不做「改造」：新增平台时<b>不要</b>在此加行，
+ * 否则又多出一份必然漂移的副本（历史教训：界面说能查、点下去报缺凭证）。
+ */
 const BALANCE_TEMPLATES = [
   'deepseek', 'volcengine', 'ark', 'doubao',
   'minimax', 'minimax-cn', 'minimax-intl', 'minimax-global',

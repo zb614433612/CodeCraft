@@ -25,7 +25,9 @@ public class TokenUsageMultiProtocolTest {
     public static void main(String[] args) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         TokenPricingConfig pricing = buildPricing();
-        TokenUsageParser parser = new TokenUsageParser(mapper, pricing);
+        // T4：构造器新增 ObjectProvider<LLMClientManager>（此处传 null —— resolvePricingMode
+        // 对 null provider 会安全降级为 TOKEN，因此本测试的计费断言行为与改动前完全一致）
+        TokenUsageParser parser = new TokenUsageParser(mapper, pricing, null);
 
         testOpenAiDeepSeekNativeCache(parser);
         testOpenAiCachedTokensStyle(parser);

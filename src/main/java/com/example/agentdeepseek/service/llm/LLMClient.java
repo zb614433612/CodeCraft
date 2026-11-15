@@ -56,10 +56,21 @@ import java.util.Map;
  *   </tr>
  *   <tr>
  *     <td>A5</td>
- *     <td>注册到 {@code LLMClientManager.createClient}</td>
- *     <td>加 {@code case "<template>"} 分支；同时在 {@code LLMClientManager} 类头的
- *         「模板选型总览」表补一行，务必写清「适用 / <b>不要用于</b>」——
- *         否则后来人会把官方专精模板配到第三方中转站上（两者契约不同）</td>
+ *     <td>在 {@code ProviderRegistry} 登记档案</td>
+ *     <td><b>⭐ 这是 T12 之后唯一的注册点，只改这一处。</b>
+ *         <ol>
+ *           <li>在 {@code ProviderRegistry} 新增/修改一个 {@code ProviderProfile}，
+ *               设置 {@code template}（主名）、{@code aliases}（历史别名 / 区域别名）、
+ *               {@code adapterType}（用哪个适配器实现）；</li>
+ *           <li>{@code adapterType} 直接决定 {@code LLMClientManager.createClient} 的选型 ——
+ *               <b>不要再改 {@code createClient} 的 switch</b>（它已改为查表分派）；</li>
+ *           <li>{@code auth} 声明认证头（名称 + 值前缀，两个字段必须成对填写）——
+ *               <b>不要再改 {@code LLMWebClientManager} 的认证头逻辑</b>（两个 switch 已合并为查表）。</li>
+ *         </ol>
+ *         为什么这样设计：旧实现下「档案声明了别名、适配器 switch 却没写」会让配了该别名的
+ *         Provider <b>掉进 {@code default} 被当成 DeepSeekClient</b> —— 能力按档案判、对话走错协议，
+ *         编译和测试都不报错，只在用户那儿暴露。收进档案后别名与实现同源，漂移在结构上不可能发生。
+ *         详见 {@code ProviderProfile#adapterType} 的注释与自检项 {@code ProviderRegistry}.selfCheck()。</td>
  *   </tr>
  * </table>
  *
@@ -105,19 +116,24 @@ import java.util.Map;
  *     <td>B6</td>
  *     <td>文件上传（Files API）</td>
  *     <td>实现 {@code FilesApiClient}（或继承 {@code AbstractFilesApiClient}）+
- *         在 {@code FilesApiClientManager.createClient} 注册 template</td>
+ *         在 {@code ProviderRegistry} 档案的 {@code filesApi} 字段声明（T7 后 {@code FilesApiClientManager}
+ *         已改为查表）；未声明的模板<b>自动降级为本地存储 + base64 内联</b>，功能仍可用</td>
  *     <td>大文件/图片只能走 inline base64，超限报错</td>
  *   </tr>
  *   <tr>
  *     <td>B7</td>
  *     <td>联网搜索</td>
- *     <td>{@code SearchTool} 里「官方搜索 API 优先」的 if 链（火山 / MiniMax / DeepSeek）</td>
+ *     <td>在 {@code ProviderRegistry} 档案的 {@code search} 字段声明平台类型
+ *         （{@code VOLCENGINE / QWEN_DIALOG / MINIMAX_PLAN / DEEPSEEK_OFFICIAL}）+
+ *         实现对应的 ApiClient（T8 后身份判定已查表）</td>
  *     <td>联网只剩通用抓取（Bing / 百度 / Jina），拿不到平台结构化结果</td>
  *   </tr>
  *   <tr>
  *     <td>B8</td>
  *     <td>余额 / 额度查询</td>
- *     <td>{@code ProviderBalanceService.queryBalance} 的 if 链（必要时新增 BillingClient）</td>
+ *     <td>在 {@code ProviderRegistry} 档案的 {@code balance} 字段声明平台类型
+ *         （{@code DEEPSEEK_OFFICIAL / VOLCENGINE_BILLING / ALIYUN_BILLING / MINIMAX_PLAN / MIMO_COOKIE}）+
+ *         必要时新增 BillingClient（T6 后 {@code ProviderBalanceService} 已删掉 5 个 {@code isXxx}，改为查表分派）</td>
  *     <td>余额按钮提示「不支持余额查询」</td>
  *   </tr>
  *   <tr>
@@ -129,56 +145,88 @@ import java.util.Map;
  *   </tr>
  * </table>
  *
- * <h3>C. 散点速查（改完适配器还要改这里，否则等于没做）</h3>
+ * <h3>C. 后端唯一真相源（T12 后：4 份副本 → 1 份）</h3>
+ * <p>
+ * <b>本项目的核心教训：能力规则一旦有副本，就必然漂移，而且漂移<b>不报错</b>。</b>
+ * 典型症状是「界面说能发图、实际图片被静默丢弃」和「界面说能查余额、点下去报缺凭证」。
+ * </p>
+ * <p>
+ * T1~T12 的重构把原本散落在下列位置的规则全部收进 {@code ProviderRegistry}：
+ * </p>
  * <table border="1">
- *   <caption>后端唯一真相源 → 前端展示副本</caption>
- *   <tr><th>能力</th><th>后端（唯一真相源）</th><th>前端（展示副本，必须同步）</th></tr>
+ *   <caption>原 4 份副本 → 现 1 份唯一真相源</caption>
+ *   <tr><th>能力</th><th>重构前散落在</th><th>现在</th></tr>
  *   <tr>
- *     <td>成本 / usage</td>
- *     <td>{@link #getUsageProtocol}、{@code AbstractLLMClient#requiresStreamUsageOption}、
- *         {@code TokenUsageParser}、{@code application.yml → llm.pricing}</td>
- *     <td>无需前端分支：由后端返回的 {@code pricedRequestCount} 自动决定是否显示金额</td>
+ *     <td>视觉</td>
+ *     <td>① {@code ModelCapabilityConfig} 代码默认值；② {@code application.yml} 的 {@code vision-rules}；
+ *         ③ {@code ModelCapabilityRules} 的 if 链；④ 前端 {@code VISION_TEMPLATES + visionStateOf}</td>
+ *     <td>{@code ProviderRegistry} 的 {@code vision} 声明（yml 降级为<b>可选覆盖层</b>）</td>
  *   </tr>
  *   <tr>
- *     <td>图片识别</td>
- *     <td>{@code ModelCapabilityRules.supportsVisionModel}、{@code FileVisionService}</td>
- *     <td>v3 {@code utils/provider-capability.ts}：{@code VISION_TEMPLATES} + {@code visionStateOf}</td>
+ *     <td>Files API</td>
+ *     <td>{@code FilesApiClientManager.createClient} 的 switch</td>
+ *     <td>{@code ProviderRegistry} 的 {@code filesApi}（T7）</td>
  *   </tr>
  *   <tr>
  *     <td>联网搜索</td>
- *     <td>{@code SearchTool}（火山 / MiniMax / DeepSeek 官方搜索）</td>
- *     <td>同上文件的 {@code deriveCapabilities().search} + {@code searchHint}</td>
+ *     <td>{@code SearchTool} 的 if 优先级链 + 3 个 ApiClient 各自的身份判定</td>
+ *     <td>{@code ProviderRegistry} 的 {@code search}（T8）</td>
  *   </tr>
  *   <tr>
- *     <td>余额查询</td>
- *     <td>{@code ProviderBalanceService}</td>
- *     <td>同上文件的 {@code deriveCapabilities().balance}</td>
+ *     <td>余额</td>
+ *     <td>{@code ProviderBalanceService} 的 5 个 {@code isXxx} + baseUrl host 兜底猜测</td>
+ *     <td>{@code ProviderRegistry} 的 {@code balance} + {@code BALANCE_DETECTION_ORDER}（T6）</td>
  *   </tr>
  *   <tr>
- *     <td>模板下拉 / 标签</td>
- *     <td>{@code LLMClientManager} 的 switch 与「模板选型总览」表</td>
- *     <td>v3 {@code ProviderEditDrawer.vue}（{@code TEMPLATE_OPTIONS}）、
- *         {@code provider-capability.ts}（{@code templateLabel / providerIconTone}）；
- *         旧版 {@code ConfigView.vue}、{@code ProviderConfigView.vue}、
- *         {@code CodeAssistantView.vue}（{@code BALANCE_TEMPLATES}）</td>
+ *     <td>计费模式</td>
+ *     <td>无（此前根本没建模 → 套餐制被按 token 估出虚假金额）</td>
+ *     <td>{@code ProviderRegistry} 的 {@code pricingMode} + {@code quotaModeUrlKeywords}（T4）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>适配器选型 / 认证头</td>
+ *     <td>{@code LLMClientManager.createClient} 的 switch + {@code LLMWebClientManager} 的<b>两个</b> switch</td>
+ *     <td>{@code ProviderRegistry} 的 {@code adapterType} + {@code auth}（T12）</td>
  *   </tr>
  * </table>
  *
+ * <h3>前端现在怎么拿能力结论（T9/T10/T11）</h3>
+ * <p>
+ * 后端通过 {@code ProviderCapabilityService} 下发结论，前端<b>从「推导者」降级为「展示者」</b>：
+ * </p>
+ * <ul>
+ *   <li>{@code GET /api/llm-providers/capabilities} —— 全部 Provider 的批量能力（含凭证成对判定）</li>
+ *   <li>{@code GET /api/llm-providers/templates} —— 全部内置模板档案（新建时的下拉 + 预览）</li>
+ *   <li>{@code GET /api/llm-providers/{code}/capabilities} —— 单个 Provider（精确到「缺 secretKey」）</li>
+ * </ul>
+ * <p>
+ * 前端 {@code provider-capability.ts} 只保留<b>离线兜底</b>规则：后端不可达时用它，
+ * 所以<b>不必</b>再与新模板逐条同步（不同步最多退化成「旧结论」，不会显示错误能力）。
+ * {@code ProviderEditDrawer} 的模板下拉也已改为从 {@code /templates} 拉取。
+ * </p>
+ *
  * <h3>D. 前端与测试</h3>
  * <ol>
- *   <li><b>v3 前端</b>：{@code ProviderEditDrawer.vue} 的 {@code TEMPLATE_OPTIONS} 加选项
- *       （否则用户根本选不到新模板）；{@code provider-capability.ts} 按 C 组四处同步。</li>
- *   <li><b>旧版前端</b>：{@code ConfigView.vue} / {@code ProviderConfigView.vue} 的
- *       {@code templateLabel} / {@code templateStyle} / 下拉选项；{@code CodeAssistantView.vue}
- *       的 {@code BALANCE_TEMPLATES}（决定余额按钮显隐）。</li>
- *   <li><b>单测</b>：仿现有 {@code GptAdapterTest} / {@code QwenAdapterTest} /
- *       {@code VolcengineAdapterTest} / {@code MiniMaxAdapterTest} 写请求体断言；
- *       视觉相关参与 {@code AdapterVisionMatrixTest}；新 usage 协议参与
- *       {@code TokenUsageMultiProtocolTest}。</li>
+ *   <li><b>v3 前端</b>：模板下拉与能力徽章<b>已自动跟随后端</b>，新增模板时无需改前端
+ *       （下拉来自 {@code /templates}，徽章来自 {@code /capabilities}）。</li>
+ *   <li><b>旧版前端</b>（{@code frontend/}）：{@code ConfigView.vue} / {@code ProviderConfigView.vue} 的
+ *       {@code templateLabel} / 下拉选项、{@code CodeAssistantView.vue} 的 {@code BALANCE_TEMPLATES}
+ *       —— 这些是<b>已标注废弃的遗留副本</b>，<b>新增模板时不要在此扩展</b>（旧版无能力接口消费层，
+ *       改了也只是又多一份必然漂移的副本）。</li>
+ *   <li><b>单测</b>（本项目用 main 方法 + 手写 check，pom 无 junit 依赖）：
+ *       <ul>
+ *         <li>{@code ProviderRegistrySelfCheck} —— 档案完整性、视觉规则等价、别名一致、适配器覆盖率；</li>
+ *         <li>{@code AuthHeaderEquivalenceTest} —— 认证头与旧 switch 逐条等价；</li>
+ *         <li>{@code AdapterVisionMatrixTest} —— 各适配器块协议转换 + 视觉防线；</li>
+ *         <li>{@code PricingModeGuardTest} —— 套餐制不估价；</li>
+ *         <li>{@code ProviderCapabilityServiceTest} —— 能力接口三态与凭证成对判定；</li>
+ *         <li>新 usage 协议参与 {@code TokenUsageMultiProtocolTest}。</li>
+ *       </ul>
+ *   </li>
  * </ol>
  *
- * <p><b>维护约定</b>：新增或修改任何一项适配点后，请同步更新本清单与
- * {@code docs/LLM_PROVIDER_SYSTEM.md} 第 9.1 节（新增 Provider 实现 SOP）。</p>
+ * <p><b>维护约定</b>：新增或修改任何适配点后，请同步更新本清单与
+ * {@code docs/LLM_PROVIDER_SYSTEM.md} 第 9.1 节（新增 Provider 实现 SOP）。
+ * <b>只改 {@code ProviderRegistry} 一处即可</b>，其余位置应视为「消费方」而非「配置处」。</p>
  */
 public interface LLMClient {
 

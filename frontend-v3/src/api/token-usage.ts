@@ -37,6 +37,19 @@ export interface TokenUsageSummary {
   outputCost: number
   /** 三段费用拆分是否可用（false 时费用结构图应隐藏） */
   breakdownAvailable: boolean
+  /**
+   * 本次统计范围内生效的计费模式：TOKEN / QUOTA / FREE。
+   *
+   * <p>金额不可用有两种完全不同的原因，文案必须能区分：</p>
+   * <ul>
+   *   <li>TOKEN 且金额为空 → 「该模型未配置单价」（可以补配置）</li>
+   *   <li>QUOTA → 「套餐 / 次数制，不按 token 计价」（本来就不该有金额，
+   *       如火山 Coding Plan 200 元 / 9 万次）；说成「未配置单价」会误导用户去配一个不存在的单价</li>
+   *   <li>FREE → 「本地模型，无费用」（如 Ollama）</li>
+   * </ul>
+   * 旧后端可能不返回该字段，前端应把 undefined 当作 TOKEN 处理。
+   */
+  pricingMode?: 'TOKEN' | 'QUOTA' | 'FREE'
 }
 
 /** 分组统计（按模型 / 按会话） */
@@ -91,6 +104,12 @@ export interface TokenUsageTurn {
   pricedRequestCount: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
+  /**
+   * 该会话生效的计费模式（与汇总接口同源）。
+   * <p>用于让聊天页「本轮费用未估算」的提示区分：QUOTA=套餐次数制本来就没有 token 单价、
+   * FREE=本地模型无费用、TOKEN=才是未配置单价。</p>
+   */
+  pricingMode?: 'TOKEN' | 'QUOTA' | 'FREE'
 }
 
 export type UsageRange = 'today' | '7d' | '30d' | 'all'

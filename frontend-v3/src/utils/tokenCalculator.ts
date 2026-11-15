@@ -178,6 +178,36 @@ export function formatUsageTokens(count: number | undefined): string {
  * <p>极小值显示 {@code <¥0.0001} 而不是「¥0.0000」：单轮命中缓存的成本常在 1e-5 量级，
  * 直接按 4 位小数会全部变成 0，看起来像「没花钱 / 统计坏了」。</p>
  */
+/**
+ * 金额不可用时的原因说明（<b>全项目唯一一份文案</b>，聊天页单轮 / 会话合计 / 成本看板共用）。
+ *
+ * <p><b>为什么必须区分三种原因</b>：只说「未配置单价」会把用户引向错误方向 ——</p>
+ * <ul>
+ *   <li>QUOTA（套餐 / 次数制，如火山 Coding Plan 200 元 / 9 万次）——
+ *       这类 Provider <b>根本不存在「元 / 百万 token」单价</b>，让用户去找单价配置是徒劳的；</li>
+ *   <li>FREE（本地 Ollama）—— 没有费用，不是配置缺失；</li>
+ *   <li>TOKEN 且未配单价 —— <b>这才是可以补配置的情况</b>。</li>
+ * </ul>
+ *
+ * <p>判定来源是后端 Provider 档案（ProviderRegistry 的 pricingMode，
+ * 含按 baseUrl 区分同一 Provider 的两种计费形态），不是前端猜测。</p>
+ *
+ * @param pricingMode 后端返回的计费模式；undefined（旧后端）按 TOKEN 处理
+ * @param subject     「未配置单价」时的主语（会话维度传「所用模型」，单轮传「该模型」）
+ */
+export function costUnavailableReason(
+  pricingMode?: 'TOKEN' | 'QUOTA' | 'FREE',
+  subject = '该模型'
+): string {
+  if (pricingMode === 'QUOTA') {
+    return '套餐 / 次数制计费，不按 token 计价（token 与缓存命中率仍为真实统计）'
+  }
+  if (pricingMode === 'FREE') {
+    return '使用本地模型，无费用（token 与缓存命中率仍为真实统计）'
+  }
+  return `${subject}尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）`
+}
+
 export function formatCost(cost: number | undefined): string {
   const n = Number.isFinite(cost as number) ? (cost as number) : 0
   if (n <= 0) return '¥0'

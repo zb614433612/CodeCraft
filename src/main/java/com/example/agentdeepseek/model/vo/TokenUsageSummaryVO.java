@@ -69,4 +69,20 @@ public class TokenUsageSummaryVO {
      * </p>
      */
     private boolean breakdownAvailable;
+
+    /**
+     * 本次统计范围内生效的<b>计费模式</b>：{@code TOKEN} / {@code QUOTA} / {@code FREE}。
+     *
+     * <p><b>为什么需要把它透传给前端</b>：金额不可用有两种完全不同的原因，用户看到的文案必须能区分 ——</p>
+     * <ul>
+     *   <li>{@code TOKEN} 且金额为空 → 「该模型未配置单价」（可以补配置）</li>
+     *   <li>{@code QUOTA} → 「套餐 / 次数制，不按 token 计价」（<b>本来就不该有金额</b>，
+     *       如火山 Coding Plan 200 元 / 9 万次）；说成「未配置单价」会误导用户去配一个不存在的单价</li>
+     *   <li>{@code FREE} → 「本地模型，无费用」（如 Ollama）</li>
+     * </ul>
+     *
+     * <p>判定来源是 {@code ProviderRegistry} 的档案（含 baseUrl 区分同 Provider 的两种形态），
+     * 不是前端猜测。</p>
+     */
+    private String pricingMode = "TOKEN";
 }

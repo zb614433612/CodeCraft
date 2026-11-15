@@ -1,6 +1,9 @@
 package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.SearchProvider;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -195,12 +198,23 @@ public class VolcengineSearchApiClient {
         if (config == null) {
             return false;
         }
-        String template = templateOf(config);
-        if (template != null && TEMPLATES_VOLCENGINE.contains(template.toLowerCase(Locale.ROOT))) {
+        /*
+          T8：Provider 身份判定改为查 ProviderRegistry 档案（不再维护本地的模板常量集合）。
+
+          等价性说明（与旧实现逐条对齐）：
+            ① 模板命中火山系（volcengine / ark / doubao 别名）→ 档案的 search 声明为 VOLCENGINE；
+            ② 模板是自定义名、但 baseUrl 域名指向火山 → 用档案的 hostDetection 兜底命中。
+          两种情况任一成立即视为火山 Provider，与旧实现的 OR 语义完全相同。
+         */
+        ProviderProfile profile = ProviderRegistry.findByTemplate(templateOf(config));
+        if (profile != null && profile.getSearch() != null
+                && profile.getSearch().getProvider() == SearchProvider.VOLCENGINE) {
             return true;
         }
+        ProviderProfile volcengine = ProviderRegistry.findByTemplate("volcengine");
         String host = hostOf(config.getBaseUrl());
-        return host != null && host.toLowerCase(Locale.ROOT).endsWith("volces.com");
+        return volcengine != null && host != null
+                && volcengine.getHostDetection().matchesHost(host);
     }
 
     /** 取请求模板标识（为空时用 provider code 兜底，与 LLMClientManager 的选型逻辑保持一致） */

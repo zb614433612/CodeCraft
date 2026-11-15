@@ -213,6 +213,8 @@ import {
   getProviderBalance,
   parseModelList
 } from './api/llm-provider'
+/* ---- Provider 能力档案：后端为唯一真相源，前端只消费（失败静默退化为本地兜底） ---- */
+import { refreshCapabilities } from './utils/provider-capability'
 /* ---- L4 逐页接线：运行日志（只读，无需管理员） ---- */
 import { getLogDates, searchLogs, tailLogs, exportLogFile } from './api/logs'
 /* ---- 外观设置：背景图上传（唯一走后端的设置项，其余存 localStorage） ---- */
@@ -5478,6 +5480,15 @@ async function loadProviders() {
   } finally {
     providerLoading.value = false
   }
+  /*
+    能力档案预热：让 ProviderRow / ProviderEditDrawer 的徽章用后端结论，
+    而不是前端那套 350 行推导演算出来的旧结论。
+
+    刻意放在 finally 之后、且不 await：能力只是展示辅助，绝不能因为它慢或失败
+    而拖住 Provider 列表渲染。失败时 refreshCapabilities 内部静默吞掉，
+    deriveCapabilities 会自动退回本地兜底规则 —— 界面不会空白，只是结论旧一点。
+   */
+  void refreshCapabilities()
 }
 
 /** 余额查询结果（GET /api/llm-providers/{code}/balance） */

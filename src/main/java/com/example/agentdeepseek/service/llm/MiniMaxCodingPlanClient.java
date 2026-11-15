@@ -1,6 +1,9 @@
 package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.SearchProvider;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -129,15 +132,28 @@ public class MiniMaxCodingPlanClient {
     }
 
     private boolean isMiniMaxProvider(ProviderConfig config) {
+        if (config == null) {
+            return false;
+        }
         String template = config.getRequestTemplate();
         if (template == null || template.isBlank()) {
             template = config.getCode();
         }
-        if (template != null && TEMPLATES_MINIMAX.contains(template.toLowerCase(Locale.ROOT))) {
+        /*
+          T8：Provider 身份判定改为查 ProviderRegistry 档案。
+
+          等价性：① 模板命中 MiniMax 系（minimax / minimax-cn / minimax-intl / minimax-global）
+          → 档案的 search 声明为 MINIMAX_PLAN；② 模板是自定义名但域名指向 MiniMax → hostDetection 兜底。
+          两条件 OR，与旧实现一致。
+         */
+        ProviderProfile profile = ProviderRegistry.findByTemplate(template);
+        if (profile != null && profile.getSearch() != null
+                && profile.getSearch().getProvider() == SearchProvider.MINIMAX_PLAN) {
             return true;
         }
+        ProviderProfile minimax = ProviderRegistry.findByTemplate("minimax");
         String host = hostOf(config.getBaseUrl());
-        return host != null && (host.endsWith(CN_HOST_SUFFIX) || host.endsWith(GLOBAL_HOST_SUFFIX));
+        return minimax != null && host != null && minimax.getHostDetection().matchesHost(host);
     }
 
     /** 解析区域 host：扩展配置 apiHost &gt; baseUrl 域名 &gt; 默认国内 */

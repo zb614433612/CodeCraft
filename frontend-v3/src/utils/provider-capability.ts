@@ -1,48 +1,59 @@
 /**
- * Provider 能力推导与展示辅助（v4）
+ * Provider 能力展示辅助（v5：<b>后端结论优先，本地规则仅作离线兜底</b>）
  * ----------------------------------------------------------------------------
- * 后端 ProviderConfig 没有 capability 字段，页面上的「图片识别 / 联网搜索 / 余额查询」
- * 全部由「请求模板 requestTemplate + 默认模型 defaultModel + 扩展配置 extraConfig + Base URL」
- * 在前端推导，规则与后端实现逐条对齐：
+ * ⚠️ 职责已变更（T10）：本文件<b>不再是能力的推导者</b>。
  *
- *   图片识别 —— 三态，判定以「模型级」为准（对齐后端 FileVisionService.supportsVisionModel）：
- *               on   = 平台协议支持图片输入，且当前默认模型确定是多模态模型；
- *               warn = 平台支持，但默认模型未配置或不支持图像（如 deepseek-chat / qwen-plus / MiniMax-M2）；
- *               off  = 平台协议不支持图片输入（当前所有已适配模板都支持，保留兜底）。
- *               各平台协议差异由后端适配器抹平：火山把 detail=auto 归一为 extraConfig.imageDetail
- *               （缺省 high）；Anthropic 转 image/source；Qwen / MiniMax / MiMo 剔除未声明的 detail；
- *               Ollama 把 content 数组转 messages[].images[]（纯 base64）；OpenAI 公共契约原样透传。
- *   联网搜索 —— 三态，判定「是否已具备平台官方搜索接口」：
- *               on   = 官方接口就绪。火山需 extraConfig.searchApiKey（或环境变量）；
- *                      千问走对话级 enableSearch；MiniMax 用 codingPlanKey（兼容 searchApiKey 别名）；
- *                      DeepSeek 免额外凭证，但要求 Base URL 主机是 api.deepseek.com；
- *               warn = 平台本来有官方搜索接口，但当前配置用不了（如 DeepSeek 走了第三方中转），
- *                      联网只剩通用抓取（Bing / 百度 / Jina / 本地抓取）；
- *               off  = 该平台没有官方搜索接口，同样只能靠通用抓取。
- *               注意：warn / off 都不代表「不能联网」，只是拿不到平台侧的搜索结果。
- *   余额查询 —— ProviderBalanceService 支持：deepseek（官方 /user/balance，免额外凭证）、
- *               volcengine（费用中心 QueryBalanceAcct，需账号级 accessKey + secretKey）、
- *               qwen（阿里云账户余额，需 AK + SK）、minimax（Token Plan 额度，需 codingPlanKey）、
- *               mimo（需 mimoCookie）。
+ *   真相源 = 后端 ProviderCapabilityService（GET /api/llm-providers/capabilities）。
+ *   判定顺序：① 后端缓存命中 → 直接用后端 state/hint（含凭证成对判定、Coding Plan 识别）；
+ *            ② 后端不可达（离线 / 接口异常 / 旧后端）→ 落到下方本地规则，保证界面不空白。
  *
- * 重要：列表接口 GET /api/llm-providers 会把密钥类字段替换成 **** 掩码，
+ * 为什么改成这样：旧实现把同一套规则在后端 + yml + ProviderRegistry + 本文件各写一遍，
+ * 「改一处、漏三处」且漏掉不报错 —— 典型表现是「界面说能发图，实际图片被静默丢弃」，
+ * 以及「界面说能查余额、点下去报缺凭证」。副本从 4 份收敛为 1 份。
+ *
+ * 本地兜底规则（仅在后端不可达时生效，与后端实现逐条对齐）：
+ *   图片识别 —— on = 平台支持且模型确定多模态；warn = 平台支持但模型未配置/不支持；
+ *               off = 平台协议不支持。
+ *   联网搜索 —— on = 官方接口就绪；warn = 有接口但当前配置用不了（如 DeepSeek 走中转）；
+ *               off = 平台无官方接口。注意 warn/off 都不代表「不能联网」。
+ *   余额查询 —— on = 可直接查；warn = 有接口但缺凭证；off = 平台无此接口。
+ *
+ * 重要：列表接口 GET /api/llm-providers 会把密钥字段替换成 **** 掩码，
  *      掩码表示「已配置」，绝不能当空值处理；空串才表示未配置。
  *
  * ----------------------------------------------------------------------------
- * ⚠️ 后端新增 LLM 适配器时，本文件必须同步这 5 处（漏了界面上就看不到新能力）：
- *   1. VISION_TEMPLATES        —— 新模板若支持图片输入，加进数组（否则 detectVision 判 off）
- *   2. visionStateOf()         —— 模型级有差异时补分支（如某系列是纯文本）
- *   3. deriveCapabilities()    —— search 段：有官方搜索接口时补分支（on / warn 判定）
- *   4. deriveCapabilities()    —— balance 段：有余额接口时补分支（缺凭证记 warn，不是 off）
- *   5. templateLabel() / providerIconTone() —— 中文标签与配色
- *
- * 另外 ProviderEditDrawer.vue 的 TEMPLATE_OPTIONS 也要加选项，否则用户选不到新模板。
- * 后端唯一真相源位置见 LLMClient 类头的 A/B/C/D 适配清单 —— 逐条对齐，不要只在前端加。
+ * 后端新增 LLM 适配器时，正确做法是<b>只改后端 ProviderRegistry 一处</b>；
+ * 下面的本地兜底规则可同步、也可不同步（它只在接口不可用时生效，不同步不会导致界面错误，
+ * 最多退化为「旧结论」）。ProviderEditDrawer 的模板下拉也已改为从后端拉取。
  * ----------------------------------------------------------------------------
  */
 
+import {
+  getAllProviderCapabilities,
+  getTemplateCapabilities,
+  type RemoteCapability,
+  type RemoteCapabilityItem
+} from '../api/provider-capability'
+
 /** 能力状态：on=具备，warn=支持但缺条件（缺凭证 / 模型未知或非多模态 / 被中转挡住），off=不支持 */
 export type CapabilityState = 'on' | 'warn' | 'off'
+
+/**
+ * 后端下发的能力字段名（用于 {@link capabilityHintOf} 精确取文案）
+ */
+export type CapabilityField = 'vision' | 'search' | 'balance' | 'filesApi'
+
+/**
+ * 后端能力缓存：<b>同一个档案用两个键索引</b>。
+ *
+ * <p>为什么同时按 code 与 template 建索引：调用点有时只有 template（新建预览），
+ * 有时只有 code（列表行的 Provider 实例）。两个键都存一份，
+ * 任何一侧命中都能拿到结论，避免调用方各自写「先用 code 还是先用 template」的分支。</p>
+ */
+const capabilityCache = new Map<string, RemoteCapability>()
+
+/** 缓存是否已预热（未预热时 deriveCapabilities 会静默走本地兜底，不报错） */
+let cachePrimed = false
 
 export interface ProviderCapabilities {
   /** 图片识别（多模态图片输入）：模型级三态 */
@@ -206,8 +217,134 @@ export function hasExtraValue(extra: Record<string, unknown>, keys: string[]): b
   })
 }
 
+// ==================== 后端能力缓存（T10 核心） ====================
+
+/**
+ * 把后端能力档案写入缓存（按 code 与 template 双键索引）。
+ *
+ * <p>调用方通常是 App.vue 在加载 Provider 列表后 fire-and-forget 调用，
+ * 因此这里必须<b>永不抛异常</b>：后端不可达时静默保留本地兜底，界面照常可用。</p>
+ */
+export function primeCapabilities(
+  data: Record<string, RemoteCapability> | RemoteCapability[] | null | undefined
+): void {
+  if (!data) return
+  const items: RemoteCapability[] = Array.isArray(data)
+    ? data
+    : Object.values(data)
+  for (const item of items) {
+    if (!item) continue
+    if (item.providerCode) {
+      capabilityCache.set(String(item.providerCode).trim().toLowerCase(), item)
+    }
+    if (item.template) {
+      capabilityCache.set(String(item.template).trim().toLowerCase(), item)
+    }
+  }
+  if (items.length > 0) {
+    cachePrimed = true
+  }
+}
+
+/**
+ * 拉取并预热能力缓存（App 启动 / Provider 列表加载后调用）。
+ *
+ * <p>失败不影响任何功能：缓存为空时 {@link deriveCapabilities} 自动走本地兜底规则。</p>
+ */
+export async function refreshCapabilities(): Promise<void> {
+  try {
+    const [providers, templates] = await Promise.all([
+      getAllProviderCapabilities(),
+      getTemplateCapabilities()
+    ])
+    primeCapabilities(templates)
+    primeCapabilities(providers)
+  } catch {
+    // 静默：离线 / 旧后端 / 接口 404 都退化为本地兜底，不打扰用户
+  }
+}
+
+/** 缓存是否已就绪（可用于诊断「为什么界面显示的是旧结论」） */
+export function isCapabilityCachePrimed(): boolean {
+  return cachePrimed
+}
+
+/**
+ * 按 code 或 template 取后端能力档案（未命中返回 null）。
+ *
+ * <p>查找顺序：精确 code → 精确 template → 前缀匹配（兼容 {@code volcengine-custom} 这类自定义 code，
+ * 与后端 {@code ProviderRegistry.findByCode} 的前缀语义一致）。</p>
+ */
+export function capabilityDetailOf(key?: string | null): RemoteCapability | null {
+  const text = String(key || '').trim().toLowerCase()
+  if (!text) return null
+  const exact = capabilityCache.get(text)
+  if (exact) return exact
+  for (const [cacheKey, item] of capabilityCache) {
+    if (cacheKey.length > 0 && text.startsWith(cacheKey)) {
+      return item
+    }
+  }
+  return null
+}
+
+/**
+ * 取某个能力的后端文案（hint）。
+ *
+ * <p>用在后端已给出精确结论的地方：如「缺 secretKey」「火山按 /api/coding 走次数套餐」，
+ * 这类信息前端推导不出来。返回 {@code null} 表示后端没数据，调用方应回落到本地文案。</p>
+ */
+export function capabilityHintOf(
+  key: string | undefined | null,
+  field: CapabilityField
+): string | null {
+  const detail = capabilityDetailOf(key)
+  if (!detail) return null
+  const item: RemoteCapabilityItem | undefined = detail[field]
+  const hint = item?.hint
+  return hint && hint.trim() ? hint : null
+}
+
+/** 取某个能力的徽章短文案（后端已按平台差异定制过，如「联网搜索·通用抓取」） */
+export function capabilityLabelOf(
+  key: string | undefined | null,
+  field: CapabilityField
+): string | null {
+  const detail = capabilityDetailOf(key)
+  if (!detail) return null
+  const label = detail[field]?.label
+  return label && label.trim() ? label : null
+}
+
+/** 取某个能力缺失的凭证字段名（仅后端能精确知道，如 ['secretKey']） */
+export function capabilityMissingKeys(
+  key: string | undefined | null,
+  field: CapabilityField
+): string[] {
+  const detail = capabilityDetailOf(key)
+  return detail?.[field]?.missingKeys ?? []
+}
+
+/** 取后端判定的计费模式（QUOTA=套餐次数制不估价 / FREE=本地免费 / TOKEN=按 token 估价） */
+export function pricingModeOf(key?: string | null): 'TOKEN' | 'QUOTA' | 'FREE' | null {
+  return capabilityDetailOf(key)?.pricingMode ?? null
+}
+
+/**
+ * 规整后端下发的 state 字符串。
+ *
+ * <p>后端枚举只有 on/warn/off 三个值，但接口可能被中继改写或返回旧版本字段，
+ * 因此这里做一次防御：未知值一律按 {@code off}（保守，不谎称有能力）。</p>
+ */
+function normalizeState(value?: string | null): CapabilityState {
+  if (value === 'on' || value === 'warn' || value === 'off') return value
+  return 'off'
+}
+
 /**
  * 按「请求模板 + 默认模型 + 扩展配置 + Base URL」推导能力。
+ *
+ * <p><b>优先用后端结论</b>（按 code 查，再按 template 查）；两者都没有时落到本地规则兜底。</p>
  *
  * @param template   请求模板（后端 requestTemplate，空则回退 code）
  * @param code       Provider 编码（后端 providerCode）
@@ -222,6 +359,21 @@ export function deriveCapabilities(
   model?: string | null,
   baseUrl?: string | null
 ): ProviderCapabilities {
+  /*
+    ① 后端结论优先：后端读的是 DB 原始配置，能判定「AK/SK 是否成对」「baseUrl 是否 /api/coding」
+    这类前端推导不出来的信息，也会与后端真正的拦截逻辑保持一致。
+    按 code 查（实例级，含凭证判定）→ 再按 template 查（模板级，新建预览）。
+  */
+  const remote = capabilityDetailOf(code) ?? capabilityDetailOf(template)
+  if (remote) {
+    return {
+      vision: normalizeState(remote.vision?.state),
+      search: normalizeState(remote.search?.state),
+      balance: normalizeState(remote.balance?.state)
+    }
+  }
+
+  // ② 后端不可达时的本地兜底规则（与后端实现逐条对齐）
   const tpl = String(template || code || '').toLowerCase()
   const codeKey = String(code || '').trim().toLowerCase()
   const extra = parseExtraConfig(extraConfig)

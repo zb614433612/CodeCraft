@@ -5,6 +5,9 @@ import com.example.agentdeepseek.service.files.impl.AnthropicFilesApiClient;
 import com.example.agentdeepseek.service.files.impl.DeepSeekFilesApiClient;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.service.llm.LLMWebClientManager;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.FilesApiProvider;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -117,19 +120,33 @@ public class FilesApiClientManager {
         if (template == null || template.isBlank()) {
             template = config.getCode();
         }
-        return switch (template.toLowerCase()) {
-            case "deepseek" -> {
+        /*
+          T7：分发依据从「本类 switch」改为「ProviderRegistry 档案」。
+
+          ⚠️ 未适配模板必须仍然返回 null（而不是抛异常、也不是猜一个客户端）：
+          上层 FileAssetService 会据此走「仅本地存储」，注入阶段再由
+          FileVisionService.buildFileBlocks 转 base64。这是 v3.1.4 定下的隐私口径 ——
+          「用户没选就不许替他选」，绝不向任何第三方云盘上传用户文件。
+         */
+        ProviderProfile profile = ProviderRegistry.findByTemplate(template);
+        FilesApiProvider provider = (profile == null || profile.getFilesApi() == null)
+                ? FilesApiProvider.NONE
+                : profile.getFilesApi().getProvider();
+
+        return switch (provider) {
+            case DEEPSEEK -> {
                 var wc = webClientManager.getOrCreate(config);
                 yield new DeepSeekFilesApiClient(wc, objectMapper, config.getCode());
             }
-            case "anthropic" -> {
-                // P3：Anthropic 兼容风格（/v1/files + x-api-key + anthropic-beta 头；baseUrl 需含 /anthropic 前缀）
+            case ANTHROPIC -> {
+                // Anthropic 兼容风格（/v1/files + x-api-key + anthropic-beta 头；baseUrl 需含 /anthropic 前缀）
                 var wc = webClientManager.getOrCreate(config);
                 yield new AnthropicFilesApiClient(wc, objectMapper, config.getCode());
             }
-            default -> {
+            case NONE -> {
                 // 未适配厂商：返回 null，上层降级处理（不抛异常、不报 500）
-                log.debug("Provider [{}] template={} 尚未适配 Files API", config.getCode(), template);
+                log.debug("Provider [{}] template={} 尚未适配 Files API（走本地存储 + base64 降级）",
+                        config.getCode(), template);
                 yield null;
             }
         };

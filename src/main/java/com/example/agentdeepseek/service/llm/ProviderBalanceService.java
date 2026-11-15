@@ -2,6 +2,9 @@ package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.model.entity.ProviderConfig;
 import com.example.agentdeepseek.model.vo.ProviderBalanceVO;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.BalanceProvider;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -126,23 +129,27 @@ public class ProviderBalanceService {
 
         String template = resolveTemplate(config);
 
-        if (isVolcengine(config, template)) {
-            return queryVolcengineBalance(config);
-        }
-        if (isDeepSeek(config, template)) {
-            return queryDeepSeekBalance(config);
-        }
-        if (isMiniMax(config, template)) {
-            return queryMiniMaxQuota(config);
-        }
-        if (isMiMo(config, template)) {
-            return queryMiMoBalance(config);
-        }
-        if (isQwen(config, template)) {
-            return queryQwenBalance(config);
-        }
-        throw new IllegalArgumentException("Provider [" + providerCode
-                + "] 不支持余额/额度查询（目前支持 DeepSeek / 火山引擎 / MiniMax / 小米 MiMo / 通义千问）");
+        /*
+          余额能力改为「查 ProviderRegistry 档案」，不再散 5 个 if 判定。
+
+          ⚠️ 判定顺序与 host 兜底规则由 balanceCandidateFor 完整保留旧行为，包括
+          「template=deepseek 但 baseUrl 指向火山域名 → 走火山余额」这种既成事实，
+          迁移时不做任何"顺手优化"，避免同一配置开始查另一个账户。
+         */
+        ProviderProfile profile = ProviderRegistry.balanceCandidateFor(template, config.getBaseUrl());
+        BalanceProvider provider = (profile == null || profile.getBalance() == null)
+                ? BalanceProvider.NONE
+                : profile.getBalance().getProvider();
+
+        return switch (provider) {
+            case VOLCENGINE_BILLING -> queryVolcengineBalance(config);
+            case DEEPSEEK_OFFICIAL -> queryDeepSeekBalance(config);
+            case MINIMAX_PLAN -> queryMiniMaxQuota(config);
+            case MIMO_COOKIE -> queryMiMoBalance(config);
+            case ALIYUN_BILLING -> queryQwenBalance(config);
+            case NONE -> throw new IllegalArgumentException("Provider [" + providerCode + "]（模板 " + template
+                    + "）不支持余额/额度查询（目前支持 DeepSeek / 火山引擎 / MiniMax / 小米 MiMo / 通义千问）");
+        };
     }
 
     // ==================== DeepSeek ====================
@@ -453,56 +460,19 @@ public class ProviderBalanceService {
 
     // ==================== 能力判定 & 工具方法 ====================
 
+    /*
+      注意：原先这里还有 5 个 isXxx(ProviderConfig, template) 判定方法，用于 if 链分派。
+      T6 起改由 ProviderRegistry.balanceCandidateFor 统一判定 —— 判定顺序与 host 兜底
+      规则都已搬进档案表，此处不再保留第二份判定逻辑（避免又一处"改一处漏一处"）。
+      新增余额能力请改 ProviderRegistry 的 balance 声明，而不是在这里加 if。
+     */
+
     private String resolveTemplate(ProviderConfig config) {
         String template = config.getRequestTemplate();
         if (template == null || template.isBlank()) {
             template = config.getCode();
         }
         return template == null ? "" : template.trim();
-    }
-
-    private boolean isDeepSeek(ProviderConfig config, String template) {
-        if (TEMPLATE_DEEPSEEK.equalsIgnoreCase(template)) {
-            return true;
-        }
-        String host = hostOf(config.getBaseUrl());
-        return DEEPSEEK_HOST.equalsIgnoreCase(host);
-    }
-
-    private boolean isVolcengine(ProviderConfig config, String template) {
-        if (TEMPLATES_VOLCENGINE.contains(template.toLowerCase(Locale.ROOT))) {
-            return true;
-        }
-        String host = hostOf(config.getBaseUrl());
-        return host != null && host.toLowerCase(Locale.ROOT).endsWith("volces.com");
-    }
-
-    private boolean isMiniMax(ProviderConfig config, String template) {
-        if (TEMPLATES_MINIMAX.contains(template.toLowerCase(Locale.ROOT))) {
-            return true;
-        }
-        String host = hostOf(config.getBaseUrl());
-        if (host == null) {
-            return false;
-        }
-        String lower = host.toLowerCase(Locale.ROOT);
-        return lower.endsWith(MINIMAX_CN_SUFFIX) || lower.endsWith(MINIMAX_GLOBAL_SUFFIX);
-    }
-
-    private boolean isMiMo(ProviderConfig config, String template) {
-        if (TEMPLATES_MIMO.contains(template.toLowerCase(Locale.ROOT))) {
-            return true;
-        }
-        String host = hostOf(config.getBaseUrl());
-        return host != null && host.toLowerCase(Locale.ROOT).endsWith(MIMO_HOST_SUFFIX);
-    }
-
-    private boolean isQwen(ProviderConfig config, String template) {
-        if (TEMPLATES_QWEN.contains(template.toLowerCase(Locale.ROOT))) {
-            return true;
-        }
-        String host = hostOf(config.getBaseUrl());
-        return host != null && host.toLowerCase(Locale.ROOT).endsWith("aliyuncs.com");
     }
 
     private static String hostOf(String baseUrl) {

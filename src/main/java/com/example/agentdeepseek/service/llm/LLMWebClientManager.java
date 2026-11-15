@@ -1,6 +1,8 @@
 package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import io.netty.channel.ChannelOption;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -165,33 +167,26 @@ public class LLMWebClientManager {
                 .clientConnector(new ReactorClientHttpConnector(httpClient));
 
         // API Key 处理：优先使用 Provider 自身配置，否则通过 filter 动态获取
-        // 不同 Provider 使用不同的认证头格式
-        String authHeaderName = getAuthHeaderName(config);
-        String authHeaderPrefix = getAuthHeaderPrefix(config);
+        // 认证头（名称 + 前缀）由 ProviderRegistry 档案统一声明，创建与刷新共用同一份规格
+        ProviderProfile.AuthSpec auth = resolveAuth(config);
 
         String apiKey = resolveApiKey(config);
         if (apiKey != null && !apiKey.isEmpty()) {
-            if (authHeaderPrefix != null && !authHeaderPrefix.isEmpty()) {
-                builder.defaultHeader(authHeaderName, authHeaderPrefix + apiKey);
-            } else {
-                builder.defaultHeader(authHeaderName, apiKey);
-            }
+            String value = withPrefix(auth.getHeaderPrefix(), apiKey);
+            builder.defaultHeader(auth.getHeaderName(), value);
         }
         // 即使有静态 Key，也添加 filter 作为动态 fallback
         builder.filter((request, next) -> {
             // 动态 API Key（每次请求前检查 resolveApiKey 是否有更新）
             String dynamicKey = resolveApiKey(config);
             if (dynamicKey != null && !dynamicKey.isEmpty()) {
-                String dynamicHeaderName = getAuthHeaderName(config);
-                String dynamicPrefix = getAuthHeaderPrefix(config);
-                String dynamicValue = (dynamicPrefix != null && !dynamicPrefix.isEmpty())
-                        ? dynamicPrefix + dynamicKey : dynamicKey;
+                String dynamicValue = withPrefix(auth.getHeaderPrefix(), dynamicKey);
                 // 如果 request 上已有认证头且与动态 Key 不同，替换之
-                var existingAuth = request.headers().get(dynamicHeaderName);
+                var existingAuth = request.headers().get(auth.getHeaderName());
                 if (existingAuth.isEmpty() || !existingAuth.get(0).equals(dynamicValue)) {
                     return next.exchange(
                             ClientRequest.from(request)
-                                    .headers(h -> h.set(dynamicHeaderName, dynamicValue))
+                                    .headers(h -> h.set(auth.getHeaderName(), dynamicValue))
                                     .build()
                     );
                 }
@@ -345,38 +340,52 @@ public class LLMWebClientManager {
     }
 
     /**
-     * 按 Provider 模板获取认证头名称
-     * <ul>
-     *   <li>deepseek / openai / minimax / volcengine（火山方舟）→ Authorization</li>
-     *   <li>anthropic → x-api-key</li>
-     *   <li>mimo → api-key（MiMo 自定义头）</li>
-     *   <li>ollama / custom → 无（返回 Authorization 但无前缀时跳过）</li>
-     * </ul>
+     * 把前缀与 key 拼成最终认证头值。
+     *
+     * <p>{@code prefix} 为 null 或空串时<b>直接返回裸 key</b>（不是「不发送认证头」）——
+     * 这与改动前的代码行为一致（旧实现 {@code prefix} 为 null 时走
+     * {@code builder.defaultHeader(name, apiKey)}）。</p>
      */
-    private String getAuthHeaderName(ProviderConfig config) {
-        String template = config.getRequestTemplate();
-        if (template == null) template = config.getCode();
-        return switch (template.toLowerCase()) {
-            case "anthropic" -> "x-api-key";
-            case "mimo" -> "api-key";
-            default -> "Authorization"; // deepseek, openai, minimax, ollama, custom
-        };
+    private static String withPrefix(String prefix, String apiKey) {
+        return (prefix == null || prefix.isEmpty()) ? apiKey : prefix + apiKey;
     }
 
     /**
-     * 按 Provider 模板获取认证头值前缀
-     * <ul>
-     *   <li>deepseek / openai / minimax → "Bearer "</li>
-     *   <li>anthropic → null（无前缀，直接放 apiKey）</li>
-     *   <li>mimo / ollama → null（无认证或自定义头）</li>
-     * </ul>
+     * 按 Provider 模板获取认证头规格（名称 + 值前缀）—— <b>唯一一份认证规则</b>
+     *
+     * <h3>T12：为什么合并成一个方法</h3>
+     * <p>
+     * 改动前是<b>两个各自独立的 switch</b>：
+     * {@code getAuthHeaderName}（返回 {@code Authorization} / {@code x-api-key} / {@code api-key}）
+     * 与 {@code getAuthHeaderPrefix}（返回 {@code "Bearer "} / {@code null}）。
+     * </p>
+     * <p>
+     * 后果：新增模板时<b>只改了其中一个</b>就会得到自相矛盾的组合 ——
+     * 例如只加了 headerName 却没加前缀，就会发出 {@code x-api-key: Bearer sk-xxx}（多了一个 Bearer）；
+     * 反之只改前缀没改头名，就是 {@code Authorization: sk-xxx}（少 Bearer）。
+     * 两种都表现为「401 认证失败」，但日志里看不出是配置问题还是密钥错误。
+     * </p>
+     * <p>
+     * 现在规则收进 {@code ProviderRegistry} 的 {@code auth} 声明，一处声明两个字段必须成对出现，
+     * 结构上不可能只改一半。
+     * </p>
+     *
+     * <h3>⚠️ 一处必须保留的历史行为</h3>
+     * <p>
+     * 旧注释写「ollama / custom 无前缀时<b>跳过</b>认证头」，但<b>代码实际是「发送裸 key」</b>
+     * （{@code prefix} 为 null 时走 {@code builder.defaultHeader(name, apiKey)}）。
+     * 这里以<b>代码行为</b>为准（继续发裸 key），不搬错误注释 ——
+     * 因为改注释容易，改行为会让本地 Ollama 用户突然收到一个多余的 Authorization 头。
+     * </p>
+     *
+     * @param config Provider 配置
+     * @return 认证规格（{@code headerPrefix} 为 null 表示不加前缀，直接放 apiKey —— <b>不是不发送</b>）
      */
-    private String getAuthHeaderPrefix(ProviderConfig config) {
+    private ProviderProfile.AuthSpec resolveAuth(ProviderConfig config) {
         String template = config.getRequestTemplate();
-        if (template == null) template = config.getCode();
-        return switch (template.toLowerCase()) {
-            case "anthropic", "mimo", "ollama", "custom" -> null;
-            default -> "Bearer "; // deepseek, openai, minimax
-        };
+        if (template == null || template.isBlank()) {
+            template = config.getCode();
+        }
+        return ProviderRegistry.authFor(template);
     }
 }

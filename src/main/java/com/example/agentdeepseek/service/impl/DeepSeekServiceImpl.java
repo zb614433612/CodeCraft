@@ -21,6 +21,7 @@ import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.FileAsset;
 import com.example.agentdeepseek.model.entity.MessageRole;
+import com.example.agentdeepseek.model.entity.ProviderConfig;
 import com.example.agentdeepseek.model.entity.Skill;
 
 import com.example.agentdeepseek.service.agentinvoke.AgentInvokeService;
@@ -1125,7 +1126,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         List<Map<String, Object>> visionBlocks = List.of();
         if (!imageAssetIds.isEmpty()) {
             String visionProviderCode = llmClient.getProviderCode();
-            if (!FileVisionService.supportsVisionModel(visionProviderCode, effectiveModel)) {
+            /*
+              ⚠️ T12 修复的真实 BUG：判定键必须用「模板」而不是「编码」。
+
+              视觉规则是按平台名注册的（deepseek / volcengine,ark,doubao / qwen,dashscope,tongyi …），
+              但用户可以自起 code —— 典型例子：火山方舟配成 code=huoshan、template=volcengine。
+
+              旧实现传 providerCode 作判定键：
+                findVisionRule("huoshan") → 精确不中、前缀也不中（没有别名以 huoshan 开头）
+                → 返回 null → 落到 defaultAllowVision=true → 判定「支持」→ 放行
+              结果：deepseek-v4-pro / v4-flash（纯文本）下用户发图，后端不拦截，
+              图片被静默丢弃 —— 正是最难排查的那类失败。
+
+              因此改为「模板优先、编码兜底、双键取严」：
+                ① 取该 Provider 的 requestTemplate（平台真相源）作主判定键；
+                ② 拿不到模板时才用 code；
+                ③ 两个键都判一次，任一判为不支持即拦截（宁可多拦一次并提示换模型，
+                   也不要让图片被无声丢弃）。
+             */
+            String visionTemplate = resolveVisionTemplateKey(visionProviderCode);
+            boolean supportedByTemplate = FileVisionService.supportsVisionModel(visionTemplate, effectiveModel);
+            boolean supportedByCode = visionProviderCode == null || visionProviderCode.isBlank()
+                    || FileVisionService.supportsVisionModel(visionProviderCode, effectiveModel);
+            if (!supportedByTemplate || !supportedByCode) {
                 throw new IllegalStateException("当前模型（" + effectiveModel
                         + "）不支持图像理解，请切换至支持视觉的模型（如 deepseek-flash）后再发送图片");
             }
@@ -3778,6 +3801,52 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 .doFinally(signalType -> persistTokenUsageSafely(
                         conversationId, (String) apiRequest.get("_turnId"), iteration,
                         usageProvider, usageModel, usageRef.get()));
+    }
+
+    /**
+     * 取视觉判定使用的「主判定键」—— 优先 {@code requestTemplate}，拿不到时才用 {@code code}。
+     *
+     * <h3>为什么不能直接用 providerCode（T12 修复的真实 BUG）</h3>
+     * <p>
+     * 视觉规则按<b>平台名</b>注册（{@code deepseek} / {@code volcengine,ark,doubao} /
+     * {@code qwen,dashscope,tongyi} …），而 {@code providerCode} 是用户自起的。
+     * 典型反例：火山方舟配成 {@code code=huoshan} + {@code requestTemplate=volcengine}。
+     * </p>
+     * <p>
+     * 此时 {@code findVisionRule("huoshan")} 精确不中、前缀也不中（没有别名以 {@code huoshan} 开头）
+     * → 返回 {@code null} → 落到全局 {@code defaultAllowVision=true} → 判定「支持」→ <b>放行</b>。
+     * 于是 {@code deepseek-v4-pro} / {@code v4-flash}（纯文本）下用户发图不报错，
+     * 图片被<b>静默丢弃</b>，日志里没有任何痕迹 —— 最难排查的那类失败。
+     * </p>
+     *
+     * <h3>为什么调用方还额外用 code 判一次</h3>
+     * <p>
+     * 因为 {@code code} 反映的是「后端实际拦截点会拿到的键」，两者取严可以保证
+     * 「界面显示的严格程度不低于实际行为」。这里只负责返回主键，取严逻辑在调用点完成。
+     * </p>
+     *
+     * @param providerCode Provider 编码（可能为用户自起的名字，如 huoshan）
+     * @return 判定键：优先模板，其次原编码
+     */
+    private String resolveVisionTemplateKey(String providerCode) {
+        if (providerCode == null || providerCode.isBlank()) {
+            return providerCode;
+        }
+        try {
+            ProviderConfig config = llmClientManager.getProviderConfig(providerCode);
+            if (config == null) {
+                return providerCode;
+            }
+            String template = config.getRequestTemplate();
+            if (template == null || template.isBlank()) {
+                return providerCode;
+            }
+            return template;
+        } catch (Exception e) {
+            // 查配置失败不应阻断发图，退回原编码（等价于旧行为，至少不会更糟）
+            log.debug("解析视觉判定模板失败，回退使用 code [{}]: {}", providerCode, e.getMessage());
+            return providerCode;
+        }
     }
 
     /**

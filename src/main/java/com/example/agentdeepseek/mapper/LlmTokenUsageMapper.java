@@ -95,6 +95,22 @@ public interface LlmTokenUsageMapper {
                                              @Param("to") LocalDateTime to);
 
     /**
+     * 统计时间范围内出现过的 Provider 编码（去重）。
+     *
+     * <p><b>为什么需要它</b>：成本看板要判定「这批数据能不能估算金额」，
+     * 而判定依据是<b>计费模式</b>（{@code ProviderRegistry} 的 {@code pricingMode}），
+     * 不是「模型名有没有配单价」。汇总 VO 里只有 token 与金额，没有 provider 维度，
+     * 因此必须单独查一次 provider 列表，才能识别出
+     * 「范围内混入了套餐制 Provider（如火山 Coding Plan）」这种情况。</p>
+     *
+     * <p>返回 {@code null} 的元素会被服务层忽略。</p>
+     */
+    @Select("SELECT DISTINCT provider FROM llm_token_usage "
+            + "WHERE created_at >= #{from} AND created_at < #{to}")
+    List<String> selectDistinctProviders(@Param("from") LocalDateTime from,
+                                         @Param("to") LocalDateTime to);
+
+    /**
      * 按模型分组统计（时间范围内，按费用倒序）
      */
     @Select("SELECT model AS group_key, COUNT(*) AS request_count, "

@@ -2,6 +2,8 @@ package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.mapper.ProviderConfigMapper;
 import com.example.agentdeepseek.model.entity.ProviderConfig;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -423,58 +425,93 @@ public class LLMClientManager {
      * <p><b>注意</b>：{@code default} 分支会静默回退到 {@code DeepSeekClient} 而非抛异常，
      * 所以模板名写错时表现为「请求能发出去但 400」，很难定位。请先在选型表登记再写分支。</p>
      */
+    /**
+     * 创建 Client 实例 —— <b>按 {@link ProviderRegistry} 档案的 adapterType 分派</b>
+     *
+     * <h3>T12：为什么不再用本地 switch</h3>
+     * <p>
+     * 旧实现是本类自己维护一份 {@code switch} 模板清单，与 {@code ProviderRegistry} 的
+     * <b>别名清单</b>是两份独立数据。典型漂移：档案声明了 {@code xiaomi-mimo} /
+     * {@code minimax-cn} / {@code minimax-intl} / {@code minimax-global}，
+     * 而本类的 switch 只写了 {@code case "mimo"} / {@code case "minimax"} ——
+     * 于是这些别名<b>掉进 {@code default} 被当成 {@code DeepSeekClient}</b>：
+     * 能力按档案判（说能发图、能查余额），对话却跑 DeepSeek 协议。
+     * </p>
+     * <p>
+     * 现在选型依据是档案的 {@code adapterType}，「别名」与「实现」同源，
+     * <b>这类漂移在结构上不可能发生</b>，不再依赖「记得同步改两处」。
+     * </p>
+     *
+     * <p><b>未注册模板的处理变了</b>：旧实现静默回退成 {@code DeepSeekClient}，
+     * 表现为「请求能发出去但 400」，极难定位。现在改为明确 WARN 并回退，
+     * 日志里能直接看到「模板名没在 ProviderRegistry 登记」。</p>
+     */
     private LLMClient createClient(ProviderConfig config) {
         String template = config.getRequestTemplate();
-        if (template == null) template = config.getCode();
+        if (template == null || template.isBlank()) {
+            template = config.getCode();
+        }
 
-        return switch (template.toLowerCase()) {
-            case "deepseek" -> {
+        ProviderProfile.AdapterType adapterType = ProviderRegistry.adapterTypeFor(template);
+        if (adapterType == null) {
+            /*
+              未登记模板：明确告警 + 保守回退。
+
+              仍然回退（而不是抛异常）是为了「老配置升级后不直接炸掉」——
+              但日志必须显眼，否则又会变成「静默用错协议」。
+             */
+            log.warn("Provider [{}] 的模板 [{}] 未在 ProviderRegistry 登记，已回退为 DeepSeekClient；"
+                            + "若该平台非 DeepSeek 兼容，请求会 400 —— 请在 ProviderRegistry 补一个档案",
+                    config.getCode(), template);
+            var wc = webClientManager.getOrCreate(config);
+            return new DeepSeekClient(wc, objectMapper, config.getCode());
+        }
+
+        return switch (adapterType) {
+            case DEEPSEEK -> {
                 var wc = webClientManager.getOrCreate(config);
                 yield new DeepSeekClient(wc, objectMapper, config.getCode());
             }
-            case "gpt", "gpt-official", "chatgpt" -> {
+            case GPT -> {
                 // OpenAI 官方 GPT / o 系列专用：max_completion_tokens + reasoning_effort + stream_options
-                // 与 openai（公共契约）区分：这里下发官方专有参数，只适合官方或官方代理
+                // 与 OPENAI（公共契约）区分：这里下发官方专有参数，只适合官方或官方代理
                 var wc = webClientManager.getOrCreate(config);
                 yield new GptClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
             }
-            case "openai" -> {
-                // 公共契约：任意 OpenAI 兼容服务（Azure / 中转站 / 自建网关），不下发厂商专有参数
+            case OPENAI -> {
+                // 公共契约：任意 OpenAI 兼容服务（Azure / 中转站 / 自建网关 / custom），不下发厂商专有参数
+                if ("custom".equalsIgnoreCase(template.trim())) {
+                    log.info("自定义 Provider [{}]，使用 OpenAI 兼容基础模式", config.getCode());
+                }
                 var wc = webClientManager.getOrCreate(config);
                 yield new OpenAIClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
             }
-            case "anthropic" -> {
+            case ANTHROPIC -> {
                 // 公共契约：任意 Anthropic Messages 兼容服务（官方 / Claude 兼容层 / 中转站）
                 var wc = webClientManager.getOrCreate(config);
                 yield new AnthropicClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
                         readExtraInt(config, "maxTokens"));
             }
-            case "ollama" -> {
+            case OLLAMA -> {
                 var wc = webClientManager.getOrCreate(config);
                 yield new OllamaClient(wc, objectMapper, config.getCode());
             }
-            case "custom" -> {
-                // 自定义 = 最小 OpenAI 兼容模式（不发送 thinking 等特有参数）
-                log.info("自定义 Provider [{}]，使用 OpenAI 兼容基础模式", config.getCode());
-                var wc = webClientManager.getOrCreate(config);
-                yield new OpenAIClient(wc, objectMapper, config.getCode(), config.getBaseUrl());
-            }
-            case "mimo" -> {
+            case MIMO -> {
                 var wc = webClientManager.getOrCreate(config);
                 yield new MiMoClient(wc, objectMapper, config.getCode());
             }
-            case "minimax" -> {
+            case MINIMAX -> {
                 var wc = webClientManager.getOrCreate(config);
                 yield new MiniMaxClient(wc, objectMapper, config.getCode());
             }
-            case "qwen", "dashscope", "tongyi" -> {
+            case QWEN -> {
                 // 通义千问（阿里云百炼 DashScope / QwenCloud），OpenAI 兼容 + Qwen 扩展参数
                 var wc = webClientManager.getOrCreate(config);
                 yield new QwenClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
                         readExtraBoolean(config, "enableSearch"),
                         readExtraInt(config, "thinkingBudget"));
             }
-            case "volcengine", "ark", "doubao" -> {
+            case VOLCENGINE -> {
                 // 火山引擎方舟（豆包 / 方舟上的 DeepSeek、GLM、Kimi 等模型），OpenAI 兼容协议
                 // 专属可配置项（Provider「扩展配置」extraConfig）：
                 //   imageDetail / reasoningEffortModels / reasoningEffortEnabled /
@@ -487,11 +524,6 @@ public class LLMClientManager {
                                 readExtraBoolean(config, "reasoningEffortEnabled"),
                                 readExtraValue(config, "reasoningEffortHigh"),
                                 readExtraValue(config, "reasoningEffortMax")));
-            }
-            default -> {
-                log.warn("未知的 request_template: {}，回退到 DeepSeekClient", template);
-                var wc = webClientManager.getOrCreate(config);
-                yield new DeepSeekClient(wc, objectMapper, config.getCode());
             }
         };
     }

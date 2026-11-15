@@ -254,9 +254,13 @@ public class AdapterVisionMatrixTest {
                 String.valueOf(FileVisionService.supportsVisionModel("volcengine", "deepseek-v4-pro")));
         check("防线：方舟 doubao-seed 支持图", "true",
                 String.valueOf(FileVisionService.supportsVisionModel("volcengine", "doubao-seed-1-6-250615")));
-        // 千问：仅 VL / Omni
-        check("防线：qwen-plus 不支持图", "false",
+        // 千问：VL / Omni / Plus 系列（qwen3.6-plus 起官方声明「支持图片理解」）。
+        // ⚠️ 历史断言「qwen-plus 不支持图」已随模型换代失效，此处改为当前真实行为：
+        //    放行 plus，但 qwen-max 各代差异大、不确定，仍保守拦截（避免"界面说能发图、实际图片被丢弃"）。
+        check("防线：qwen-plus 支持图（3.6+ 官方声明）", "true",
                 String.valueOf(FileVisionService.supportsVisionModel("qwen", "qwen-plus")));
+        check("防线：qwen-max 不支持图（各代差异大，保守拦截）", "false",
+                String.valueOf(FileVisionService.supportsVisionModel("qwen", "qwen-max")));
         check("防线：qwen3-vl-plus 支持图", "true",
                 String.valueOf(FileVisionService.supportsVisionModel("qwen", "qwen3-vl-plus")));
         // MiniMax：M2 系纯文本，M3 多模态

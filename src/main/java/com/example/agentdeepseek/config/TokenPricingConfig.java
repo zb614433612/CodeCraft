@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.config;
 
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -136,5 +137,39 @@ public class TokenPricingConfig {
      */
     public boolean isPriced(String model) {
         return resolve(model) != null;
+    }
+
+    // ==================== 计费模式（T4：根治「套餐制被按 token 估价」） ====================
+
+    /**
+     * 该模型在给定计费模式下「是否应当估算金额」。
+     *
+     * <h3>为什么需要「计费模式」这一层</h3>
+     * <p>
+     * 历史 bug：本配置只能表达「元 / 百万 token」一种形态，于是
+     * <b>「这个模型没配单价」</b> 与 <b>「这个 Provider 根本不该按 token 估价」</b>
+     * 被混成了同一件事。
+     * </p>
+     * <p>
+     * 实测后果：火山方舟 Coding Plan 是「200 元 / 9 万次」的<b>次数套餐</b>，
+     * 并不存在「元 / 百万 token」这种单价；但成本看板在混合范围（既有 DeepSeek 又有火山）里
+     * 取了 DeepSeek 的单价当参照，把火山的 <b>5396 万 token</b> 算出了一笔
+     * 「看起来合理、实际完全错误」的金额。
+     * </p>
+     * <p>
+     * 因此：{@link ProviderProfile.PricingMode#QUOTA}（套餐 / 次数制）与
+     * {@link ProviderProfile.PricingMode#FREE}（本地免费）一律<b>不估算</b>，
+     * <b>即使有人误给这类模型配了单价</b> —— 误配不应当产生一个虚假金额。
+     * </p>
+     *
+     * @param model 模型名
+     * @param mode  计费模式（null 视为 {@link ProviderProfile.PricingMode#TOKEN}）
+     * @return true 表示「可以按单价估算金额」
+     */
+    public boolean isEstimable(String model, ProviderProfile.PricingMode mode) {
+        if (mode != null && mode != ProviderProfile.PricingMode.TOKEN) {
+            return false;
+        }
+        return isPriced(model);
     }
 }

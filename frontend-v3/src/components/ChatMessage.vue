@@ -251,7 +251,7 @@ import { renderMarkdown, renderMarkdownLight } from '../utils/markdown'
 import { isImageAvatar, avatarFallback } from '../utils/avatar'
 import { toolHeadline } from '../utils/tool-render'
 /* 真实用量展示：金额 / 命中率 / token 缩写的统一口径（与底部会话统计共用） */
-import { formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
+import { costUnavailableReason, formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
 import type { TaskItem } from '../utils/task-list'
 /* 用户消息附件：图片点开灯箱、文档走 blob 下载（<a href> 无法带鉴权头） */
 import { openLightbox } from '../utils/lightbox'
@@ -392,6 +392,12 @@ export interface TurnUsage {
   pricedRequestCount?: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
+  /**
+   * 该会话生效的计费模式：TOKEN / QUOTA（套餐次数制）/ FREE（本地免费）。
+   * <p>金额不可用时用它区分原因：套餐制本来就没有 token 单价，
+   * 说成「未配置单价」会让用户去找一个不存在的配置项。</p>
+   */
+  pricingMode?: 'TOKEN' | 'QUOTA' | 'FREE'
 }
 
 const props = withDefaults(
@@ -469,7 +475,7 @@ const usageTitle = computed(() => {
   const parts = [
     usageCostAvailable.value
       ? `本轮估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`
-      : '本轮费用未估算：该模型尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）',
+      : `本轮费用未估算：${costUnavailableReason(u.pricingMode)}`,
     `输入 ${formatUsageTokens(u.promptTokens)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens || 0)} / 未命中 ${formatUsageTokens(u.cacheMissTokens || 0)}）`,
     `输出 ${formatUsageTokens(u.completionTokens)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens || 0)}）`,
     `缓存命中率 ${formatHitRate(u.cacheHitRate)}`

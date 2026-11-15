@@ -104,7 +104,7 @@
         <div class="cc-field">
           <label class="cc-field__label">请求模板</label>
           <select v-model="form.requestTemplate" class="cc-select">
-            <option v-for="opt in TEMPLATE_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            <option v-for="opt in templateOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
           <div class="cc-field__hint">
             决定请求体构造与平台专属能力（思考模式 / 图片 / 联网搜索 / 余额查询）
@@ -247,7 +247,8 @@
 <script setup lang="ts">
 import DrawerResizer from './DrawerResizer.vue'
 import { computed, reactive, ref, watch } from 'vue'
-import { deriveCapabilities, searchHint, searchLabel, visionHint } from '../utils/provider-capability'
+import { getTemplateCapabilities } from '../api/provider-capability'
+import { capabilityHintOf, deriveCapabilities, searchHint, searchLabel, visionHint } from '../utils/provider-capability'
 import type { ProviderItem } from './ProviderRow.vue'
 
 /** 单币种余额明细（与后端 ProviderBalanceVO.BalanceInfo 对应） */
@@ -319,25 +320,81 @@ const emit = defineEmits<{
   (e: 'query-balance', code: string): void
 }>()
 
+/** 模板下拉选项（value = 后端 requestTemplate，label = 中文展示名） */
+interface TemplateOption {
+  value: string
+  label: string
+}
+
 /**
- * 请求模板下拉选项。
+ * 请求模板下拉选项的<b>离线兜底</b>。
  *
- * ⚠️ 后端新增适配器时必须在这里加一行（否则界面上根本选不到新模板），
- *    并同步 utils/provider-capability.ts 的 5 处能力推导（见该文件头注释）。
- *    模板取值必须与后端 LLMClientManager.createClient 的 switch 分支一致。
+ * <p>正常情况下从 {@code GET /llm-providers/templates} 拉取（见 {@link loadTemplateOptions}），
+ * 后端 {@code ProviderRegistry} 是唯一真相源，新增适配器只需改后端一处。
+ * 这份兜底仅在后端不可达（离线 / 旧后端 / 接口异常）时生效，
+ * 保证用户至少还能选到既有模板，不至于因网络问题完全没法配 Provider。</p>
+ *
+ * <p>⚠️ 兜底内容不再需要与后端逐条对齐 —— 它只是「降级清单」，
+ * 少了一个新模板不影响正确性（用户升级后端后自然就能看到）。</p>
  */
-const TEMPLATE_OPTIONS = [
-  { value: 'deepseek', label: 'DeepSeek（兼容 OpenAI）' },
-  { value: 'volcengine', label: '火山方舟（豆包｜图片 / 搜索 / 余额）' },
-  { value: 'qwen', label: '通义千问（阿里云百炼 / OpenAI 兼容）' },
-  { value: 'gpt', label: 'GPT（OpenAI 官方 / o 系列）' },
-  { value: 'openai', label: 'OpenAI（任意兼容服务）' },
-  { value: 'anthropic', label: 'Anthropic（Messages 兼容）' },
-  { value: 'minimax', label: 'MiniMax' },
-  { value: 'mimo', label: 'MiMo（小米｜多模态）' },
-  { value: 'ollama', label: 'Ollama（本地）' },
-  { value: 'custom', label: '自定义' }
+const TEMPLATE_OPTIONS_FALLBACK: TemplateOption[] = [
+  { value: 'deepseek', label: 'DeepSeek（deepseek）' },
+  { value: 'volcengine', label: '火山方舟（volcengine）' },
+  { value: 'qwen', label: '通义千问（qwen）' },
+  { value: 'gpt', label: 'GPT（gpt）' },
+  { value: 'openai', label: 'OpenAI 兼容（openai）' },
+  { value: 'anthropic', label: 'Anthropic（anthropic）' },
+  { value: 'minimax', label: 'MiniMax（minimax）' },
+  { value: 'mimo', label: 'MiMo（mimo）' },
+  { value: 'ollama', label: 'Ollama（ollama）' },
+  { value: 'custom', label: '自定义（custom）' }
 ]
+
+/** 后端下发的模板选项（空数组时自动回落到兜底清单） */
+const templateOptionsRemote = ref<TemplateOption[]>([])
+/** 是否已成功拉取过（避免每次打开抽屉都重复请求） */
+const templateOptionsLoaded = ref(false)
+
+/**
+ * 模板下拉实际数据：<b>后端优先，离线兜底</b>。
+ *
+ * <p>标签里保留模板值（如「火山方舟（volcengine）」），因为用户改 baseUrl 时
+ * 需要知道这个 Provider 到底走哪套协议；平台特性（图片 / 搜索 / 余额）
+ * 已在下方的「能力预览」区展示，不必挤进下拉。</p>
+ */
+const templateOptions = computed<TemplateOption[]>(() =>
+  templateOptionsRemote.value.length ? templateOptionsRemote.value : TEMPLATE_OPTIONS_FALLBACK
+)
+
+/**
+ * 拉取模板清单（幂等：成功后不再重复请求）。
+ *
+ * <p>失败静默：模板下拉回落兜底清单，不影响保存流程。</p>
+ */
+async function loadTemplateOptions() {
+  if (templateOptionsLoaded.value) return
+  try {
+    const list = await getTemplateCapabilities()
+    if (Array.isArray(list) && list.length) {
+      templateOptionsRemote.value = list.map(item => ({
+        value: item.template,
+        label: item.label ? `${item.label}（${item.template}）` : item.template
+      }))
+      templateOptionsLoaded.value = true
+    }
+  } catch {
+    // 后端不可达：保留兜底清单，下次打开抽屉时重试
+  }
+}
+
+/** 抽屉打开时拉一次模板清单（新建场景需要它才能选到最新模板） */
+watch(
+  () => props.open,
+  open => {
+    if (open) void loadTemplateOptions()
+  },
+  { immediate: true }
+)
 
 /** 扩展配置快捷模板（火山方舟 / 千问 / MiniMax） */
 const EXTRA_PRESETS: Array<{ key: string; label: string }> = [
@@ -415,7 +472,17 @@ const previewCaps = computed(() =>
 )
 
 /** 图片识别徽章悬浮说明（表格里填了默认模型时给出模型级结论） */
-const previewVisionHint = computed(() => visionHint(previewCaps.value.vision, form.defaultModel))
+/**
+ * 图片识别徽章悬浮说明（表格里填了默认模型时给出模型级结论）。
+ *
+ * <p>后端文案优先：它能准确说出「平台已声明该模型为纯文本」这类前端猜不出的原因。
+ * 新建场景下 code 可能还没填，因此再按模板兜底一次。</p>
+ */
+const previewVisionHint = computed(() =>
+  capabilityHintOf(form.code, 'vision')
+  ?? capabilityHintOf(form.requestTemplate, 'vision')
+  ?? visionHint(previewCaps.value.vision, form.defaultModel)
+)
 
 /** 联网搜索徽章：on 实心 / warn 描边（官方接口被中转挡住）/ off 置灰 */
 const previewSearchClass = computed(() =>
@@ -423,7 +490,9 @@ const previewSearchClass = computed(() =>
 )
 const previewSearchLabel = computed(() => searchLabel(previewCaps.value.search))
 const previewSearchTitle = computed(() =>
-  searchHint(previewCaps.value.search, {
+  capabilityHintOf(form.code, 'search')
+  ?? capabilityHintOf(form.requestTemplate, 'search')
+  ?? searchHint(previewCaps.value.search, {
     template: form.requestTemplate,
     code: form.code,
     baseUrl: form.baseUrl

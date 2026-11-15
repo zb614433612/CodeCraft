@@ -89,6 +89,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import {
+  capabilityHintOf,
   deriveCapabilities,
   providerIconTone,
   providerInitial,
@@ -174,7 +175,17 @@ const caps = computed(() =>
 const visionClass = computed(() =>
   caps.value.vision === 'on' ? 'is-on' : caps.value.vision === 'warn' ? 'is-warn' : ''
 )
-const visionTitle = computed(() => visionHint(caps.value.vision, props.provider.defaultModel))
+/**
+ * 图片识别徽章说明：<b>后端文案优先</b>。
+ *
+ * <p>后端能说出前端推不出来的原因 —— 例如「平台已声明该模型为纯文本」，
+ * 或「AK 已配置但缺 SK」。这类信息若靠前端猜，就会出现
+ * 「界面说能发图、实际被后端拦截」的错位。</p>
+ */
+const visionTitle = computed(() =>
+  capabilityHintOf(props.provider.code, 'vision')
+  ?? visionHint(caps.value.vision, props.provider.defaultModel)
+)
 
 /**
  * 联网搜索徽章：on 实心 / warn 描边（官方接口被中转挡住，只剩通用抓取）/ off 置灰。
@@ -184,8 +195,15 @@ const searchClass = computed(() =>
   caps.value.search === 'on' ? 'is-on' : caps.value.search === 'warn' ? 'is-warn' : ''
 )
 const searchCapLabel = computed(() => searchLabel(caps.value.search))
+/**
+ * 联网搜索徽章说明：后端文案优先。
+ *
+ * <p>后端会区分「火山未配 searchApiKey」与「DeepSeek 走了第三方中转」两种完全不同的原因，
+ * 并明确说明「仍可通用抓取」—— 这句话必须保留，否则会被读成「联网坏了」。</p>
+ */
 const searchTitle = computed(() =>
-  searchHint(caps.value.search, {
+  capabilityHintOf(props.provider.code, 'search')
+  ?? searchHint(caps.value.search, {
     template: props.provider.requestTemplate,
     code: props.provider.code,
     baseUrl: props.provider.baseUrl

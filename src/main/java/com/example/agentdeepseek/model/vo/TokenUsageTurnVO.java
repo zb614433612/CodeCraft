@@ -58,4 +58,20 @@ public class TokenUsageTurnVO {
 
     /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段，无数据 */
     private double cacheHitRate;
+
+    /**
+     * 该会话生效的计费模式：{@code TOKEN} / {@code QUOTA} / {@code FREE}。
+     *
+     * <p>与 {@link TokenUsageSummaryVO#getPricingMode()} 同源（由 Provider 档案判定），
+     * 作用是让聊天页「本轮费用未估算」的提示能区分真正原因：</p>
+     * <ul>
+     *   <li>{@code QUOTA} → 套餐 / 次数制（如火山 Coding Plan），本来就没有 token 单价；</li>
+     *   <li>{@code FREE} → 本地模型（如 Ollama），无费用；</li>
+     *   <li>{@code TOKEN} → 才是「未配置单价」。</li>
+     * </ul>
+     *
+     * <p>按会话整体判定而非逐轮判定：一轮的 provider 字段不在汇总 SQL 里，
+     * 而同一会话通常固定用一个 Provider，取会话级结论足够且只需一次查询。</p>
+     */
+    private String pricingMode = "TOKEN";
 }

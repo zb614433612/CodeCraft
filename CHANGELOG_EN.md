@@ -5,6 +5,138 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.5] - 2026-11-15
+
+> **Architectural refactor**: consolidates "what capabilities does a Provider have" from
+> **4 scattered copies** into a **single backend source of truth**, and fixes 3 bugs that had
+> been silently in effect.
+> This release **requires a backend restart**; no database changes, no data migration.
+
+### 🔥 Fixed: vision interception completely ineffective for custom codes (P0, real bug)
+
+- **Symptom**: after configuring Volcengine Ark as `code=huoshan` + `requestTemplate=volcengine`,
+  switching the default model to `deepseek-v4-pro` / `v4-flash` (text-only) and then sending an
+  image was **not intercepted** — the image was **silently dropped**, with no trace in the logs.
+- **Root cause**: vision rules are registered by **platform name** (`deepseek` /
+  `volcengine,ark,doubao` / `qwen,dashscope,tongyi`), but the interception point in
+  `DeepSeekServiceImpl` passed the **user-defined `providerCode`**:
+  `findVisionRule("huoshan")` matched neither exactly nor by prefix → returned `null`
+  → fell through to the global `defaultAllowVision=true` → judged "supported" → allowed.
+- **Fix**: changed to "**template first, code as fallback, strictest of both wins**".
+  `requestTemplate` is the platform source of truth; `code` reflects what the interception point
+  actually receives. Either one judging "unsupported" blocks the request — better to block once
+  with a "switch model" hint than let an image be dropped without a word.
+
+### 🔥 Fixed: quota-based Providers estimated with phantom costs (P0, real bug)
+
+- **Symptom**: Volcengine Coding Plan (`/api/coding/v3`) bills by **request quota**, yet the cost
+  dashboard computed amounts using DeepSeek's per-token price — measured: 267 requests /
+  53.96M tokens were estimated at **¥7.595619** in costs that never occurred.
+- **Root cause**: the billing model only knew "per token", with no concept of "quota / request
+  count" — "price not configured" and "should not be priced per token" were conflated.
+- **Fix**: introduced `PricingMode` (`TOKEN` / `QUOTA` / `FREE`):
+  - `QUOTA` (Volcengine `/api/coding`, MiniMax Coding Plan) → **never estimates amounts**,
+    showing only tokens and cache hit rate;
+  - `FREE` (local Ollama) → no cost;
+  - `TOKEN` → estimated by unit price.
+  The guard **takes priority over the global fallback price**: the fallback means "estimate unknown
+  models at this price", not "authorization to also price quota-based plans".
+
+### 🔥 Fixed: 4 adapter drifts (alias configured → wrong protocol used)
+
+- **Symptom**: with `template=xiaomi-mimo` / `minimax-cn` / `minimax-intl` / `minimax-global`,
+  capabilities were judged by the profile (claiming vision + balance support) while **conversations
+  ran the DeepSeek protocol**.
+- **Root cause**: `ProviderRegistry` declared these aliases, but the `switch` in
+  `LLMClientManager.createClient` only had `case "mimo"` / `case "minimax"`, so the aliases
+  **fell into `default` and were treated as `DeepSeekClient`**. Compiled fine, tests passed —
+  it only surfaced for the user.
+- **Fix**: moved the **adapter type into the profile** (`ProviderProfile.adapterType`) and turned
+  `createClient` into a table lookup — "alias" and "implementation" now share one source, so
+  **this class of drift is structurally impossible**. The self-check item
+  `A2 adapter drift count` went from 4 to **0**, plus new assertions that the 4 formerly-drifting
+  aliases must resolve to the correct adapter.
+  Also fixed an authentication-header bug for `xiaomi-mimo`: the old implementation gave it
+  `Authorization: Bearer`, while MiMo requires `api-key: <raw key>`.
+
+### ✨ Added: Provider capability endpoints (frontend demoted from "deriver" to "renderer")
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/llm-providers/capabilities` | Batch capabilities for all Providers (incl. **paired credential check**) |
+| `GET /api/llm-providers/templates` | All built-in template profiles (create dropdown + credential-free preview) |
+| `GET /api/llm-providers/{code}/capabilities` | Single Provider (precise down to "missing secretKey") |
+
+- Returns `state` (`on` / `warn` / `off`) + `label` + `hint` + `platformSupported` + `missingKeys` + `pricingMode`.
+- **Deliberately no admin check**: the payload contains no secret values (`missingKeys` only gives
+  **field names**), and the chat page also needs it to decide "can this Provider accept images".
+  With an admin check, non-admins would see "capability unknown" and fall back to guessing on the
+  frontend — exactly the fourth copy this release eliminates.
+- The 350-line derivation in `provider-capability.ts` (`VISION_TEMPLATES` + 5 regexes +
+  `deriveCapabilities`) is demoted to an **offline fallback** (used only when the backend is
+  unreachable), and `ProviderEditDrawer`'s `TEMPLATE_OPTIONS` now comes from `/templates` —
+  **adding a template requires no frontend change**.
+
+### ♻️ Refactor: capability rules from 4 copies → 1
+
+| Capability | Previously scattered across | Now |
+|------------|-----------------------------|-----|
+| Vision | ① `ModelCapabilityConfig` code defaults ② `application.yml` `vision-rules` ③ `ModelCapabilityRules` if-chain ④ frontend `VISION_TEMPLATES` + `visionStateOf()` | `ProviderRegistry`'s `vision` (YAML demoted to **optional override**) |
+| Files API | `FilesApiClientManager.createClient` switch | profile's `filesApi` |
+| Web search | `SearchTool` if-priority chain + identity checks inside 3 ApiClients | profile's `search` |
+| Balance | `ProviderBalanceService`'s 5 `isXxx` methods + baseUrl host guessing | profile's `balance` + `BALANCE_DETECTION_ORDER` |
+| Adapter selection / auth headers | `LLMClientManager.createClient` switch + **two** switches in `LLMWebClientManager` | profile's `adapterType` + `auth` |
+
+- **Two auth-header switches merged into one `auth` declaration**: previously "changed header name
+  without the prefix" produced `x-api-key: Bearer sk-xxx` (an extra Bearer), and "changed prefix
+  without the name" produced `Authorization: sk-xxx` (missing Bearer) — both look like 401 but
+  reveal nothing about the cause. After merging, one declaration carries both fields, so a
+  half-change is structurally impossible.
+- One historical behavior deliberately preserved: `ollama` / `custom` with a null prefix **sends the
+  raw key** (it does *not* skip authentication). The old comment said "skip the auth header", but
+  the code actually sent the raw key — this release pins the **actual code behavior** and asserts it
+  in `AuthHeaderEquivalenceTest`, preventing someone from "fixing a bug per the comment".
+
+### 🧪 Tests
+
+9 main-method tests added/updated, **681 assertions all green**:
+
+| Test | Assertions |
+|------|------------|
+| `ProviderRegistrySelfCheck` | 237 |
+| `ProviderCapabilityServiceTest` (new) | 129 |
+| `AuthHeaderEquivalenceTest` (new) | 107 |
+| `AdapterVisionMatrixTest` | 53 |
+| `BalanceDispatchEquivalenceTest` (new) | 46 |
+| `TokenUsageMultiProtocolTest` | 40 |
+| `PricingModeGuardTest` (new) | 27 |
+| `DeepSeekToolsApiClientTest` | 26 |
+| `SearchToolLogicTest` | 16 |
+
+`BalanceDispatchEquivalenceTest`'s "order traps" group preserves 6 counter-intuitive established
+facts (e.g. `template=deepseek` + Volcengine domain → Volcengine balance), ensuring the migration
+does not "helpfully optimize" anything.
+
+### 📄 Documentation
+
+- Rewrote the A/B/C/D checklists in `LLMClient`'s class header: A5 changed from "add a `case`" to
+  "register a profile in `ProviderRegistry`", and group C from "copies must be kept in sync" to a
+  "single source of truth" comparison table.
+- Updated section 9.1 (new Provider SOP) of `docs/LLM_PROVIDER_SYSTEM.md` accordingly, explicitly
+  noting: **do not** add a `case` to `createClient` and **do not** add auth-header branches to
+  `LLMWebClientManager` — both are table-driven now, so additions take no effect and only split
+  "declaration" from "behavior" again.
+
+### ⚠️ Upgrade notes
+
+- **Backend restart required**: `ProviderRegistry` is a pure static class; a running JVM will not
+  reload it.
+- Legacy copies in the old frontend (`frontend/`), such as `BALANCE_TEMPLATES`, are **marked
+  deprecated** and were not refactored — the old frontend has no capability-endpoint consumer layer,
+  so changes there would only create yet another copy destined to drift.
+
+---
+
 ## [3.1.4] - 2026-11-14
 
 > **Patch release for 3.1.3**, fixing a serious flaw where the previous version's fallback branch

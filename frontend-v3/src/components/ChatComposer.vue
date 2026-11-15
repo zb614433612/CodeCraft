@@ -166,7 +166,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { openLightbox } from '../utils/lightbox'
 /* 真实用量展示：与消息底部共用同一套格式化口径（金额 / 命中率 / token 缩写） */
-import { formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
+import { costUnavailableReason, formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
 
 export interface Attachment {
   id: string
@@ -204,6 +204,12 @@ export interface SessionUsage {
   pricedRequestCount?: number
   /** 缓存命中率（0~1）；-1 表示 Provider 未返回缓存字段 */
   cacheHitRate: number
+  /**
+   * 计费模式：TOKEN / QUOTA（套餐次数制，如火山 Coding Plan）/ FREE（本地免费）。
+   * <p>金额不可用时用它区分原因，避免把「套餐制本来就没有 token 单价」
+   * 说成「未配置单价」而误导用户。</p>
+   */
+  pricingMode?: 'TOKEN' | 'QUOTA' | 'FREE'
 }
 
 const props = withDefaults(
@@ -389,6 +395,11 @@ const sessionCost = computed(() =>
 const sessionHitRate = computed(() => formatHitRate(props.usage?.cacheHitRate))
 const sessionTokens = computed(() => formatUsageTokens(props.usage?.totalTokens))
 
+/*
+  金额不可用时的原因说明统一走 utils/tokenCalculator 的 costUnavailableReason：
+  套餐制 / 本地免费 / 未配单价是三种不同原因，文案只保留一份，避免各页面各说一套。
+ */
+
 /** 悬停说明：把「会话累计」的构成讲清楚，并声明是估算而非账单 */
 const usageTitle = computed(() => {
   const u = props.usage
@@ -396,7 +407,7 @@ const usageTitle = computed(() => {
   const parts = [
     sessionCostAvailable.value
       ? `本会话累计估算费用 ${formatCost(u.costEstimate)}（按单价表估算，非账单）`
-      : '本会话费用未估算：所用模型尚未在 llm.pricing.models 配置单价（仅统计 token 与缓存）',
+      : `本会话费用未估算：${costUnavailableReason(u.pricingMode, '所用模型')}`,
     `输入 ${formatUsageTokens(u.promptTokens || 0)} tokens（缓存命中 ${formatUsageTokens(u.cacheHitTokens || 0)} / 未命中 ${formatUsageTokens(u.cacheMissTokens || 0)}）`,
     `输出 ${formatUsageTokens(u.completionTokens || 0)} tokens（含思考链 ${formatUsageTokens(u.reasoningTokens || 0)}）`,
     `缓存命中率 ${formatHitRate(u.cacheHitRate)}`

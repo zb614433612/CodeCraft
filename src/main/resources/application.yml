@@ -878,12 +878,19 @@ llm:
     # 判定顺序：模型名为空 → 放行；命中 exclude（关键词/前缀）→ 不支持；命中 include 关键词 → 支持；
     #          都未命中 → 该 Provider 的 default-allow；Provider 无规则 → 下面这个全局开关。
     # key 支持逗号分隔多个别名，也支持前缀匹配（minimax 可命中 minimax-coding-plan）。
-    # 内置默认规则与历史硬编码行为完全等价，一般无需配置；新增视觉模型时加关键词即可。
-    default-allow-vision: true
-    # 需要覆盖内置规则时，取消下面的注释并按需调整（未配置时使用代码内置默认）：
+    #
+    # ⚠ 真相源已统一（T5）：内置默认规则来自
+    #   service/llm/profile/ProviderRegistry.java（ProviderProfile.VisionSpec），
+    #   本文件的 vision-rules 只是「可选覆盖层」。
+    #   平时不要配 —— 新增视觉模型 / 调整判定规则请改 ProviderRegistry 一处，前后端共用同一份结论。
+    #   若确实要临时覆盖某平台：取消下面注释。注意是「整体替换」而非逐项合并，
+    #   配了就要把需要保留的平台全写上，漏写的平台会退回全局 default-allow-vision。
+    # 需要覆盖内置规则时，取消下面的注释并按需调整（未配置时使用 ProviderRegistry 默认）：
     # ⚠ 火山方舟的 deepseek 系已分化，切勿再用 exclude-prefixes: ["deepseek"] 一刀切：
     #   deepseek-v4.1-flash / v4.1-flash-economy 支持图像（图片真实计入 prompt_tokens）；
     #   deepseek-v4-pro / v4-flash 纯文本（图片被静默丢弃，模型自称「没有图片」）。
+    # 全局兜底：Provider 没有任何规则时是否允许发图（true=宽松放行，真正不支持时由 API 层报错）
+    default-allow-vision: true
     # vision-rules:
     #   deepseek:
     #     include-keywords: ["flash", "vision", "-vl"]

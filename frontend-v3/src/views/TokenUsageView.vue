@@ -286,7 +286,9 @@ function emptySummary(): TokenUsageSummary {
     cacheHitCost: 0,
     cacheMissCost: 0,
     outputCost: 0,
-    breakdownAvailable: false
+    breakdownAvailable: false,
+    // 空数据的默认计费模式：TOKEN（与后端默认一致，避免旧后端不返回该字段时类型不满足）
+    pricingMode: 'TOKEN'
   }
 }
 
@@ -334,6 +336,17 @@ const summaryCostText = computed(() =>
 /** 汇总金额下方说明：把「为什么是 —」讲清楚，避免用户以为统计坏了 */
 const summaryCostHint = computed(() => {
   const s = summary.value
+  /*
+    计费模式优先于「有没有配单价」：
+    套餐制（火山 Coding Plan 200 元 / 9 万次）与本地免费（Ollama）本来就不存在
+    「元 / 百万 token」单价，说成「该模型未配置单价」会让用户跑去配一个根本不存在的单价。
+   */
+  if (s.pricingMode === 'QUOTA') {
+    return `${s.requestCount} 次请求 · 套餐/次数制，不按 token 计价`
+  }
+  if (s.pricingMode === 'FREE') {
+    return `${s.requestCount} 次请求 · 本地模型，无费用`
+  }
   if (s.pricedRequestCount !== undefined && s.pricedRequestCount <= 0) {
     return `${s.requestCount} 次请求 · 该模型未配置单价`
   }

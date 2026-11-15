@@ -5,6 +5,120 @@
 
 ---
 
+## [3.1.5] - 2026-11-15
+
+> **架构级重构**：把「一个 Provider 有哪些能力」从**散落 4 处的副本**收敛为**后端唯一真相源**，
+> 并顺带修掉 3 个一直在悄悄生效的 Bug。
+> 本版**需要重启后端**；未改数据库结构，无数据迁移。
+
+### 🔥 修复：视觉拦截对自定义 code 完全失效（P0，真 Bug）
+
+- **症状**：把火山方舟配成 `code=huoshan` + `requestTemplate=volcengine`
+  后，默认模型换成 `deepseek-v4-pro` / `v4-flash`（纯文本）**再发图不会被拦截**，
+  图片被**静默丢弃**，日志里没有任何痕迹。
+- **根因**：视觉规则按**平台名**注册（`deepseek` / `volcengine,ark,doubao` / `qwen,dashscope,tongyi`），
+  但拦截点 `DeepSeekServiceImpl` 传的是**用户自起的 `providerCode`**：
+  `findVisionRule("huoshan")` 精确不中、前缀也不中 → 返回 `null`
+  → 落到全局 `defaultAllowVision=true` → 判定「支持」→ 放行。
+- **修复**：改为「**模板优先、编码兜底、双键取严**」。
+  `requestTemplate` 是平台真相源，`code` 反映拦截点的实际入参，两者任一判不支持即拦截 ——
+  宁可多拦一次并提示换模型，也不要让图片被无声丢弃。
+
+### 🔥 修复：套餐制 Provider 被按 token 估出「不存在的花费」（P0，真 Bug）
+
+- **症状**：火山 Coding Plan（`/api/coding/v3`）按**次数套餐**计费，
+  但成本看板按 DeepSeek 的 token 单价算出金额 —— 实测 267 次请求 / 5396 万 token
+  被估出 **7.595619 元**从未真实发生的花费。
+- **根因**：计费模型里**只有「按 token」一种形态**，没有「套餐 / 次数制」的概念，
+  「没配单价」与「不该按 token 估价」被混为一谈。
+- **修复**：新增 `PricingMode`（`TOKEN` / `QUOTA` / `FREE`）：
+  - `QUOTA`（火山 `/api/coding`、MiniMax Coding Plan）→ **永不估算金额**，只展示 token 与缓存命中率；
+  - `FREE`（Ollama 本地）→ 无费用；
+  - `TOKEN` → 才按单价估算。
+  闸门**优先级高于全局兜底价**：兜底价是「未知模型按此价估算」，不是「连套餐制也要估」的授权。
+
+### 🔥 修复：4 条适配器漂移（配了别名 → 对话走错协议）
+
+- **症状**：Provider 配 `template=xiaomi-mimo` / `minimax-cn` / `minimax-intl` / `minimax-global` 时，
+  能力按档案判（说能发图、能查余额），**对话却跑 DeepSeek 协议**。
+- **根因**：`ProviderRegistry` 声明了这些别名，但 `LLMClientManager.createClient` 的 `switch`
+  只写了 `case "mimo"` / `case "minimax"`，别名**掉进 `default` 被当成 `DeepSeekClient`**。
+  编译通过、测试通过，只在用户那儿暴露。
+- **修复**：把**适配器类型收进档案**（`ProviderProfile.adapterType`），
+  `createClient` 改为查表分派 —— 「别名」与「实现」同源，**这类漂移在结构上不可能再发生**。
+  自检项 `A2 适配器漂移条数` 从 4 变成 **0**，并新增断言「曾漂移的 4 个别名必须解析到正确适配器」。
+  顺带修掉 `xiaomi-mimo` 的认证头错误：旧实现给它 `Authorization: Bearer`，
+  而 MiMo 要求 `api-key: <裸 key>`。
+
+### ✨ 新增：Provider 能力接口（前端从「推导者」降级为「展示者」）
+
+| 接口 | 用途 |
+|------|------|
+| `GET /api/llm-providers/capabilities` | 全部 Provider 的批量能力（含**凭证成对判定**） |
+| `GET /api/llm-providers/templates` | 全部内置模板档案（新建下拉 + 无凭证预览） |
+| `GET /api/llm-providers/{code}/capabilities` | 单个 Provider（精确到「缺 secretKey」） |
+
+- 返回 `state`（`on` / `warn` / `off`）+ `label` + `hint` + `platformSupported` + `missingKeys` + `pricingMode`。
+- **刻意不做 admin 校验**：返回内容不含任何密钥值（`missingKeys` 只给**字段名**），
+  而聊天页也需要它判断「当前 Provider 能否发图」；若加 admin 校验，
+  非管理员会看到「能力未知」，反而退化成前端猜 —— 那正是本版要消灭的第四份副本。
+- 前端 `provider-capability.ts` 的 350 行推导（`VISION_TEMPLATES` + 5 段正则 + `deriveCapabilities`）
+  降级为**离线兜底**（后端不可达时才用），`ProviderEditDrawer` 的 `TEMPLATE_OPTIONS`
+  改为从 `/templates` 拉取 —— **新增模板时前端无需改动**。
+
+### ♻️ 重构：能力规则 4 份副本 → 1 份
+
+| 能力 | 重构前散落在 | 现在 |
+|------|--------------|------|
+| 视觉 | ① `ModelCapabilityConfig` 代码默认值 ② `application.yml` 的 `vision-rules` ③ `ModelCapabilityRules` 的 if 链 ④ 前端 `VISION_TEMPLATES` + `visionStateOf()` | `ProviderRegistry` 的 `vision`（yml 降为**可选覆盖层**） |
+| Files API | `FilesApiClientManager.createClient` 的 switch | 档案的 `filesApi` |
+| 联网搜索 | `SearchTool` 的 if 优先级链 + 3 个 ApiClient 各自的身份判定 | 档案的 `search` |
+| 余额 | `ProviderBalanceService` 的 5 个 `isXxx` + baseUrl host 兜底猜测 | 档案的 `balance` + `BALANCE_DETECTION_ORDER` |
+| 适配器选型 / 认证头 | `LLMClientManager.createClient` 的 switch + `LLMWebClientManager` 的**两个** switch | 档案的 `adapterType` + `auth` |
+
+- **认证头两个 switch 合并为一个 `auth` 声明**：旧实现里「改头名没改前缀」会发出
+  `x-api-key: Bearer sk-xxx`（多一个 Bearer），「改前缀没改头名」会发出
+  `Authorization: sk-xxx`（少 Bearer），两者都表现为 401 但看不出原因。
+  合并后一处声明两个字段必须成对出现，结构上不可能只改一半。
+- 刻意保留一处历史行为：`ollama` / `custom` 前缀为 null 时**发送裸 key**（不是不发送）。
+  旧注释写的是「跳过认证头」，但代码实际是发裸 key —— 本版按**代码行为**固化，
+  并写进 `AuthHeaderEquivalenceTest` 断言，避免有人「按注释修 bug」造成行为变更。
+
+### 🧪 测试
+
+新增/更新 9 个 main 方法式测试，共 **681 项断言全绿**：
+
+| 测试 | 断言数 |
+|------|--------|
+| `ProviderRegistrySelfCheck` | 237 |
+| `ProviderCapabilityServiceTest`（新） | 129 |
+| `AuthHeaderEquivalenceTest`（新） | 107 |
+| `AdapterVisionMatrixTest` | 53 |
+| `BalanceDispatchEquivalenceTest`（新） | 46 |
+| `TokenUsageMultiProtocolTest` | 40 |
+| `PricingModeGuardTest`（新） | 27 |
+| `DeepSeekToolsApiClientTest` | 26 |
+| `SearchToolLogicTest` | 16 |
+
+其中 `BalanceDispatchEquivalenceTest` 的「顺序陷阱」组保留了 6 个反直觉的既成事实
+（如 `template=deepseek` + 火山域名 → 走火山余额），确保迁移不「顺手优化」。
+
+### 📄 文档
+
+- `LLMClient` 类头 A/B/C/D 四组清单重写：A5 从「加 `case`」改为「在 `ProviderRegistry` 登记档案」，
+  C 组从「副本必须同步」改为「唯一真相源对照表」。
+- `docs/LLM_PROVIDER_SYSTEM.md` 第 9.1 节（新增 Provider SOP）同步改写，
+  并明确标注：**不要再**在 `createClient` 加 `case`、**不要**在 `LLMWebClientManager` 加认证头分支 ——
+  两处已改为查表分派，加了不生效，只会让「声明」与「行为」重新分裂成两份。
+
+### ⚠️ 升级提示
+
+- **必须重启后端**：`ProviderRegistry` 是纯静态类，运行中的 JVM 不会重新加载。
+- 旧版前端（`frontend/`）的 `BALANCE_TEMPLATES` 等遗留副本**已标注废弃**，未做改造 ——
+  旧版没有能力接口消费层，改了也只是又多一份必然漂移的副本。
+
+---
+
 ## [3.1.4] - 2026-11-14
 
 > **3.1.3 的补丁版**：修复上一版**降级分支写了却永远不生效**的严重缺陷。

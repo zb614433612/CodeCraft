@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v3.1.4 | 更新：2026-11-14 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.1.5 | 更新：2026-11-15 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -706,7 +706,7 @@ POST /api/llm-providers
 | A2 | 实现 `buildThinkingParams(String thinkingMode)` | **唯一的 abstract 方法**。入参只会是 `normalizeThinkingMode` 归一化后的 5 档（none/low/medium/high/max）或空串 auto，**不要**比较 `thinking_low` 这类原始字符串 |
 | A3 | 实现 3 个解析方法 | `extractContentFromStreamChunk`（正文增量）/ `extractReasoningFromStreamChunk`（思考链，无则 null）/ `extractContentFromBlockingResponse`（非流式正文） |
 | A4 | 确认工具调用**增量结构** | 主链路 `DeepSeekServiceImpl` 固定按 OpenAI 的 `choices[].delta.tool_calls`（index/id/arguments 增量拼接）解析，**协议不同必须在适配器内转换**，否则「能聊天、一调工具就断」 |
-| A5 | 注册到 `LLMClientManager.createClient` | 加 `case "<template>"`（建议同时接受历史别名）；并在类头「模板选型总览」表补一行，写清「适用 / **不要用于**」 |
+| A5 | **在 `ProviderRegistry` 登记档案** | ⭐ T12 之后**唯一注册点**：填 `template`（主名）/ `aliases`（历史与区域别名）/ `adapterType`（用哪个适配器实现）/ `auth`（认证头名称+前缀，成对填写）。**不要再改** `LLMClientManager.createClient` 的 switch 或 `LLMWebClientManager` 的认证头逻辑 —— 两者都已改为查表分派 |
 
 #### B. 能力开关（不写不报错，功能静默缺失）
 
@@ -716,52 +716,91 @@ POST /api/llm-providers
 | B2 | reasoning_content 回传 | `requiresReasoningPadding()`（DeepSeek 系必开） | thinking 模型第二轮起 400：`reasoning_content must be passed back` |
 | B3 | 必需请求头 | `getRequestHeaders()`（如 Anthropic 的 `anthropic-version`） | 端点写对了但 400/401 |
 | B4 | 端点路径 | `getChatEndpoint()`（默认 `/v1/chat/completions`） | 404 |
-| B5 | 图片识别 | `application.yml → llm.model-capabilities.vision-rules`（模型级判定）+ 适配器内块协议转换（`image_url → image/source`、剔除不认的 `detail`） | 发图 400 / 图片被静默丢弃 |
-| B6 | 文件上传（Files API） | 实现 `FilesApiClient` + 在 `FilesApiClientManager.createClient` 注册 template | 只能走 inline base64，大文件超限报错 |
-| B7 | 联网搜索 | `SearchTool` 里「官方搜索 API 优先」的 if 链（火山 / MiniMax / DeepSeek） | 只剩通用抓取（Bing / 百度 / Jina），拿不到平台结构化结果 |
-| B8 | 余额 / 额度查询 | `ProviderBalanceService.queryBalance` 的 if 链（必要时新增 BillingClient） | 余额按钮提示「不支持余额查询」 |
+| B5 | 图片识别 | `ProviderRegistry` 档案的 `vision` 声明（yml 的 `vision-rules` 是**可选覆盖层**）+ 适配器内块协议转换（`image_url → image/source`、剔除不认的 `detail`） | 发图 400 / 图片被静默丢弃 |
+| B6 | 文件上传（Files API） | 实现 `FilesApiClient` + 在档案的 `filesApi` 字段声明（T7 后 `FilesApiClientManager` 已查表）；未声明则**自动降级本地 + base64**，功能仍可用 | 只能走 inline base64，大文件超限报错 |
+| B7 | 联网搜索 | 在档案的 `search` 字段声明类型（`VOLCENGINE` / `QWEN_DIALOG` / `MINIMAX_PLAN` / `DEEPSEEK_OFFICIAL`）+ 实现对应 ApiClient（T8 后身份判定已查表） | 只剩通用抓取（Bing / 百度 / Jina），拿不到平台结构化结果 |
+| B8 | 余额 / 额度查询 | 在档案的 `balance` 字段声明类型（`DEEPSEEK_OFFICIAL` / `VOLCENGINE_BILLING` / `ALIYUN_BILLING` / `MINIMAX_PLAN` / `MIMO_COOKIE`）+ 必要时新增 BillingClient（T6 已删 5 个 `isXxx`，改为查表分派） | 余额按钮提示「不支持余额查询」 |
 | B9 | 输出上限 / 推理模型判定 | `llm.model-capabilities`（reasoning-model-prefixes 等）+ `extraConfig.maxTokens` | 输出被截断，或推理模型被塞 temperature 遭拒 |
 
-#### C. 散点速查（最容易漏：改完适配器还要改这些）
+#### C. 唯一真相源（T12 后：4 份副本 → 1 份）
 
-| 能力 | 后端（唯一真相源） | 前端（展示副本，必须同步） |
-|------|--------------------|------------------------------|
-| 成本 / usage | `LLMClient.getUsageProtocol`、`AbstractLLMClient.requiresStreamUsageOption`、`TokenUsageParser`、`llm.pricing` | 无需前端分支：由后端 `pricedRequestCount` 自动决定是否显示金额 |
-| 图片识别 | `ModelCapabilityRules.supportsVisionModel`、`FileVisionService` | v3 `utils/provider-capability.ts`：`VISION_TEMPLATES` + `visionStateOf()` |
-| 联网搜索 | `SearchTool` | 同上文件 `deriveCapabilities().search` + `searchHint()` |
-| 余额查询 | `ProviderBalanceService` | 同上文件 `deriveCapabilities().balance` |
-| 模板下拉 / 标签 | `LLMClientManager` 的 switch 与选型表 | v3 `ProviderEditDrawer.vue`（`TEMPLATE_OPTIONS`）+ `templateLabel()` / `providerIconTone()`；旧版 `ConfigView.vue` / `ProviderConfigView.vue` / `CodeAssistantView.vue`（`BALANCE_TEMPLATES`） |
+> **核心教训**：能力规则一旦有副本就必然漂移，而且漂移**不报错**。
+> 典型症状是「界面说能发图、实际图片被静默丢弃」和「界面说能查余额、点下去报缺凭证」。
 
-#### D. 前端与测试
+| 能力 | 重构前散落在（4 份副本） | 现在（1 份） |
+|------|--------------------------|--------------|
+| 视觉 | ① `ModelCapabilityConfig` 代码默认值 ② `application.yml` 的 `vision-rules` ③ `ModelCapabilityRules` 的 if 链 ④ 前端 `VISION_TEMPLATES` + `visionStateOf()` | `ProviderRegistry` 的 `vision`（yml 降为**可选覆盖层**，T5） |
+| Files API | `FilesApiClientManager.createClient` 的 switch | 档案的 `filesApi`（T7） |
+| 联网搜索 | `SearchTool` 的 if 优先级链 + 3 个 ApiClient 各自的身份判定 | 档案的 `search`（T8） |
+| 余额 | `ProviderBalanceService` 的 5 个 `isXxx` + baseUrl host 兜底猜测 | 档案的 `balance` + `BALANCE_DETECTION_ORDER`（T6） |
+| 计费模式 | 无（此前未建模 → 套餐制被按 token 估出虚假金额） | 档案的 `pricingMode` + `quotaModeUrlKeywords`（T4） |
+| 适配器选型 / 认证头 | `LLMClientManager.createClient` 的 switch + `LLMWebClientManager` 的**两个** switch | 档案的 `adapterType` + `auth`（T12） |
 
-1. **v3 前端**：`ProviderEditDrawer.vue` 的 `TEMPLATE_OPTIONS` 加选项（否则用户选不到新模板）；
-   `provider-capability.ts` 按 C 组同步 5 处（文件头有清单）。
-2. **旧版前端**：`ConfigView.vue` / `ProviderConfigView.vue` 的 `templateLabel` / `templateStyle` / 下拉；
-   `CodeAssistantView.vue` 的 `BALANCE_TEMPLATES`（余额按钮显隐）。
-3. **单测**：仿 `GptAdapterTest` / `QwenAdapterTest` / `VolcengineAdapterTest` / `MiniMaxAdapterTest`
-   写请求体断言；视觉参与 `AdapterVisionMatrixTest`；新 usage 协议参与 `TokenUsageMultiProtocolTest`。
+#### D. 前端现在怎么拿能力（T9/T10/T11）
 
-#### E. 自检清单（提交前逐条打勾）
+后端通过 `ProviderCapabilityService` 下发结论，前端**从「推导者」降级为「展示者」**：
 
-- [ ] `mvn -q compile -DskipTests` 通过
+| 接口 | 用途 |
+|------|------|
+| `GET /api/llm-providers/capabilities` | 全部 Provider 的批量能力（含**凭证成对判定**） |
+| `GET /api/llm-providers/templates` | 全部内置模板档案（新建下拉 + 无凭证预览） |
+| `GET /api/llm-providers/{code}/capabilities` | 单个 Provider（精确到「缺 secretKey」） |
+
+前端 `provider-capability.ts` 只保留**离线兜底**规则（后端不可达时用），
+因此**不必**再与新模板逐条同步（不同步最多退化成「旧结论」，不会显示错误能力）。
+`ProviderEditDrawer.vue` 的模板下拉已改为从 `/templates` 拉取。
+
+**旧版前端**（`frontend/`）：`ConfigView.vue` / `ProviderConfigView.vue` / `CodeAssistantView.vue`
+（`BALANCE_TEMPLATES`）是**已标注废弃的遗留副本**，新增模板时**不要在此扩展**。
+
+#### E. 单测（main 方法式，pom 无 junit 依赖）
+
+| 测试 | 覆盖 |
+|------|------|
+| `ProviderRegistrySelfCheck` | 档案完整性、视觉规则等价、别名一致、**适配器漂移必须为 0** |
+| `AuthHeaderEquivalenceTest` | 认证头与旧 switch **逐条等价**（含 ollama/custom 发裸 key 的历史行为） |
+| `AdapterVisionMatrixTest` | 各适配器块协议转换 + 视觉防线 |
+| `PricingModeGuardTest` | 套餐制不估价（含真实用量回放） |
+| `ProviderCapabilityServiceTest` | 能力接口三态、凭证成对判定、边界 |
+| `TokenUsageMultiProtocolTest` | 新 usage 协议 |
+
+#### F. 提交前自检清单
+
+- [ ] `mvn -q compile -DskipTests -DskipFrontend=true` 通过
+- [ ] `ProviderRegistrySelfCheck` 全绿（**漂移条数必须为 0**）
 - [ ] 新 Provider 能正常对话（A1~A3）
 - [ ] 触发一次工具调用，`tool_calls` 与 `role=tool` 正常配对（A4）
-- [ ] 成本看板出现金额，或确认「未配单价」按设计显示「—」（B1）
+- [ ] 成本看板出现金额，或确认套餐制显示「不估价」（B1 / T4）
 - [ ] 开思考跑两轮不 400（B2）
-- [ ] 发一张图（B5）
-- [ ] 余额按钮可用或按预期提示（B8）
-- [ ] v3 下拉能选到新模板（D1）
+- [ ] 发一张图（B5）；若模型是纯文本，确认后端**真的拦截**并提示换模型
+- [ ] 余额按钮可用，或精确提示缺哪个凭证字段（B8）
+- [ ] v3 下拉能自动看到新模板（无需改前端）
 - [ ] 已在 `LLMClient` 清单与本文档登记新模板
 
-#### F. 代码示例
+#### G. 代码示例
 
 ```java
-case "new_provider" -> {
-    var wc = webClientManager.getOrCreate(config);
-    yield new NewProviderClient(wc, objectMapper, config.getCode(), config.getBaseUrl(),
-            readExtraInt(config, "maxTokens"));
+// ① 唯一注册点：在 ProviderRegistry 里加一个档案
+private static ProviderProfile newProviderProfile() {
+    ProviderProfile p = new ProviderProfile();
+    p.setTemplate("new_provider");
+    p.setAliases(new LinkedHashSet<>(list("new-provider-legacy")));  // 历史别名
+    p.setUsageProtocol(UsageProtocols.OPENAI);
+    p.setAdapterType(AdapterType.OPENAI);      // ← 决定用哪个适配器实现
+    p.setAuth(new AuthSpec("Authorization", "Bearer "));   // ← 认证头（名称+前缀成对）
+    p.setVision(...); p.setSearch(...); p.setBalance(...); p.setFilesApi(...);
+    p.setPricingMode(PricingMode.TOKEN);
+    p.setDisplay(new DisplaySpec("NewProvider", "", order, true));
+    return p;
 }
+
+// ② 适配器本身仍然要写（buildThinkingParams + 3 个解析方法）
+public class NewProviderClient extends AbstractLLMClient { ... }
 ```
+
+> ⚠️ **不要再**在 `LLMClientManager.createClient` 里加 `case`，也**不要**在
+> `LLMWebClientManager` 里加认证头分支 —— 两处都已改为按档案查表分派。
+> 加了也不会生效，反而会让「档案声明」与「实际行为」重新分裂成两份。
 
 ### 9.2 自定义请求模板
 
