@@ -152,7 +152,8 @@ import { useSettingsStore } from './store/settings'
 import { useFileRefStore } from './store/file-ref'
 import { clearSession } from './utils/session'
 /* token 失效出口：聊天流里的 401 / 「登录已过期」必须把用户送回登录页（见 consumeChatStream 的 catch） */
-import { notifyUnauthorized } from './utils/http-client'
+/* 登录成功出口：重新登录后清掉各页残留的鉴权错误（否则「LLM 提供商」等页会一直显示「未登录」） */
+import { notifyUnauthorized, onLoginSuccess } from './utils/http-client'
 import { switchToLegacy } from './utils/ui-version'
 import { logout as apiLogout } from './api/user'
 import type { ApprovalPayload, ConversationDetail } from './views/ChatView.vue'
@@ -6276,6 +6277,55 @@ function onSettingsNavigate(key: string) {
   // activeKey 已与 route.path 双向绑定，此处等价于 router.push(key)
   activeKey.value = key
 }
+
+/* ============================ 重新登录后的状态复位 ============================ */
+/**
+ * 清空各页「鉴权失败残留」的错误态。
+ *
+ * <h3>为什么必须做这件事</h3>
+ * <p>PAGE_BINDINGS 里每个页面的 load 闸门都是「<b>列表为空 && 没有 error</b> 才请求」。
+ * 这套语义在单次会话内是合理的 —— 失败后不自动重试，避免后端不可用时每次切页都白等一次超时。</p>
+ *
+ * <p>但它默认「错误态会随页面一起消失」，而 App.vue 在 SPA 里<b>从不卸载</b>：</p>
+ * <ol>
+ *   <li>后端重启 / token 过期 → 启动时的并发请求全部 401；</li>
+ *   <li>http-client 清 token 并把用户送到 /login，各页 error 里留下
+ *       「未登录，请先登录」「登录已过期，请重新登录」；</li>
+ *   <li>用户重新登录成功 → 回到业务页 → load 闸门看到 error 非空 → <b>直接跳过加载</b>；</li>
+ *   <li>页面就一直停在那句「未登录」，只有手点页面上的「刷新」才恢复
+ *       —— 「LLM 提供商」页那句「加载失败：未登录，请先登录」正是这么来的。</li>
+ * </ol>
+ *
+ * <p>所以这里订阅 http-client 的登录成功事件，把鉴权类错误统一清空。
+ * 清空后列表仍为空，下次进入页面即会重新拉取，不需要重启应用。</p>
+ *
+ * <p>刻意<b>不</b>清列表数据：错误期间的列表多半是上一次成功加载的旧数据，
+ * 清掉会让页面闪成空态；保留旧数据 + 清错误 = 用户看到内容，同时后台重新拉一次。</p>
+ */
+function resetStaleAuthErrors(): void {
+  conversationError.value = ''
+  chatError.value = ''
+  chatLoadError.value = ''
+  toolGroupsError.value = ''
+  skillError.value = ''
+  mcpError.value = ''
+  scheduleError.value = ''
+  lessonError.value = ''
+  dbError.value = ''
+  dbExecuteError.value = ''
+  fileError.value = ''
+  p2pError.value = ''
+  providerError.value = ''
+  providerBalanceError.value = ''
+  userError.value = ''
+  permError.value = ''
+}
+
+/*
+  订阅：只在「拿到新 token（重新登录 / 切换账号）」时触发一次。
+  取消订阅函数不需要保存 —— App.vue 与整个应用同生命周期，没有需要注销的场景。
+*/
+onLoginSuccess(resetStaleAuthErrors)
 
 /* ============================ 页面绑定（L5：router-view） ============================ */
 /**

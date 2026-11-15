@@ -59,20 +59,84 @@ public final class ReasoningPassback {
     }
 
     /**
-     * 写入「本轮工具循环」的 assistant 消息：<b>无条件</b>回传真实思考内容。
+     * 写入「本轮工具循环」的 assistant 消息：<b>与历史同一套取值规则</b>（推荐）。
+     *
+     * <h3>⚠️ 为什么当前轮也必须按 mode 取值（前缀缓存一致性）</h3>
      * <p>
-     * 用于刚由模型生成、马上要带着 tool 结果继续下一轮迭代的 assistant 消息。
-     * 该消息是思维链的「当前一环」，置空会让模型丢失刚刚的推理上下文。
+     * DeepSeek 的上下文缓存按「请求前缀」命中：只有<b>本次请求的 prompt 以某次已缓存请求的
+     * prompt 为前缀</b>时才能复用。而「本轮 assistant」在下一轮会被 {@link #putHistory}
+     * 重新下发一次 —— 如果两次取值不同（本轮真实思考链、下轮空串），
+     * 那么<b>下一次请求的 prompt 就不再以本次请求为前缀</b>，从差异点起全部按「未命中输入」
+     * 重新 prefill（单价之差可达数十倍，长上下文时表现为首个 token 等十几秒到几十秒）。
+     * </p>
+     * <p>
+     * 实测数据（本项目 conversation 129）：同一轮内相邻请求命中率 97%+，跨轮第一条请求
+     * 反复出现 {@code cache_hit_tokens = 0}，且 miss 量恰好等于「上一整轮工具循环产生的
+     * 内容量」—— 正是本方法旧实现（无条件真实值）与 {@link #putHistory} 不一致造成的。
+     * </p>
+     * <p>
+     * 因此取值的唯一正确口径是：<b>同一条消息在任何一次请求里都必须得到相同的值</b>。
+     * 由此得到两档自洽语义：
+     * </p>
+     * <ul>
+     *   <li>{@code full}：全部消息都下发真实思考链（缓存稳定，但每轮多付 reasoning 的未命中输入费用）；</li>
+     *   <li>{@code balanced / compact}：全部消息都下发空串占位（缓存稳定，且 reasoning 不再随请求上行）。</li>
+     * </ul>
+     * <p>
+     * 代价说明：balanced / compact 下模型在本轮工具循环中看不到自己上一步的「思考文字」，
+     * 但完整的 {@code tool_calls} 与工具结果仍在上下文里，续跑依据充分。
+     * 若确实需要最强推理衔接，请显式切到 {@code full}。
      * </p>
      *
      * @param message   目标消息（调用方需已设置 {@code role=assistant}）
      * @param reasoning 模型本轮返回的思考内容；为 {@code null} 时写入空串（字段不能缺）
+     * @param mode      本次请求实际生效的上下文模式（务必传「请求生效值」，不要传全局配置默认值）
      */
-    public static void putCurrentTurn(Map<String, Object> message, String reasoning) {
+    public static void putCurrentTurn(Map<String, Object> message, String reasoning, ContextMode mode) {
         if (message == null) {
             return;
         }
-        message.put(FIELD, reasoning == null ? "" : reasoning);
+        // 与 putHistory 完全同一套判定：保证同一条消息在任何时刻取值恒定
+        boolean keepRealValue = mode == null || !mode.shouldStripHistoryReasoning();
+        message.put(FIELD, keepRealValue && reasoning != null ? reasoning : "");
+    }
+
+    /**
+     * 兼容重载：等价于 {@code full} 语义（无条件回传真实思考内容）。
+     *
+     * @deprecated <b>主链路不要再用这个重载</b>。它强制真实值，一旦与「历史重建按
+     *             balanced 置空」混用，就会让跨轮请求失去前缀关系、缓存全量失效
+     *             （长上下文时首 token 退化到 20~30 秒）。请改用
+     *             {@link #putCurrentTurn(Map, String, ContextMode)} 并传入本次请求
+     *             实际生效的模式（工具循环里用 {@link #modeOf(Map)} 取）。
+     *             保留它只为「显式 full 语义」与既有单测兼容。
+     */
+    @Deprecated
+    public static void putCurrentTurn(Map<String, Object> message, String reasoning) {
+        putCurrentTurn(message, reasoning, ContextMode.FULL);
+    }
+
+    /**
+     * 从 API 请求内部字段（{@code _contextMode}）解析本次请求实际生效的上下文模式。
+     *
+     * <p>工具循环复用同一个 {@code apiRequest}，其中 {@code _contextMode} 由主链路按
+     * 「请求参数 &gt; sys_config &gt; 全局配置 &gt; 默认」的优先级解析后写入。
+     * 用它而不是 {@code deepSeekConfig.resolveContextMode()}，才能保证历史组装
+     * （{@link com.example.agentdeepseek.service.impl.ContextBuilder}）与当前轮下发
+     * 用的是<b>同一档</b>模式 —— 否则会出现「历史置空、当前轮真实值」的第三种形态。</p>
+     *
+     * @param apiRequest 工具循环的 apiRequest（可为 null）
+     * @return 解析出的模式；无法解析时返回 {@link ContextMode#DEFAULT}
+     */
+    public static ContextMode modeOf(Map<String, Object> apiRequest) {
+        if (apiRequest == null) {
+            return ContextMode.DEFAULT;
+        }
+        Object raw = apiRequest.get("_contextMode");
+        if (raw instanceof String text) {
+            return ContextMode.from(text, ContextMode.DEFAULT);
+        }
+        return ContextMode.DEFAULT;
     }
 
     /**

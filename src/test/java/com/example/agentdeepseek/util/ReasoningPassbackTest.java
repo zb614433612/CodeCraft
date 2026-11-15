@@ -28,6 +28,7 @@ public class ReasoningPassbackTest {
         System.out.println("===== ReasoningPassback 回归测试 =====\n");
 
         testCurrentTurnAlwaysCarriesField();
+        testCurrentTurnFollowsMode();
         testHistoryFullModeKeepsRealValue();
         testHistoryBalancedModeUsesPlaceholder();
         testHistoryCompactModeUsesPlaceholder();
@@ -59,6 +60,45 @@ public class ReasoningPassbackTest {
         ReasoningPassback.putCurrentTurn(msg3, "");
         check("当前轮-空串→空串占位", "".equals(msg3.get(ReasoningPassback.FIELD)));
         check("当前轮-不破坏 tool_calls", msg3.containsKey("tool_calls"));
+    }
+
+    /**
+     * 当前轮也必须按 mode 取值 —— 这是前缀缓存一致性的核心契约。
+     *
+     * <p>同一条 assistant 消息会在「生成它的那一轮」与「下一轮从 DB 重建」两个时刻被下发，
+     * 若两次取值不同，下一次请求的 prompt 就不再是上一次请求的前缀 → 跨轮全量重新 prefill。
+     * 因此 balanced / compact 下当前轮就必须是空串，而不是等下一轮才置空。</p>
+     */
+    private static void testCurrentTurnFollowsMode() {
+        Map<String, Object> balanced = assistantWithToolCalls();
+        ReasoningPassback.putCurrentTurn(balanced, "本轮的真实思考", ContextMode.BALANCED);
+        check("当前轮-balanced→空串（与历史一致，保住前缀缓存）",
+                "".equals(balanced.get(ReasoningPassback.FIELD)));
+        check("当前轮-balanced→字段仍存在", balanced.containsKey(ReasoningPassback.FIELD));
+
+        Map<String, Object> compact = assistantWithToolCalls();
+        ReasoningPassback.putCurrentTurn(compact, "本轮的真实思考", ContextMode.COMPACT);
+        check("当前轮-compact→空串", "".equals(compact.get(ReasoningPassback.FIELD)));
+
+        Map<String, Object> full = assistantWithToolCalls();
+        ReasoningPassback.putCurrentTurn(full, "本轮的真实思考", ContextMode.FULL);
+        check("当前轮-full→真实值", "本轮的真实思考".equals(full.get(ReasoningPassback.FIELD)));
+
+        // 同一条消息在「当前轮」与「历史」两条路径下必须得到相同的值
+        Map<String, Object> asCurrent = assistantWithToolCalls();
+        Map<String, Object> asHistory = assistantWithToolCalls();
+        ReasoningPassback.putCurrentTurn(asCurrent, "思考X", ContextMode.BALANCED);
+        ReasoningPassback.putHistory(asHistory, "思考X", ContextMode.BALANCED);
+        check("同一消息-当前轮与历史取值一致（缓存命中前提）",
+                asCurrent.get(ReasoningPassback.FIELD).equals(asHistory.get(ReasoningPassback.FIELD)));
+
+        // modeOf：从请求内部字段解析，缺省回落 DEFAULT（= balanced）
+        Map<String, Object> reqCompact = new java.util.HashMap<>();
+        reqCompact.put("_contextMode", "compact");
+        check("modeOf-compact", ReasoningPassback.modeOf(reqCompact) == ContextMode.COMPACT);
+        check("modeOf-null请求→DEFAULT", ReasoningPassback.modeOf(null) == ContextMode.DEFAULT);
+        check("modeOf-空请求→DEFAULT",
+                ReasoningPassback.modeOf(new java.util.HashMap<>()) == ContextMode.DEFAULT);
     }
 
     /** full 模式：历史回传真实值 */

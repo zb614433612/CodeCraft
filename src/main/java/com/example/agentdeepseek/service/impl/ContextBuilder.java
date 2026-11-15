@@ -241,12 +241,27 @@ public class ContextBuilder {
         int estimatedTokens = TokenEstimator.estimateMessages(result);
 
         if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
-            log.info("历史上下文超限（压缩阈值），尝试智能压缩：估算 {} tokens, 上限 {}",
-                    estimatedTokens, maxTokens);
-            int afterCompactTokens = compactionService.compact(conversationId, result);
-            if (afterCompactTokens > 0) {
-                estimatedTokens = afterCompactTokens;
-                log.info("智能压缩完成，压缩后 {} tokens", estimatedTokens);
+            /*
+              同步压缩会阻塞调用一次 LLM（compact() → callCompactionLlm → blockingChat，最长 60 秒），
+              它直接加在「首 token 之前」的路径上，属于最昂贵的操作，因此必须先过防抖：
+
+              ① 刚压缩过就跳过：压缩本身要几十秒，而它只把历史摘要化一次；
+                 若上下文刚好卡在阈值附近，不做防抖会「每一条请求都压一次」，
+                 表现为首 token 从 10 秒退化到 20~30 秒，而且压缩收益往往为负。
+              ② 与异步预压缩共用同一个间隔常量，避免两条路径互相踩踏
+                 （异步路径压完 5 秒后同步路径又压一次，等于白等两遍）。
+             */
+            if (compactionService.isRecentlyCompacted(conversationId)) {
+                log.debug("跳过同步压缩：距上次压缩不足防抖间隔，直接使用现有上下文。估算 {} tokens, 上限 {}",
+                        estimatedTokens, maxTokens);
+            } else {
+                log.info("历史上下文超限（压缩阈值），尝试智能压缩：估算 {} tokens, 上限 {}",
+                        estimatedTokens, maxTokens);
+                int afterCompactTokens = compactionService.compact(conversationId, result);
+                if (afterCompactTokens > 0) {
+                    estimatedTokens = afterCompactTokens;
+                    log.info("智能压缩完成，压缩后 {} tokens", estimatedTokens);
+                }
             }
         }
 

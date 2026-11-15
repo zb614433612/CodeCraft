@@ -1,5 +1,5 @@
 import type { ApiResponse } from '@/store/user'
-import { getAuthHeaders, authFetch, notifyUnauthorized } from '@/utils/http-client'
+import { getAuthHeaders, authFetch, notifyUnauthorized, reportUnauthorizedOn401 } from '@/utils/http-client'
 import { readSseStream } from '@/utils/sse-client'
 import type { StreamChatEvent } from '@/utils/sse-client'
 
@@ -245,11 +245,13 @@ export async function uploadAttachment(file: File): Promise<FileUploadResult> {
   // uploadAttachment 使用 FormData，不能设置 Content-Type（让浏览器自动设 multipart boundary）
   const authHeader = await getAuthHeaders()
 
-  const response = await fetch('/api/deepseek/upload', {
-    method: 'POST',
-    headers: authHeader,
-    body: formData
-  })
+  const response = reportUnauthorizedOn401(
+    await fetch('/api/deepseek/upload', {
+      method: 'POST',
+      headers: authHeader,
+      body: formData
+    })
+  )
   return response.json()
 }
 
@@ -299,11 +301,13 @@ export async function chat(
 export async function supplementRequest(conversationId: number, message: string): Promise<{ success: boolean; error?: string; message?: string }> {
   const authHeader = await getAuthHeaders()
 
-  const response = await fetch('/api/deepseek/supplement', {
-    method: 'POST',
-    headers: { ...authHeader, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ conversationId: String(conversationId), message })
-  })
+  const response = reportUnauthorizedOn401(
+    await fetch('/api/deepseek/supplement', {
+      method: 'POST',
+      headers: { ...authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: String(conversationId), message })
+    })
+  )
   return response.json()
 }
 

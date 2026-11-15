@@ -381,8 +381,15 @@ public class CompactionService {
      * <p>
      * 取当前生效记录中最新的 createdAt 与当前时间比较；无记录则视为「未压缩过」。
      * </p>
+     * <p>
+     * <b>为什么必须对外公开</b>：同步压缩路径（{@code ContextBuilder#buildMessagesFromHistory}
+     * 里超过 compact-threshold 时的一次性压缩）会<b>阻塞调一次 LLM</b>（{@code blockingChat}
+     * 最长 60 秒）。若不加这道判断，那么在「上下文刚好卡在阈值附近」的长会话里，
+     * <b>每一轮的每一条请求</b>都会先阻塞几十秒去做一次「压缩收益为负」的无用压缩，
+     * 表现为「首 token 从 10 秒退化到 20~30 秒」，且越用越明显。
+     * </p>
      */
-    private boolean isRecentlyCompacted(Long conversationId) {
+    public boolean isRecentlyCompacted(Long conversationId) {
         try {
             List<CompactionRecord> records = compactionMapper.selectActiveByConversationId(conversationId);
             if (records == null || records.isEmpty()) {

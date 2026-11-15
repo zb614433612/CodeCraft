@@ -1,4 +1,4 @@
-import { request, getAuthHeaders } from '@/utils/http-client'
+import { request, getAuthHeaders, reportUnauthorizedOn401 } from '@/utils/http-client'
 import type { ApiResponse } from '@/store/user'
 
 // ===== 类型 =====
@@ -93,11 +93,13 @@ export async function uploadFileAsset(
   if (options.source) formData.append('source', options.source)
 
   const authHeader = await getAuthHeaders()
-  const response = await fetch('/api/files', {
-    method: 'POST',
-    headers: authHeader,
-    body: formData
-  })
+  const response = reportUnauthorizedOn401(
+    await fetch('/api/files', {
+      method: 'POST',
+      headers: authHeader,
+      body: formData
+    })
+  )
   return response.json()
 }
 
@@ -225,7 +227,9 @@ export async function listCloudFiles(providerCode?: string): Promise<ApiResponse
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 60000)
   try {
-    const response = await fetch(`/api/files/cloud${qs}`, { headers: authHeader, signal: controller.signal })
+    const response = reportUnauthorizedOn401(
+      await fetch(`/api/files/cloud${qs}`, { headers: authHeader, signal: controller.signal })
+    )
     return await response.json()
   } catch (e: any) {
     if (e.name === 'AbortError') throw new Error('云端文件查询超时，请稍后重试')
@@ -256,7 +260,9 @@ export async function getFilePreviewBlobUrl(id: number): Promise<string> {
   const cached = previewUrlCache.get(id)
   if (cached) return cached
   const authHeader = await getAuthHeaders()
-  const res = await fetch(`/api/files/${id}/preview`, { headers: authHeader })
+  const res = reportUnauthorizedOn401(
+    await fetch(`/api/files/${id}/preview`, { headers: authHeader })
+  )
   if (!res.ok) {
     throw new Error(res.status === 404 ? '本地副本不存在' : `预览加载失败（${res.status}）`)
   }
@@ -329,7 +335,9 @@ export function docTypeIcon(type: 'pdf' | 'word' | 'excel' | 'text'): string {
  */
 export async function downloadFileAsset(id: number, filename?: string): Promise<void> {
   const authHeader = await getAuthHeaders()
-  const res = await fetch(`/api/files/${id}/preview`, { headers: authHeader })
+  const res = reportUnauthorizedOn401(
+    await fetch(`/api/files/${id}/preview`, { headers: authHeader })
+  )
   if (!res.ok) {
     throw new Error(res.status === 404 ? '文件不存在或已被清理' : `下载失败（${res.status}）`)
   }

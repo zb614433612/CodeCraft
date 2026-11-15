@@ -5,6 +5,107 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.1.7] - 2026-11-15
+
+> **TTFT performance regression fix**: eliminates the root cause of "after enabling the
+> balanced context mode, the first token in long sessions degrades from ≤10s to 20–30s".
+> Also fixes the v3 frontend issue where some pages still showed "not logged in" after
+> re-logging in, plus several bare `fetch` channels that had no 401 handling.
+> This release **requires a backend restart and a hard frontend refresh**;
+> no database changes, no data migration.
+> ⚠️ **Behavior change**: under `balanced` / `compact`, the model no longer sees its own
+> previous reasoning text within the current tool loop (`tool_calls` and tool results are
+> still in context). If you need the strongest reasoning continuity, switch the context
+> mode to `full`.
+
+### 🔥 Fixed: cross-turn prefix cache total invalidation causing slow first token (P0, TTFT regression root cause)
+
+- **Symptom**: after switching `context-mode` to `balanced`, time-to-first-token in long
+  sessions rose from under 10 seconds to 20–30 seconds. In `llm_token_usage`, adjacent
+  requests within the same `turn` hit 97%+ of the cache, but the **first request of each
+  turn repeatedly reported `cache_hit_tokens = 0`**, with the miss volume roughly equal to
+  everything produced by the previous turn's tool loop.
+- **Root cause**: DeepSeek's context cache matches on **request prefix** — the current
+  prompt must be a **true prefix** of some previously cached prompt. But an assistant
+  message's `reasoning_content` was given **two different values** by two code paths:
+  - the turn that generated it → `ReasoningPassback.putCurrentTurn()` with the
+    **real reasoning chain unconditionally**;
+  - the next turn, rebuilt from the DB → `putHistory(balanced)` with an **empty placeholder**.
+
+  One message in two shapes → the next request is no longer a prefix extension of the
+  previous one → everything from the divergence point onward is re-prefilled as "cache
+  miss input". The longer the history and the larger the tool loop output, the more gets
+  re-prefilled. The turns that hit 96%–99% instead of 0% are those where the model
+  returned no reasoning (DB `reasoning` empty), so both paths happened to write an empty
+  string.
+- **Fix**: establish a single rule — **the same message must resolve to the same
+  `reasoning_content` value in every request**:
+  - `putCurrentTurn` gains a `ContextMode` parameter and shares the exact same decision as
+    `putHistory` (`full` → real value; `balanced` / `compact` → empty placeholder);
+  - new `ReasoningPassback.modeOf(apiRequest)` resolves the mode **actually in effect for
+    this request** from the internal `_contextMode` field (priority: request param >
+    `sys_config` > global config > default). One call site previously used the global
+    config default, which differed from the request-effective value used when assembling
+    history, producing a third shape;
+  - all 5 `putCurrentTurn` call sites and 1 `putHistory` call site in
+    `DeepSeekServiceImpl` now pass the request-effective mode; the old two-arg
+    `putCurrentTurn` is marked `@Deprecated` (equals `full`, kept for existing tests and
+    explicit full semantics).
+- **How to verify**: group by `turn_id`, take `MIN(id)` as that turn's first request.
+  Before the fix you will see `cache_hit_tokens = 0`; after the fix it should stay at 90%+.
+
+### 🔥 Fixed: synchronous compaction blocking ahead of the first token (P0, compounding amplifier)
+
+- **Symptom**: when the context length sits right around the compaction threshold, every
+  request stalls for tens of seconds before being sent.
+- **Root cause**: after `max-context-tokens` was lowered from 1M to 300k, the 0.85
+  compaction threshold equals **255k tokens**; the **synchronous** compaction path in
+  `ContextBuilder` had no debounce at all (`asyncPrecompress` has a 120s one, the
+  synchronous path had none). So **every request of every turn** first blocked on an LLM
+  call (`blockingChat`, up to 60s) to perform a compaction that yielded **negative** savings.
+- **Fix**: `CompactionService.isRecentlyCompacted()` made public; the synchronous path now
+  passes the same debounce check and skips compaction when one just happened, using the
+  existing context directly. Both paths share the same interval constant so they cannot
+  step on each other.
+
+### 🐛 Fixed: v3 pages still showing "not logged in" after re-login (P1)
+
+- **Symptom**: after a backend restart invalidated the token → redirect to login →
+  successful re-login → entering the "Model Configuration" page, the list still said
+  "Load failed: not logged in, please log in first", and only a manual "refresh" recovered
+  it. The skills / MCP / scheduled tasks / files / databases / P2P / users / menu
+  permission pages got stuck the same way.
+- **Root cause**: each page's load gate is "list empty **and no error** → fetch", using
+  `error` as an "already loaded" marker; but `App.vue` (the SPA root) never unmounts, so
+  each page's `error` is a long-lived ref. A 401 wrote "not logged in / login expired" and
+  **nothing cleared it after a successful re-login**, so the gate permanently skipped loading.
+- **Fix**: `http-client` gains an `onLoginSuccess()` event (fires when a **non-empty token
+  different from the previous one** arrives; re-writing the same token does not fire) and
+  resets the 401 dedupe window on session switch. `App.vue` subscribes and clears the
+  stale auth errors of 16 pages at once (**keeping list data** to avoid flashing an empty
+  state), so the next page entry fetches automatically.
+
+### 🐛 Fixed: bare fetch channels had no 401 exit (P2)
+
+- Attachment upload (`/deepseek/upload`), supplementary request (`/deepseek/supplement`),
+  file upload / cloud list / preview / download (`/files*`), and project raw file reads
+  (`/project/raw`) use native `fetch` (mandatory for FormData and binary streams),
+  bypassing the automatic 401 handling in `request` / `authFetch`. On token expiry they
+  only reported "upload failed" / "file load failed (401)" — neither prompting for re-login
+  nor redirecting to the login page.
+- New `reportUnauthorizedOn401(response)` acts as the unified 401 exit for bare fetch
+  channels (same behavior as inside `request`: clear token → notify → redirect to login),
+  covering all 6 call sites.
+
+### ✅ Tests
+
+- `ReasoningPassbackTest`: 28 assertions → **36** (8 new), specifically locking down the
+  cache-hit prerequisite "the same message must resolve identically on both the current-turn
+  and history paths", plus `modeOf` resolution and its fallback.
+- `mvn compile` / `mvn test-compile` pass; all 36 assertions green.
+
+---
+
 ## [3.1.6] - 2026-11-15
 
 > **Refactor review release**: three systematic review passes over the v3.1.5 Provider capability

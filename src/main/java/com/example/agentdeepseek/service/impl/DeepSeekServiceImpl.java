@@ -3472,9 +3472,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                     tcMsg.put("content", collectedContentStr);
                                                                 }
                                                                 tcMsg.put("tool_calls", completeToolCalls);
-                                                                // 【强制回传】本轮工具循环的 assistant 必须带真实 reasoning_content：
-                                                                //   DeepSeek thinking + tools 场景下字段缺失会 400（见 ReasoningPassback）
-                                                                ReasoningPassback.putCurrentTurn(tcMsg, reasoning);
+                                                                // 【缓存一致性】本轮 assistant 的 reasoning_content 必须与「下一轮重建历史」
+                                                                //   取同一个值（见 ReasoningPassback 的长注释）：
+                                                                //   full → 真实思考链；balanced/compact → 空串占位。
+                                                                //   历史若用全局默认值而非请求生效值，会产生「历史空串 / 本轮真实值」的第三种形态，
+                                                                //   使下一次请求的 prompt 不再是本次请求的前缀 → 跨轮全量重新 prefill。
+                                                                ReasoningPassback.putCurrentTurn(tcMsg, reasoning,
+                                                                        ReasoningPassback.modeOf(apiRequest));
                                                                 messages.add(tcMsg);
 
                                                                 // 为每个工具调用添加 tool 结果消息（内容均为用户自定义指示）
@@ -3546,9 +3550,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                                 tcMsg.put("content", collectedContentStr);
                                                             }
                                                             tcMsg.put("tool_calls", completeToolCalls);
-                                                            // 【强制回传】本轮工具循环的 assistant 必须带真实 reasoning_content：
-                                                            //   DeepSeek thinking + tools 场景下字段缺失会 400（见 ReasoningPassback）
-                                                            ReasoningPassback.putCurrentTurn(tcMsg, reasoning);
+                                                            // 【缓存一致性】与下一轮历史重建取同一值（见 ReasoningPassback 长注释）
+                                                            ReasoningPassback.putCurrentTurn(tcMsg, reasoning,
+                                                                    ReasoningPassback.modeOf(apiRequest));
                                                             messages.add(tcMsg);
 
                                                             // 构建工具结果消息并保存（M5：统一封装，含截图等工具的 user 消息注入）
@@ -3651,12 +3655,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                             toolCallMessage.put("content", collectedContentStr);
                                         }
                                         toolCallMessage.put("tool_calls", completeToolCalls);
-                                        // 【强制回传】工具循环内必须带真实 reasoning_content：
-                                        //   DeepSeek 会在服务端强校验该字段（缺失即 400），且思维链要在
-                                        //   多步工具调用之间保持连续 —— 置空会削弱模型的推理衔接。
-                                        //   成本上这部分新增量很小（每轮仅一次「未命中输入」），
-                                        //   换来的是更少的跑偏与更少的轮次（轮次才是成本大头）。
-                                        ReasoningPassback.putCurrentTurn(toolCallMessage, reasoning);
+                                        // 【缓存一致性】reasoning_content 取值必须与下一轮历史重建完全一致：
+                                        //   本轮真实值 / 下轮空串 会让下一次请求断掉前缀关系 → 跨轮全量 prefill
+                                        //   （长上下文时表现为首 token 等十几到几十秒）。详见 ReasoningPassback。
+                                        ReasoningPassback.putCurrentTurn(toolCallMessage, reasoning,
+                                                ReasoningPassback.modeOf(apiRequest));
                                         messages.add(toolCallMessage);
 
                                         // 创建工具结果事件流
@@ -3777,11 +3780,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         if (content != null && !content.isEmpty()) {
                             assistantMessage.put("content", content);
                         }
-                        // 【强制回传】assistant 消息一律携带 reasoning_content 字段（缺失即 400）。
-                        //   本条是「无工具调用的最终回复」，不参与工具续跑，因此走历史策略：
-                        //   full 回真实值，balanced/compact 置空串占位（≈3~5 token，成本可忽略）。
+                        // 【缓存一致性】assistant 消息一律携带 reasoning_content 字段（缺失即 400）。
+                        //   本条是「无工具调用的最终回复」，它会在下一次请求时由
+                        //   ContextBuilder 从 DB 重建，因此这里必须用「请求生效的 mode」而不是
+                        //   全局配置默认值 —— 否则同一消息会出现第三种取值形态，跨轮前缀再次断裂。
                         ReasoningPassback.putHistory(assistantMessage, reasoning,
-                                deepSeekConfig.resolveContextMode());
+                                ReasoningPassback.modeOf(apiRequest));
                         messages.add(assistantMessage);
 
                         // 📝 成长体系 C3：弯路通道（最终回复已追加到 messages 后触发——
@@ -4120,9 +4124,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 toolCallMessage.put("content", collectedContent);
                             }
                             toolCallMessage.put("tool_calls", completeToolCalls);
-                            // 【强制回传】工具循环内必须带真实 reasoning_content：
-                            //   DeepSeek thinking + tools 场景下字段缺失会 400（见 ReasoningPassback）
-                            ReasoningPassback.putCurrentTurn(toolCallMessage, reasoning);
+                            // 【缓存一致性】取值与下一轮历史重建保持一致（见 ReasoningPassback 长注释）
+                            ReasoningPassback.putCurrentTurn(toolCallMessage, reasoning,
+                                    ReasoningPassback.modeOf(apiRequest));
                             messages.add(toolCallMessage);
 
                             // 将包含回答的工具结果添加到消息列表并保存（M5：统一封装，含截图等工具的 user 消息注入）
@@ -4355,8 +4359,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             rejectTcMsg.put("content", collectedContentStr);
         }
         rejectTcMsg.put("tool_calls", completeToolCalls);
-        // 【强制回传】拒绝后续跑仍属工具循环，reasoning_content 字段缺失会 400（见 ReasoningPassback）
-        ReasoningPassback.putCurrentTurn(rejectTcMsg, reasoning);
+        // 【缓存一致性】拒绝后续跑仍属工具循环，取值规则与历史重建一致（见 ReasoningPassback）
+        ReasoningPassback.putCurrentTurn(rejectTcMsg, reasoning, ReasoningPassback.modeOf(apiRequest));
         messages.add(rejectTcMsg);
 
         // 为每个工具调用添加 tool 结果消息（内容均为拒绝提示）

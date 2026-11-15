@@ -1,5 +1,5 @@
 import type { ApiResponse } from '@/store/user'
-import { authFetch as authFetchWithRedirect, getAuthHeaders } from '@/utils/http-client'
+import { authFetch as authFetchWithRedirect, getAuthHeaders, reportUnauthorizedOn401 } from '@/utils/http-client'
 
 export interface ProjectTreeNode {
   name: string
@@ -87,7 +87,9 @@ export async function searchProjectFiles(
  */
 export async function getProjectFileBlobUrl(path: string): Promise<string> {
   const authHeader = await getAuthHeaders()
-  const res = await fetch(`/api/project/raw?path=${encodeURIComponent(path)}`, { headers: authHeader })
+  const res = reportUnauthorizedOn401(
+    await fetch(`/api/project/raw?path=${encodeURIComponent(path)}`, { headers: authHeader })
+  )
   if (!res.ok) {
     throw new Error(res.status === 404 ? '文件不存在或无法访问' : `文件加载失败（${res.status}）`)
   }

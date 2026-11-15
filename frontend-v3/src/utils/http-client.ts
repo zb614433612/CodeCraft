@@ -182,18 +182,72 @@ export function getStoredToken(): string {
 
 /** 写入 token */
 export function setAuthToken(token: string): void {
-  memoryToken = token || ''
+  const next = token || ''
+  /**
+   * 「新登录」判定：拿到<b>非空且与当前不同</b>的 token。
+   *
+   * <p>只判非空是不够的 —— `userStore.setToken()` 与登录页可能对同一个 token 重复写入，
+   * 每次都通知会把所有页面的缓存标记成「刚登录」。</p>
+   */
+  const isNewLogin = !!next && next !== memoryToken
+  memoryToken = next
   // 拿到新 token = 重新登录成功：解除判废标记，恢复经典版兜底能力
-  if (token) revokedToken = false
+  if (next) revokedToken = false
   try {
-    if (token) {
-      localStorage.setItem(TOKEN_KEY, token)
+    if (next) {
+      localStorage.setItem(TOKEN_KEY, next)
       localStorage.removeItem(TOKEN_REVOKED_KEY)
     } else {
       localStorage.removeItem(TOKEN_KEY)
     }
   } catch {
     // localStorage 不可用（隐私模式 / file://）时仅保留内存 token
+  }
+  if (isNewLogin) {
+    /*
+      会话切换：上一轮的 401 去重窗口必须清零。
+      否则「登出 → 立刻重新登录 → 新 token 又被后端判废」时，那次 401 会落在 800ms 窗口内被
+      静默丢弃 —— 用户看到请求失败，却既不提示也不跳登录页。
+     */
+    resetUnauthorizedDedupe()
+    fireLoginSuccess()
+  }
+}
+
+// ==================== 登录成功（会话切换）通知 ====================
+
+/**
+ * 登录成功订阅者集合。
+ *
+ * <p><b>为什么需要这个信号</b>：所有页面的数据加载闸门都是「列表为空 && 没有 error 才请求」
+ * （见 App.vue 的 PAGE_BINDINGS）。一次 401 会在 `xxxError` 里留下
+ * 「未登录，请先登录」/「登录已过期，请重新登录」，而重新登录成功后<b>没有任何人清它</b> ——
+ * 于是用户登录回来，该页仍然显示「未登录」，只有手点页面上的「刷新」才恢复。</p>
+ *
+ * <p>最典型的现场：后端重启 → 启动时的并发请求全部 401 → 跳登录页 → 用户重新登录 →
+ * 进入「LLM 提供商」页，列表处一直写着「加载失败：未登录，请先登录」。</p>
+ */
+const loginHandlers = new Set<() => void>()
+
+/**
+ * 订阅「登录成功（拿到新 token）」事件。
+ *
+ * @param handler 回调（每次登录成功触发一次）
+ * @returns 取消订阅函数
+ */
+export function onLoginSuccess(handler: () => void): () => void {
+  loginHandlers.add(handler)
+  return () => loginHandlers.delete(handler)
+}
+
+/** 通知所有订阅者：会话已切换（登录成功） */
+function fireLoginSuccess(): void {
+  for (const handler of [...loginHandlers]) {
+    try {
+      handler()
+    } catch {
+      // 单个订阅方异常不能影响登录主流程
+    }
   }
 }
 
@@ -330,6 +384,16 @@ let lastUnauthorizedAt = 0
 const UNAUTHORIZED_DEDUPE_MS = 800
 
 /**
+ * 重置 401 去重窗口。
+ *
+ * <p>登录成功（会话切换）后必须清零：新 token 的首次 401 是一次**全新**的失效事件，
+ * 若仍落在上一轮的 800ms 窗口里会被静默丢弃，用户会看到「请求失败但既不提示也不退出」。</p>
+ */
+function resetUnauthorizedDedupe(): void {
+  lastUnauthorizedAt = 0
+}
+
+/**
  * 触发未授权回调；回调内部异常不应影响调用方原本的错误处理。
  *
  * <p>一次切页 / 一轮刷新往往会并发打出 5~10 个接口，token 失效时它们会同时 401。
@@ -389,6 +453,21 @@ export function notifyUnauthorized(reason = '登录已过期'): void {
     return
   }
   fireUnauthorized(reason)
+}
+
+/**
+ * 裸 fetch 通道的 401 统一出口（与 {@link request} / {@link authFetch} 内部行为一致）。
+ *
+ * <p>上传附件（FormData）、文件预览、项目原文件读取（二进制流）这类场景必须用原生 fetch，
+ * 绕过了 request 的自动 401 处理。历史坑：token 过期时这些接口只会报
+ * 「上传失败」/「文件加载失败（401）」，既不提示重新登录也不跳登录页 ——
+ * 用户会以为是文件坏了，实际只需要重新登录。</p>
+ *
+ * <p>用法：{@code const res = reportUnauthorizedOn401(await fetch(url, init))}</p>
+ */
+export function reportUnauthorizedOn401(response: Response): Response {
+  if (response.status === 401) notifyUnauthorized('登录已过期')
+  return response
 }
 
 /**
