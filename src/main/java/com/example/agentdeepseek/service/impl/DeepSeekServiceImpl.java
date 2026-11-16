@@ -625,7 +625,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                         "name VARCHAR(100) NOT NULL, " +
                         "description VARCHAR(500), " +
-                        "avatar VARCHAR(20) DEFAULT '🤖', " +
+                        "avatar VARCHAR(255) DEFAULT '🤖', " +
                         "system_prompt TEXT, " +
                         "tool_names TEXT, " +
                         "model_name VARCHAR(100) DEFAULT 'deepseek-v4-flash', " +

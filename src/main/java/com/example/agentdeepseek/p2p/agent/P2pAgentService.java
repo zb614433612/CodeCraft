@@ -93,6 +93,10 @@ public class P2pAgentService {
         authMapper.createUniqueIndex();
         // 兼容旧表：添加 agent_name 列
         migrateAuthTable();
+        // 兼容旧表：agent_avatar VARCHAR(20) → VARCHAR(255)
+        // 老库 CREATE TABLE IF NOT EXISTS 不生效，必须显式扩容，
+        // 否则「头像用图片 URL」的 Agent 授权时写入超长 → 接口 500
+        widenAvatarColumn();
         convMappingMapper.createTableIfNotExists();
         convMappingMapper.createIndexPeerAgent();
         convMappingMapper.createIndexConv();
@@ -100,11 +104,21 @@ public class P2pAgentService {
         log.info("[P2P-Agent] Authorization & conversation mapping tables ensured");
     }
 
+    /** 老库 agent_avatar 列宽扩容（幂等，失败仅告警不阻断启动） */
+    private void widenAvatarColumn() {
+        try {
+            authMapper.widenAgentAvatar();
+            log.info("[P2P-Agent] Ensured agent_avatar width >= 255");
+        } catch (Exception e) {
+            log.warn("[P2P-Agent] Widen agent_avatar skipped: {}", e.getMessage());
+        }
+    }
+
     private void migrateAuthTable() {
         String[] alters = {
             "ALTER TABLE p2p_agent_authorization ADD COLUMN agent_name VARCHAR(100) DEFAULT ''",
             "ALTER TABLE p2p_agent_authorization ADD COLUMN agent_description VARCHAR(500) DEFAULT ''",
-            "ALTER TABLE p2p_agent_authorization ADD COLUMN agent_avatar VARCHAR(20) DEFAULT '🤖'",
+            "ALTER TABLE p2p_agent_authorization ADD COLUMN agent_avatar VARCHAR(255) DEFAULT '🤖'",
             "ALTER TABLE p2p_agent_authorization ADD COLUMN user_id BIGINT DEFAULT NULL"
         };
         for (String sql : alters) {

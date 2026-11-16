@@ -5,6 +5,71 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.2] - 2026-11-16
+
+> **Single-fix release**: resolves a reproducible HTTP 500 on the "Device Link → Agent Authorization"
+> endpoint. The root cause is a **legacy narrow column definition**: `agent_avatar VARCHAR(20)` cannot
+> hold the URL of an image avatar.
+> This release **requires a backend restart**; it includes an automatic widening migration for
+> existing databases, so no manual SQL is needed and in-place upgrade works.
+
+### 🔥 Fixed: "Agent Authorization" under Device Link always returned HTTP 500 (user-reported, P0)
+
+- **Symptom**: on the v3 "Device Link" page, selecting an agent and clicking authorize popped up
+  "Service error HTTP 500 Internal Server Error" for
+  `POST /api/p2p/agent-auth/grant/{peerId}`. Cancel and list-authorizations worked fine;
+  **only the authorize step failed**.
+- **Root cause (one column too narrow, whole chain collapses)**:
+  - `p2p_agent_authorization.agent_avatar` was defined as **`VARCHAR(20)`**, while both
+    `agent_config.avatar` and `sys_user.avatar` are **`VARCHAR(255)`** — this table was designed
+    when avatars were assumed to be emoji only, and nobody widened it later.
+  - The user switched the agent avatar to an **image**, stored as a URL:
+    `/api/avatar/file/f4fe889fb991454496e272fbc6ede39b.jpg`, **53 characters** long.
+  - On authorize, `grantAuthorization` writes that avatar URL into `agent_avatar` as a redundant
+    field, so the database threw
+    `Value too long for column "agent_avatar CHARACTER VARYING(20)"`
+    (H2 error code `22001-232`), which was uncaught → surfaced as HTTP 500.
+  - **Why other endpoints were unaffected**: `getMyAuthToPeer` / `getPeerAuthToMe` only **read**,
+    and `cancelAgentAuth` only runs `UPDATE status='cancelled'` (never touching the avatar column),
+    so only the authorize write path hit the column width.
+  - **Why the logs had no clue**: `app.log` contained only startup records, and `trace.db` had
+    **zero** `MERGE INTO p2p_agent` entries — the evidence could only be obtained by reproducing
+    against the database directly.
+- **Fix (three changes + one safety net)**:
+  1. `P2pAgentAuthorizationMapper.createTableIfNotExists` — the table now declares
+     `agent_avatar` as `VARCHAR(255)`, aligned with `agent_config.avatar` / `sys_user.avatar`;
+  2. added `widenAgentAvatar()` — an idempotent ALTER:
+     `ALTER TABLE p2p_agent_authorization ALTER COLUMN agent_avatar VARCHAR(255)`;
+  3. `P2pAgentService.init()` calls that migration (wrapped in try-catch; failure only warns and
+     never blocks startup). **This is the key for existing users** —
+     `CREATE TABLE IF NOT EXISTS` does nothing to an existing table, so without this explicit
+     widening an upgraded old database would stay at `VARCHAR(20)` and keep returning 500;
+  4. corrected two sibling definitions so a freshly created database cannot regress:
+     - `agent_avatar VARCHAR(20)` → `VARCHAR(255)` in `P2pAgentService.migrateAuthTable()`;
+     - `avatar VARCHAR(20)` → `VARCHAR(255)` in the `agent_config` DDL inside `DeepSeekServiceImpl`.
+- **Verification (before/after, measured on the same database)**:
+  - before the fix, running that same MERGE with the real 53-character avatar URL:
+    `Value too long for column "agent_avatar CHARACTER VARYING(20)": "...jpg" (53)` ❌
+  - after widening, the same SQL: **executed successfully, 1 row affected** ✅
+  - idempotency: repeating `ALTER COLUMN ... VARCHAR(255)` did not error ✅
+  - column width re-check: `agent_avatar` = **255** in `INFORMATION_SCHEMA` ✅
+  - `mvn -DskipTests compile` → `BUILD SUCCESS` ✅
+- **Blast-radius check**: scanning every `avatar` column in the database found only this one at 20;
+  `agent_config.avatar` (255) and `sys_user.avatar` (255) were already fine.
+  The table's other columns `agent_name VARCHAR(100)` and `agent_description VARCHAR(500)` match the
+  limits of their `agent_config` sources, so there is no overflow risk there.
+
+### ⚠️ Upgrade notes
+
+- **A backend restart is required** for the fix to take effect (the migration runs in
+  `@PostConstruct init()`).
+- Existing databases are widened automatically, **no manual SQL needed**. In environments where DDL
+  is restricted, run once manually:
+  `ALTER TABLE p2p_agent_authorization ALTER COLUMN agent_avatar VARCHAR(255)`
+- No other schema changes, no data migration, in-place upgrade works.
+
+---
+
 ## [3.3.1] - 2026-11-16
 
 > **Stability release**: fixes 20 functional defects found in the previous two review rounds. Two of

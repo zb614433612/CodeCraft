@@ -13,20 +13,39 @@ import java.util.List;
 @Repository
 public interface P2pAgentAuthorizationMapper {
 
-    /** 动态建表 */
+    /**
+     * 动态建表。
+     * <p>
+     * ⚠️ agent_avatar 必须是 VARCHAR(255)：Agent 头像既可能是 emoji（几个字符），
+     * 也可能是一张图片的 URL（如 /api/avatar/file/xxx.jpg，实测 53 字符）。
+     * 历史上这里是 VARCHAR(20)，导致「头像用图片」的 Agent 授权时
+     * MERGE 写入报 Value too long → 接口 500。对齐 agent_config.avatar / sys_user.avatar 的 255。
+     * </p>
+     */
     @Update("CREATE TABLE IF NOT EXISTS p2p_agent_authorization (" +
             "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
             "peer_id VARCHAR(64) NOT NULL, " +
             "agent_config_id BIGINT NOT NULL, " +
             "agent_name VARCHAR(100) DEFAULT '', " +
             "agent_description VARCHAR(500) DEFAULT '', " +
-            "agent_avatar VARCHAR(20) DEFAULT '🤖', " +
+            "agent_avatar VARCHAR(255) DEFAULT '🤖', " +
             "user_id BIGINT DEFAULT NULL, " +
             "direction VARCHAR(10) NOT NULL, " +
             "status VARCHAR(10) NOT NULL DEFAULT 'active', " +
             "created_at DATETIME NOT NULL, " +
             "cancelled_at DATETIME)")
     void createTableIfNotExists();
+
+    /**
+     * 老库列宽扩容：agent_avatar VARCHAR(20) → VARCHAR(255)。
+     * <p>
+     * CREATE TABLE IF NOT EXISTS 对已存在的表不生效，所以老用户升级后仍是窄列，
+     * 授权接口会继续 500。这里用幂等 ALTER 兜底：H2/MySQL 下重复执行
+     * 「改成同样的宽度」不会报错，可安全地在每次启动时调用。
+     * </p>
+     */
+    @Update("ALTER TABLE p2p_agent_authorization ALTER COLUMN agent_avatar VARCHAR(255)")
+    void widenAgentAvatar();
 
     /** 建索引 */
     @Update("CREATE INDEX IF NOT EXISTS idx_paa_peer_dir ON p2p_agent_authorization(peer_id, direction)")

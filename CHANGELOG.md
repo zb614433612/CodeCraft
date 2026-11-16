@@ -5,6 +5,66 @@
 
 ---
 
+## [3.3.2] - 2026-11-16
+
+> **单点修复版本**：修掉「设备互联 → Agent 授权」接口必现的 HTTP 500。
+> 根因是一列**历史遗留的窄列定义**：`agent_avatar VARCHAR(20)` 装不下图片头像的 URL。
+> 本版**需要重启后端**；含老库自动扩容迁移，无需手工执行 SQL，可覆盖安装。
+
+### 🔥 修复：设备互联「Agent 授权」必现 HTTP 500（用户报告，P0）
+
+- **症状**：v3 前端「设备互联」页面勾选 Agent 点授权，弹出
+  「服务异常 HTTP 500 Internal Server Error」，接口为
+  `POST /api/p2p/agent-auth/grant/{peerId}`。取消授权、查询授权列表都正常，
+  **只有「授权」这一步失败**。
+- **根因（一列宽度不够，全链路雪崩）**：
+  - `p2p_agent_authorization.agent_avatar` 定义为 **`VARCHAR(20)`**，
+    而 `agent_config.avatar` 与 `sys_user.avatar` 都是 **`VARCHAR(255)`**——
+    这张表是当初只按「emoji 头像」设计时留下的，后来没人同步放宽。
+  - 用户把 Agent 头像换成了**图片**，存的是 URL：
+    `/api/avatar/file/f4fe889fb991454496e272fbc6ede39b.jpg`，长 **53 字符**。
+  - 授权时 `grantAuthorization` 把该头像 URL 作为冗余字段写进 `agent_avatar`，
+    数据库直接抛 `Value too long for column "agent_avatar CHARACTER VARYING(20)"`
+    （H2 错误码 `22001-232`），未被捕获 → 冒泡成 HTTP 500。
+  - **为什么其它接口没事**：`getMyAuthToPeer` / `getPeerAuthToMe` 只**读**不写，
+    `cancelAgentAuth` 只做 `UPDATE status='cancelled'`（不碰头像列），
+    所以只有「授权」这条写入路径会踩到列宽。
+  - **为什么日志里查不到线索**：`app.log` 只有启动记录、`trace.db` 中
+    `MERGE INTO p2p_agent` 一条都没有——说明异常发生在应用层之前就被截断，
+    实际证据需要直接对数据库复现才能拿到。
+- **修复（三处 + 一处兜底）**：
+  1. `P2pAgentAuthorizationMapper.createTableIfNotExists` —
+     建表时 `agent_avatar` 改为 `VARCHAR(255)`，与 `agent_config.avatar` / `sys_user.avatar` 对齐；
+  2. 新增 `widenAgentAvatar()` — 幂等 ALTER：
+     `ALTER TABLE p2p_agent_authorization ALTER COLUMN agent_avatar VARCHAR(255)`；
+  3. `P2pAgentService.init()` 中调用该迁移（包 try-catch，失败仅 warn 不阻断启动）。
+     **这一步是老用户能修好的关键**——`CREATE TABLE IF NOT EXISTS` 对已存在的表不生效，
+     没有这段显式扩容，老库升级后仍是 `VARCHAR(20)`，500 会继续发生；
+  4. 同步修正两处同源的错误定义，避免「新建库又被写成窄列」：
+     - `P2pAgentService.migrateAuthTable()` 中的 `agent_avatar VARCHAR(20)` → `VARCHAR(255)`；
+     - `DeepSeekServiceImpl` 建 `agent_config` 时的 `avatar VARCHAR(20)` → `VARCHAR(255)`。
+- **验证（修复前后对比，均在同一数据库实测）**：
+  - 修复前，用真实的 53 字符头像 URL 执行同一条 MERGE：
+    `Value too long for column "agent_avatar CHARACTER VARYING(20)": "...jpg" (53)` ❌
+  - 扩容后同一条 SQL：**执行成功，影响 1 行** ✅
+  - 幂等性：重复执行 `ALTER COLUMN ... VARCHAR(255)` 不报错 ✅
+  - 列宽复查：`INFORMATION_SCHEMA` 中 `agent_avatar` = **255** ✅
+  - `mvn -DskipTests compile` → `BUILD SUCCESS` ✅
+- **影响面确认**：全库扫描 `avatar` 列，仅此一处为 20，
+  `agent_config.avatar`(255)、`sys_user.avatar`(255) 均正常。
+  同表其它列 `agent_name VARCHAR(100)`、`agent_description VARCHAR(500)`
+  与源表 `agent_config` 的上限一致，无溢出风险。
+
+### ⚠️ 升级提示
+
+- **必须重启后端**才生效（迁移在 `@PostConstruct init()` 中执行）。
+- 老库会自动扩容，**无需手工执行 SQL**；若部署环境限制 DDL，
+  可手工执行一次：
+  `ALTER TABLE p2p_agent_authorization ALTER COLUMN agent_avatar VARCHAR(255)`
+- 未改其它表结构，无数据迁移，可覆盖安装。
+
+---
+
 ## [3.3.1] - 2026-11-16
 
 > **稳定性修复版本**：集中修复前两轮代码审查发现的 20 处功能性缺陷，其中 2 处是
