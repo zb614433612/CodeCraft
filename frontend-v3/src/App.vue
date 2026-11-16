@@ -5657,6 +5657,14 @@ function onProviderRefresh() {
  */
 const LOG_PAGE_LINES = 12
 const LOG_LOAD_STEP = 12
+/**
+ * 搜索模式每页条数。
+ *
+ * 为什么从 500 降下来：后端 /logs/search 已改为「最新优先 + 滑动窗口」分页，
+ * page=1 返回的就是最新的一页；前端只要在滚动到顶部时递增 page 即可翻到更早的日志。
+ * 用较小的页大小可以让首屏更快，也避免一次渲染 500 行 DOM 造成卡顿。
+ */
+const LOG_SEARCH_PAGE_SIZE = 200
 
 const logMode = ref<'tail' | 'search'>('tail')
 const logAvailableDates = ref<string[]>([])
@@ -5667,6 +5675,10 @@ const logLines = ref<LogLineItem[]>([])
 const logHasMore = ref(false)
 /** tail 模式已加载的行数，作为「加载更早」时的 skip 值 */
 const logTailLoaded = ref(0)
+/** 搜索模式当前页码（滚动到顶部时 +1 向更早翻页） */
+const logSearchPage = ref(1)
+/** 搜索模式下「加载更早」复用同一次查询条件 */
+let logLastQuery: { keyword?: string; level?: string; date?: string } = {}
 
 /** 行 id 自增，保证 v-for key 稳定 */
 let logSeq = 0
@@ -5717,6 +5729,8 @@ function onLogRefresh() {
 async function onLogSearch(query: LogSearchQuery) {
   logMode.value = 'search'
   logSearchDate.value = query.date || ''
+  logLastQuery = { keyword: query.keyword, level: query.level, date: query.date }
+  logSearchPage.value = 1
   logLoading.value = true
   try {
     const result = await searchLogs({
@@ -5724,7 +5738,7 @@ async function onLogSearch(query: LogSearchQuery) {
       level: query.level,
       date: query.date,
       page: 1,
-      size: 500
+      size: LOG_SEARCH_PAGE_SIZE
     })
     logLines.value = result.lines.map(line => ({
       id: `log-${logSeq++}`,
@@ -5733,9 +5747,12 @@ async function onLogSearch(query: LogSearchQuery) {
       fileName: line.fileName
     }))
     logTotal.value = result.total
+    // 后端已改为「最新优先」，page=1 是最新一页；还有更早的才允许继续加载
+    logHasMore.value = result.lines.length >= LOG_SEARCH_PAGE_SIZE
   } catch (err) {
     logLines.value = []
     logTotal.value = 0
+    logHasMore.value = false
     toast.error(readErrorMessage(err, '搜索日志失败'))
   } finally {
     logLoading.value = false
@@ -5750,11 +5767,48 @@ function onLogSwitchTail() {
   void loadLogLatest()
 }
 
-/** 加载更早的日志：skip = 已加载行数，把结果 prepend 到列表头部 */
+/**
+ * 加载更早的日志。两种模式共用同一个入口（组件只在滚到顶部时发 load-more）：
+ *
+ * - tail 模式：按 skip=已加载行数 从文件末尾继续往前读（tailLogs）；
+ * - search 模式：page+1 向后端要更早的一页（后端已改为「最新优先」分页）。
+ *
+ * 历史坑（本次修复）：搜索模式原先只有 page=1 一次请求，而旧后端从**文件头**收集
+ * 并只留 page*size 条，导致日志页永远只能看到文件里最旧的那 500 行 ——
+ * 用户因此以为新日志丢失了（实测 app.log 13000 行时只能看到 09:34~09:55 一段）。
+ */
 async function onLogLoadMore() {
   if (!logHasMore.value || logLoading.value) return
   logLoading.value = true
   try {
+    if (logMode.value === 'search') {
+      const nextPage = logSearchPage.value + 1
+      const result = await searchLogs({
+        keyword: logLastQuery.keyword,
+        level: logLastQuery.level,
+        date: logLastQuery.date,
+        page: nextPage,
+        size: LOG_SEARCH_PAGE_SIZE
+      })
+      if (!result.lines.length) {
+        logHasMore.value = false
+        return
+      }
+      logSearchPage.value = nextPage
+      logLines.value = [
+        ...result.lines.map(line => ({
+          id: `log-${logSeq++}`,
+          text: line.content,
+          lineNumber: line.lineNumber,
+          fileName: line.fileName
+        })),
+        ...logLines.value
+      ]
+      logTotal.value = result.total
+      logHasMore.value = result.lines.length >= LOG_SEARCH_PAGE_SIZE
+      return
+    }
+
     const older = await tailLogs(LOG_LOAD_STEP, logTailLoaded.value)
     if (!older.length) {
       logHasMore.value = false

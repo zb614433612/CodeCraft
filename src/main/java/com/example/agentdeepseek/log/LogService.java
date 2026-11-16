@@ -117,10 +117,32 @@ public class LogService {
 
         if (logFiles.isEmpty()) return SearchResult.empty();
 
-        List<LogLine> allMatches = new ArrayList<>();
-        long totalCount = 0;
-        final int maxCollect = page * size;
+        /*
+          ⚠️ 分页语义（2026-11-16 修复，勿改回"从文件头收集"）：
+
+          旧实现从**文件头**开始收集，收满 page*size 条就停止收集，再对这批结果做 subList。
+          后果：page=1 拿到的其实是整个日志文件里**最旧的** size 条，而不是最新的。
+
+          实测证据（用户反馈）：
+            - app.log 已达 13000+ 行、2.7MB，且一直在写（最后一行 17:55）
+            - 日志页「搜索」只能看到 09:34 ~ 09:55 这一段
+            - 原因：09:55 恰好在第 383 行，而前端固定 size=500，500 行只覆盖到 09:56 左右
+            - 用户因此以为「09:55 之后的日志丢失了」，实际一条都没丢
+
+          新实现：
+            1. 全量扫描统计 totalCount（保证"共命中 N 条"准确）；
+            2. 同时用滑动窗口只保留**最新的** maxCollect 条匹配行
+               （超过上限从头部丢弃最旧的），内存 O(maxCollect) 而非 O(全文件)；
+            3. page=1 取窗口**尾部**一页（即最新），返回时仍按「旧→新」排列，
+               符合前端日志面板自上而下的阅读习惯；
+            4. page 递增 = 向更早翻页（page=2 比 page=1 更旧）。
+         */
+        final int maxCollect = Math.max(size, page * size);
         final String upperLevel = (level != null) ? level.toUpperCase() : null;
+
+        // 滑动窗口：保持「旧→新」顺序（新行 addLast 到尾部），超限时 removeFirst 丢弃最旧的
+        Deque<LogLine> window = new ArrayDeque<>();
+        long totalCount = 0;
 
         for (Path file : logFiles) {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file.toFile()), StandardCharsets.UTF_8))) {
@@ -148,8 +170,10 @@ public class LogService {
                     }
 
                     totalCount++;
-                    if (allMatches.size() < maxCollect) {
-                        allMatches.add(new LogLine(targetDate, file.getFileName().toString(), fileLineNum, line));
+                    window.addLast(new LogLine(targetDate, file.getFileName().toString(), fileLineNum, line));
+                    // 超限即丢弃最旧的一条（O(1)，不做逐行 remove(0)）
+                    while (window.size() > maxCollect) {
+                        window.removeFirst();
                     }
                 }
             } catch (IOException e) {
@@ -157,13 +181,16 @@ public class LogService {
             }
         }
 
-        int startIndex = (page - 1) * size;
-        int endIndex = Math.min(startIndex + size, allMatches.size());
-        if (startIndex >= allMatches.size()) {
+        // 分页：从窗口尾部（最新）向头部（更旧）切页，返回给前端时保持「旧→新」
+        List<LogLine> collected = new ArrayList<>(window);
+        int collectedSize = collected.size();
+        int endExclusive = collectedSize - (page - 1) * size;   // 该页在窗口中的右边界（不含）
+        if (endExclusive <= 0) {
+            // 请求页已超出窗口最旧端（日志条数不足），返回空页但保留真实 totalCount
             return new SearchResult(targetDate, List.of(), totalCount, page, size);
         }
-
-        return new SearchResult(targetDate, allMatches.subList(startIndex, endIndex), totalCount, page, size);
+        int startInclusive = Math.max(0, endExclusive - size);  // 该页左边界（含）
+        return new SearchResult(targetDate, collected.subList(startInclusive, endExclusive), totalCount, page, size);
     }
 
     /**

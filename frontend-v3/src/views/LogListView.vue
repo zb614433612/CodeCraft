@@ -116,7 +116,7 @@
             <span class="cc-log-auto" title="开启后新日志自动滚动到底部" @click="toggleAutoScroll">
               <span class="cc-switch" :class="{ 'is-on': autoScroll }" />自动滚动
             </span>
-            <button v-if="mode === 'tail' && hasMore" class="cc-btn cc-btn--ghost" @click="requestMore">
+            <button v-if="hasMore" class="cc-btn cc-btn--ghost" @click="requestMore">
               <svg class="cc-i cc-i--sm" style="transform: rotate(-90deg)"><use href="#i-chev" /></svg>加载更早
             </button>
           </div>
@@ -136,7 +136,7 @@
       <!-- 状态栏 -->
       <div v-if="filteredLines.length" class="cc-log-statusbar">
         <span class="cc-log-statusbar__item">
-          <svg v-if="mode === 'tail' && hasMore" class="cc-i cc-i--sm" style="transform: rotate(-90deg)">
+          <svg v-if="hasMore" class="cc-i cc-i--sm" style="transform: rotate(-90deg)">
             <use href="#i-chev" />
           </svg>
           <svg v-else class="cc-i cc-i--sm"><use href="#i-check" /></svg>
@@ -248,12 +248,17 @@ const panelMeta = computed(() => {
   if (props.mode === 'tail') {
     return `实时 · 已加载 ${props.lines.length} 行${props.hasMore ? '（可继续加载更早）' : ''}`
   }
-  return `搜索 · ${dateLabel.value} · 命中 ${props.total} 条`
+  // 搜索模式同样支持分页加载（page+1 翻更早的一页），这里把已加载量级暴露出来
+  return `搜索 · ${dateLabel.value} · 命中 ${props.total} 条 · 已加载 ${filteredLines.value.length} 条`
 })
 
 const statusText = computed(() => {
   if (props.mode === 'search') {
-    return `共命中 ${props.total} 条，当前展示 ${filteredLines.value.length} 条`
+    // 搜索模式已支持 page+1 翻更早页，这里必须提示用户「还能继续加载」，
+    // 否则用户以为只有第一页（历史 bug：搜索模式永远看不到更早日志）
+    return props.hasMore
+      ? `共命中 ${props.total} 条，当前展示 ${filteredLines.value.length} 条 · 滚动到顶部或点「加载更早」翻上一页`
+      : `共命中 ${props.total} 条，已加载全部`
   }
   return props.hasMore ? '滚动到顶部或点「加载更早」继续加载' : '已加载全部日志'
 })
@@ -299,7 +304,10 @@ function onScroll() {
   const el = listRef.value
   if (!el) return
   autoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 24
-  if (props.mode === 'tail' && props.hasMore && !props.loading && el.scrollTop <= 8) {
+  // 两种模式都支持「滚到顶部加载更早」：
+  //   tail 模式 → skip 继续往前读文件；search 模式 → page+1 翻更早的一页
+  // 历史坑：这里原先硬编码 mode === 'tail'，导致搜索模式永远只有第一页（见 App.vue onLogLoadMore 注释）
+  if (props.hasMore && !props.loading && el.scrollTop <= 8) {
     requestMore()
   }
 }

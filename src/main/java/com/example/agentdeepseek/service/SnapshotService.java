@@ -310,6 +310,28 @@ public class SnapshotService {
         }
 
         Path absPath = Path.of(absoluteFilePath).normalize().toAbsolutePath();
+
+        /*
+          ⚠️ 目录（及设备文件等非普通文件）绝不纳入快照（2026-11-16 修复）。
+
+          线上实证（用户 app.log）：
+            computeDiffStats 失败: file=...\dexanet-auth\src\main\java\com\dexanet\auth\service\sso
+            java.nio.file.AccessDeniedException: ...\snapshots\<id>\files\...\service\sso
+          报错路径以 sso 结尾 —— 那是个**包目录**，不是 .java 文件。
+          Windows 上对目录调 Files.readAllBytes 必定抛 AccessDeniedException（目录不是可读流）。
+
+          目录是怎么混进来的：file_writer 执行 action=delete 且 path 指向目录时，
+          ToolExecutor.resolveFilePath 会把目录当成「待修改文件」传进来。
+          备份阶段 Files.copy(目录) 只建出空目录，之后 diff 统计/回滚读它就炸。
+
+          这里提前拦截：既不建快照目录，也不写 metadata 与索引，避免留下
+          「永远无法 patch」的失效条目（本方法 synchronized，脏条目还会拖慢后续快照）。
+         */
+        if (Files.exists(absPath) && !Files.isRegularFile(absPath)) {
+            log.warn("跳过非普通文件，不创建快照: {}（目录/设备文件不支持 diff 统计与回滚）", absPath);
+            return null;
+        }
+
         Path projectRootPath = getProjectRootPath();
         // 根内 → 相对路径；根外/跨盘 → 绝对路径（旧实现在这里直接放弃快照，见 FileEntry#absolutePath）
         String relativePath = toDisplayPath(projectRootPath, absPath);
@@ -611,17 +633,28 @@ public class SnapshotService {
         String relativePath = entry.getRelativePath();
         try {
             Path backupPath = resolveBackupPath(snapshotId, meta, entry);
+
+            /*
+              第二道防线（2026-11-16）：旧版本写下的快照里可能残留目录条目
+              （createSnapshot 的入口拦截只对**新**快照生效，已落盘的 metadata 不会自动清）。
+              这里逐个校验「可读的普通文件」，非普通文件（目录/设备/符号链接目标）一律跳过，
+              避免 Files.readAllBytes 抛 AccessDeniedException 污染日志。
+
+              注意顺序：必须先判 isRegularFile 再读，不能靠 catch 兜 ——
+              异常信息只带路径不带"为什么"，排查成本高；且本方法 synchronized，
+              反复抛异常会拖慢整个快照链。
+             */
             if (entry.isWasNewFile()) {
                 // 新建文件：全部新增行
-                if (Files.exists(absPath)) {
+                if (Files.isRegularFile(absPath)) {
                     String content = FileEncodingDetector.readString(absPath);
                     entry.setLinesAdded(countLines(content));
                     entry.setLinesDeleted(0);
                 }
-            } else if (Files.exists(backupPath)) {
-                // 修改已有文件：计算 diff
+            } else if (Files.isRegularFile(backupPath)) {
+                // 修改已有文件：计算 diff（备份与当前都必须是普通文件才可比）
                 String oldContent = FileEncodingDetector.readString(backupPath);
-                if (Files.exists(absPath)) {
+                if (Files.isRegularFile(absPath)) {
                     String newContent = FileEncodingDetector.readString(absPath);
                     int[] stats = computeLineDiff(oldContent, newContent);
                     entry.setLinesAdded(stats[0]);
@@ -631,6 +664,10 @@ public class SnapshotService {
                     entry.setLinesAdded(0);
                     entry.setLinesDeleted(countLines(oldContent));
                 }
+            } else if (Files.exists(backupPath)) {
+                // 备份存在但不是普通文件（历史脏数据里的目录条目）→ 无法统计，跳过并记一条 warn
+                log.warn("快照备份不是普通文件，跳过 diff 统计: snapshot={}, path={}", snapshotId, backupPath);
+                return;
             }
 
             // 持久化更新

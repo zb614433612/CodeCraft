@@ -98,6 +98,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -2097,6 +2098,34 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // handleToolCallIteration 不会再被调用，需要在这里检查是否有在流式期间入队的补充消息。
             return handleStreamingPhase(conversationId, storageConversationId, apiRequest, messages, iteration, maxIterations)
                     .concatWith(Flux.defer(() -> {
+                        /*
+                          ★ 截断续写（2026-11-16 修复「火山跑十几轮就停」）
+
+                          上一轮流结束时若 finish_reason=length，说明输出被 max_tokens 截断：
+                          模型的话没说完，tool_calls 也没来得及吐出来。旧实现把它当成
+                          「无工具调用 → 任务自然结束」，于是任务被判死，用户看到「输出『开始。』后秒断」。
+
+                          这里追加一条 user 续写指令并**重新进入工具循环**，让模型接着把话说完
+                          （包括把没收完的 tool_calls 补出来）。注意：不消耗额外的 iteration 上限之外
+                          的任何计数，续写仍受 maxIterations 与既有守卫约束，不会无限循环。
+                         */
+                        if ("length".equals(String.valueOf(apiRequest.get("_finishReason")))) {
+                            apiRequest.remove("_finishReason");
+                            Map<String, Object> continueMsg = new HashMap<>();
+                            continueMsg.put("role", "user");
+                            continueMsg.put("content",
+                                    "【系统自动续写】上一次输出因长度上限被截断，请从中断处**继续**完成任务，"
+                                            + "不要重复已输出的内容，也不要重新开始。"
+                                            + "如果还需要调用工具，请直接发起工具调用。");
+                            messages.add(continueMsg);
+                            log.warn("检测到 finish_reason=length（输出被截断），追加续写请求并重新进入工具循环: " +
+                                            "conversationId={}, iteration={}, provider={}",
+                                    conversationId, iteration, resolveProviderCode(apiRequest));
+                            return Flux.just(createReasoningSSEEvent("✂️ 输出达到长度上限，正在自动续写..."))
+                                    .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
+                                            messages, iteration, maxIterations));
+                        }
+
                         // 检查补充需求队列
                         List<String> deferredSupplements = new ArrayList<>();
                         String s;
@@ -3122,6 +3151,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         AtomicBoolean shouldContinue = new AtomicBoolean(true);
         // 工具调用累积状态
         AtomicBoolean accumulatingToolCalls = new AtomicBoolean(false);
+        /*
+          ⚠️ 本轮流式响应的 finish_reason（2026-11-16 修复「火山跑十几轮就停」的真实根因）
+
+          背景实测（用户 app.log，conversationId=324）：
+            - 每一轮都以 [DONE] 正常收尾，无任何 IOException / timeout / connection reset；
+            - 但火山方舟每跑到 iteration≈18~19 就「任务完成」，而 DeepSeek 官网同一任务能跑到
+              iteration=125 —— 差异不在网络，而在「模型这轮到底回了什么」。
+
+          根因：本项目**从不读取 finish_reason**（全库只有 AgentForkManager 子Agent 路径读了）。
+          于是 OpenAI 协议里的三种结束原因被一视同仁：
+            stop        → 真的说完了
+            tool_calls  → 要调工具
+            length      → **输出被 max_tokens 截断**！此时模型的话没说完、tool_calls 也没吐全，
+                          但代码把它当成「无工具调用 → 自然结束」→ 保存半截回复 → 任务收尾。
+          用户看到的「输出『开始。』后秒断」正是 length 截断的典型形态。
+
+          火山比 DeepSeek 更容易触发 length：思考模式下 reasoning_content 同样消耗输出额度，
+          而火山 Coding Plan 的默认输出额度更小，思考链一长就把额度吃光，
+          模型来不及输出 tool_calls 就被截断。
+
+          因此这里必须捕获 finish_reason，供收尾分支判断「是不是真的说完了」。
+         */
+        AtomicReference<String> finishReasonRef = new AtomicReference<>();
         // 使用 ConcurrentHashMap：flatMap 默认并发处理多个 chunk，普通 HashMap 并发写有死循环风险
         Map<Integer, ObjectNode> accumulatedToolCalls = new ConcurrentHashMap<>();
 
@@ -3219,7 +3271,24 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         JsonNode eventNode = objectMapper.readTree(data);
                         JsonNode choices = eventNode.path("choices");
                         if (choices.isArray() && choices.size() > 0) {
-                            JsonNode delta = choices.get(0).path("delta");
+                            JsonNode choice = choices.get(0);
+                            JsonNode delta = choice.path("delta");
+
+                            /*
+                              ★ 捕获 finish_reason（OpenAI 协议里每帧的 choices[0].finish_reason）
+                                取值：null（流中间帧） / "stop"（正常说完） / "length"（输出被截断）
+                                      / "tool_calls"（要调工具） / "content_filter" 等。
+                                只在非 null 时覆盖，避免中间帧把已经拿到的值冲成空。
+                                用途见下方 doOnComplete：length 必须当作「没说完」继续，
+                                绝不能像旧实现那样当成「任务自然结束」。
+                             */
+                            JsonNode finishReasonNode = choice.path("finish_reason");
+                            if (!finishReasonNode.isMissingNode() && !finishReasonNode.isNull()) {
+                                String fr = finishReasonNode.asText("");
+                                if (!fr.isEmpty()) {
+                                    finishReasonRef.set(fr);
+                                }
+                            }
 
                             // 检查是否有tool_calls
                             JsonNode toolCalls = delta.path("tool_calls");
@@ -3775,13 +3844,47 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
                     // 只有在没有检测到工具调用（shouldContinue为true）且流正常完成时才保存助手消息
                     if (shouldContinue.get()) {
+                        /*
+                          ★★ 关键修复（2026-11-16）：finish_reason=length 绝不能当「任务说完」
+
+                          旧行为：只要本轮没有 tool_calls，就无条件走「保存最终回复 → 任务收尾」。
+                          但 finish_reason=length 表示**输出被 max_tokens 截断**，模型话没说完、
+                          tool_calls 也根本没机会吐出来。把它当正常结束，用户看到的就是
+                          「输出『开始。』后秒断」，而日志里每轮都是漂亮的 [DONE]，完全查不出问题。
+
+                          实测差异（同一任务、同一会话 324）：
+                            DeepSeek 官网 → 稳定带 tool_calls 回来，跑到 iteration=125；
+                            火山方舟     → 思考链吃掉输出额度，十几轮就碰一次 length，
+                                         被当成正常结束 → 每轮都在 iteration≈18~19 收工。
+
+                          处理策略：length 时**不**保存为最终回复，改为「截断续写」——
+                          标记 _finishReason=length，交由外层 doOnComplete 之后的兜底逻辑
+                          追加一条「继续」的 user 消息重新进入工具循环。
+                          这样模型能把没说完的话说完，而不是把任务判死。
+                        */
+                        String finishReason = finishReasonRef.get();
+                        boolean truncated = "length".equals(finishReason);
+                        if (truncated) {
+                            log.warn("本轮输出被截断（finish_reason=length）：provider={}, iteration={}, " +
+                                            "已有 content 长度={}。不判定为任务完成，将追加续写请求。",
+                                    resolveProviderCode(apiRequest), iteration,
+                                    contentCollector.length());
+                            apiRequest.put("_finishReason", "length");
+                        }
+
                         // 📝 成长体系 F3：工具循环自然结束（无工具调用、输出最终回复）→ 清算注入追踪
                         //    剩余追踪条目按 baseline 对比自动反馈有效（LLM 已主动反馈过的跳过）
-                        settleLessonTracking(storageConversationId);
+                        //    ⚠️ 截断场景不结算：任务还没做完，按「当年自然结束」记账会污染经验有效性
+                        if (!truncated) {
+                            settleLessonTracking(storageConversationId);
+                        }
 
                         // 📝 成长体系 C2：工具循环自然结束 → 异步对话复盘
                         //    工具把错误包装成友好提示（不抛异常）时自动捕获不触发，由复盘兜底提炼经验
-                        triggerLessonReview(conversationId, apiRequest, messages);
+                        //    同理，截断场景不做复盘（内容不完整，复盘结论会失真）
+                        if (!truncated) {
+                            triggerLessonReview(conversationId, apiRequest, messages);
+                        }
 
                         String fullResponse = responseBuilder.toString();
                         Map<String, String> extracted = contextBuilder.extractContentAndReasoningFromStreamResponse(fullResponse);
@@ -3794,6 +3897,27 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 log.warn("工具循环中未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
                             }
                         }
+
+                        /*
+                          截断场景（finish_reason=length）走这里的特殊分支：
+                          把已输出的半截内容作为 assistant 消息入上下文（模型下轮才能接着写），
+                          但**不做**「最终回复」的收尾动作（不复盘、不收尾），
+                          由外层 handleToolCallIteration 的 concatWith 检测 _finishReason 后追加续写请求。
+                        */
+                        if (truncated) {
+                            Map<String, Object> partialAssistant = new HashMap<>();
+                            partialAssistant.put("role", "assistant");
+                            if (content != null && !content.isEmpty()) {
+                                partialAssistant.put("content", content);
+                            }
+                            ReasoningPassback.putHistory(partialAssistant, reasoning,
+                                    ReasoningPassback.modeOf(apiRequest));
+                            messages.add(partialAssistant);
+                            log.info("截断内容已作为中间 assistant 消息入上下文: content长度={}, provider={}",
+                                    content != null ? content.length() : 0, resolveProviderCode(apiRequest));
+                            return;
+                        }
+
                         saveAssistantMessage(storageConversationId, content, reasoning);
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);

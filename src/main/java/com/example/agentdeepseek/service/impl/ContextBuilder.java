@@ -37,6 +37,36 @@ public class ContextBuilder {
 
     private static final int SESSION_NAME_TRUNCATE_LENGTH = 6;
 
+    /**
+     * 工具循环裁剪摘要的识别前缀（幂等标记）。
+     *
+     * <p>凡是 content 以此开头的 tool 消息，说明已被 {@link #trimToolLoopToBudget} 摘要过，
+     * 后续轮次必须<b>原样跳过</b>：重复改写会让历史每轮都变一次，前缀缓存全量失效
+     * （实测 TTFB 从 1.4s 退化到 20s），同时让模型看到的历史始终不稳定 ——
+     * 这是「均衡模式失忆」的放大器之一。</p>
+     *
+     * <p>与 {@code ToolResultBudget.MARK}（"…[CC-TRUNC]"）区分：那个标记的是
+     * 「单条结果写入前超预算被截断」，本标记的是「历史上下文裁剪时的摘要化」。</p>
+     */
+    private static final String TRIM_SUMMARY_MARK = "[工具 ";
+
+    /**
+     * 工具循环裁剪时<b>完整保留</b>的最近工具调用轮数。
+     *
+     * <p>⚠️ 这个值直接决定模型「还记得最近几步」。旧实现硬编码保留 2 轮，
+     * 导致每个工具结果只完整存活 2 轮就被摘要成空壳 —— 模型永远只看得到「刚刚这两步」，
+     * 再往前全忘，表现为反复重新表态、重复同一批操作（用户反馈的「均衡模式失忆」）。</p>
+     *
+     * <p>为什么取 8：单条工具结果已被 {@code ToolResultBudget} 在写入前截到
+     * 10K~12K 字符（约 2.5K~3K tokens），8 轮 ≈ 2 万~2.4 万 tokens，相对 30 万+ 的
+     * 上下文预算只占 8%，成本可接受；而 8 步的连续视野足以让模型建立「我在做什么、
+     * 做到哪一步」的稳定认知，不必频繁回头重做。</p>
+     *
+     * <p>若保留 8 轮后仍超限，{@link #trimToolLoopToBudget} 的逐级扩展会继续向更早的轮次推进，
+     * 因此调大此值不会导致裁剪失效，只会让「开始损失记忆」的位置更晚出现。</p>
+     */
+    private static final int PROTECT_RECENT_TOOL_ROUNDS = 8;
+
     private final ConversationMapper conversationMapper;
     private final ConversationMessageMapper conversationMessageMapper;
     private final CompactionService compactionService;
@@ -625,48 +655,100 @@ public class ContextBuilder {
             }
         }
 
-        // 2. 确定摘要区：保留最近 1 轮完整工具调用（最后一条 assistant(tool_calls) 及其后消息），
-        //    倒数第二条 assistant(tool_calls) 之前的 tool 消息全部摘要化
+        /*
+          ===== 2. 确定摘要区 =====
+
+          ★ 2026-11-16 修复「均衡模式失忆」的真正根因（用户直接指出）：
+
+          旧实现是 `assistantWithToolCallsSeen >= 2` —— 只把**最后 2 轮**完整工具调用留在可摘要区之外。
+          而工具结果是按轮次滑动的：第 N 轮时 t(N-1)/tN 完整，到第 N+1 轮时 t(N-1) 就退化成
+          「倒数第三条」，立刻被摘要掉。于是**每个工具结果只完整存活 2 轮**，模型永远只看得见
+          「刚刚这两步」，再往前全是空壳。
+
+          这不是「从旧到新逐步压缩」的直觉语义，而是「每走一步就丢一步记忆」：
+          模型看不到「我已经读过这个文件、已经定位到根因、已经改完第 1 处」，
+          于是每轮都重新表态「我不再验证了，直接动手」，然后重复同一批操作 —— 即用户说的「失忆」。
+
+          修复：把保护窗口从 2 轮提升到 PROTECT_RECENT_TOOL_ROUNDS 轮（默认 8），
+          让近期的连续执行链完整可见；更早的部分才收敛成「保留首部的摘要」。
+          若保留 8 轮后仍超限，下面的逐级扩展会继续向前压，保证一定收敛。
+         */
         int summaryEnd = 0; // [0, summaryEnd) 区间内的 tool 消息摘要化
         int assistantWithToolCallsSeen = 0;
         for (int i = messages.size() - 1; i >= 0; i--) {
             Map<String, Object> msg = messages.get(i);
             if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
                 assistantWithToolCallsSeen++;
-                if (assistantWithToolCallsSeen >= 2) {
+                if (assistantWithToolCallsSeen > PROTECT_RECENT_TOOL_ROUNDS) {
                     summaryEnd = i;
                     break;
                 }
             }
         }
 
-        // 3. 摘要化 [0, summaryEnd) 内的 tool 消息（保留 tool_call_id，替换 content）
+        /*
+          ===== 3. 摘要化 [0, summaryEnd) 内的 tool 消息（保留 tool_call_id，替换 content）=====
+
+          ★ 2026-11-16 修复「均衡模式失忆」：两处缺陷叠加导致模型完全看不到自己做过什么
+
+          缺陷一（信息归零）：旧实现把成功结果整体替换成
+              "[工具 xxx 调用成功 - 上下文超限已裁剪，完整结果请用 query_tool_history 查询]"
+          这是一句**不含任何内容**的空壳。工具循环里模型靠「工具结果」判断进度，
+          结果全被抹成同样的空串后，它就不知道「读过哪个文件、发现了什么、改到哪一步」，
+          表现为反复输出同一句开场白、把已经做对的事重新做一遍 —— 即用户说的「失忆」。
+          修复：摘要必须保留结果首部（成功 400 / 失败 300 字符），让模型能认出「这是哪一步」。
+
+          缺陷二（覆盖不足 + 每轮重复改写）：
+          旧实现只处理 [0, summaryEnd)（保留最近 1 轮），而工具循环的 token 大头往往还在
+          被保留的尾部；于是每一轮都判定「仍超限 → 再裁一次」，历史被反复改写 →
+          前缀缓存持续失效（实测 TTFB 从 1.4s 退化到 20s）→ 行为更不稳定。
+          修复：① 逐级扩大可摘要范围直到降到上限或无处可扩；② 已摘要的消息带标记幂等跳过，
+          保证「第一次裁完就稳定」，后续轮次不再动历史。
+         */
         int compacted = 0;
-        for (int i = 0; i < summaryEnd; i++) {
-            Map<String, Object> msg = messages.get(i);
-            if (!"tool".equals(msg.get("role"))) continue;
-            String content = (String) msg.get("content");
-            if (content == null || content.isEmpty()) continue;
-            String toolCallId = (String) msg.get("tool_call_id");
-            String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
+        int cursor = summaryEnd;
+        while (true) {
+            for (int i = 0; i < cursor; i++) {
+                Map<String, Object> msg = messages.get(i);
+                if (!"tool".equals(msg.get("role"))) continue;
+                String content = (String) msg.get("content");
+                if (content == null || content.isEmpty()) continue;
+                // 幂等：已摘要过的消息不再改写（否则每轮都会重写历史 → 缓存全失效）
+                if (content.startsWith(TRIM_SUMMARY_MARK)) continue;
 
-            String prefix = content.length() > 200 ? content.substring(0, 200) : content;
-            boolean isError = prefix.startsWith("ERROR:") || prefix.startsWith("ERROR：")
-                    || prefix.startsWith("Error:") || prefix.startsWith("Error：")
-                    || prefix.startsWith("Exception:") || prefix.startsWith("Exception：")
-                    || prefix.contains("【缺少参数】") || prefix.contains("【未找到】")
-                    || prefix.contains("【查询失败】") || prefix.contains("【无匹配")
-                    || prefix.contains("【无数据】") || prefix.contains("Permission denied")
-                    || prefix.contains("Access denied") || prefix.contains("命令执行失败")
-                    || prefix.contains("操作失败：");
+                String toolCallId = (String) msg.get("tool_call_id");
+                String toolName = toolCallId != null ? tcIdToName.getOrDefault(toolCallId, "unknown") : "unknown";
 
-            if (isError) {
-                String shortContent = content.length() > 150 ? content.substring(0, 150) + "..." : content;
-                msg.put("content", "[工具 " + toolName + " 调用失败(上下文裁剪): " + shortContent + "]");
-            } else {
-                msg.put("content", "[工具 " + toolName + " 调用成功 - 上下文超限已裁剪，完整结果请用 query_tool_history 查询]");
+                String prefix = content.length() > 200 ? content.substring(0, 200) : content;
+                boolean isError = prefix.startsWith("ERROR:") || prefix.startsWith("ERROR：")
+                        || prefix.startsWith("Error:") || prefix.startsWith("Error：")
+                        || prefix.startsWith("Exception:") || prefix.startsWith("Exception：")
+                        || prefix.contains("【缺少参数】") || prefix.contains("【未找到】")
+                        || prefix.contains("【查询失败】") || prefix.contains("【无匹配")
+                        || prefix.contains("【无数据】") || prefix.contains("Permission denied")
+                        || prefix.contains("Access denied") || prefix.contains("命令执行失败")
+                        || prefix.contains("操作失败：");
+
+                if (isError) {
+                    // 失败信息对「避免重复踩坑」价值极高，保留更多首部
+                    String shortContent = content.length() > 300 ? content.substring(0, 300) + "…" : content;
+                    msg.put("content", TRIM_SUMMARY_MARK + "工具 " + toolName + " 已执行（失败）] " + shortContent);
+                } else {
+                    // 成功结果保留首部摘要：模型据此能认出「做过这一步」，不再重复劳动
+                    String preview = content.length() > 400 ? content.substring(0, 400) + "…" : content;
+                    msg.put("content", TRIM_SUMMARY_MARK + "工具 " + toolName
+                            + " 已执行（结果已压缩，完整内容可用 query_tool_history 查询）] " + preview);
+                }
+                compacted++;
             }
-            compacted++;
+
+            estimated = TokenEstimator.estimateMessages(messages);
+            if (estimated <= maxTokens) break;
+
+            // 覆盖仍不足 → 把下一条 assistant(tool_calls) 纳入可摘要区，逐步向近处扩展
+            int nextCursor = findNextSummaryCursor(messages, cursor);
+            if (nextCursor <= cursor) break;
+            cursor = nextCursor;
         }
 
         // 4. 仍超限：对剩余超大 tool 消息按从新到旧顺序做首尾截断（统一走 ToolResultBudget，保证幂等）
@@ -690,6 +772,48 @@ public class ContextBuilder {
         }
 
         log.info("工具循环裁剪完成：摘要化 {} 条, 截断 {} 条, 剩余估算 {} tokens", compacted, truncated, estimated);
+    }
+
+    /**
+     * 计算「下一档可摘要区上界」，用于 {@link #trimToolLoopToBudget} 逐级扩大摘要范围。
+     *
+     * <p>背景：旧实现只摘要化 {@code [0, summaryEnd)}（保留最近 1 轮完整工具调用），
+     * 但工具循环里 token 大头常常还压在尾部；一次摘要降不到上限，于是<b>每一轮</b>
+     * 都判定「仍超限 → 再裁一次」，历史被反复改写、前缀缓存持续失效，模型看到的历史
+     * 每轮都不一样 —— 与「摘要成空壳」叠加后就是用户感知的「均衡模式失忆」。</p>
+     *
+     * <p>本方法把可摘要上界向后推一个 {@code assistant(tool_calls)} 的位置，
+     * 使调用方可以「摘要 → 重新估算 → 仍超限再扩大」逐步收敛，直到降到上限或无处可扩。</p>
+     *
+     * <p><b>不可突破的底线</b>：最后一条 {@code assistant(tool_calls)} 及其之后的消息
+     * （即当前正在进行的这一轮）永远不摘要 —— 否则模型连「刚刚这一步的结果」都看不到，
+     * 会立刻重复执行同一次工具调用。</p>
+     *
+     * @param messages 消息列表
+     * @param cursor   当前可摘要区上界（不含）
+     * @return 新的上界（严格大于 {@code cursor}）；无可扩展空间时返回 {@code -1}
+     */
+    private int findNextSummaryCursor(List<Map<String, Object>> messages, int cursor) {
+        if (messages == null || messages.isEmpty()) return -1;
+
+        // 找到最后一条 assistant(tool_calls)：它及其之后属于「当前轮」，一律保护
+        int lastAssistantWithTc = -1;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Map<String, Object> msg = messages.get(i);
+            if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
+                lastAssistantWithTc = i;
+                break;
+            }
+        }
+        int limit = lastAssistantWithTc >= 0 ? lastAssistantWithTc : messages.size();
+
+        for (int i = Math.max(cursor, 0); i < limit; i++) {
+            Map<String, Object> msg = messages.get(i);
+            if ("assistant".equals(msg.get("role")) && msg.containsKey("tool_calls")) {
+                return i + 1;
+            }
+        }
+        return -1;
     }
 
     /**

@@ -5,6 +5,140 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.0] - 2026-11-16
+
+> **Context and log-visibility release**: fixes the model "amnesia" caused by tool-loop trimming
+> replacing historical tool results with empty shells and rewriting them on every round; truncated
+> output is no longer mistaken for "task complete" (it now auto-continues). Also fixes two
+> long-standing defects: the log page could never show the newest logs, and snapshots treated
+> directories as files.
+> This release **requires a backend restart**; no database changes, no migration, in-place upgrade works.
+
+### 🔥 Fixed: tool-loop trimming erased history, making the model repeat itself (P0)
+
+- **Symptom**: in long tasks the model "forgot what it was doing halfway through", repeatedly
+  emitting the same opening line (e.g. "I'll stop verifying and fix it now" round after round)
+  and then redoing work it had already done. The same task behaved correctly in "Compact" and
+  "Full" context modes — **only "Balanced" mode was affected**.
+- **Root cause (three compounding defects)**:
+  1. **Information erased**: successful tool results were replaced wholesale with
+     `[Tool xxx succeeded - trimmed due to context limit, use query_tool_history for full result]`,
+     a shell containing no content at all. In a tool loop the model relies on tool results to track
+     progress; once they all become the same empty string it no longer knows which file it read,
+     what it found, or which step it reached.
+  2. **Insufficient coverage → rewritten every round**: the old implementation only summarized
+     `[0, summaryEnd)` while keeping the last 2 rounds, yet the token bulk often sits at the tail.
+     A single pass could not reach the limit, so **every round** decided "still over limit → trim
+     again". Production logs show `438225 → 438096 tokens` (only **129** saved, effectively
+     nothing), and the repeated rewrites invalidated the prefix cache continuously
+     (measured TTFB degraded from 1.4s to 20s).
+  3. **Protection window too narrow**: only the last **2** tool rounds were kept intact, but tool
+     results slide by round — at round N, t(N-1)/tN are intact; at round N+1, t(N-1) has become
+     "third from the end" and is summarized immediately. Each tool result therefore survived intact
+     for only 2 rounds, so the model could only ever see "the last two steps".
+- **Fix**:
+  - Summaries now **keep a prefix**: 400 chars for success, 300 chars for failure (failure text is
+    extremely valuable for avoiding repeated mistakes), so the model can recognize "I already did
+    this step, and roughly what came back".
+  - New idempotency marker `[Tool `: already-summarized messages are **skipped untouched** in later
+    rounds, guaranteeing "stable after the first trim" instead of rewriting history every round.
+  - New `findNextSummaryCursor` for progressive expansion: re-estimate after summarizing, and if
+    still over limit, pull the next `assistant(tool_calls)` into the summarizable region until it
+    converges or nothing is left.
+  - Protection window raised from a hard-coded 2 to `PROTECT_RECENT_TOOL_ROUNDS = 8`: 8 rounds is
+    about 20K–24K tokens, only 8% of a 300K budget, buying an 8-step continuous view.
+  - **Hard floor**: the last `assistant(tool_calls)` and everything after it (the round currently in
+    progress) is never summarized; otherwise the model cannot even see the latest step's result and
+    will immediately repeat the same tool call.
+- **Why only Balanced mode broke**: Full mode passes real `reasoning_content` back, so the chain of
+  thought preserves continuity. Compact mode summarizes tool results deterministically at build
+  time (short), so the token count stays low enough that this fallback trimming path is **never
+  reached**. Only Balanced mode loses reasoning *and* keeps raw long results, so it always triggers trimming.
+
+### 🔥 Fixed: `finish_reason=length` mistaken for "task complete", long tasks stopped after ~19 rounds (P0)
+
+- **Symptom**: the model printed one line such as "Starting." and then nothing; the task was marked
+  complete. Every round ended with a clean `[DONE]` in the log and there was no `IOException`,
+  `timeout` or `connection reset`, so conventional "network disconnect" investigation found nothing.
+  The same task reached `iteration=125` on DeepSeek official but only `iteration≈18~19` on Volcengine Ark.
+- **Root cause**: "is the task finished" was decided solely by whether the round contained
+  `tool_calls`, while **`finish_reason` was never parsed anywhere in the codebase**. In the OpenAI
+  protocol `length` means **output was truncated by max_tokens** — the model had not finished its
+  sentence and never got to emit `tool_calls`, yet the code treated it as "no tool calls → natural
+  end", saved the half-baked reply and closed the task. Ark triggers this more often because
+  `deepseek-v4.1-flash` runs in thinking mode, where `reasoning_content` also consumes the output
+  budget; a long chain of thought exhausts it.
+- **Fix**:
+  - Capture `choices[0].finish_reason` during streaming parsing (`AtomicReference`, overwritten only
+    when non-null, so intermediate frames cannot blank out a value already obtained).
+  - On `length`, **do not** mark the task complete: skip growth-system settlement and skip
+    conversation retro (incomplete content would distort conclusions), and set `_finishReason=length`.
+  - The partial content is appended to context as an **intermediate assistant message** (so the model
+    can continue next round) instead of being persisted as the task result.
+  - The outer `concatWith` detects the truncation marker, injects
+    `[auto-continue] the previous output was truncated by the length limit, please continue from where it stopped…`
+    and **re-enters the tool loop**; the UI shows `✂️ Output hit the length limit, auto-continuing...`.
+    Continuation is still bounded by `maxIterations` and the existing guards, so it cannot loop forever.
+
+### 🐛 Fixed: log page could never show the newest logs (paging direction was reversed)
+
+- **Symptom**: the log page could not show recent entries (e.g. everything after 09:55 was invisible).
+- **Root cause**: `LogService.search()` collected `maxCollect = page * size` lines starting from the
+  **beginning of the file**, so `page=1` returned the **oldest** 500 lines. Measured `app.log` had
+  13018 lines with 09:55 at line 383; the following 12564 lines all fell outside the window — the
+  newer the log, the less likely it was visible.
+- **Fix**:
+  - Backend now uses a **sliding window** (`ArrayDeque` + `addLast` / `removeFirst`) keeping only the
+    newest `maxCollect` lines, so `page=1` returns the **newest page**, matching tail-mode semantics.
+  - Frontend `App.vue` gained `LOG_SEARCH_PAGE_SIZE=200`, `logSearchPage`, `logLastQuery`; search mode
+    now supports loading an earlier page via `page+1`.
+  - `LogListView.vue` removed the UI restriction that only tail mode could show the load-earlier
+    button, and `panelMeta` / `statusText` now report loaded counts and paging hints in search mode.
+
+### 🐛 Fixed: snapshots treated directories as files, throwing `AccessDeniedException`
+
+- **Symptom**: `computeDiffStats` threw `java.nio.file.AccessDeniedException` with a path ending in
+  the package name `sso` — that is a **directory**, not a `.java` file. On Windows, calling
+  `Files.readAllBytes` on a directory always throws this (a directory is not a readable stream).
+- **Root cause**: when `file_writer` ran `action=delete` with `path` pointing at a directory,
+  `ToolExecutor.resolveFilePath` passed the directory into the snapshot chain as a "file to modify";
+  the backup stage `Files.copy(directory)` only created an empty directory, and later diff statistics
+  or rollback blew up reading it. Since the relevant `SnapshotService` methods are `synchronized`,
+  repeated exceptions also slowed the whole snapshot chain.
+- **Fix (three layers of defense)**:
+  - `SnapshotService.createSnapshot` guards at entry: existing-but-not-regular files return `null`
+    immediately, without creating a snapshot directory or writing metadata / index.
+  - `SnapshotService.computeDiffStats` now uses `Files.isRegularFile` everywhere, plus a warn-and-skip
+    branch for historical dirty data (directory entries already persisted by older versions).
+  - `ToolExecutor.resolveFilePath` returns `null` for "exists but not a regular file", blocking it at the source.
+
+### ✅ Self-checks
+
+- New `LogServiceSearchTest` (6 cases): page=1 returns the newest page, total is the real hit count,
+  page=2 is older than page=1, adjacent pages join without overlap or gaps, large page size keeps the
+  whole window, small window still keeps the newest 5 lines.
+- New `SnapshotDirGuardTest` (6 cases): directories create no snapshot, leave no snapshot subdirectory,
+  write no index entry; regular files still snapshot normally (no false positives);
+  `computeDiffStats` does not throw for directories; files inside a directory still snapshot normally.
+- `ContextBuilderTrimTest` (5 cases) all green: tool-loop trimming 396191 → 114601 tokens (71% down, in one pass).
+
+### 🔢 Version sync
+
+- `pom.xml` project version → 3.3.0
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.3.0.jar`) + `package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- README badges (zh/en), 8 doc headers, 4 packaging examples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes touch streaming parsing, context trimming, log search and the snapshot service).
+- **No database schema changes**, no migration; in-place install works.
+- Frontend changed as well; a hard refresh (`Ctrl+F5`) is recommended to avoid stale assets.
+
+---
+
 ## [3.2.0] - 2026-11-16
 
 > **Long-task stability release**: fixes the root cause of "long tasks disconnect in the middle

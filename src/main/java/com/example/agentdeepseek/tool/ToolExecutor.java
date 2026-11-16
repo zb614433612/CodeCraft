@@ -361,6 +361,20 @@ public class ToolExecutor {
 
     /**
      * 从工具参数中提取文件路径，返回标准化绝对路径
+     *
+     * <p><b>目录必须返回 null（2026-11-16 修复）</b>：本方法的返回值同时驱动
+     * 「创建快照」与「计算 diff 统计」两条链路。而 {@code file_writer} 的
+     * {@code action=delete} 允许 {@code path} 指向一个**目录**，此前会被当成
+     * 「待修改文件」一路传下去，导致：</p>
+     * <ul>
+     *   <li>{@code SnapshotService.createSnapshot} 对目录调 {@code Files.copy}，
+     *       只会在快照目录里建出一个空目录；</li>
+     *   <li>{@code computeDiffStats} 随后对那个空目录调 {@code Files.readAllBytes}，
+     *       Windows 上抛 {@code AccessDeniedException}，日志里刷
+     *       {@code computeDiffStats 失败: file=...\service\sso}。</li>
+     * </ul>
+     * <p>判据必须是「<b>存在且非普通文件</b>」：文件尚不存在时是合法的"即将创建"场景，
+     * 快照需要把它记为 wasNewFile（回滚时据此删除），不能一并拦掉。</p>
      */
     private String resolveFilePath(String toolName, JsonNode arguments) {
         String filePathStr = arguments.path("file_path").asText("");
@@ -378,6 +392,11 @@ public class ToolExecutor {
             }
         } else {
             filePath = filePath.normalize();
+        }
+        // 目录/设备文件不支持 diff 统计与回滚：直接返回 null，让调用方跳过快照与统计
+        if (java.nio.file.Files.exists(filePath) && !java.nio.file.Files.isRegularFile(filePath)) {
+            log.debug("跳过非普通文件路径（目录等不支持快照/diff）: tool={}, path={}", toolName, filePath);
+            return null;
         }
         return filePath.toString();
     }
