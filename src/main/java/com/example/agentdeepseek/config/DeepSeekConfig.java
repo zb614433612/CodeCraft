@@ -16,6 +16,7 @@ import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -139,6 +140,59 @@ public class DeepSeekConfig {
      * 上下文最大 token 数上限（DeepSeek 模型为 1M）
      */
     private int maxContextTokens = 1000000;
+
+    /**
+     * Provider 级上下文上限覆盖表（key = Provider code，如 {@code huoshan}；value = token 上限）。
+     *
+     * <h3>为什么需要（2026-11-16）</h3>
+     * <p>此前 {@link #maxContextTokens} 是全局单值，所有 Provider 共用。但不同平台的实际
+     * 上下文窗口差异很大：DeepSeek 官方 1M，火山方舟 Coding Plan 档位为 1049K（≈1M），
+     * 而部分中转站/小模型只有 128K~256K。用一个全局值管所有 Provider 会两头出错：</p>
+     * <ul>
+     *   <li><b>全局值偏小</b>（如 300K 管 1M 窗口的平台）→ 提前触发压缩/丢弃，
+     *       裁剪动作本身会改变消息前缀，导致前缀缓存失效（单价差约 50 倍），
+     *       且每次请求体反复变化、变大，拉长首字节延迟；</li>
+     *   <li><b>全局值偏大</b>（如 1M 管 128K 窗口的中转站）→ 真的把超限请求发出去，
+     *       直接 API 400。</li>
+     * </ul>
+     *
+     * <p><b>取值语义</b>：未配置的 Provider 回落到 {@link #maxContextTokens}
+     * （即「保持既有行为」）；命中覆盖表时以覆盖值为准。</p>
+     *
+     * <p><b>⚠️ 不要为了「窗口大就该用满」而把值调得过大</b>：请求体越大，prefill 越久，
+     * 首字节延迟越长，长任务里流式静默窗口也越长——这会让连接更容易被中间层
+     * （代理/防火墙）的空闲判定回收。保守取值（窗口的 25%~40%）通常比用满更稳。</p>
+     *
+     * <p>配置示例（application.yml）：</p>
+     * <pre>
+     * deepseek:
+     *   max-context-tokens: 300000
+     *   provider-max-context-tokens:
+     *     huoshan: 400000     # 火山上限 1049K，这里只用到 ~38%，留足 prefill 余量
+     *     deepseek: 600000
+     * </pre>
+     */
+    private Map<String, Integer> providerMaxContextTokens = new LinkedHashMap<>();
+
+    /**
+     * 取指定 Provider 实际生效的上下文 token 上限。
+     *
+     * <p>命中 {@link #providerMaxContextTokens} 则用覆盖值，否则回落全局
+     * {@link #maxContextTokens}。所有「按 token 上限做压缩/裁剪决策」的位置都必须走
+     * 本方法，不要再直接读 {@code getMaxContextTokens()}，否则 Provider 覆盖会失效。</p>
+     *
+     * @param providerCode Provider 编码（可为 null / 空白，此时直接回落全局值）
+     * @return 生效的 token 上限
+     */
+    public int resolveMaxContextTokens(String providerCode) {
+        if (providerCode != null && !providerCode.isBlank()) {
+            Integer override = providerMaxContextTokens.get(providerCode.trim().toLowerCase());
+            if (override != null && override > 0) {
+                return override;
+            }
+        }
+        return maxContextTokens;
+    }
 
     /**
      * 上下文压缩配置

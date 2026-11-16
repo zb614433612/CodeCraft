@@ -2075,14 +2075,16 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
             log.debug("半流式工具调用循环迭代 {}，消息数量: {}", iteration + 1, messages.size());
 
-            // ★ 工具循环上下文预算守卫：防止多轮工具调用累积导致上下文超限（模型 1M tokens 上限，API 400）
+            // ★ 工具循环上下文预算守卫：防止多轮工具调用累积导致上下文超限（API 400）
             //   每次迭代请求前检查，超限则执行工具循环专用裁剪（旧 tool 消息摘要化 + 超大消息首尾截断）。
-            //   阈值取 maxContextTokens 的 85%，预留输出空间与 token 估算偏差。
-            int toolLoopGuardLimit = (int) (deepSeekConfig.getMaxContextTokens() * 0.85);
+            //   阈值取「该 Provider 实际生效上限」的 85%，预留输出空间与 token 估算偏差——
+            //   此前用全局 maxContextTokens，火山（1049K 窗口）会被 30 万阈值频繁误裁。
+            final String loopProviderCode = resolveProviderCode(initialApiRequest);
+            int toolLoopGuardLimit = (int) (deepSeekConfig.resolveMaxContextTokens(loopProviderCode) * 0.85);
             int loopEstimatedTokens = TokenEstimator.estimateMessages(messages);
             if (loopEstimatedTokens > toolLoopGuardLimit) {
-                log.warn("工具循环上下文超限预警：估算 {} tokens > 守卫上限 {}，执行裁剪",
-                        loopEstimatedTokens, toolLoopGuardLimit);
+                log.warn("工具循环上下文超限预警：估算 {} tokens > 守卫上限 {}（provider={}），执行裁剪",
+                        loopEstimatedTokens, toolLoopGuardLimit, loopProviderCode);
                 contextBuilder.trimToolLoopToBudget(messages, toolLoopGuardLimit);
             }
 
@@ -2993,6 +2995,28 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      */
     private boolean isToolCallsComplete(Map<Integer, ObjectNode> accumulatedToolCalls) {
         return toolLoopManager.isToolCallsComplete(accumulatedToolCalls);
+    }
+
+    /**
+     * 从 API 请求体中解析本次调用实际使用的 Provider 编码。
+     *
+     * <p>请求体里的 {@code _llmClient} 是内部字段（发送前会被剔除）。选择它的理由：
+     * 它代表「本次真正要请求的平台」，比读全局默认 Provider 更准确——用户可以为
+     * 不同会话/Agent 绑定不同 Provider，只有从这里取到才能正确套用各自的上下文上限
+     * （见 {@link DeepSeekConfig#resolveMaxContextTokens(String)}）。</p>
+     *
+     * @param apiRequest API 请求体（可为 null）
+     * @return Provider 编码；取不到时返回 {@code null}，此时各处回退全局上限
+     */
+    private String resolveProviderCode(Map<String, Object> apiRequest) {
+        if (apiRequest == null) {
+            return null;
+        }
+        Object client = apiRequest.get("_llmClient");
+        if (client instanceof LLMClient llmClient) {
+            return llmClient.getProviderCode();
+        }
+        return null;
     }
 
     /**

@@ -142,9 +142,23 @@ public class VolcengineBillingClient {
         String date = xDate.substring(0, 8);
         String contentHash = sha256Hex(body);
         String canonicalQuery = "Action=" + ACTION + "&Version=" + API_VERSION;
-        String signedHeaders = "content-type;host;x-content-sha256;x-date";
-        String canonicalHeaders = "content-type:application/json\n"
-                + "host:" + HOST + "\n"
+        /*
+          不签 content-type —— 与官方 SDK 对齐。
+
+          官方 @volcengine/openapi 的 Signer 把 content-type 列入 unsignableHeaders：
+              ["authorization", "content-type", "content-length", "user-agent", "presigned-expires", "expect"]
+          该列表的动机是「这些头可能被 HTTP 客户端自动改写」（如追加 charset），
+          一旦参与签名，就会出现「本地算出的签名与实际发出的头不一致」→ SignatureDoesNotMatch。
+
+          实测对照（固定 X-Date=20261116T030000Z、body="{}"、region=cn-beijing）：
+              官方 Signer                SignedHeaders=host;x-content-sha256;x-date
+                                         sig=6758e2a79d685a2dd5b510d2f38c5525759cff0f6485befe4c299e1605176bd2
+              本类（含 content-type）     sig=1c09103bade835f5bd41f7819e539f08f85d83c42838c0d4726b264809f21b6f  ← 不一致
+              本类（不含 content-type）   sig=6758e2a79d685a2dd5b510d2f38c5525759cff0f6485befe4c299e1605176bd2  ← 与官方逐字节一致
+          故移除 content-type，使签名与官方参考实现完全一致。
+         */
+        String signedHeaders = "host;x-content-sha256;x-date";
+        String canonicalHeaders = "host:" + HOST + "\n"
                 + "x-content-sha256:" + contentHash + "\n"
                 + "x-date:" + xDate + "\n";
 

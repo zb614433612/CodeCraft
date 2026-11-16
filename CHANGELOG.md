@@ -5,6 +5,129 @@
 
 ---
 
+## [3.2.0] - 2026-11-16
+
+> **长任务稳定性版本**：修复「长任务跑到中途莫名其妙断连」的根因（SSE 静默期没有心跳，
+> 被链路中间层按空闲连接回收），并修掉上下文裁剪的两处静默失效——线上曾出现
+> 「估算 429388 tokens 超限、执行裁剪、结果移除了 0 条消息」的死循环形态。
+> 同时引入 **Provider 级上下文上限**，火山方舟这类「窗口远大于全局配置」的平台不再被
+> 全局 30 万阈值误裁。
+> 本版**需要重启后端 + 强刷前端**；未改数据库结构，无数据迁移，可覆盖安装。
+
+### 🔥 修复：SSE 全链路无心跳，长任务静默期被中间层掐断（P0，断连根因）
+
+- **症状**：长任务跑到一半突然「断连」，前端不报任何错误、后端 `agent_task`
+  全部 `status=completed`、`error_message` 全为 `null`；同一会话在 DeepSeek 官方偶尔出现，
+  在火山方舟上明显更频繁。
+- **根因链**：
+  1. SSE 是「上游有事件才有字节流动」的推模型。工具执行期间（跑构建、读大文件、
+     等子 Agent）上游可能长时间无事件，`SseBatchUtil.batch()` 下游**一个字节都不发**；
+  2. 实测轮内静默间隔可达 **125.8 / 96.1 / 90.4 秒**，静默 ≥30 秒的占比 **59 / 525**；
+  3. 链路中间层（代理 / 防火墙 / 反代 / 系统连接跟踪表）普遍有 **30~60 秒**的空闲连接
+     判定，越过即把连接当死连接回收；
+  4. 前端 `reader.read()` 直接拿到 `done`，`readSseStream` 按正常收尾 `yield complete`。
+     于是表现为「流悄悄结束了」，既不报错也无提示；
+  5. 火山更频繁，是因为其首字节延迟更长（实测 TTFB 最大 23.5s、均 1146ms），
+     静默窗口更容易触顶。
+- **修复**：`SseBatchUtil` 增加静默期心跳保活：
+  - 独立 `Flux.interval` 分支与事件流 **merge**，不并入 50ms 批窗口——
+    并入会在静默期被攒住（`bufferTimeout` 靠「首元素到达」启动计时，
+    静默期没有事件唤醒它，心跳反而发不出去）；
+  - 静默超过 **15 秒**才补发一次心跳，密集输出期不产生多余帧；
+  - 用「1 秒轻量 tick + 静默判定」而非直接 `interval(15s)`：
+    后者会让上游正常结束后的收尾最长拖满一个 15 秒周期、连接悬挂不关；
+  - 心跳载荷取单键 JSON `{"event":"heartbeat"}` 而**非 SSE 注释行**：
+    输出会经 `ServerSentEvent.builder` 编码，Spring 给 payload 每个换行补 `data: ` 前缀，
+    注释行会被编码成 `data: : keepalive`——非合法 JSON，前端会走「非 JSON 当正文」
+    分支把文字渲染进界面。
+- **前端配套**：`sse-client.ts` 显式丢弃心跳帧。虽然后端载荷已能自然落到
+  `return null`，但那是「单键 JSON 恰好无 sessionId」的**巧合**；
+  将来若给心跳加 `ts` / `seq` 字段，巧合会破、心跳就可能被当正文渲染。
+  显式判断把这件事变成契约。
+
+### 🔥 修复：上下文裁剪删 0 条的死循环（P0，与断连叠加放大）
+
+- **症状**：日志中连续出现
+  `上下文滑动窗口丢弃：估算 429388 tokens (上限 300000)` →
+  `上下文丢弃完成：移除了 0 条消息，剩余 273 条，估算 429388 tokens`，
+  10:57 前后连续重复 10 次无进展；请求体一路涨到 **74 万字符**。
+- **根因**：`findProtectStart` 在「user 轮次不足 `protectRounds`」时返回 `1`
+  （工具循环里常见只有 1 条 user 消息）。而裁剪循环 `idx` 固定从 `1` 起跳、
+  条件为 `idx < lastIdx`（`lastIdx = 1`）——**恒不成立，一条都删不掉**。
+  这不是"裁了但没效果"，是裁剪压根没执行。
+- **修复**：`trimToTokenBudget` 增加**降级链**——保护带裁完仍超限则逐级缩小
+  （`protectRounds` → `1` → `0`），每级复用同一套裁剪循环并打印降级日志。
+- **同时加固（重要）**：降级到 0 轮时**绝不能删掉最后一条 user 提问及其之后的当前轮次**。
+  可裁区上界改为同时满足两个约束并取**较严**的那个：
+  `min(保护带起点, 最后一条 user 的下标)`。
+  初版实现取 `max`，自检实测出「62 条裁到 2 条且 user 提问消失」——模型会失去回答对象，
+  比上下文超限严重得多。该约束已固化为自检用例。
+
+### ✨ 新增：Provider 级上下文上限（避免「一刀切」误裁）
+
+- **背景**：此前 `max-context-tokens` 是全局单值，所有 Provider 共用。
+  但实际窗口差异很大：DeepSeek 官方 1M、火山方舟 Coding Plan **1049K**、
+  部分中转站 / 小模型仅 128K~256K。用全局 30 万管火山会「提前误裁」——
+  裁剪本身会改变消息前缀导致缓存失效（单价差约 50 倍），还让请求体反复变大、拉长 prefill。
+- **实现**：`DeepSeekConfig` 新增 `providerMaxContextTokens` 覆盖表与
+  `resolveMaxContextTokens(providerCode)`；未配置的 Provider 回落全局值（保持既有行为）。
+  三处「按上限做压缩/裁剪决策」的位置全部改为走该方法：
+  `ContextBuilder.trimToTokenBudget`、`CompactionService.decide / asyncPrecompress`、
+  `DeepSeekServiceImpl` 工具循环守卫（`resolveProviderCode` 从请求体 `_llmClient` 取实际 Provider）。
+- **配置**（`application.yml`）：
+
+```yaml
+deepseek:
+  max-context-tokens: 300000
+  provider-max-context-tokens:
+    huoshan: 400000
+```
+
+- **取值原则（不要用满）**：请求体越大 → prefill 越久 → 首字节延迟越长 →
+  长任务静默窗口越长 → 越容易被中间层掐断。火山只用到窗口的约 38%，属刻意保守。
+  实测请求体撑到 74 万字符时首字节延迟已到 17~23 秒。
+
+### 🔧 文档补充：火山费用中心 V4 签名两个易错点
+
+- `docs/LLM_PROVIDER_SYSTEM.md` 新增 4.5.1 节：
+  - **`content-type` 不参与签名**：官方 `@volcengine/openapi` 把它列入 `unsignableHeaders`
+    （该头可能被 HTTP 客户端改写，参与签名会出现「本地算的签名 ≠ 实际发出的请求」）。
+    本项目 `SignedHeaders` 为 `host;x-content-sha256;x-date`；
+  - **凭证缺失与凭证错误必须分清**：附 `InvalidAccessKey` / `SignatureDoesNotMatch` /
+    `InvalidSecretToken` / `InvalidCredential` 四个返回码的语义对照表。
+    关键判据：`SignatureDoesNotMatch` 意味着 **AK 存在**、错在 SK 或签名头。
+
+### 🧪 新增自检（防止这两类"静默失效"回归）
+
+- `SseBatchUtilHeartbeatTest`（4 用例）：静默期必须发心跳 / 密集期不发心跳 /
+  上游结束快速收敛（实测 108ms）/ 心跳载荷可被前端安全忽略；
+- `ContextBuilderTrimTest`（5 用例）：多轮超限必须真正裁剪 / 2 轮边界降级裁剪 /
+  单 user 工具循环**必须保留 user 提问** / 未超限不裁剪 /
+  工具循环裁剪必须显著降 token（实测 `396191 → 108945`，从"截断 0 条"变为"摘要化 28 条、截断 2 条"）。
+- 回归：`VolcengineAdapterTest` **46 passed, 0 failed**；`mvn compile` 通过；
+  两套前端 `typecheck` 0 error。
+
+### 🔢 版本号同步
+
+- `pom.xml` 项目版本 → 3.2.0
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json`（版本 + `code-craft-3.2.0.jar` 引用）
+- `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- 8 个技术文档头（版本 + 更新日期）、README 双徽章、4 处打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **后端需重启**（`SseBatchUtil` / `ContextBuilder` / `DeepSeekConfig` / `CompactionService` /
+  `DeepSeekServiceImpl` 均有改动）；
+- **前端需强刷**（`sse-client.ts` 改动）；
+- **无数据库结构变更**，无需数据迁移，可直接覆盖安装；
+- 新增配置项 `deepseek.provider-max-context-tokens` **可选**：
+  不配置则全部回落 `max-context-tokens`（与 3.1.7 行为一致）。
+
+---
+
 ## [3.1.7] - 2026-11-15
 
 > **TTFT 性能回归修复版**：修掉「开启均衡（balanced）上下文模式后，长会话首个 token

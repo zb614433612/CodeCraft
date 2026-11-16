@@ -5,6 +5,149 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.2.0] - 2026-11-16
+
+> **Long-task stability release**: fixes the root cause of "long tasks disconnect in the middle
+> for no apparent reason" (the SSE stream had no heartbeat during silent periods, so intermediate
+> layers reclaimed the connection as idle), and fixes two silent failures in context trimming —
+> production logs showed the pathological state "estimated 429388 tokens over limit, trimming
+> executed, 0 messages removed". Also introduces **per-provider context limits**, so platforms
+> like Volcengine Ark whose window is far larger than the global setting are no longer
+> mis-trimmed by the global 300K threshold.
+> This release **requires a backend restart and a hard frontend refresh**;
+> no database schema changes, no data migration, in-place upgrade is fine.
+
+### 🔥 Fix: no heartbeat anywhere in the SSE chain — silent periods get killed by intermediate layers (P0, root cause of disconnects)
+
+- **Symptom**: a long task suddenly "disconnects" midway. The frontend reports no error at all,
+  while the backend shows every `agent_task` as `status=completed` with `error_message = null`.
+  The same session occasionally did this on DeepSeek official, but noticeably more often on
+  Volcengine Ark.
+- **Root-cause chain**:
+  1. SSE is a push model: bytes flow only when the upstream has events. While tools run
+     (builds, large file reads, waiting on sub-agents) the upstream may stay silent for a long
+     time, and `SseBatchUtil.batch()` emits **not a single byte** downstream;
+  2. Measured in-turn silent gaps reached **125.8 / 96.1 / 90.4 seconds**, with **59 / 525**
+     gaps at or above 30 seconds;
+  3. Intermediate layers (proxies, firewalls, reverse proxies, connection-tracking tables)
+     commonly treat a connection idle for **30–60 seconds** as dead and reclaim it;
+  4. The frontend `reader.read()` simply receives `done`, and `readSseStream` treats that as a
+     normal ending and yields `complete`. The result looks like "the stream quietly ended" —
+     no error, no notice;
+  5. It happened more often on Ark because its time-to-first-byte is longer
+     (measured max TTFB 23.5s, mean 1146ms), so the silent window hits the threshold more easily.
+- **Fix**: added silent-period heartbeat keep-alive in `SseBatchUtil`:
+  - a separate `Flux.interval` branch **merged** with the event stream, deliberately not fed
+    through the 50ms batch window — merging it there would hold it back, because `bufferTimeout`
+    starts its timer when the first element arrives and nothing wakes it during silence;
+  - a heartbeat is emitted only after **15 seconds** of silence, so dense output produces no
+    extra frames;
+  - implemented as "1-second lightweight tick + silence check" rather than a plain
+    `interval(15s)` — the latter would delay shutdown by up to a full 15-second period after the
+    upstream completes, leaving the connection hanging;
+  - the payload is the single-key JSON `{"event":"heartbeat"}`, **not an SSE comment line**:
+    the output goes through `ServerSentEvent.builder`, and Spring prefixes every payload line
+    with `data: `, so a comment line would be encoded as `data: : keepalive` — not valid JSON,
+    and the frontend would fall into its "non-JSON means body text" branch and render it.
+- **Frontend counterpart**: `sse-client.ts` explicitly drops heartbeat frames. The payload
+  already lands on `return null` naturally, but that relies on the coincidence "single-key JSON
+  happens to have no sessionId"; if a `ts` / `seq` field is ever added, the coincidence breaks
+  and a heartbeat could be rendered as body text. The explicit check turns it into a contract.
+
+### 🔥 Fix: context trimming removed 0 messages, spinning without progress (P0, amplified the disconnects)
+
+- **Symptom**: the log repeatedly showed
+  `context sliding-window drop: estimated 429388 tokens (limit 300000)` followed by
+  `context drop complete: removed 0 messages, 273 remaining, estimated 429388 tokens` —
+  ten consecutive iterations with no progress around 10:57; request bodies grew to **740K chars**.
+- **Root cause**: `findProtectStart` returns `1` when the number of `user` turns is fewer than
+  `protectRounds` (tool loops commonly have exactly one `user` message). The trim loop starts at
+  `idx = 1` with condition `idx < lastIdx` where `lastIdx = 1` — **never true, so nothing was ever
+  removed**. This was not "trimming that had no effect"; trimming never ran at all.
+- **Fix**: `trimToTokenBudget` now has a **degradation chain** — if the context is still over the
+  limit after trimming within the protected band, the band is progressively shrunk
+  (`protectRounds` → `1` → `0`), each level reusing the same loop and logging the downgrade.
+- **Hardening (important)**: at the `0`-round level the trimmer must **never remove the last
+  `user` message or anything after it** (the current turn). The removable upper bound is now the
+  **stricter** of two constraints: `min(protected-band start, index of last user message)`.
+  The first implementation used `max`, and the self-check caught a real regression —
+  "62 messages trimmed down to 2 with the user question deleted", which would leave the model
+  with nothing to answer and is far worse than an over-limit context. That constraint is now
+  locked in by a test case.
+
+### ✨ New: per-provider context limits (no more one-size-fits-all mis-trimming)
+
+- **Background**: `max-context-tokens` used to be a single global value shared by all providers,
+  but real windows differ a lot: DeepSeek official 1M, Volcengine Ark Coding Plan **1049K**,
+  some relay stations / small models only 128K–256K. Using a global 300K for Ark meant premature
+  trimming — and trimming itself changes the message prefix, invalidating the prompt cache
+  (roughly a 50x price difference) while also inflating the request body and lengthening prefill.
+- **Implementation**: `DeepSeekConfig` gained a `providerMaxContextTokens` override map plus
+  `resolveMaxContextTokens(providerCode)`; unconfigured providers fall back to the global value
+  (preserving existing behavior). All three places that decide based on the limit now go through
+  it: `ContextBuilder.trimToTokenBudget`, `CompactionService.decide / asyncPrecompress`, and the
+  tool-loop guard in `DeepSeekServiceImpl` (`resolveProviderCode` reads the actual provider from
+  the request's `_llmClient`).
+- **Configuration** (`application.yml`):
+
+```yaml
+deepseek:
+  max-context-tokens: 300000
+  provider-max-context-tokens:
+    huoshan: 400000
+```
+
+- **Sizing principle (do not max it out)**: a larger request body means longer prefill, longer
+  TTFB, a longer silent window in long tasks, and therefore a higher chance of being cut off by
+  an intermediate layer. Ark uses only about 38% of its window — deliberately conservative.
+  At a 740K-char request body, measured TTFB was already 17–23 seconds.
+
+### 🔧 Docs: two easy-to-miss points in the Volcengine billing V4 signature
+
+- Added section 4.5.1 to `docs/LLM_PROVIDER_SYSTEM.md`:
+  - **`content-type` does not participate in signing**: the official `@volcengine/openapi`
+    lists it in `unsignableHeaders` (HTTP clients may rewrite that header, and signing it
+    produces "locally computed signature ≠ request actually sent").
+    This project signs `host;x-content-sha256;x-date`;
+  - **Missing credentials must be distinguished from wrong credentials**: a lookup table for
+    `InvalidAccessKey` / `SignatureDoesNotMatch` / `InvalidSecretToken` / `InvalidCredential`.
+    Key discriminator: `SignatureDoesNotMatch` means the **AK exists** and the problem is the
+    SK or the signed headers.
+
+### 🧪 New self-checks (so these silent failures cannot regress unnoticed)
+
+- `SseBatchUtilHeartbeatTest` (4 cases): heartbeat must be emitted during silence / no heartbeat
+  during dense output / fast convergence after upstream completion (measured 108ms) /
+  heartbeat payload safely ignorable by the frontend;
+- `ContextBuilderTrimTest` (5 cases): multi-turn over-limit must actually trim / 2-turn boundary
+  falls back correctly / **single-user tool loop must keep the user question** / no trimming
+  when under the limit / tool-loop trimming must meaningfully reduce tokens
+  (measured `396191 → 108945`, going from "0 truncated" to "28 summarized, 2 truncated").
+- Regression: `VolcengineAdapterTest` **46 passed, 0 failed**; `mvn compile` passes;
+  `typecheck` 0 errors on both frontends.
+
+### 🔢 Version bump
+
+- `pom.xml` project version → 3.2.0
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json` (version + `code-craft-3.2.0.jar` reference)
+- `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- 8 technical doc headers (version + updated date), both README badges, 4 packaging command
+  examples, FAQ version example
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (`SseBatchUtil` / `ContextBuilder` / `DeepSeekConfig` /
+  `CompactionService` / `DeepSeekServiceImpl` all changed);
+- **Hard frontend refresh required** (`sse-client.ts` changed);
+- **No database schema changes**, no data migration, in-place upgrade is safe;
+- The new `deepseek.provider-max-context-tokens` key is **optional**: if omitted, every provider
+  falls back to `max-context-tokens` (identical to 3.1.7 behavior).
+
+---
+
 ## [3.1.7] - 2026-11-15
 
 > **TTFT performance regression fix**: eliminates the root cause of "after enabling the

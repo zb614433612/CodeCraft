@@ -101,17 +101,33 @@ public class CompactionService {
     // ==================== 对外接口 ====================
 
     /**
-     * 判断当前消息列表是否需要压缩
+     * 压缩决策（Provider 无关版本，回退全局上限）。
+     *
+     * <p><b>⚠️ 已废弃</b>：上下文上限已支持 Provider 级覆盖，请改用
+     * {@link #decide(List, String)} 并传入实际 providerCode，
+     * 否则火山等「窗口远大于全局配置」的平台会被提前压缩。</p>
      *
      * @param messages API 格式的消息列表
      * @return 压缩决策：NONE / WARN（仅标记）/ COMPACT（执行压缩）/ DROP（丢弃兜底）
+     * @deprecated 改用 {@link #decide(List, String)}，本方法等价于传入 {@code null}
      */
+    @Deprecated
     public CompactionDecision decide(List<Map<String, Object>> messages) {
+        return decide(messages, null);
+    }
+
+    /**
+     * 压缩决策：按 Provider 实际生效的上下文上限计算占比。
+     *
+     * @param messages     消息列表
+     * @param providerCode Provider 编码（{@code null} 时回退全局上限）
+     */
+    public CompactionDecision decide(List<Map<String, Object>> messages, String providerCode) {
         if (!deepSeekConfig.getCompaction().isEnabled()) {
             return CompactionDecision.NONE;
         }
         int estimatedTokens = TokenEstimator.estimateMessages(messages);
-        int maxTokens = deepSeekConfig.getMaxContextTokens();
+        int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
         double ratio = (double) estimatedTokens / maxTokens;
 
@@ -345,7 +361,9 @@ public class CompactionService {
                 List<Map<String, Object>> apiMessages =
                         toApiMessages(messages, deepSeekConfig.isStripHistoryReasoning());
                 int estimatedTokens = TokenEstimator.estimateMessages(apiMessages);
-                int maxTokens = deepSeekConfig.getMaxContextTokens();
+                // 上限按 Provider 解析：异步预压缩若用全局值，火山（1049K 窗口）会被
+                // 30 万阈值频繁触发压缩，既浪费额度又让前缀缓存反复失效。
+                int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
                 double ratio = (double) estimatedTokens / maxTokens;
 
                 // 异步预压缩阈值比同步更低：超过 60% 就开始预压缩

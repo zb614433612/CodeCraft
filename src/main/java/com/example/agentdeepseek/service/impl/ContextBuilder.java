@@ -131,6 +131,21 @@ public class ContextBuilder {
      * @param mode 上下文模式；{@code null} 时回退到全局配置
      */
     public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, ContextMode mode) {
+        return buildMessagesFromHistory(conversationId, mode, null);
+    }
+
+    /**
+     * 按指定上下文模式与 Provider 构建历史消息（支持 Provider 级上下文上限）。
+     *
+     * <p><b>为什么需要 providerCode（2026-11-16）</b>：上下文上限不再由全局单值决定——
+     * 不同平台窗口差异大（DeepSeek 官方 1M / 火山 Coding Plan 1049K / 部分中转站 128K），
+     * 用同一个值管所有 Provider 会「偏小时提前裁剪、偏大时直接 400」。
+     * 实际取值见 {@link DeepSeekConfig#resolveMaxContextTokens(String)}。</p>
+     *
+     * @param mode         上下文模式；{@code null} 时回退到全局配置
+     * @param providerCode Provider 编码；{@code null} 时回退全局上限
+     */
+    public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, ContextMode mode, String providerCode) {
         ContextMode effectiveMode = mode != null ? mode : deepSeekConfig.resolveContextMode();
         // 1. 加载原始消息
         List<ConversationMessage> dbMessages = conversationMessageMapper.selectByConversationId(conversationId);
@@ -237,7 +252,9 @@ public class ContextBuilder {
         }
 
         // 4. 三级阈值上下文管理：先尝试压缩，兜底丢弃
-        int maxTokens = deepSeekConfig.getMaxContextTokens();
+        //    上限按 Provider 解析（火山 1049K / DeepSeek 1M / 中转站可能只有 128K）——
+        //    用全局单值管所有 Provider 会「偏小则提前裁剪、偏大则直接 400」，见 resolveMaxContextTokens。
+        int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
         int estimatedTokens = TokenEstimator.estimateMessages(result);
 
         if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
@@ -432,6 +449,17 @@ public class ContextBuilder {
     /**
      * Token 感知的上下文滑动窗口裁剪（兜底策略）
      * 从最早的历史开始，按完整轮次（user + assistant + tool）裁剪，保留保护带
+     *
+     * <p><b>2026-11-16 修复「移除了 0 条消息」</b>：原实现只按保护带计算可裁剪区，
+     * 而从 {@code idx = 1} 起裁的循环在「user 轮次不足 protectRounds」时（工具循环里
+     * 常见只有 1 条 user 消息）会因 {@code protectStart = 1} 导致循环条件
+     * {@code idx < lastIdx} 恒不成立——即使估算已远超丢弃阈值，也一条都删不掉。
+     * 日志证据：{@code 上下文丢弃完成：移除了 0 条消息，剩余 273 条，估算 429388 tokens}。</p>
+     *
+     * <p>修复方式：保护带裁完后若仍超限，按阈值降级——先缩保护带至最近 1 轮，
+     * 仍超限则放开保护带（只保留 system prompt 与最后一条 user 提问）。
+     * 这是「宁可有损、也不能把超限请求发给 API」的兜底取舍。</p>
+     *
      * @param messages 消息列表（会直接修改）
      * @param maxTokens token 上限
      */
@@ -446,10 +474,50 @@ public class ContextBuilder {
                 estimatedTokens, maxTokens, beforeSize);
 
         int protectRounds = deepSeekConfig.getCompaction().getProtectRounds();
-        int protectStart = findProtectStart(messages, protectRounds);
 
+        /*
+         * 降级序列：先按配置的保护带裁（正常路径）；裁完仍超限则逐级缩小保护带。
+         * 每一级都复用同一套裁剪循环，只是 protectRounds 递减。
+         */
+        int[] protectRoundsSteps = {protectRounds, 1, 0};
+        for (int step = 0; step < protectRoundsSteps.length; step++) {
+            int rounds = protectRoundsSteps[step];
+            if (step > 0) {
+                log.warn("保护带（{} 轮）内已无更多可裁内容，降级保护带至 {} 轮后重试裁剪", protectRoundsSteps[step - 1], rounds);
+            }
+            estimatedTokens = trimWithinProtectBand(messages, maxTokens, rounds);
+            if (estimatedTokens <= maxTokens) break;
+        }
+
+        int trimmed = beforeSize - messages.size();
+        log.info("上下文丢弃完成：移除了 {} 条消息，剩余 {} 条，估算 {} tokens",
+                trimmed, messages.size(), estimatedTokens);
+    }
+
+    /**
+     * 在指定保护带轮次下执行一轮滑动窗口裁剪，返回裁剪后的估算 token 数。
+     *
+     * <p><b>⚠️ 不可突破的底线</b>：无论保护带降到多低，<b>最后一条 user 消息及其之后的
+     * 全部消息（当前轮次）永远不裁</b>。理由：裁掉用户的提问，模型就没有可回答的对象，
+     * API 会直接 400 或答非所问——这比「上下文超限」严重得多。
+     * （自检用例 {@code ContextBuilderTrimTest} 覆盖了该约束，修复前实测会把 62 条裁到 2 条
+     * 且删掉 user 提问。）</p>
+     *
+     * @param messages     消息列表（会直接修改）
+     * @param maxTokens    token 上限
+     * @param protectRounds 保护带轮数（最近的 N 轮 user 对话不裁）
+     * @return 裁剪后的估算 token 数
+     */
+    private int trimWithinProtectBand(List<Map<String, Object>> messages, int maxTokens, int protectRounds) {
         int idx = 1;
-        int lastIdx = Math.min(protectStart, messages.size() - 1);
+        int lastIdx = resolveTrimUpperBound(messages, protectRounds);
+
+        /*
+         * 可裁区为空（单 user 工具循环的常态）：idx 落在当前轮次起点上，
+         * 此时「没有更早的轮次可丢」——正确策略是交给
+         * trimToolLoopToBudget 做「旧 tool 消息摘要化 + 超大消息截断」，
+         * 而不是在这里硬删当前提问（那会让模型失去回答对象，比超限严重得多）。
+         */
         while (idx < lastIdx) {
             int endIdx = idx + 1;
             while (endIdx < lastIdx) {
@@ -461,15 +529,57 @@ public class ContextBuilder {
             for (int i = endIdx - 1; i >= idx; i--) {
                 messages.remove(i);
             }
-            lastIdx = Math.min(protectStart, messages.size() - 1);
 
-            estimatedTokens = TokenEstimator.estimateMessages(messages);
-            if (estimatedTokens <= maxTokens) break;
+            /* 删除后保护带与当前轮次起点都会左移，必须重算上界 */
+            lastIdx = resolveTrimUpperBound(messages, protectRounds);
+
+            int estimatedTokens = TokenEstimator.estimateMessages(messages);
+            if (estimatedTokens <= maxTokens) return estimatedTokens;
         }
 
-        int trimmed = beforeSize - messages.size();
-        log.info("上下文丢弃完成：移除了 {} 条消息，剩余 {} 条，估算 {} tokens",
-                trimmed, messages.size(), estimatedTokens);
+        return TokenEstimator.estimateMessages(messages);
+    }
+
+    /**
+     * 计算滑动窗口可裁区的上界（下标区间 {@code [1, 返回值)} 允许删除）。
+     *
+     * <p>上界必须同时满足两个约束，取<b>较严</b>的那个（即 {@code min}）：</p>
+     * <ol>
+     *   <li><b>保护带约束</b>：最近的 {@code protectRounds} 轮不裁 → 上界不超过
+     *       {@link #findProtectStart} 的返回值；</li>
+     *   <li><b>当前轮次底线</b>：最后一条 user 提问及其之后的所有消息永不可裁 →
+     *       上界不超过 {@link #findLastUserIndex} 的返回值。</li>
+     * </ol>
+     *
+     * <p><b>为什么第 2 条不能省</b>：工具循环里通常只有 1 条 user 消息（index 1），
+     * 而裁剪固定从 {@code idx = 1} 起跳——若只用保护带约束，{@code protectRounds}
+     * 降到 0 时上界会落到 2，于是 {@code [1,2)} 正好把用户提问删掉。
+     * 自检用例曾实测出「62 条裁到 2 条且 user 提问消失」，正是缺了这条底线。</p>
+     *
+     * @param messages      消息列表
+     * @param protectRounds 保护带轮数
+     * @return 可裁区上界（{@code idx} 大于等于它时不裁任何消息）
+     */
+    private int resolveTrimUpperBound(List<Map<String, Object>> messages, int protectRounds) {
+        int protectStart = findProtectStart(messages, protectRounds);
+        int currentRoundStart = findLastUserIndex(messages);
+        return Math.min(protectStart, currentRoundStart);
+    }
+
+    /**
+     * 查找最后一条 user 消息的下标（当前轮次起点）。
+     *
+     * @param messages 消息列表
+     * @return 最后一条 user 的下标；不存在时返回 {@code messages.size()}（表示「全部受保护」）
+     */
+    private int findLastUserIndex(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) return 0;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if ("user".equals(messages.get(i).get("role"))) {
+                return i;
+            }
+        }
+        return messages.size();
     }
 
     /**
@@ -585,6 +695,17 @@ public class ContextBuilder {
     /**
      * 查找保护带的起始位置
      * 从后往前找，找到第 protectRounds 个 user 消息的索引
+     *
+     * <p><b>返回值语义（2026-11-16 修正）</b>：返回的是「保护带第一条消息的下标」。
+     * 调用方 {@link #trimToTokenBudget} 把 [0, protectStart) 视为可裁剪区。
+     * 当 user 轮次数不足 {@code protectRounds} 时（工具循环里常见只有 1 条 user 消息），
+     * 原实现返回 1 —— 于是可裁剪区变成 [0,1)，而裁剪循环从 {@code idx = 1} 起跳、
+     * 条件 {@code idx < lastIdx}（lastIdx = 1）直接不成立，<b>一条都删不掉</b>：
+     * 日志表现为「上下文丢弃完成：移除了 0 条消息」。</p>
+     *
+     * <p>修正为「返回 0」：用户明确要求丢弃时应允许裁掉全部历史轮次（保护带为空）。
+     * 只有 user 消息本身受调用方 {@code idx} 起点保护（{@code idx} 从 1 开始，
+     * 第 0 条通常是 system prompt，永不被裁）。</p>
      */
     private int findProtectStart(List<Map<String, Object>> messages, int protectRounds) {
         if (messages == null || messages.isEmpty()) return 0;
@@ -598,6 +719,15 @@ public class ContextBuilder {
                 }
             }
         }
+        /*
+         * 轮次不足保护带：说明「全部历史都在保护带内」。此处返回 1（保护带从下标 1 起，
+         * 即除 system prompt 外全部保护），语义与原实现一致。
+         *
+         * ⚠️ 但要特别注意：调用方 trimToTokenBudget 的可裁剪区是 [idx=1, protectStart)，
+         * 返回 1 会让该区间为空、裁剪循环整体不执行（日志表现为「移除了 0 条消息」）。
+         * 因此「是否允许突破保护带」的决策必须放在调用方——它才知道当前是否已越过
+         * 丢弃阈值、是否必须让保护带让位。详见 trimToTokenBudget 的降级分支。
+         */
         return 1;
     }
 

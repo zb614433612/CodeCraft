@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v3.1.7 | 更新：2026-11-15 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.2.0 | 更新：2026-11-16 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -331,6 +331,47 @@ WHERE code = 'volcengine';
 > 列表接口对 `accessKey` / `secretKey` / `searchApiKey` 做掩码返回，提交含掩码时视为「未修改」。
 > 联网搜索的 Key 与方舟 Ark Key **不通用**（需在联网搜索控制台单独创建）；未配置时该能力静默跳过，不影响对话。
 > 所有增强能力的能力判定都基于「请求模板 + 实际域名 + 凭证有效性」，与用户自定义的 providerCode 名称无关。
+
+#### 4.5.1 费用中心 V4 签名的两个易错点
+
+余额查询走的是**账号级 OpenAPI**，与对话用的 Ark API Key 完全无关。签名实现见
+`VolcengineBillingClient#buildAuthorization`，有两点与直觉不同：
+
+**① `content-type` 不参与签名。**
+官方 `@volcengine/openapi` 的 `Signer` 把一批头列入 `unsignableHeaders`：
+
+```js
+["authorization", "content-type", "content-length", "user-agent", "presigned-expires", "expect"]
+```
+
+理由是这些头可能被 HTTP 客户端自动改写（例如追加 `charset`），一旦参与签名就会出现
+「本地算出的签名 ≠ 实际发出的请求」→ `SignatureDoesNotMatch`。因此本项目只签：
+
+```
+SignedHeaders=host;x-content-sha256;x-date
+```
+
+固定输入下的官方参考签名（用于回归测试 `VolcengineAdapterTest#billingSignatureMatchesOfficialReference`）：
+
+```
+AK=AKLTtest  SK=secretKey  region=cn-beijing  X-Date=20240101T120000Z  body={}
+→ 3839df22847a0c14255427ad172f08cbcf020b3aeccbea9ef90a1b6306a63d11
+```
+
+> 注意区分**代码偏差**与**凭证错误**：签名头里多带 `content-type` 是一个真实的实现偏差（已修正，
+> 用官方 SDK 交叉校验可复现差异），但它**不会**表现为「AK 有效时仍然 401」——
+> 排查时若发现「改用官方签名算法后依然 `SignatureDoesNotMatch`」，那问题就与签名算法无关，
+> 应转向 SK 值本身（见下表）。
+
+**② 凭证缺失与凭证错误必须分清。**
+火山对失败原因的返回码是有语义的，可据此定位到底是哪一层错了：
+
+| 服务端返回 | 含义 | 常见原因 |
+|-----------|------|---------|
+| `InvalidAccessKey` | AK 本身不存在 | AK 填错 / 不是这一对；注意与下面的 `SignatureDoesNotMatch` 区分 |
+| `SignatureDoesNotMatch` | **AK 存在**，但算出的签名不匹配 | SK 错误、或参与签名的头不一致（见 ①） |
+| `InvalidSecretToken` | 用了临时凭证但没带/带错 `X-Security-Token` | 用的是 STS 临时 AK/SK，需同时填 sessionToken |
+| `InvalidCredential` | `Authorization` 头格式非法 | AK 里混入了非法字符（如 `/`），常见于被 base64 二次编码的值 |
 
 ### 4.6 MiniMax / 小米 MiMo 增强能力
 

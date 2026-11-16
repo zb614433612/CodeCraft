@@ -107,6 +107,17 @@ export class SseParser {
    * 解析数据块并生成事件
    */
   processDataChunk(dataChunk: string): StreamChatEvent | null {
+    /*
+      心跳保活帧直接丢弃（后端 SseBatchUtil.HEARTBEAT_PAYLOAD = {"event":"heartbeat"}）。
+      为什么仍要显式判断：这类载荷即使落到下方「非 JSON 当正文」分支也会被丢弃，
+      但那依赖「单键 JSON 恰好无 sessionId」这一隐含前提；将来若给心跳加字段
+      （如 ts / seq），隐含前提会破，心跳就可能被当正文渲染进界面。
+      显式判断把这件事变成契约，而不是巧合。
+    */
+    if (dataChunk.trim() === '{"event":"heartbeat"}') {
+      return null
+    }
+
     // 尝试解析为JSON
     try {
       const parsed = JSON.parse(dataChunk)

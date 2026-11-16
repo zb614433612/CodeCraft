@@ -56,6 +56,7 @@ public class VolcengineAdapterTest {
 
         // ==================== 费用中心签名 ====================
         billingAuthorizationStructure();
+        billingSignatureMatchesOfficialReference();
         billingAuthorizationDeterministic();
 
         // ==================== 联网搜索解析 ====================
@@ -249,11 +250,47 @@ public class VolcengineAdapterTest {
         check("签名：算法前缀", "true", String.valueOf(auth.startsWith("HMAC-SHA256 Credential=AKLTtest/")));
         check("签名：credential scope", "true",
                 String.valueOf(auth.contains("/20240101/cn-beijing/billing/request")));
-        check("签名：signedHeaders", "true",
-                String.valueOf(auth.contains("SignedHeaders=content-type;host;x-content-sha256;x-date")));
+        /*
+          不再签 content-type —— 与官方 @volcengine/openapi 的 Signer 对齐。
+          官方把 content-type 列入 unsignableHeaders（见 sign.js 顶部常量），
+          参与签名会与「HTTP 客户端可能改写该头」的事实冲突 → SignatureDoesNotMatch。
+         */
+        check("签名：signedHeaders 不含 content-type", "true",
+                String.valueOf(auth.contains("SignedHeaders=host;x-content-sha256;x-date")));
+
+        // 官方 SDK 交叉校验用
         String signature = auth.substring(auth.indexOf("Signature=") + "Signature=".length());
         check("签名：64 位小写 hex", "true", String.valueOf(signature.matches("[0-9a-f]{64}")));
     }
+
+    /**
+     * 固定向量回归测试：与官方 @volcengine/openapi Signer 逐字节一致。
+     *
+     * <p>期望值由官方 SDK 用同样的输入算得（固定 X-Date 保证确定性）：
+     * <pre>
+     *   AK=AKLTtest  SK=secretKey  region=cn-beijing
+     *   X-Date=20240101T120000Z  body={}
+     *   SignedHeaders=host;x-content-sha256;x-date
+     * </pre>
+     * 这条断言把「与官方实现一致」钉死，避免后续有人又把 content-type 加回去。
+     */
+    private static void billingSignatureMatchesOfficialReference() {
+        VolcengineBillingClient billing = new VolcengineBillingClient(MAPPER);
+        String auth = billing.buildAuthorization("AKLTtest", "secretKey",
+                "cn-beijing", "20240101T120000Z", "{}");
+        String signature = auth.substring(auth.indexOf("Signature=") + "Signature=".length());
+
+        // 该值由官方 Signer 计算，见 docs/LLM_PROVIDER_SYSTEM.md 的火山签名说明
+        String expected = OFFICIAL_BILLING_SIGNATURE;
+        check("签名：与官方 SDK 参考值一致", expected, signature);
+    }
+
+    /**
+     * 上述期望签名（官方 SDK 计算所得）。
+     * <p>生成方式：固定 X-Date / body=getDateTime，用 @volcengine/openapi 的 Signer 签名。</p>
+     */
+    private static final String OFFICIAL_BILLING_SIGNATURE =
+            "3839df22847a0c14255427ad172f08cbcf020b3aeccbea9ef90a1b6306a63d11";
 
     private static void billingAuthorizationDeterministic() {
         VolcengineBillingClient billing = new VolcengineBillingClient(MAPPER);
