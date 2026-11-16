@@ -137,7 +137,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, isRef, onMounted, provide, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, isRef, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from './layouts/AppShell.vue'
 import ToastHost from './components/ToastHost.vue'
@@ -288,6 +288,8 @@ import type { TokenUsageSummary, TokenUsageTurn } from './api/token-usage'
 /* ---- F05 子Agent面板：fork 记录读库 + 委托调用心跳 ---- */
 import { listSubAgents } from './api/sub-agent'
 import {
+  DELEGATE_STALE_MS,
+  isDelegateStale,
   mayForkSubAgent,
   mergeDelegateCall,
   toDelegateCall,
@@ -715,7 +717,15 @@ function setConvMessages(key: string, list: ChatMessageModel[]) {
   }
 }
 
-/** 删除某个会话的全部分片状态（会话被删 / 草稿废弃时调用） */
+/**
+ * 删除某个会话的全部分片状态（会话被删 / 草稿废弃时调用）。
+ *
+ * <p><b>⚠️ 新增任何「按会话 key 分片」的 ref 时，必须同步加进本函数和
+ * {@link migrateConversationKey}。</b>这两处此前都漏掉过同一批状态
+ * （snapshotCountMap / snapshotHintMap / cursorMap / hasMoreMap / browserTabsMap /
+ * conversationAgentMap / conversationTitleMap），造成的后果是「删除会话后
+ * 徽章残留」「草稿转正后分页游标丢失」这类难排查的静默问题。</p>
+ */
 function dropConversationState(key: string) {
   if (!key) return
   const dropKey = <T>(map: Record<string, T>) => {
@@ -749,6 +759,30 @@ function dropConversationState(key: string) {
   if (m11) sessionUsageMap.value = m11 as Record<string, TokenUsageSummary>
   const m12 = dropKey(turnUsageMap.value)
   if (m12) turnUsageMap.value = m12 as Record<string, Record<string, TokenUsageTurn>>
+  /*
+    以下是此前遗漏的 7 个分片状态（2026-11-16 补齐）。逐个说明「不清会怎样」：
+      · snapshotCountMap  —— 状态栏「N 轮可回滚」徽章常驻，删了会话还显示可回滚轮数
+      · snapshotHintMap   —— 改动面板的轮次摘要占位，残留旧会话的文本
+      · cursorMap / hasMoreMap —— 会话 id 若被复用（DB 自增一般不复用，但草稿 key 会），
+                             新会话首次上滑会拿着旧游标，表现为「加载出重复/空的更早历史」
+      · browserTabsMap    —— AI 浏览器入口在别的会话下继续显示本会话的标签
+      · conversationAgentMap / conversationTitleMap —— 会话已删除，仍长期保留其标题与归属，
+                             属纯内存泄漏；任务浮层也不会再引用一个已删除的会话
+   */
+  const m13 = dropKey(snapshotCountMap.value)
+  if (m13) snapshotCountMap.value = m13
+  const m14 = dropKey(snapshotHintMap.value)
+  if (m14) snapshotHintMap.value = m14 as Record<string, Record<string, string>>
+  const m15 = dropKey(cursorMap.value)
+  if (m15) cursorMap.value = m15 as Record<string, number | null>
+  const m16 = dropKey(hasMoreMap.value)
+  if (m16) hasMoreMap.value = m16
+  const m17 = dropKey(browserTabsMap.value)
+  if (m17) browserTabsMap.value = m17 as Record<string, BrowserTab[]>
+  const m18 = dropKey(conversationAgentMap.value)
+  if (m18) conversationAgentMap.value = m18
+  const m19 = dropKey(conversationTitleMap.value)
+  if (m19) conversationTitleMap.value = m19
   streamAborts.delete(key)
   pendingUuidMap.delete(key)
   // 会话都没了，针对它的子Agent轮询也必须停（否则定时器会一直空转）
@@ -795,6 +829,28 @@ function migrateConversationKey(from: string, to: string) {
   if (m11) sessionUsageMap.value = m11 as Record<string, TokenUsageSummary>
   const m12 = move(turnUsageMap.value)
   if (m12) turnUsageMap.value = m12 as Record<string, Record<string, TokenUsageTurn>>
+  /*
+    以下 5 个是此前漏迁移的分片状态（2026-11-16 补齐）。
+    迁移时机是「新会话首个 SSE 事件带回真实 id」，此刻这些值多数还没写入，
+    所以漏迁移不会立刻出错；但只要在首个事件之前写过（如切会话时拉过一次
+    快照计数、或浏览器标签已加载），草稿 key 上那份数据就会永久孤立：
+      · snapshotCountMap —— 「N 轮可回滚」徽章丢失，新会话看不到历史可回滚轮次
+      · snapshotHintMap   —— 改动面板轮次摘要丢失（缺失时显示占位文案）
+      · cursorMap / hasMoreMap —— 分页游标丢失，首次上滑可能重复加载或拿空页
+      · browserTabsMap    —— 「AI 浏览器」入口在本会话消失，直到下次轮询重建
+    注意：这里刻意不迁移 conversationAgentMap / conversationTitleMap ——
+    它们由 loadConversations 按真实 id 直接写入，草稿 key 上本来就没有有效值。
+   */
+  const m13 = move(snapshotCountMap.value)
+  if (m13) snapshotCountMap.value = m13
+  const m14 = move(snapshotHintMap.value)
+  if (m14) snapshotHintMap.value = m14 as Record<string, Record<string, string>>
+  const m15 = move(cursorMap.value)
+  if (m15) cursorMap.value = m15 as Record<string, number | null>
+  const m16 = move(hasMoreMap.value)
+  if (m16) hasMoreMap.value = m16
+  const m17 = move(browserTabsMap.value)
+  if (m17) browserTabsMap.value = m17 as Record<string, BrowserTab[]>
   // 轮询定时器跟着会话 key 迁移，否则草稿 key 下的定时器会失去归属
   if (subAgentTimers.has(from)) {
     window.clearInterval(subAgentTimers.get(from)!)
@@ -960,9 +1016,72 @@ function refreshBrowserOnToolCall(toolNames: string[]) {
  *
  * <p>不落库、不持久化：每次心跳刷新已等待秒数，超过 {@link DELEGATE_STALE_MS} 视为已结束。
  * 刷新页面后靠新的心跳重建，历史委托不再回显（后端也没有对应的查询接口）。</p>
+ *
+ * <p><b>⚠️ 必须主动剔除过期记录（2026-11-16 修复「子Agent浮层一直不消失」）</b>：
+ * 原先这里只 addLast 从不删除，且下游 `delegateActive` 直接数数组长度（注释写着
+ * 「心跳未过期」但实现没过滤）。后果是委托结束、心跳停止后，旧记录永久留在 map 里 ——
+ * 聊天页状态栏的「子Agent」按钮和它的浮层就一直挂着，用户怎么关都关不掉，
+ * 只有刷新页面才能清掉。修复：读路径按 updatedAt 过滤掉超过 DELEGATE_STALE_MS 的项。
+ * </p>
  */
 const delegateMap = ref<Record<string, DelegateCall[]>>({})
-const chatDelegates = computed<DelegateCall[]>(() => delegateMap.value[activeConversationId.value] ?? [])
+
+/*
+  ⚠️ 过期判定必须有响应式时钟驱动（2026-11-16 修复「子Agent浮层一直不消失」的第二层原因）。
+
+  `isDelegateStale` 依赖 `Date.now()`，而 `Date.now()` 不是响应式数据 —— 即使上面
+  computed 里做了 filter，只要没有任何响应式依赖变化，Vue 就不会重新求值：
+  委托结束后不再有新心跳进来，`delegateMap` 保持不变，computed 就永远返回上一次结果，
+  按钮和浮层照样挂着。所以必须引入一个会「自己走」的时钟 ref，让过期判定有时间维度。
+
+  只在确实存在委托项时才启动定时器（无委托时 0 成本），且用 1s 粒度即可 ——
+  过期阈值是 20s（DELEGATE_STALE_MS），1s 的判定误差对 UI 无感知。
+ */
+const delegateClock = ref(Date.now())
+let delegateClockTimer: number | undefined
+
+function stopDelegateClock() {
+  if (delegateClockTimer !== undefined) {
+    window.clearInterval(delegateClockTimer)
+    delegateClockTimer = undefined
+  }
+}
+
+/** 按当前所有会话的委托项数量，决定是否维持时钟运转 */
+function syncDelegateClock() {
+  const hasAny = Object.values(delegateMap.value).some(list => list.length > 0)
+  if (!hasAny) {
+    stopDelegateClock()
+    return
+  }
+  if (delegateClockTimer !== undefined) return
+  delegateClockTimer = window.setInterval(() => {
+    delegateClock.value = Date.now()
+    // 时钟每走一格顺手清理已过期的历史记录，避免 map 无限增长（会话 key 也不会被回收）
+    pruneStaleDelegates()
+  }, 1000)
+}
+
+/** 清掉所有会话里心跳已过期的委托记录；有实际删除才写回，避免无意义的重渲染 */
+function pruneStaleDelegates() {
+  const now = delegateClock.value
+  let changed = false
+  const next: Record<string, DelegateCall[]> = {}
+  for (const [key, list] of Object.entries(delegateMap.value)) {
+    const alive = list.filter(call => !isDelegateStale(call, now))
+    if (alive.length !== list.length) changed = true
+    if (alive.length > 0) next[key] = alive
+  }
+  if (changed) delegateMap.value = next
+  if (Object.keys(next).length === 0) stopDelegateClock()
+}
+
+const chatDelegates = computed<DelegateCall[]>(() => {
+  const list = delegateMap.value[activeConversationId.value] ?? []
+  // 读数时也过滤一次（时钟驱动的 prune 是滞后的，这里保证「展示即准确」）
+  const now = delegateClock.value
+  return list.filter(call => !isDelegateStale(call, now))
+})
 
 /** 子Agent轮询定时器（会话 key → timer）。只要有 running 记录就保持轮询，全部终态自动停 */
 const subAgentTimers = new Map<string, number>()
@@ -1022,6 +1141,9 @@ function noteDelegateProgress(key: string, data: { callId?: string; targetSessio
   if (!call) return
   const current = delegateMap.value[key] ?? []
   delegateMap.value = { ...delegateMap.value, [key]: mergeDelegateCall(current, call) }
+  // 有新心跳 = 存在活跃委托：确保过期判定时钟在走（否则记录永远不会被剔除）
+  delegateClock.value = Date.now()
+  syncDelegateClock()
 }
 /** 各会话的待审批卡片（按会话 key 分片，切走再切回不会丢） */
 const approvalMap = ref<Record<string, ApprovalPayload | null>>({})
@@ -1397,7 +1519,8 @@ async function onSwitchBackgroundTask(key: string) {
     currentAgentId.value = ownerAgent
     syncChatRuntime()
     conversationList.value = []
-    await loadConversations()
+    // force=true：Agent 已切换，飞行中的旧请求拉的是「上一个 Agent」的列表，绝不能复用
+    await loadConversations(true)
     toast.info(`已切换到「${currentAgent.value?.name || `#${ownerAgent}`}」`)
   }
   await onSelectConversation(key)
@@ -1413,7 +1536,8 @@ async function onOpenSubagentSession(sessionId: number) {
   const key = String(sessionId)
   if (!key || key === activeConversationId.value) return
   if (!conversationList.value.some(item => item.id === key)) {
-    await loadConversations()
+    // force=true：会话可能刚由另一处创建/迁移，需穿透去重拿到最新列表再判断
+    await loadConversations(true)
     if (!conversationList.value.some(item => item.id === key)) {
       toast.warning('该会话不在当前智能体的会话列表里', {
         description: '可在侧栏切换到发起委托的那个智能体后再查看'
@@ -1552,6 +1676,8 @@ const chatContextTokens = computed(() => contextTokensMap.value[activeConversati
  * 估算值本身只用于界面展示，偶发同长度改写导致的偏差可以接受。</p>
  */
 const msgTokenCache = new Map<string, { fp: string; tokens: number }>()
+/** 缓存条目上限（超过后按插入序淘汰最旧的一批，避免整表清空造成的重算尖峰） */
+const MSG_TOKEN_CACHE_MAX = 4000
 
 /** 单条消息进入上下文的 token 估算（口径见 refreshContextTokens） */
 function estimateMessageTokens(
@@ -1578,8 +1704,27 @@ function estimateMessageTokens(
     tokens += (msg.tools?.length ?? 0) * 30
   }
 
-  // 上限只是防极端长会话把缓存撑爆（id 不复用，清空后重算即可）
-  if (msgTokenCache.size > 4000) msgTokenCache.clear()
+  /*
+    缓存上限保护（2026-11-16 改进）。
+
+    原实现 `if (msgTokenCache.size > 4000) msgTokenCache.clear()` 一次性清空整张表：
+    清空瞬间所有消息的估算都失效，下一次 refreshContextTokens / 翻页会把整个已加载列表
+    全部重算一遍 —— 长会话（几百条消息、每条几千字符）会有一次明显卡顿，
+    而且之后又慢慢涨回 4000 再来一次，形成周期性抖动。
+
+    改成「按插入顺序淘汰最旧的一批」：Map 保持插入序，删掉最早的 1/4 即可。
+    被淘汰的旧消息通常已经滚出窗口，重算代价可接受；新消息的缓存仍然命中。
+    这样容量上限依然是 4000，但淘汰是渐进的小批量，不再有整表重建的尖峰。
+   */
+  if (msgTokenCache.size >= MSG_TOKEN_CACHE_MAX) {
+    const evict = Math.max(1, Math.floor(MSG_TOKEN_CACHE_MAX / 4))
+    const it = msgTokenCache.keys()
+    for (let i = 0; i < evict; i++) {
+      const next = it.next()
+      if (next.done) break
+      msgTokenCache.delete(next.value)
+    }
+  }
   msgTokenCache.set(msg.id, { fp, tokens })
   return tokens
 }
@@ -1999,11 +2144,36 @@ async function loadMessageFileRefs(key: string, conversationId: number) {
 
 /**
  * 侧栏会话列表。
- * 并发调用复用同一次请求：原先「加载中直接 return」会让首轮结束后触发的那次刷新被丢弃，
- * 表现为「刚发出的新会话在侧栏消失」。
+ *
+ * <p>并发调用复用同一次请求：原先「加载中直接 return」会让首轮结束后触发的那次刷新被丢弃，
+ * 表现为「刚发出的新会话在侧栏消失」。</p>
+ *
+ * <p><b>⚠️ 但「强制刷新」必须能穿透去重（2026-11-16 修复「删除会话后列表没变」）</b>：</p>
+ * <p>旧实现只要 {@code conversationsInFlight} 非空就无条件返回那笔旧请求的 Promise。
+ * 删除会话时这个时序很容易踩中：流式收尾 / 后台轮询 / 切会话都可能正在飞一次
+ * {@code loadConversations}，于是删除后调用的 `await loadConversations()` 拿到的是
+ * <b>删除之前</b>那笔请求的结果 —— 被删的会话原样留在侧栏里，用户以为删除没生效
+ * （点进去才发现已经 404）。刷新一次浏览器才消失。</p>
+ * <p>修复：加 {@code force} 参数。需要「拿到删除/新增之后的最新状态」的调用方（删除会话、
+ * 新增会话成功、重连后台任务等写操作后的刷新）传 {@code force=true}：它会等旧的飞行请求
+ * 落地后再发一笔新请求，保证结果反映最新服务端状态。普通读路径仍走去重复用，
+ * 保留原来「并发刷新只发一次请求」的收益。</p>
  */
 let conversationsInFlight: Promise<void> | null = null
-async function loadConversations() {
+async function loadConversations(force = false) {
+  if (conversationsInFlight) {
+    if (!force) return conversationsInFlight
+    /*
+      强制刷新：先等旧请求结束（吞掉它的错误，避免旧请求失败连带影响本次），
+      再继续走下面的「发新请求」流程。这里不能直接 return 旧 Promise —— 那正是 bug 本身。
+      注意用 try/catch 而不是裸 await：旧请求若抛错，不能让它阻断这次的强制刷新。
+    */
+    await conversationsInFlight.catch(() => {})
+  }
+  /*
+    再检查一次：等旧请求期间可能又有人发起了新请求。此时若已有「更新的」请求在飞，
+    直接复用它即可（它一定比旧的那笔新，语义上满足 force 的要求）。
+  */
   if (conversationsInFlight) return conversationsInFlight
   conversationsInFlight = (async () => {
     conversationLoading.value = true
@@ -2396,7 +2566,8 @@ async function onConversationDelete(id: string) {
     }
     dropConversationState(id)
     if (activeConversationId.value === id) onNewChat()
-    await loadConversations()
+    // force=true：必须穿透并发去重，否则可能拿到「删除之前」那笔飞行请求的结果（被删会话仍留在侧栏）
+    await loadConversations(true)
   } catch (err) {
     toast.error('删除失败', { description: readErrorMessage(err, '请稍后重试') })
   }
@@ -2837,7 +3008,8 @@ async function consumeChatStream(
            * 而「切走 → 后台继续 → 点侧栏切回」正是多会话并行的主路径。
            * loadConversations 内部有并发去重，重复调用安全。
            */
-          void loadConversations()
+          // force=true：新会话刚落库，必须确保侧栏拿到这条新记录（飞行中的旧请求不含它）
+          void loadConversations(true)
         }
       }
 
@@ -3167,8 +3339,47 @@ async function onSend(text: string) {
     setStreaming(finalKey, false)
     streamAborts.delete(finalKey)
     streamAborts.delete(key)
+    /*
+      ★ 兜底清理「永远 running」的工具卡片（2026-11-16 修复）。
+
+      `tool_call_start` 会给每个工具 push 一条 state='running' 的占位条目，
+      正常路径靠 `----工具调用:----` 结果段落把 state 改成 'done'。
+      但工具有三种「结果段落永远不来」的情形：
+        · 工具执行抛异常（后端把异常转成 tool 消息，但前端解析拿不到该段落）；
+        · manual 模式下用户拒绝授权；
+        · 任务被停止 / 取消 / 连接断开 / LLM 报错中断。
+      此时条目永久停在「执行中」，转圈动画一直转 —— 与经典版同一处缺陷。
+
+      流已结束（finally 必定执行），此刻仍未 done 的工具一定不会再有结果了，
+      统一改成 'failed' 并写明原因，让卡片停止转圈并明确「未返回结果」。
+      用 'failed' 而不是 'done'：避免把「没结果」伪装成成功。
+    */
+    const unsettled = (assistant.tools ?? []).filter(t => t.state === 'running')
+    if (unsettled.length) {
+      for (const t of unsettled) {
+        t.state = 'failed'
+        if (!t.summary) t.summary = '未返回结果（任务在本步骤结束：可能被中止、授权未通过或执行异常）'
+      }
+    }
     // 本轮正文 / 思考 / 工具返回都已落定，重算上下文估算（流式期间刻意不逐帧算）
     refreshContextTokens(finalKey)
+    /*
+      ★ 兜底清理失效的待回执卡片（2026-11-16 修复）。
+
+      `ask_user` 事件会 setApproval 出一张卡片，正常路径靠用户提交回执
+      （submitChatAnswer 里 setApproval(key, null)）或下一轮发消息时清除。
+      但任务可能在这之前就结束：LLM 报错（task_error）、生成失败（error）、
+      网络断开、用户点「停止生成」。此时那张卡片会永久挂在聊天页 ——
+      它的 uuid 已经失效，用户点「同意 / 拒绝」都不会有反应，只能关掉整个页面。
+
+      判据：流已结束（finally 必定执行），且该会话仍有 approval 卡片，
+      说明这张卡片在本轮内没等到有效回执（真回了的话 submitChatAnswer 已经清掉）。
+      用 setApproval 而非直接改 map：它同步维护 pendingMap（侧栏黄叹号）与 uuid，
+      只清 approval 会让侧栏标记残留在「等待确认」状态。
+    */
+    if (approvalMap.value[finalKey]) {
+      setApproval(finalKey, null)
+    }
     /*
       真实用量：本轮成本 / 缓存命中 / token。
       立即拉一次保证「不卡」，再延时补一次兜住「usage 落库晚于最后一个 SSE 事件」的时序差
@@ -3199,7 +3410,8 @@ async function onSend(text: string) {
     // 每轮对话结束后都刷新侧栏：后端按 updated_at 排序，刷新后最新活跃的会话重新置顶
     // （旧版行为：每次对话结束后重新排序渲染；此前只在 wasNewSession 首轮刷新，
     //  老会话聊完列表顺序纹丝不动，活跃会话沉在下面）
-    if (convId) await loadConversations()
+    // force=true：本轮写入改变了 updated_at，必须拿到最新排序，不能复用飞行中的旧请求
+    if (convId) await loadConversations(true)
     // 后台完成：用户已经切到别的会话，补一句提示（主动停止的不提示）
     if (activeConversationId.value !== finalKey && !abort.signal.aborted) {
       toast.success('后台会话已完成', { description: conversationTitleOf(finalKey) })
@@ -3414,6 +3626,21 @@ function tryConsumePendingRefs() {
 // 引用消费时机：① 应用启动（可能带着引用直接落在聊天页）；② 每次切到聊天页。
 // 消费语义是取走即清空，重复触发不会重复加文件。
 onMounted(() => tryConsumePendingRefs())
+
+/*
+  卸载时清掉所有长期定时器（2026-11-16 补齐）。
+  根组件通常不会卸载，但热更新（HMR）会反复重建，不定时清理就会累积多个 interval；
+  三类定时器各自有独立的启动条件，必须逐个收掉：
+    · delegateClock    —— 委托心跳的过期判定时钟（1s）
+    · subAgentTimers   —— 子Agent状态轮询（3s，按会话 key）
+    · browserPollTimer —— AI 浏览器标签轮询（4s）
+  遗漏 browserPollTimer 会导致每次 HMR 多一个 4 秒轮询，累积后持续打后端。
+ */
+onBeforeUnmount(() => {
+  stopDelegateClock()
+  for (const key of subAgentTimers.keys()) stopSubAgentPolling(key)
+  stopBrowserPoll()
+})
 watch(
   () => route.path,
   path => {
@@ -4120,7 +4347,8 @@ async function onAgentSelect(id: number | string) {
   onNewChat()
   conversationList.value = []
   activeKey.value = '/chat'
-  await loadConversations()
+  // force=true：Agent 已切换 + 列表已清空，必须发一笔新请求（复用飞行中的旧请求会拿回上个 Agent 的列表）
+  await loadConversations(true)
 }
 
 /**
@@ -4164,7 +4392,8 @@ async function onSwitchAgent(id: number | string) {
   // 当前会话属于旧 Agent，先切到该 Agent 的空草稿；旧会话的后台流不受影响
   onNewChat()
   conversationList.value = []
-  await loadConversations()
+  // force=true：Agent 已切换 + 列表已清空，必须发新请求拿到该 Agent 的会话
+  await loadConversations(true)
   const name = currentAgent.value?.name || `#${agentId}`
   const running = backgroundCount.value
   toast.success(`已切换到「${name}」`, {

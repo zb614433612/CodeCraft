@@ -102,6 +102,33 @@ public class AgentForkManager {
             new ThreadPoolExecutor.CallerRunsPolicy()
     );
 
+    /**
+     * 容器关闭时收敛子Agent线程池（2026-11-16 补）。
+     *
+     * <p>线程虽然是 daemon，但 Spring 上下文重建时旧池会一直持有 20 个核心线程
+     * （corePoolSize=20 且 SynchronousQueue 无缓冲，线程常驻不回收），
+     * 多刷几次上下文就会累积几十个空闲线程。这里 shutdownNow 中断在途子Agent，
+     * 并清空几个跟踪表，让下次上下文重建从干净状态开始。</p>
+     */
+    @jakarta.annotation.PreDestroy
+    public void shutdown() {
+        try {
+            agentExecutor.shutdownNow();
+            if (!agentExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                log.warn("子Agent线程池在 5 秒内未能完全终止，已强制放弃等待");
+            }
+            log.info("子Agent线程池已关闭");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("关闭子Agent线程池时被中断");
+        }
+        // 跟踪表均为无界 ConcurrentHashMap，关闭时一并清空，避免残留引用阻止回收
+        agentFutures.clear();
+        agentThreads.clear();
+        runningAgents.clear();
+        pendingAgentsByConversation.clear();
+    }
+
     public AgentForkManager(
             DeepSeekConfig deepSeekConfig,
             ObjectMapper objectMapper,

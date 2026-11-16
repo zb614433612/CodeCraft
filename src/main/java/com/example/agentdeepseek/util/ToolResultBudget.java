@@ -99,9 +99,23 @@ public class ToolResultBudget {
             int reserve = (marker == null ? MARK_RESERVE_HINT : marker.length()) + SEP.length() * 2;
             int available = budget - reserve;
             if (available < MIN_HEAD) {
-                // 预算小到放不下标记：退化为「只保留头部」，保证不超过预算
-                head = Math.min(budget, content.length()) - MARK.length();
-                if (head < MIN_HEAD) head = Math.min(MIN_HEAD, content.length());
+                /*
+                  预算小到放不下完整标记（2026-11-16 修复）。
+
+                  旧实现只扣了 MARK.length()，漏掉两处 SEP（"\n\n"）的开销，
+                  于是 budget=300 时实际产出 304 字符 —— 比预算还大，与本节
+                  「保证不超过预算」的承诺相反。实测证据（ToolResultBudgetTest E3）：
+                  日志出现 `tool=tiny, 5000 → 304 字符（预算 300，省略 4711）`。
+                  预算是系统性的「上下文成本闸门」，这一点点超出会在多轮累积中放大；
+                  且该分支只在预算异常小时进入，修正对正常路径零影响。
+                 */
+                int overhead = MARK.length() + SEP.length() * 2;
+                int allowed = budget - overhead;
+                if (allowed <= 0) {
+                    // 预算连标记本身都放不下：只返回标记，保证不超预算且仍幂等
+                    return MARK;
+                }
+                head = Math.min(allowed, content.length());
                 tail = 0;
                 marker = MARK;
                 break;
@@ -123,8 +137,14 @@ public class ToolResultBudget {
         String result = sb.toString();
 
         // 极端情况下（标记异常膨胀）再兜一层：按预算硬切，仍带标记保证幂等
-        if (result.length() > budget + 64) {
-            result = result.substring(0, Math.max(MIN_HEAD, budget - MARK.length())) + MARK;
+        //
+        // ⚠️ 尾巴必须保留 MARK，否则二次调用会因幂等判据（content.contains(MARK)）失效
+        //    而重新截断 → 内容持续漂移 → 前缀缓存每轮失效。
+        // 同时不能再调用 Math.max(MIN_HEAD, ...)：预算小于 MIN_HEAD 时那个 max 会把结果
+        // 顶回 200+，反而超出预算（与「绝不超预算」的契约矛盾）。改为 clamp 到 [0, budget-MARK]。
+        if (result.length() > budget) {
+            int cut = Math.max(0, budget - MARK.length());
+            result = result.substring(0, Math.min(cut, result.length())) + MARK;
         }
         // INFO 级：截断是「上下文成本」的关键事件，需在日志里可盘点（每轮通常只有几条）
         log.info("工具结果超预算已裁剪: tool={}, {} → {} 字符（预算 {}，省略 {}）",

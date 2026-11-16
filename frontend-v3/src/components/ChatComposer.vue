@@ -163,7 +163,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { openLightbox } from '../utils/lightbox'
 /* 真实用量展示：与消息底部共用同一套格式化口径（金额 / 命中率 / token 缩写） */
 import { costUnavailableReason, formatCost, formatHitRate, formatUsageTokens, isCostAvailable } from '../utils/tokenCalculator'
@@ -446,7 +446,12 @@ function onSend() {
   emit('send')
 }
 
-/** 高度自适应（max-height 由 CSS 控制为 200px） */
+/**
+ * 高度自适应（上限 200px，min-height 由 CSS 控制）。
+ *
+ * <p>必须先置 auto 再读 scrollHeight：否则读到的还是上一次写死的高度，
+ * 内容变短时永远降不下来。</p>
+ */
 function autoResize() {
   const el = textareaRef.value
   if (!el) return
@@ -454,10 +459,36 @@ function autoResize() {
   el.style.height = `${Math.min(el.scrollHeight, 200)}px`
 }
 
+/*
+  ⚠️ 必须在 DOM 更新后重算，不能用默认的 flush: 'pre'（2026-11-16 修复「输入框异常变高」）。
+
+  <p><b>症状</b>：发送消息后输入框一直停在最高（200px），要再敲一个字才恢复正常。</p>
+  <p><b>根因</b>：`watch(() => props.modelValue)` 默认 flush='pre'，回调在 <b>DOM 更新之前</b>
+  执行。发送时 ChatView 先 `emit('send')` 再 `draft.value = ''`，watch 立刻跑 autoResize，
+  此刻 textarea 的 DOM value 还是刚才那段长文本（可能十几行），于是
+  `el.style.height = min(scrollHeight, 200) = 200px` 被写死。紧接着 DOM 被清空，
+  但 autoResize 已经跑完了，没人再纠正 → 输入框保持 200px 高，直到下一次 @input。</p>
+  <p>改用 flush:'post'（DOM 更新后执行），此时 scrollHeight 反映的是新内容高度。
+  nextTick 之外的额外保险：即便 post 时机下 DOM 仍未落定，读到的也是清空后的值。</p>
+ */
 watch(
   () => props.modelValue,
-  () => autoResize()
+  () => {
+    // flush:'post' 已保证 DOM 更新完毕；这里再套 nextTick 兜住「同一 tick 内多次改值」的极端情况
+    void nextTick(autoResize)
+  },
+  { flush: 'post' }
 )
+
+/* 初始挂载时也按真实内容算一次：组件可能在有初始草稿的情况下被创建（如切回带草稿的会话） */
+onMounted(() => autoResize())
+
+/*
+  rows 变化时重算：空态用 rows=3、会话中用 rows=2，两处是不同组件实例，
+  但切换会话导致 props.rows 变化时（如空态↔非空态复用实例）高度也要跟着调整。
+ */
+watch(() => props.rows, () => void nextTick(autoResize))
+
 
 defineExpose({ focus: () => textareaRef.value?.focus() })
 </script>

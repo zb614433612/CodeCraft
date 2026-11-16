@@ -48,6 +48,25 @@ public class LessonRecorder {
     }
 
     /**
+     * 容器关闭时收敛异步线程池（2026-11-16 补）。
+     *
+     * <p>线程已 setDaemon，JVM 退出不阻塞；但 Spring 上下文重建（热部署 / 多次测试刷新）
+     * 时旧池会残留单线程 + 最多 500 个排队任务，累积泄漏。</p>
+     */
+    @jakarta.annotation.PreDestroy
+    public void shutdown() {
+        try {
+            executor.shutdownNow();
+            if (!executor.awaitTermination(3, TimeUnit.SECONDS)) {
+                log.warn("踩坑经验捕获线程池未在 3 秒内终止，已放弃等待");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("关闭踩坑经验捕获线程池时被中断");
+        }
+    }
+
+    /**
      * 异步记录一次工具失败（调用线程调用，上下文值在此提取）
      *
      * @param toolName      工具名（如 command / file_writer / mcp_server_manager）

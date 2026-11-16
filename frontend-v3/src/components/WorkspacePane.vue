@@ -63,7 +63,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import WorkspaceTabs from './WorkspaceTabs.vue'
 import WorkspaceTabView from './WorkspaceTabView.vue'
 import { confirm } from '../utils/confirm'
@@ -173,6 +173,16 @@ function onDocClick(event: MouseEvent) {
   if (target?.closest('.cc-wsp__menu') || target?.closest('.cc-wtabs__op')) return
   closeMenu()
 }
-document.addEventListener('click', onDocClick)
+
+/*
+  ⚠️ 监听必须挂在 onMounted 而不是 setup 顶层（2026-11-16 修复脆弱写法）。
+
+  setup 顶层直接 addEventListener 有两个隐患：
+    1) SSR / 预渲染环境没有 document，会直接抛 ReferenceError；
+    2) 若组件被 <KeepAlive> 包裹或将来加上 v-if 复用，setup 只在首次创建时执行一次，
+       而 onBeforeUnmount 会在每次卸载时移除 —— 复用后监听就永久丢了（菜单点外面关不掉）。
+  挂在 onMounted 保证「每次真正挂载都注册」，与 onBeforeUnmount 的移除严格配对。
+ */
+onMounted(() => document.addEventListener('click', onDocClick))
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </script>

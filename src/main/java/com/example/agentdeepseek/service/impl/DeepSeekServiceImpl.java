@@ -259,6 +259,39 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     // 评委已批准的额外迭代次数（conversationId → totalGranted）
     private final Map<Long, Integer> judgeGrantedIterations = new ConcurrentHashMap<>();
 
+    /**
+     * 容器关闭时收敛后台任务线程池与在途订阅（2026-11-16 补）。
+     *
+     * <p>线程都设了 daemon，JVM 退出本身不会卡住；但 Spring 上下文重建（热部署、
+     * 多次 {@code @SpringBootTest} 刷新）时线程池与订阅会累积泄漏：
+     * 旧的 ExecutorService 不再有人用却仍持有线程，旧订阅还会继续往已废弃的
+     * Sink 里推事件。这里按「先取消订阅、再关池」的顺序收尾。</p>
+     */
+    @jakarta.annotation.PreDestroy
+    public void shutdown() {
+        // 先取消在途任务订阅：停止事件推送，避免关池后线程仍在往 Sink 写
+        for (Map.Entry<Long, Disposable> entry : taskSubscriptions.entrySet()) {
+            try {
+                entry.getValue().dispose();
+            } catch (Exception e) {
+                log.warn("关闭时释放任务订阅失败: conversationId={}, err={}", entry.getKey(), e.getMessage());
+            }
+        }
+        taskSubscriptions.clear();
+        judgeGrantedIterations.clear();
+        // 再收敛线程池：中断在途任务并清空队列，最多等 5 秒
+        try {
+            taskExecutor.shutdownNow();
+            if (!taskExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                log.warn("后台任务线程池在 5 秒内未能完全终止，已强制放弃等待");
+            }
+            log.info("后台任务线程池已关闭");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("关闭后台任务线程池时被中断");
+        }
+    }
+
 
     public DeepSeekServiceImpl(WebClient deepSeekWebClient,
                                DeepSeekConfig deepSeekConfig,
@@ -2054,9 +2087,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             sup.length() > 80 ? sup.substring(0, 80) + "..." : sup);
                 }
                 // 发送提示事件告知前端
+                /*
+                  ⚠️ iteration 必须 +1（2026-11-16 修复）。
+
+                  本分支同样会重新进入 handleToolCallIteration 并**再发起一次 LLM 请求**，
+                  此前却原样透传 iteration，导致这次请求不计入迭代预算。
+                  后果：用户连续补充需求（或补充队列反复入队）时，iteration 永不增长，
+                  `iteration >= maxIterations` 的终止判断永远不成立 ——
+                  每一轮都追加一条 user 消息且循环不复位，上下文持续膨胀直到撑爆/卡死。
+                  maxIterations 的意义是「最多允许发起多少次 LLM 请求」，这里显然算一次。
+                 */
                 return Flux.just(createReasoningSSEEvent("💡 收到用户补充需求（共 " + supplements.size() + " 条），正在调整执行..."))
                         .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
-                                messages, iteration, maxIterations));
+                                messages, iteration + 1, maxIterations));
             }
 
             if (iteration >= maxIterations) {
@@ -2121,9 +2164,20 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             log.warn("检测到 finish_reason=length（输出被截断），追加续写请求并重新进入工具循环: " +
                                             "conversationId={}, iteration={}, provider={}",
                                     conversationId, iteration, resolveProviderCode(apiRequest));
+                            /*
+                              ⚠️ iteration 必须 +1（2026-11-16 修复）。
+
+                              续写同样是一次真实的 LLM 请求，必须计入 maxIterations 预算。
+                              此前原样透传 iteration，与上方注释「续写仍受 maxIterations 约束，
+                              不会无限循环」直接矛盾——实际上完全不受约束：
+                              若模型的输出持续被 max_tokens 截断（长代码生成、超大文件写入时很常见），
+                              每次都会走本分支追加一条续写 user 消息并递归，iteration 恒定不变，
+                              `iteration >= maxIterations` 永不成立 → messages 无限膨胀
+                              → 上下文撑爆、或递归深度失控。
+                             */
                             return Flux.just(createReasoningSSEEvent("✂️ 输出达到长度上限，正在自动续写..."))
                                     .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
-                                            messages, iteration, maxIterations));
+                                            messages, iteration + 1, maxIterations));
                         }
 
                         // 检查补充需求队列
@@ -2143,9 +2197,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         sup.length() > 80 ? sup.substring(0, 80) + "..." : sup);
                             }
                             // 发送提示事件并重新进入ToolLoop
+                            // ⚠️ iteration 必须 +1（2026-11-16 修复）：本分支会再发起一次 LLM 请求，
+                            //    此前原样透传会让补充需求循环完全绕过 maxIterations 限制。
                             return Flux.just(createReasoningSSEEvent("💡 收到用户补充需求（共 " + deferredSupplements.size() + " 条），正在调整执行..."))
                                     .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
-                                            messages, iteration, maxIterations));
+                                            messages, iteration + 1, maxIterations));
                         }
                         return Flux.empty();
                     }));

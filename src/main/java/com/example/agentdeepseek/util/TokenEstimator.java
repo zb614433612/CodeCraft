@@ -57,9 +57,21 @@ public class TokenEstimator {
                 total += estimate(reasoning);
             }
 
-            // tool_calls 字段（JSON 格式，额外开销）
+            // tool_calls 字段（含 function.name 与 function.arguments）
+            //
+            // ⚠️ 不能只加固定值（2026-11-16 修复）：此前这里写 `total += 15`，把整个
+            // tool_calls 当成 15 token 的固定开销。但实测 tool_calls 的 JSON 里
+            // `function.arguments` 才是体积大头 —— file_writer 写一个完整文件时，
+            // 全部文件内容都在 arguments 字符串里，动辄数万字符（≈上万 token）。
+            // 严重低估的直接后果：estimateMessages 是所有裁剪/压缩决策的依据
+            // （trimToTokenBudget / trimToolLoopToBudget / CompactionService.decide），
+            // 低估 → 判定「没超限」→ 不裁剪 → 请求真的超限 → API 400，整轮失败。
+            // 因此这里按实际 JSON 文本精确估算，只保留极小的结构开销。
             if (msg.containsKey("tool_calls")) {
-                total += 15;
+                Object toolCalls = msg.get("tool_calls");
+                int toolCallsTokens = estimateToolCalls(toolCalls);
+                // 无 tool_calls 内容时（null/空数组）仍保留最小结构开销
+                total += toolCallsTokens > 0 ? toolCallsTokens : 15;
             }
 
             // tool_call_id 字段
@@ -103,5 +115,43 @@ public class TokenEstimator {
             return sum;
         }
         return estimate(String.valueOf(content));
+    }
+
+    /**
+     * 估算 {@code tool_calls} 字段的 token 数（兼容 JsonNode / List / String）。
+     *
+     * <p>历史上有两种形态：{@code ContextBuilder} 组装时用 {@code ObjectNode}
+     * （Jackson JsonNode），部分路径也用 {@code List<Map>}。这里统一转成 JSON 文本
+     * 再估算，保证不因类型不同而漏算。</p>
+     *
+     * <p>为什么必须精确估算：{@code function.arguments} 是工具入参的完整字符串，
+     * 写文件时可达数万字符。截断/压缩决策依赖这个值，低估会导致超限请求被放行。</p>
+     *
+     * @param toolCalls tool_calls 字段值（可为 null）
+     * @return token 估算值；无法估算时返回 0（调用方会退回最小结构开销）
+     */
+    private static int estimateToolCalls(Object toolCalls) {
+        if (toolCalls == null) {
+            return 0;
+        }
+        // Jackson JsonNode：直接取 JSON 文本长度估算
+        if (toolCalls instanceof com.fasterxml.jackson.databind.JsonNode node) {
+            if (node.isNull() || node.isMissingNode()) {
+                return 0;
+            }
+            // 空数组/空对象没有实际内容，交给调用方的最小开销兜底
+            if ((node.isArray() || node.isObject()) && node.isEmpty()) {
+                return 0;
+            }
+            return estimate(node.toString());
+        }
+        // List / Map 形态：转字符串后估算
+        if (toolCalls instanceof java.util.Collection<?> || toolCalls instanceof java.util.Map<?, ?>) {
+            return estimate(String.valueOf(toolCalls));
+        }
+        if (toolCalls instanceof String text) {
+            return estimate(text);
+        }
+        return estimate(String.valueOf(toolCalls));
     }
 }

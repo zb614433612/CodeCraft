@@ -21,6 +21,15 @@ public class P2pChatService {
 
     private static final Logger log = LoggerFactory.getLogger(P2pChatService.class);
 
+    /**
+     * 历史消息单次最多返回条数（2026-11-16 新增）。
+     *
+     * <p>原 Controller 的 {@code limit} 默认 50 且无上限，一次传百万级会把整张表
+     * 读进内存再构造 Map 列表返回。这里以 200 为上限：前端一次只展示一屏，
+     * 需要更早的历史应通过 offset 分页，而不是一次全取。</p>
+     */
+    private static final int MAX_PAGE_LIMIT = 200;
+
     @Autowired
     private P2pChatMessageMapper mapper;
 
@@ -104,10 +113,22 @@ public class P2pChatService {
     }
 
     /**
-     * 获取历史消息（分页，最新50条）
+     * 获取历史消息（分页，默认最新 50 条）。
+     *
+     * <p><b>⚠️ 必须钳制参数（2026-11-16 修复）</b>：offset / limit 由 Controller
+     * 直接取自 {@code @RequestParam}，此前无任何上限。风险两点：</p>
+     * <ul>
+     *   <li>{@code limit} 传极大值（如 1000000）→ 一次把整张表捞进内存，构造成 Map 列表
+     *       再序列化返回，属于可被外部触发的内存/带宽放大（Peer 通道是可连入的入口）；</li>
+     *   <li>{@code offset} 传负数或极大值 → SQL 报错或返回不可预期结果。</li>
+     * </ul>
+     * <p>这里统一收敛：offset 至少 0，limit 夹到 [1, MAX_PAGE_LIMIT]。放在 Service 层
+     * 而不是 Controller，是因为其他调用方（如未来新增的回溯接口）也走同一入口。</p>
      */
     public List<P2pChatMessage> getHistory(String peerId, int offset, int limit) {
-        return mapper.findByPeerId(peerId, offset, limit);
+        int safeOffset = Math.max(offset, 0);
+        int safeLimit = Math.max(1, Math.min(limit, MAX_PAGE_LIMIT));
+        return mapper.findByPeerId(peerId, safeOffset, safeLimit);
     }
 
     /**

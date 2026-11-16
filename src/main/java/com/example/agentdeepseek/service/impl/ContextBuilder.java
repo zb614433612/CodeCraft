@@ -45,10 +45,19 @@ public class ContextBuilder {
      * （实测 TTFB 从 1.4s 退化到 20s），同时让模型看到的历史始终不稳定 ——
      * 这是「均衡模式失忆」的放大器之一。</p>
      *
-     * <p>与 {@code ToolResultBudget.MARK}（"…[CC-TRUNC]"）区分：那个标记的是
-     * 「单条结果写入前超预算被截断」，本标记的是「历史上下文裁剪时的摘要化」。</p>
+     * <p><b>⚠️ 为什么必须用这么长的独特前缀（2026-11-16 修复）</b>：
+     * 此前这里只写 {@code "[工具 "}，而 {@link #compactHistoryMessages}（compact 模式）
+     * 生成的摘要文案同样是 {@code "[工具 xxx 调用成功/失败...]"} 开头 —— 两者<b>撞了前缀</b>。
+     * 后果：compact 模式下被精简过的 tool 消息，在后续 {@code trimToolLoopToBudget} 里
+     * 会被误判成「已摘要过」而永久跳过，即使它还带着几百字符的可压缩正文。
+     * 于是工具循环裁剪的收敛能力被削弱：明明还有可压缩空间，却判定「无处可压」提前退出，
+     * 最终仍然把超限请求发出去（API 400）。</p>
+     *
+     * <p>因此改用带方括号嵌套的独特串，与 {@code compactHistoryMessages} 的
+     * {@code "[工具 "}、以及 {@code ToolResultBudget.MARK}（{@code "…[CC-TRUNC]"}）
+     * 三者互不包含，任何一方都不会误吞另一方。</p>
      */
-    private static final String TRIM_SUMMARY_MARK = "[工具 ";
+    private static final String TRIM_SUMMARY_MARK = "[CC-TRIM][工具 ";
 
     /**
      * 工具循环裁剪时<b>完整保留</b>的最近工具调用轮数。
@@ -732,11 +741,12 @@ public class ContextBuilder {
                 if (isError) {
                     // 失败信息对「避免重复踩坑」价值极高，保留更多首部
                     String shortContent = content.length() > 300 ? content.substring(0, 300) + "…" : content;
-                    msg.put("content", TRIM_SUMMARY_MARK + "工具 " + toolName + " 已执行（失败）] " + shortContent);
+                    // 注意：TRIM_SUMMARY_MARK 已包含「[工具 」前缀，此处不要再拼「工具」
+                    msg.put("content", TRIM_SUMMARY_MARK + toolName + " 已执行（失败）] " + shortContent);
                 } else {
                     // 成功结果保留首部摘要：模型据此能认出「做过这一步」，不再重复劳动
                     String preview = content.length() > 400 ? content.substring(0, 400) + "…" : content;
-                    msg.put("content", TRIM_SUMMARY_MARK + "工具 " + toolName
+                    msg.put("content", TRIM_SUMMARY_MARK + toolName
                             + " 已执行（结果已压缩，完整内容可用 query_tool_history 查询）] " + preview);
                 }
                 compacted++;

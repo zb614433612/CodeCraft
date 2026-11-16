@@ -132,7 +132,21 @@ public class UserServiceImpl implements UserService {
         }
         // 刷新token过期时间
         tokenStore.refreshToken(token);
-        return Long.parseLong(userIdStr);
+        /*
+          ⚠️ 必须容错（2026-11-16 修复）。
+
+          此前直接 `return Long.parseLong(userIdStr)`：一旦缓存里的 id 被污染成非数字
+          （手工改缓存、旧版本写入格式变化、Redis 数据错乱等），这里会抛 NumberFormatException
+          一路冒泡到过滤器/全局异常处理器，导致**每一个带该 token 的请求都 500**，
+          且用户无法自行恢复（只能等 token 过期）。按「无效 token 视同未认证」处理更安全：
+          返回 null 让调用方走 401 未授权流程，用户重新登录即可。
+         */
+        try {
+            return Long.parseLong(userIdStr.trim());
+        } catch (NumberFormatException e) {
+            log.warn("token 中的 userId 非法（缓存被污染？），按未认证处理: userId={}", userIdStr);
+            return null;
+        }
     }
 
     @Override
@@ -171,16 +185,41 @@ public class UserServiceImpl implements UserService {
 
     // ========== 用户管理接口实现 ==========
 
+    /** 用户列表默认每页条数（与 Controller 的 defaultValue 保持一致） */
+    private static final int DEFAULT_USER_PAGE_SIZE = 10;
+    /** 用户列表每页条数上限：防止 pageSize 传成极端值一次拉空整表 */
+    private static final int MAX_USER_PAGE_SIZE = 200;
+
     @Override
     public PageResult<User> listUsers(int page, int pageSize, String search) {
-        int offset = (page - 1) * pageSize;
+        /*
+          ⚠️ offset 必须用 long 计算并做上下限钳制（2026-11-16 修复）。
+
+          此前写 `int offset = (page - 1) * pageSize;`，而 Controller 的 page / pageSize
+          都是 @RequestParam 直接取的 int，**没有任何上限校验**。一旦 page 传大值
+          （前端翻页 bug、脚本误调、恶意请求），(page-1)*pageSize 在 int 上溢出成负数：
+            page=2147483647, pageSize=100 → 溢出为负数
+          → `LIMIT -214748..., 100` → 数据库报错或返回不可预期结果。
+
+          修复分两层：
+          1) 这里用 long 计算再收敛，pageSize 夹到 [1, MAX_USER_PAGE_SIZE]，page 至少 1；
+          2) offset 用 long 中转，超过 Integer.MAX_VALUE 时按「该页已超出数据范围」处理：
+             直接把 offset 顶到最大可表达值（查询必然返回空列表，且不会让 SQL 报错）。
+             不抛异常是为了保持接口语义稳定 —— 越界页返回空页 + 正确 total 更符合分页契约。
+         */
+        int safePage = Math.max(page, 1);
+        int safeSize = Math.max(1, Math.min(pageSize <= 0 ? DEFAULT_USER_PAGE_SIZE : pageSize, MAX_USER_PAGE_SIZE));
+        long offsetLong = (long) (safePage - 1) * safeSize;
+        // 越过 int 上限时收敛到 Integer.MAX_VALUE：保证不溢出、SQL 不报错、语义上等价于「空页」
+        int offset = (int) Math.min(offsetLong, Integer.MAX_VALUE);
+
         List<User> users;
         long total;
         if (search != null && !search.trim().isEmpty()) {
-            users = userMapper.searchByUsername(search.trim(), offset, pageSize);
+            users = userMapper.searchByUsername(search.trim(), offset, safeSize);
             total = userMapper.countByUsername(search.trim());
         } else {
-            users = userMapper.selectAll(offset, pageSize);
+            users = userMapper.selectAll(offset, safeSize);
             total = userMapper.selectCount();
         }
         return new PageResult<>(users, total, page, pageSize);

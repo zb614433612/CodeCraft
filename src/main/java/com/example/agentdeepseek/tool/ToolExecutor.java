@@ -584,9 +584,18 @@ public class ToolExecutor {
         fileExplorer.put("glob", new String[]{"pattern"});
         table.put("file_explorer", fileExplorer);
 
+        /*
+          ⚠️ 参数名必须与 FileWriterTool 实际读取的字段一致（2026-11-16 修复）。
+
+          此前 write / edit 在这里登记为 "path"，而 FileWriterTool.doWrite / doEdit 读的是
+          `args.path("file_path")`（工具 schema 里也是 file_path）。两边不一致的直接后果：
+          模型按 schema 规范传 {"action":"write","file_path":"...","content":"..."} 时，
+          校验器找不到 "path" 键，直接返回「缺少必填参数：path」，工具根本没被执行。
+          只有 delete 是真的读 "path"，所以它保持 "path" 不变。
+         */
         Map<String, String[]> fileWriter = new HashMap<>();
-        fileWriter.put("write", new String[]{"path", "content"});
-        fileWriter.put("edit", new String[]{"path", "old_text", "new_text"});
+        fileWriter.put("write", new String[]{"file_path", "content"});
+        fileWriter.put("edit", new String[]{"file_path", "old_text", "new_text"});
         fileWriter.put("delete", new String[]{"path"});
         table.put("file_writer", fileWriter);
 

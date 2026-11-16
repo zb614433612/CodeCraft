@@ -163,7 +163,21 @@ export async function request<T>(url: string, options: RequestInit = {}, timeout
   } catch (error: any) {
     clearTimeout(timeoutId)
 
+    /*
+      ⚠️ AbortError 不能一律当成「超时」（2026-11-16 修复）。
+
+      原先 `if (error.name === 'AbortError') throw new Error('请求超时，请检查网络连接或稍后重试')`
+      把两种完全不同的取消混为一谈：
+        1) 本函数的 timeoutId 触发 controller.abort() → 说「超时」是对的；
+        2) 调用方传入的 options.signal 被 abort（组件卸载 / 用户取消 / 被新请求抢占）
+           → 此时提示「请检查网络连接」是误归因，把用户引向排查网络，实际是自己取消的。
+      区分判据：调用方传了 options.signal 且它已 aborted → 走「请求已取消」；
+      否则只可能是本函数的超时定时器。
+     */
     if (error.name === 'AbortError') {
+      if (options.signal?.aborted) {
+        throw new Error('请求已取消')
+      }
       throw new Error('请求超时，请检查网络连接或稍后重试')
     }
 

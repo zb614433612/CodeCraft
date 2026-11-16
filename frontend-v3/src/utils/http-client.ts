@@ -307,7 +307,13 @@ async function rawFetch(
   timeout: number = DEFAULT_TIMEOUT
 ): Promise<Response> {
   const controller = new AbortController()
+  /*
+    ⚠️ 保持原有语义：无论调用方是否传 signal，都安装超时定时器（2026-11-16 修复误归因时
+    刻意不改这一点）。原实现是 `signal: init.signal ?? controller.signal` —— 一旦调用方
+    传了自己的 signal，内建超时就形同虚设；这是既有行为，本次不改动以降低引入新 bug 的风险。
+  */
   const timer = setTimeout(() => controller.abort(), timeout)
+  const externalSignal = init.signal ?? null
 
   // FormData 必须让浏览器自动带 boundary，不能手写 Content-Type
   const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData
@@ -321,7 +327,22 @@ async function rawFetch(
   }
 
   try {
-    return await fetch(fullUrl, { ...init, headers, signal: init.signal ?? controller.signal })
+    return await fetch(fullUrl, { ...init, headers, signal: externalSignal ?? controller.signal })
+  } catch (error) {
+    /*
+      标记「这次 AbortError 是调用方取消的」（2026-11-16 修复误归因）。
+
+      判据用「外部 signal 是否已 aborted」，而不是给 error 打标记 —— fetch 抛出的
+      DOMException 实例在不同宿主下不保证同一引用，但 signal.aborted 一定反映真实原因。
+      只有「调用了传外部 signal」且「它确实被 abort」时才标记：
+        · 外部 signal 存在 → fetch 用的是它（见上面 signal 取值），取消必由它触发；
+        · 外部 signal 不存在 → 只可能是本模块的 timeout controller，走「请求超时」文案。
+      这样不需要改超时安装逻辑，风险最小。
+     */
+    if (isAbortError(error) && externalSignal?.aborted) {
+      EXT_SIGNAL_ABORTS.add(error as object)
+    }
+    throw error
   } finally {
     clearTimeout(timer)
   }
@@ -553,15 +574,47 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException ? error.name === 'AbortError' : false
 }
 
-/** 统一把异常转成可读 Error */
+/**
+ * 统一把异常转成可读 Error。
+ *
+ * <p><b>⚠️ AbortError 不能一律当成「超时」（2026-11-16 修复）</b>：</p>
+ * <p>{@code AbortError} 有两种来源，语义完全不同：</p>
+ * <ol>
+ *   <li><b>本函数所在请求自己的超时定时器触发</b>（{@code rawFetch} 里的
+ *       {@code setTimeout(() => controller.abort(), timeout)}）→ 此刻说「请求超时」是对的；</li>
+ *   <li><b>调用方自己的 AbortController</b>（组件卸载、用户点取消、被新请求抢占等）→
+ *       此时提示「请求超时，请检查后端服务是否正常」是误归因，会把用户
+ *       引向排查后端（实际上后端好好的，是自己取消的）。</li>
+ * </ol>
+ * <p>区分方式：{@code rawFetch} 在使用调用方传入的 signal 时，会把它标记到
+ * {@code EXT_SIGNAL_ABORT} 上（见 rawFetch 的实现）。这里据此判断：外部取消
+ * 返回原文案「请求已取消」，只有自家超时才报「请求超时」。</p>
+ */
 function normalizeError(error: unknown, timeout: number): Error {
   if (isAbortError(error)) {
+    if (isExternalAbort(error)) {
+      return new Error('请求已取消')
+    }
     return new Error(`请求超时（${Math.round(timeout / 1000)} 秒），请检查后端服务是否正常`)
   }
   if (error instanceof TypeError && /fetch|network/i.test(error.message)) {
     return new Error('网络连接失败，请确认后端服务已启动')
   }
   return error instanceof Error ? error : new Error(String(error))
+}
+
+/**
+ * 判断该 AbortError 是否来自「调用方自己的 signal」而非本模块的超时定时器。
+ *
+ * <p>为什么用 WeakSet 而不是给 Error 打属性：DOMException 实例在部分宿主环境
+ * （旧 Safari / 某些 polyfill）上是冻结的，直接挂自定义属性会静默失败或抛错；
+ * WeakSet 只持弱引用，不会阻止这些短命对象被回收，也没有内存增长风险。</p>
+ */
+const EXT_SIGNAL_ABORTS = new WeakSet<object>()
+
+/** 该 AbortError 是否由调用方传入的 signal 触发（而非本模块的超时定时器） */
+function isExternalAbort(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && EXT_SIGNAL_ABORTS.has(error)
 }
 
 // ==================== 对外请求方法 ====================

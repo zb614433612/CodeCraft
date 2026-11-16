@@ -137,7 +137,20 @@ public class LogService {
                符合前端日志面板自上而下的阅读习惯；
             4. page 递增 = 向更早翻页（page=2 比 page=1 更旧）。
          */
-        final int maxCollect = Math.max(size, page * size);
+        /*
+          ⚠️ 必须用 long 计算再收敛（2026-11-16 修复）。
+
+          此前写 `int maxCollect = Math.max(size, page * size);` —— page 由 Controller
+          从请求参数直接透传，只校验了下限（page >= 1），没有上限。一旦 page 很大
+          （前端翻页 bug、脚本误传、恶意请求），page * size 会在 int 上溢出成负数：
+            page=500000, size=5000 → 2,500,000,000 > Integer.MAX_VALUE → 溢出为负数
+          于是 maxCollect 变负 → 下面 `while (window.size() > maxCollect)` 恒成立
+          → 每读一行就 removeFirst，窗口永远是空的 → 静默返回空页（不报错，最难排查）。
+
+          修复：用 long 计算并 clamp 到一个合理上限（不改变正常分页语义）。
+          同理 187 行的 (page - 1) * size 也改为 long 计算。
+         */
+        final int maxCollect = (int) Math.min(Integer.MAX_VALUE, Math.max(size, (long) page * size));
         final String upperLevel = (level != null) ? level.toUpperCase() : null;
 
         // 滑动窗口：保持「旧→新」顺序（新行 addLast 到尾部），超限时 removeFirst 丢弃最旧的
@@ -184,7 +197,9 @@ public class LogService {
         // 分页：从窗口尾部（最新）向头部（更旧）切页，返回给前端时保持「旧→新」
         List<LogLine> collected = new ArrayList<>(window);
         int collectedSize = collected.size();
-        int endExclusive = collectedSize - (page - 1) * size;   // 该页在窗口中的右边界（不含）
+        // ⚠️ (page - 1) * size 同样必须用 long 计算（2026-11-16 修复，防 int 溢出成负数）
+        long endExclusiveLong = collectedSize - (long) (page - 1) * size;   // 该页在窗口中的右边界（不含）
+        int endExclusive = (int) Math.min(collectedSize, Math.max(0, endExclusiveLong));
         if (endExclusive <= 0) {
             // 请求页已超出窗口最旧端（日志条数不足），返回空页但保留真实 totalCount
             return new SearchResult(targetDate, List.of(), totalCount, page, size);

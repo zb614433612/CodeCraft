@@ -648,7 +648,7 @@ import { blockedBy, isBlocked, taskStats } from '../utils/task-list'
 /* F05：子Agent面板（fork 子Agent 读库 + 委托调用心跳） */
 import SubAgentPanel from '../components/SubAgentPanel.vue'
 import type { DelegateCall, SubAgentRun } from '../utils/agent-event'
-import { formatDuration, subAgentStats } from '../utils/agent-event'
+import { formatDuration, isDelegateStale, subAgentStats } from '../utils/agent-event'
 /* F08：消息列表窗口化（尾部窗口 + 顶部占位块） */
 import { useTailWindow } from '../utils/virtual-list'
 import { readProjectFile, getProjectFileBlobUrl } from '../api/project'
@@ -1484,8 +1484,18 @@ const taskPopOpen = ref(false)
 const subAgentPopOpen = ref(false)
 /** 子Agent统计（运行中 / 已完成 / 失败），用于按钮徽章与浮层标题 */
 const subAgentStat = computed(() => subAgentStats(props.subAgents))
-/** 是否有委托调用在进行（心跳未过期） */
-const delegateActive = computed(() => props.delegateCalls.length)
+/**
+ * 是否有委托调用在进行。
+ *
+ * <p><b>⚠️ 必须过滤过期项（2026-11-16 修复「子Agent浮层一直不消失」）</b>：
+ * 这里原先直接 `props.delegateCalls.length`，注释却写着「心跳未过期」——
+ * 实现与注释不符。父级虽然已改为在 computed 里过滤，但本组件是纯展示层，
+ * 不能假设父级一定过滤干净（其他调用方/未来复用都可能传入原始列表）。
+ * 因此这里再兜一层，保证「按钮出现」这件事与「真的有活跃委托」严格一致。</p>
+ */
+const delegateActive = computed(
+  () => props.delegateCalls.filter(call => !isDelegateStale(call)).length
+)
 /** 子Agent按钮是否该显示：有任何一个子Agent或委托项才显示，避免空状态下塞一个死按钮 */
 const showSubAgentEntry = computed(() => subAgentStat.value.total > 0 || delegateActive.value > 0)
 

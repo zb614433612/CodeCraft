@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -95,6 +96,31 @@ public class CompactionService {
             log.info("压缩记录表初始化完成");
         } catch (Exception e) {
             log.warn("压缩记录表初始化失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 容器关闭时收敛预压缩线程池（2026-11-16 补）。
+     *
+     * <p>此前没有 @PreDestroy：虽然线程都设了 setDaemon(true)（JVM 退出不会卡住），
+     * 但 Spring 上下文重复创建（热部署、@SpringBootTest 多次刷新）时线程池会累积泄漏。
+     * 另外 {@code newFixedThreadPool} 用的是**无界队列**（LinkedBlockingQueue 默认容量
+     * Integer.MAX_VALUE），大量会话同时触发预压缩时任务会无限堆积 → 内存持续增长。
+     * 这里先 shutdownNow 中断在途任务并清空队列，再短暂等待收尾。</p>
+     */
+    @PreDestroy
+    public void destroy() {
+        try {
+            precompressExecutor.shutdownNow();
+            if (!precompressExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                log.warn("预压缩线程池在 5 秒内未能完全终止，已强制放弃等待");
+            }
+            log.info("预压缩线程池已关闭");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("关闭预压缩线程池时被中断");
+        } catch (Exception e) {
+            log.warn("关闭预压缩线程池失败: {}", e.getMessage());
         }
     }
 

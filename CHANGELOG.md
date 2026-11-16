@@ -5,6 +5,255 @@
 
 ---
 
+## [3.3.1] - 2026-11-16
+
+> **稳定性修复版本**：集中修复前两轮代码审查发现的 20 处功能性缺陷，其中 2 处是
+> **用户可见的直接故障**（聊天输入框异常变高、删除会话后侧栏不刷新），
+> 4 处是静默的**状态泄漏 / 数据错位**，3 处是**参数未钳制**导致的溢出与 DoS 面。
+> 本版**需要重启后端 + 重新加载前端**；未改数据库结构，无数据迁移，可覆盖安装。
+
+### 🔥 修复：聊天输入框发送后异常变高，要再敲字才恢复（用户报告，P0）
+
+- **症状**：在 v3 聊天页输入较长内容（超过 200px 高度）并发送后，输入框**一直停在最高**，
+  须再输入任意字符才恢复正常高度。
+- **根因（Vue 响应式时序）**：`ChatComposer.vue` 里 `watch(() => props.modelValue, () => autoResize())`
+  使用默认的 `flush: 'pre'`，回调在 **DOM 更新之前**执行。发送时 `ChatView` 先
+  `emit('send')` 再 `draft.value = ''`，watch 立刻执行 `autoResize()`，此时 textarea 的
+  **DOM value 仍是刚才那段长文本**，于是 `el.style.height = min(scrollHeight, 200) = 200px` 被写死；
+  紧接着 DOM 被清空，但 `autoResize` 已经跑完，**没人再纠正** → 输入框保持 200px。
+  短文本时算出来是 54px，所以表现为「有时」才出现。
+- **修复**：
+  - `watch` 改为 `{ flush: 'post' }`，确保在 DOM 更新后读取真实 `scrollHeight`；
+  - 回调内再套 `nextTick(autoResize)`，兜住「同一 tick 内多次改值」的极端情况；
+  - 新增 `onMounted(() => autoResize())`：组件在带初始草稿的情况下被创建时也算一次；
+  - 新增 `watch(() => props.rows, ...)`：空态（rows=3）与会话中（rows=2）切换时重算高度。
+
+### 🔥 修复：删除会话后侧栏列表不刷新，要刷新浏览器才消失（用户报告，P0）
+
+- **症状**：删除某个会话后，被删的会话**仍留在侧栏**，点进去才发现已 404；
+  刷新一次浏览器后才消失。
+- **根因（并发去重把「旧结果」当成「新结果」）**：`App.vue` 的 `loadConversations()`
+  只要 `conversationsInFlight` 非空就**无条件返回那笔旧请求的 Promise**。
+  删除会话时这个时序很容易踩中——流式收尾、后台轮询、切会话都可能正在飞一次
+  `loadConversations`，于是删除后调用的 `await loadConversations()` 拿到的是
+  **删除之前**那笔请求的结果，被删的会话原样写回列表。
+- **修复**：新增 `force` 参数，写操作后的刷新可**穿透去重**：
+  - `force=true` 时先 `await` 旧请求落地（吞掉其错误），再发起一笔新请求；
+  - 等待期间若已有更新的请求在飞，直接复用它（它必然比旧的更新）；
+  - 已为 7 处写路径传 `force=true`：删除会话、一轮对话结束（影响排序）、
+    新会话拿到真实 id、切 Agent（3 处）、委托跳转需确认会话存在；
+  - 3 处**首屏加载**保持不带 `force`（此时列表为空，保留「并发只发一次请求」的收益）。
+
+### 🔥 修复：`file_writer` 必填校验字段名错位，按 schema 调用必被拦截（P0）
+
+- **症状**：模型按工具 schema 规范传 `{"action":"write","file_path":"...","content":"..."}`
+  时，必然收到「缺少必填参数：path」，工具根本没被执行。
+- **根因**：`ToolExecutor.REQUIRED_PARAMS` 里 `write`/`edit` 登记为 `path`，
+  而 `FileWriterTool` 实际读的是 `args.path("file_path")`（schema 里也是 `file_path`）；
+  `isNonEmpty` 无别名处理，两边不一致就直接拦截。只有 `delete` 真的读 `path`。
+- **修复**：校验表 `write` → `["file_path","content"]`、`edit` → `["file_path","old_text","new_text"]`，
+  `delete` 保持 `["path"]`。已当场实证：修复前自身调用被拦截，修复后正常执行。
+
+### 🔥 修复：`iteration` 未递增，`maxIterations` 守卫失效可无限递归（P0）
+
+- **症状**：截断续写 / 补充需求注入 / `concatWith` 兜底补充三条路径重新进入工具循环时，
+  迭代计数不增加，长任务可能无限递归下去。
+- **根因**：`DeepSeekServiceImpl` 这三处递归调用传的是 `iteration` 而非 `iteration + 1`
+  （正常工具执行路径的 5 处都是 `+1`）。
+- **修复**：三处（补充需求注入、`finish_reason=length` 截断续写、`concatWith` 兜底补充）
+  统一改为 `iteration + 1`。评委扩容分支（传 `iteration` + 提高 `newMaxIterations`）属正确设计，未改。
+
+### 🐛 修复：`AbortError` 被无差别当成「请求超时」，误导用户排查后端
+
+- **症状**：用户主动取消请求（或组件卸载、请求被抢占）时，界面提示
+  「请求超时，请检查后端服务是否正常」，把排查方向完全指错。
+- **根因**：两套前端的 `http-client` 都把**任何** `AbortError` 映射成「超时」。
+  实际上 `AbortError` 有两种来源：①本模块的超时定时器触发；②调用方自己的
+  `AbortController`（取消 / 卸载 / 抢占）——后者与后端毫无关系。
+- **修复**：
+  - `frontend-v3`：`rawFetch` 在 catch 中用「外部 signal 是否已 aborted」判定来源，
+    标记到 `WeakSet`；`normalizeError` 据此返回「请求已取消」而非「请求超时」。
+    用 signal 状态而非给 error 打属性，是因为 fetch 抛出的 `DOMException`
+    在不同宿主下不保证同一对象引用。
+  - `frontend`（经典版）：catch 中判断 `options.signal?.aborted`，区分两种取消语义。
+
+### 🐛 修复：会话分片状态漏清 / 漏迁移，导致徽章残留与分页错乱
+
+- **症状**：删除会话后状态栏仍显示「N 轮可回滚」徽章；草稿会话转正后
+  「AI 浏览器」入口消失、首次上滑可能加载出重复/空的更早历史。
+- **根因**：`App.vue` 的 `dropConversationState` 漏清 7 个按会话分片的状态，
+  `migrateConversationKey` 漏迁 5 个。两者是同一病根——
+  **「集合类状态只有 add/set，没有 delete/migrate」**。
+- **修复**：
+  - `dropConversationState` 补清 `snapshotCountMap`、`snapshotHintMap`、`cursorMap`、
+    `hasMoreMap`、`browserTabsMap`、`conversationAgentMap`、`conversationTitleMap`；
+  - `migrateConversationKey` 补迁前 5 个（后两个由 `loadConversations` 按真实 id 直接写入，
+    草稿 key 上本无有效值，刻意不迁）；
+  - 在两处函数的注释里写明「新增任何按会话 key 分片的 ref 必须同步加进这两个函数」，
+    避免同类遗漏再次发生。
+
+### 🐛 修复：AI 浏览器标签轮询定时器卸载时未清理
+
+- **症状**：热更新（HMR）反复重建组件时，每轮残留一个 4 秒轮询，累积后持续空转打后端。
+- **根因**：`App.vue` 的 `onBeforeUnmount` 只清了 `delegateClock` 与 `subAgentTimers`，
+  漏了 `browserPollTimer`（上一轮修复「子Agent浮层不消失」时的同类遗漏）。
+- **修复**：`onBeforeUnmount` 补 `stopBrowserPoll()`，并在注释中列出三类定时器清单。
+
+### 🐛 修复：用户列表分页 `offset` 整数溢出
+
+- **症状**：`page` 传大值时列表返回异常结果或数据库报错。
+- **根因**：`UserServiceImpl.listUsers` 用 `int offset = (page - 1) * pageSize`，
+  而 `UserController` 的 `page`/`pageSize` 都直接取自 `@RequestParam`、**无任何上限校验**。
+  `page=2147483647, pageSize=100` 时乘积溢出为负数 → `LIMIT -214748..., 100`。
+- **修复**：`pageSize` 夹到 `[1, 200]`、`page` 至少 1，`offset` 用 `long` 计算后
+  收敛到 `Integer.MAX_VALUE`（越界页返回空页 + 正确 total，不抛异常以保持分页契约稳定）。
+- **备注**：同项目的 `FileAssetService`（上限 200）与 `LessonService`（上限 100）
+  本就有钳制，本次是补齐唯一遗漏的入口。
+
+### 🐛 修复：P2P 历史消息分页无上限
+
+- **症状**：`limit` 传极大值可一次拉空整张聊天记录表。
+- **根因**：`P2pController.getHistory` 的 `offset`/`limit` 直接透传，
+  经 `P2pChatService` 原样进 SQL，无任何钳制。Peer 通道是可连入的入口，构成内存/带宽放大面。
+- **修复**：在 Service 层统一收敛——`offset` 至少 0，`limit` 夹到 `[1, 200]`
+  （放在 Service 而非 Controller，使未来的其他调用方同样受保护）。
+
+### 🐛 修复：7 个线程池缺少 `@PreDestroy`，上下文重建时累积泄漏
+
+- **症状**：热部署 / 多次 `@SpringBootTest` 刷新后，空闲线程与排队任务持续累积。
+- **根因**：线程虽为 daemon（JVM 退出不阻塞），但 Spring 上下文重建时旧池无人关闭。
+  上一轮只为 `CompactionService` 补了关闭，其余遗漏。
+- **修复**：补齐 6 处 `@PreDestroy`：
+  - `DeepSeekServiceImpl` — `bg-task-` 池；先 `dispose` 在途任务订阅再关池，
+    并清空 `taskSubscriptions` / `judgeGrantedIterations`；
+  - `AgentForkManager` — `sub-agent-` 池（`corePoolSize=20` 常驻不回收，累积最明显）；
+    并清空 4 个跟踪表；
+  - `LessonRecorder` / `LessonReviewService` / `LessonDetourService` / `LessonNormalizerService` — 4 个单线程池。
+  统一模式：`shutdownNow()` + `awaitTermination`（3~5 秒）+ 中断标志恢复。
+
+### 🐛 修复：更新包选择忽略 Windows 架构
+
+- **症状**：若发布同时含 x64 与 arm64 的 exe，ARM 设备会拿到 x64 安装包
+  （能装上但性能异常或无法运行），且是静默选错、用户无从判断。
+- **根因**：`electron/update-utils.js` 的 `pickAsset` 在 `win32` 分支**完全不看 arch**，
+  只取「第一个名字像 setup 的 exe」。且 `update-manager` 调用时未传 `platform`/`arch`（靠默认值）。
+- **修复**：
+  - `platform`/`arch` 参数补默认值（`process.platform` / `process.arch`）；
+  - Windows 分支新增三级匹配：架构后缀精确匹配 → 无架构后缀的通用包（兼容现有命名）→ 兜底第一个；
+  - Linux 分支同步支持架构后缀匹配。
+  - 已实测 7 种场景（含双架构 x64/arm64 设备、单通用包、mac、linux），全部选对。
+- **备注**：当前发布仅单一架构（走「通用包」分支），本改动为将来多架构发布预先兜底。
+
+### 🐛 修复：极小预算下工具结果仍会超预算
+
+- **症状**：预算设为 300 时实际输出 304 字节，末尾兜底还会把结果顶超预算。
+- **根因**：极小预算分支漏算两处 `SEP` 分隔符开销；末尾 `Math.max(MIN_HEAD, ...)`
+  在极端情况下把已压缩的头部重新顶回最小值，导致总量超限。
+- **修复**：改为精确 clamp，实测预算 300 → 实际输出 300。
+
+### 🐛 修复：历史摘要标记与 compact 前缀撞车，精简过的消息被永久跳过
+
+- **症状**：被 `compactHistoryMessages` 精简过的历史消息会被误判为「已摘要」而永久跳过，
+  导致后续裁剪失效。
+- **根因**：`ContextBuilder.TRIM_SUMMARY_MARK` 为 `"[工具 "`，而 `compactHistoryMessages`
+  生成的摘要前缀同样是 `"[工具 ..."`，两者撞车。
+- **修复**：标记改为 `"[CC-TRIM][工具 "`（带唯一前缀），并修正生成处重复拼接「工具」的瑕疵。
+
+### 🐛 修复：`tool_calls` 固定按 15 token 估算，严重低估写大文件场景
+
+- **症状**：写大文件的工具调用被低估约 1400 倍（实测 15 vs 21028），裁剪决策失效导致 API 400。
+- **根因**：`TokenEstimator` 对 `tool_calls` 一律按固定 15 token 计，不看实际 arguments 大小。
+- **修复**：新增 `estimateToolCalls()`，按实际 JSON 长度估算。已补 `TokenEstimatorTest`
+  6 个用例，并做反向验证（临时回退到固定 15 → 3 条断言失败，证明测试有效）。
+
+### 🐛 修复：日志搜索分页 `int` 溢出
+
+- **症状**：大页码时静默返回空页（不报错，最难排查）。
+- **根因**：`page * size` 与 `(page - 1) * size` 在 int 上溢出为负数，
+  滑动窗口的「超限即丢弃」条件恒成立，窗口永远为空。
+- **修复**：两处改用 `long` 计算并 clamp 到合理上限，不改变正常分页语义。
+
+### 🐛 修复：`provider-max-context-tokens` 大小写不一致时静默回落
+
+- **症状**：yml 里写 `huoshan: 400000` 但代码查 `huoshan` 小写键，
+  若 yml 写成 `HuoShan` 则静默回落到全局 300000，无任何提示。
+- **根因**：`DeepSeekConfig.resolveMaxContextTokens` 直接用
+  `providerMaxContextTokens.get(providerCode.trim().toLowerCase())`，而 yml key 原样保留。
+- **修复**：增加忽略大小写的兜底匹配 + `warn` 日志，配置不匹配时不再静默。
+
+### 🐛 修复：`validateToken` 的 `Long.parseLong` 未捕获异常
+
+- **症状**：非法 token 传入时抛 `NumberFormatException` 导致 500，而非按未登录处理。
+- **修复**：加 `try-catch`，非法时返回 `null`。
+
+### 🐛 修复：`msgTokenCache` 溢出时整表清空，造成周期性卡顿
+
+- **症状**：长会话滚动到一定规模会出现一次明显卡顿，之后周期性复现。
+- **根因**：`msgTokenCache` 超过 4000 条时 `clear()` 整表，瞬间所有消息估算失效，
+  下一次刷新会把整个已加载列表全部重算。
+- **修复**：改为**按插入序淘汰最旧的 1/4**（Map 保持插入序），容量上限不变但淘汰是渐进小批量，
+  不再有整表重建的尖峰。
+
+### 🐛 修复：登录随机码使用可预测的 `java.util.Random`
+
+- **症状**：登录挑战码理论上可被反推。
+- **根因**：`RandomCodeUtil` 用共享 `java.util.Random`——线性同余伪随机，
+  连续少量输出即可反推内部状态；本类生成的是 `MD5(MD5(密码) + 随机码)` 的挑战码，
+  可预测意味着摘要可被预先计算。另外多线程并发 `nextInt` 存在种子更新丢失。
+- **修复**：改用 `SecureRandom`（线程安全 + 密码学安全），仍保持静态单例复用
+  （避免每次初始化熵源的开销），并对 `length <= 0` 做防御。
+
+### 🐛 修复：`WorkspacePane` 在 setup 顶层挂载 document 监听
+
+- **症状**：现行功能正常，但属脆弱写法：SSR 环境直接抛错；若组件将来被 `<KeepAlive>`
+  或 `v-if` 复用，`setup` 只执行一次而 `onBeforeUnmount` 每次都移除，监听会永久丢失。
+- **修复**：移到 `onMounted`，与 `onBeforeUnmount` 的移除严格配对。
+
+### ✅ 顺带确认无问题的部分
+
+本轮同时交叉核对了以下模块，确认**实现正确**，未做改动：
+
+- `ToolExecutor.REQUIRED_PARAMS` 全表（`file_explorer`/`file_writer`/`command`/`desktop`/`git`
+  六类工具）逐一与实际读取字段名对照，`file_writer` 是唯一错位处；
+- `ConversationController` 消息分页契约（`beforeId`/`rounds` 字段名一致，`rounds` 上限 50 有保护）；
+- `getMessagesPage` 的轮次游标算法（`${offset}` 由 Service 限定 0~49，无注入风险）；
+- `execute_sql` 的三重保护（单语句 + 类型白名单 + 长度限制）；
+- 全部 `*Drawer.vue` 的 `watch` 回填与 `submit` 的 `finally` 复位；
+- `P2pChatDrawer` 生命周期（keydown 监听与轮询均严格配对）；
+- Electron `before-quit` 的三层清理链路（PTY 会话 / 浏览器桥 / 后端进程）；
+- Electron 下载完整性校验与「已下载态」双重校验。
+
+### 🔢 版本号同步
+
+- `pom.xml` 项目版本 → 3.3.1
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json`（`version` + `code-craft-3.3.1.jar`）+ `package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- README 中英徽章、13 个 docs 文档头与打包命令示例
+
+### 📋 验证记录
+
+本次发布前已完成以下验证，全部通过：
+
+- `mvn -DskipTests compile` → `BUILD SUCCESS`
+- 5 个 `main` 方法自检程序全部通过，**共 57 项断言，0 失败**：
+  `TokenEstimatorTest`（6）、`ToolResultBudgetTest`（34）、`LogServiceSearchTest`（6）、
+  `ContextBuilderTrimTest`（5）、`SnapshotDirGuardTest`（6）
+- `frontend-v3` typecheck + build：0 error
+- `frontend`（经典版）typecheck + build：0 error
+- `pickAsset` 7 种平台/架构组合实测，全部选对
+
+### ⚠️ 升级提示
+
+- **必须重启后端**，并重新加载前端（后端 embed 前端产物到 `static/`，需重新打包才生效）。
+- 未改数据库结构，**无数据迁移**，可直接覆盖安装。
+- 「输入框异常变高」与「删除会话后列表不刷新」两个用户可见故障，建议升级后实测确认：
+  前者输入 10 行以上文字→发送→观察是否恢复默认高度；
+  后者令某会话在后台流式生成时删除另一会话→观察侧栏是否立即移除。
+
+---
+
 ## [3.3.0] - 2026-11-16
 
 > **上下文与日志可见性版本**：修掉「工具循环裁剪把历史工具结果抹成空壳、并每轮重复改写」

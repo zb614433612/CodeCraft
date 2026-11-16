@@ -4545,6 +4545,20 @@ watch(isLoadingMessages, (loading) => {
 
 const selectConversation = (id: string) => {
   currentConversationId.value = id
+  /*
+    ★ 切换会话必须重置子Agent列表（2026-11-16 修复「子Agent 一直显示」。
+
+    `agentInfos` 是全局单 ref、从未被清空过：只要某个会话曾经 fork 过子Agent，
+    侧栏头部那个「子Agent」tab（v-if="agentInfos.length > 0"）就永久存在，
+    而且会串到别的会话里 —— 用户看到的是「上个会话的子Agent」。
+    更糟的是部分条目状态停在 running，面板里一直转圈。
+
+    这里做最保守也最正确的处理：切会话即清空。理由是这个列表本来就是
+    「当前会话实时流」的派生数据，历史回放没有对应数据源
+    （后端 AgentForkManager 从不发 agent_event，见 utils 层同类注释）。
+    清空后若新会话又有子Agent事件，会重新填充，不影响实时展示。
+  */
+  agentInfos.value = []
   // ★ 切会话：重置滚动状态为「跟随底部」。否则上一个会话向上翻历史后 autoScrollToBottom=false，
   //   本次进入 scrollToBottom 会直接 return → 界面停在第一条消息（表现为「没定位到最新记录」）
   autoScrollToBottom.value = true
@@ -4563,6 +4577,8 @@ const selectConversation = (id: string) => {
 
 const startNewChat = () => {
   const id = `local-${Date.now()}`
+  // 新会话没有任何子Agent：清掉上一个会话残留的列表（否则侧栏「子Agent」tab 会一直挂着）
+  agentInfos.value = []
   const conv: Conversation = {
     id,
     title: '编码对话',
@@ -5645,6 +5661,48 @@ const sendMessage = async (textOverride?: string) => {
     //      或 Vue 响应式更新时序问题导致视图未更新，这里再次清空确保万无一失）
     if (inputMessage.value !== '') {
       inputMessage.value = ''
+    }
+    /*
+      ★ 兜底清理「永远 pending」的工具卡片（2026-11-16 修复）。
+
+      背景：`tool_call_start` 会给每个工具 push 一条 pending:true 的占位卡片，
+      正常路径靠后续的 toolResult 事件把 pending 置为 false。但工具有三种
+      「结果事件永远不来」的情形：执行抛异常、manual 模式下用户拒绝授权、
+      任务被停止 / 中断 / 连接断开。此时卡片就永久停在「执行中」的转圈状态，
+      刷新页面前不会恢复 —— 用户会以为任务卡住了。
+
+      修复口径：流已结束（finally 必定执行），此刻若还有 pending 卡片，
+      它一定不会再有结果事件了，统一标记完成并把文案改成「未返回结果」。
+      `tr.pending === false` 后卡片按普通结果渲染，不再转圈。
+    */
+    const unsettledIdx = (assistantMsg.toolResults || []).findIndex(tr => tr.pending)
+    if (unsettledIdx !== -1) {
+      for (const tr of assistantMsg.toolResults || []) {
+        if (!tr.pending) continue
+        tr.pending = false
+        // 不覆盖已有正文（极端时序下可能已写入部分内容），只在空文案时补提示
+        if (!tr.content) {
+          tr.content = `> **${tr.toolName || '工具'}**\n\n【未返回结果】任务在本步骤结束（可能被中止、授权未通过或执行异常）。`
+        }
+      }
+      flushMessageUpdate(convId, assistantMsg.id)
+    }
+    /*
+      ★ 兜底清理失效的待审批面板（2026-11-16 修复）。
+
+      `ask_user` 事件会 setPendingQuestion 出审批面板，正常路径靠用户提交回执
+      （handlePermissionAction / submitPendingAnswer / handleIterationDecision 里清）。
+      但任务可能在这之前就结束：LLM 报错、生成失败、连接断开、用户点「停止生成」。
+      此时面板永久挂在界面上，uuid 已失效，点「同意/拒绝」都不会有反应 ——
+      与 v3 完全相同的缺陷。
+
+      判据：流已结束（finally 必定执行）且该会话仍有待审批问题，说明本轮没等到有效回执。
+      迭代确认面板（askType=iteration_confirm）同样清掉：任务都结束了，再让用户
+      选择「继续并扩容」没有意义（后端也没有活着的任务可以扩容）。
+    */
+    if (pendingQuestions.has(convId)) {
+      setPendingQuestion(convId, null)
+      cleanupPermissionPanel()
     }
     stopElapsedTimer()
     setStreamStatus(convId, '')

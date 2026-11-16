@@ -121,6 +121,20 @@ public class LessonReviewService {
                 (r, e) -> log.warn("对话复盘任务队列已满，丢弃一条（不阻塞主流程）"));
     }
 
+    /** 容器关闭时收敛对话复盘线程池（2026-11-16 补；daemon 不阻塞退出，但上下文重建会累积） */
+    @jakarta.annotation.PreDestroy
+    public void shutdown() {
+        try {
+            executor.shutdownNow();
+            if (!executor.awaitTermination(3, TimeUnit.SECONDS)) {
+                log.warn("对话复盘线程池未在 3 秒内终止，已放弃等待");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("关闭对话复盘线程池时被中断");
+        }
+    }
+
     // ============================================================
     // 对外入口：异步复盘一轮对话
     // ============================================================

@@ -5,6 +5,296 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.1] - 2026-11-16
+
+> **Stability release**: fixes 20 functional defects found in the previous two review rounds. Two of
+> them are **directly user-visible failures** (chat input growing abnormally tall, session list not
+> refreshing after deletion), four are silent **state leaks / data misplacement**, and three are
+> **unclamped parameters** causing integer overflow and DoS exposure.
+> This release **requires a backend restart and a frontend reload**; no database changes, no migration,
+> in-place upgrade works.
+
+### 🔥 Fixed: chat input grows abnormally tall after sending, only recovers after typing again (user-reported, P0)
+
+- **Symptom**: on the v3 chat page, after typing a long message (taller than 200px) and sending it,
+  the input box **stays at maximum height** until any further character is typed.
+- **Root cause (Vue reactivity timing)**: in `ChatComposer.vue`,
+  `watch(() => props.modelValue, () => autoResize())` used the default `flush: 'pre'`, which runs the
+  callback **before the DOM is updated**. On send, `ChatView` first `emit('send')` then
+  `draft.value = ''`; the watch fires immediately and `autoResize()` reads a textarea whose
+  **DOM value is still the long text**, so `el.style.height = min(scrollHeight, 200) = 200px` is
+  written permanently. Then the DOM is cleared, but `autoResize` has already finished and
+  **nothing corrects it** → the box stays at 200px. With short text the computed height is 54px,
+  which is why it only happened "sometimes".
+- **Fix**:
+  - `watch` changed to `{ flush: 'post' }` so `scrollHeight` is read after the DOM updates;
+  - the callback also wraps `nextTick(autoResize)` to cover multiple value changes within one tick;
+  - added `onMounted(() => autoResize())` for components created with a pre-filled draft;
+  - added `watch(() => props.rows, ...)` so switching between empty state (rows=3) and in-session
+    (rows=2) recomputes the height.
+
+### 🔥 Fixed: session list not refreshing after deletion, only cleared by a browser refresh (user-reported, P0)
+
+- **Symptom**: after deleting a session it **remained in the sidebar**; clicking it revealed a 404.
+  Only a full browser refresh removed it.
+- **Root cause (concurrent de-duplication returned the "stale" result)**: `App.vue`'s
+  `loadConversations()` unconditionally returned the in-flight promise whenever
+  `conversationsInFlight` was non-null. This timing is easy to hit when deleting — streaming
+  finalization, background polling, or session switching may all have a `loadConversations` in
+  flight — so the `await loadConversations()` after deletion received the result of the request
+  issued **before** the deletion, writing the deleted session back into the list.
+- **Fix**: added a `force` parameter so post-write refreshes can **bypass de-duplication**:
+  - with `force=true` it first awaits the in-flight request (swallowing its error), then issues a new one;
+  - if a newer request starts while waiting, it is reused (it is necessarily fresher);
+  - `force=true` applied to 7 write paths: session deletion, end of a conversation round
+    (affects ordering), new session acquiring its real id, agent switching (3 places), and
+    delegate navigation that must confirm the session exists;
+  - the 3 **first-paint** loads intentionally keep no `force` (the list is empty then, so the
+    "one request per concurrent refresh" benefit is preserved).
+
+### 🔥 Fixed: `file_writer` required-parameter field name mismatch blocked every schema-correct call (P0)
+
+- **Symptom**: calling `{"action":"write","file_path":"...","content":"..."}` exactly as the tool
+  schema specifies always produced "missing required parameter: path" and the tool never ran.
+- **Root cause**: `ToolExecutor.REQUIRED_PARAMS` registered `path` for `write`/`edit`, while
+  `FileWriterTool` actually reads `args.path("file_path")` (and the schema declares `file_path`).
+  `isNonEmpty` has no alias handling, so the mismatch rejects the call outright. Only `delete`
+  genuinely reads `path`.
+- **Fix**: table changed to `write` → `["file_path","content"]`, `edit` →
+  `["file_path","old_text","new_text"]`, `delete` keeps `["path"]`. Verified live: rejected before
+  the fix, executed normally after.
+
+### 🔥 Fixed: `iteration` not incremented, `maxIterations` guard defeated, unbounded recursion possible (P0)
+
+- **Symptom**: re-entering the tool loop from truncation continuation, supplementary-requirement
+  injection, or the `concatWith` fallback did not increase the iteration counter, so long tasks
+  could recurse indefinitely.
+- **Root cause**: those three recursive calls in `DeepSeekServiceImpl` passed `iteration` instead of
+  `iteration + 1` (the five normal tool-execution paths all use `+1`).
+- **Fix**: all three paths now pass `iteration + 1`. The judge-expansion branches (passing
+  `iteration` while raising `newMaxIterations`) are correct by design and were left untouched.
+
+### 🐛 Fixed: `AbortError` indiscriminately reported as "request timeout", misdirecting users to the backend
+
+- **Symptom**: when the user cancelled a request (or a component unmounted, or a request was
+  superseded), the UI showed "request timed out, please check that the backend is running",
+  pointing diagnosis in the wrong direction.
+- **Root cause**: both frontends' `http-client` mapped **any** `AbortError` to "timeout". In reality
+  `AbortError` has two sources: (1) this module's own timeout timer, and (2) the caller's own
+  `AbortController` (cancel / unmount / preemption) — the latter has nothing to do with the backend.
+- **Fix**:
+  - `frontend-v3`: `rawFetch` determines the source in its catch block via
+    "is the external signal aborted" and records it in a `WeakSet`; `normalizeError` then reports
+    "request cancelled" instead of "request timed out". Signal state is used rather than tagging the
+    error object because the `DOMException` thrown by `fetch` is not guaranteed to be the same
+    instance across hosts.
+  - `frontend` (classic): the catch block checks `options.signal?.aborted` to distinguish the two
+    cancellation semantics.
+
+### 🐛 Fixed: per-session sharded state left unclear / unmigrated, causing stale badges and broken pagination
+
+- **Symptom**: after deleting a session the status bar still showed the "N rollback-able rounds"
+  badge; after a draft session became real, the "AI browser" entry disappeared and the first
+  scroll-up could load duplicate or empty older history.
+- **Root cause**: `App.vue`'s `dropConversationState` failed to clear 7 per-session sharded states,
+  and `migrateConversationKey` failed to migrate 5. Both share one root cause —
+  **"collection state only has add/set, no delete/migrate"**.
+- **Fix**:
+  - `dropConversationState` now also clears `snapshotCountMap`, `snapshotHintMap`, `cursorMap`,
+    `hasMoreMap`, `browserTabsMap`, `conversationAgentMap`, `conversationTitleMap`;
+  - `migrateConversationKey` now migrates the first five (the latter two are written directly by
+    `loadConversations` under the real id and never hold valid values under a draft key, so they are
+    intentionally excluded);
+  - both functions now state in comments that any new per-session-keyed ref must be registered in
+    both places, preventing a repeat of the same omission.
+
+### 🐛 Fixed: AI browser tab polling timer not cleared on unmount
+
+- **Symptom**: with hot module replacement repeatedly recreating the component, one 4-second polling
+  timer leaked per cycle, accumulating into continuous idle backend requests.
+- **Root cause**: `App.vue`'s `onBeforeUnmount` cleared `delegateClock` and `subAgentTimers` but
+  missed `browserPollTimer` (the same class of omission as the "sub-agent overlay never disappears"
+  fix in the previous round).
+- **Fix**: added `stopBrowserPoll()` to `onBeforeUnmount` and documented the three timer kinds inline.
+
+### 🐛 Fixed: integer overflow in user-list pagination `offset`
+
+- **Symptom**: a large `page` value produced anomalous results or a database error.
+- **Root cause**: `UserServiceImpl.listUsers` computed `int offset = (page - 1) * pageSize`, while
+  `UserController` takes `page`/`pageSize` straight from `@RequestParam` with **no upper bound**.
+  With `page=2147483647, pageSize=100` the product overflows to negative → `LIMIT -214748..., 100`.
+- **Fix**: `pageSize` clamped to `[1, 200]`, `page` at least 1, and `offset` computed in `long` then
+  clamped to `Integer.MAX_VALUE` (an out-of-range page returns an empty page with a correct total
+  instead of throwing, keeping the pagination contract stable).
+- **Note**: `FileAssetService` (cap 200) and `LessonService` (cap 100) already had clamping; this
+  completes the only missing entry point.
+
+### 🐛 Fixed: P2P history pagination without any bound
+
+- **Symptom**: a huge `limit` could pull the entire chat-history table in one call.
+- **Root cause**: `P2pController.getHistory` passed `offset`/`limit` straight through, reaching SQL
+  unchanged via `P2pChatService`. The peer channel is an externally connectable surface, making this
+  a memory/bandwidth amplification vector.
+- **Fix**: clamped in the service layer — `offset` at least 0, `limit` clamped to `[1, 200]`
+  (placed in the service, not the controller, so future callers are protected too).
+
+### 🐛 Fixed: 7 thread pools missing `@PreDestroy`, leaking across context rebuilds
+
+- **Symptom**: after hot deployment or repeated `@SpringBootTest` refreshes, idle threads and queued
+  tasks kept accumulating.
+- **Root cause**: the threads are daemons (so JVM exit is not blocked), but nothing closed the old
+  pools when a Spring context was rebuilt. The previous round only added shutdown to
+  `CompactionService`.
+- **Fix**: added 6 missing `@PreDestroy` methods:
+  - `DeepSeekServiceImpl` — the `bg-task-` pool; disposes in-flight task subscriptions before
+    shutting down, and clears `taskSubscriptions` / `judgeGrantedIterations`;
+  - `AgentForkManager` — the `sub-agent-` pool (`corePoolSize=20` never reclaimed, the most visible
+    accumulation); also clears its 4 tracking maps;
+  - `LessonRecorder` / `LessonReviewService` / `LessonDetourService` / `LessonNormalizerService` —
+    four single-thread pools.
+  Uniform pattern: `shutdownNow()` + `awaitTermination` (3–5s) + interrupt-flag restoration.
+
+### 🐛 Fixed: update-asset selection ignored Windows architecture
+
+- **Symptom**: if a release shipped both x64 and arm64 exes, an ARM machine would receive the x64
+  installer (it installs but performs badly or fails to run), silently and with no way for the user
+  to tell.
+- **Root cause**: the `win32` branch of `pickAsset` in `electron/update-utils.js` **ignored `arch`
+  entirely**, taking simply the first exe that looked like a setup. `update-manager` also called it
+  without passing `platform`/`arch` (relying on defaults).
+- **Fix**:
+  - `platform`/`arch` now default to `process.platform` / `process.arch`;
+  - the Windows branch gained three-tier matching: exact architecture suffix → generic package
+    without any architecture suffix (compatible with current naming) → first as a last resort;
+  - the Linux branch gained the same architecture-suffix matching.
+  - Verified across 7 scenarios (dual-arch x64/arm64 machines, a single generic package, macOS,
+    Linux) — all selected correctly.
+- **Note**: the current release has only one architecture (taking the "generic package" branch); this
+  change is groundwork for future multi-architecture releases.
+
+### 🐛 Fixed: tool result still exceeded budget under a tiny budget
+
+- **Symptom**: with a budget of 300 the output was 304 bytes, and the trailing fallback could push
+  the result over budget again.
+- **Root cause**: the tiny-budget branch omitted two `SEP` separator costs, and the trailing
+  `Math.max(MIN_HEAD, ...)` could push the already-compressed head back up to the minimum.
+- **Fix**: replaced with exact clamping; verified 300 → 300.
+
+### 🐛 Fixed: history summary marker collided with the compact prefix, permanently skipping compacted messages
+
+- **Symptom**: history messages compacted by `compactHistoryMessages` were misidentified as
+  "already summarized" and permanently skipped, disabling subsequent trimming.
+- **Root cause**: `ContextBuilder.TRIM_SUMMARY_MARK` was `"[工具 "`, while `compactHistoryMessages`
+  generated the same `"[工具 ..."` prefix — the two collided.
+- **Fix**: the marker is now `"[CC-TRIM][工具 "` (unique prefix), and the duplicated "工具" assembly
+  at the generation site was corrected.
+
+### 🐛 Fixed: `tool_calls` estimated at a flat 15 tokens, severely underestimating large file writes
+
+- **Symptom**: writing large files was underestimated by roughly 1400× (15 vs 21028 measured),
+  breaking trimming decisions and causing API 400 errors.
+- **Root cause**: `TokenEstimator` always counted `tool_calls` as a flat 15 tokens, ignoring the
+  actual argument size.
+- **Fix**: added `estimateToolCalls()` estimating from the real JSON length. Added 6
+  `TokenEstimatorTest` cases plus a reverse verification (temporarily reverting to the flat 15 made
+  3 assertions fail, proving the test is effective).
+
+### 🐛 Fixed: `int` overflow in log-search pagination
+
+- **Symptom**: large page numbers silently returned an empty page (no error, hardest to diagnose).
+- **Root cause**: `page * size` and `(page - 1) * size` overflowed to negative in `int`, so the
+  sliding window's "over limit → discard" condition always held and the window was always empty.
+- **Fix**: both computations now use `long` and clamp to a sane upper bound, preserving normal
+  pagination semantics.
+
+### 🐛 Fixed: `provider-max-context-tokens` silently fell back on case mismatch
+
+- **Symptom**: writing `huoshan: 400000` in yml but looking up the lowercase key meant that a yml
+  entry like `HuoShan` silently fell back to the global 300000 with no warning.
+- **Root cause**: `DeepSeekConfig.resolveMaxContextTokens` used
+  `providerMaxContextTokens.get(providerCode.trim().toLowerCase())` directly while yml keys are
+  preserved verbatim.
+- **Fix**: added a case-insensitive fallback lookup plus a `warn` log so mismatches are no longer silent.
+
+### 🐛 Fixed: `Long.parseLong` in `validateToken` without exception handling
+
+- **Symptom**: an invalid token threw `NumberFormatException`, producing a 500 instead of treating
+  the caller as unauthenticated.
+- **Fix**: wrapped in `try-catch`, returning `null` for invalid input.
+
+### 🐛 Fixed: `msgTokenCache` clearing the whole table on overflow, causing periodic stalls
+
+- **Symptom**: scrolling a long session produced one noticeable stall, recurring periodically.
+- **Root cause**: `msgTokenCache` called `clear()` on crossing 4000 entries, instantly invalidating
+  every estimate so the next refresh recomputed the entire loaded list.
+- **Fix**: now evicts **the oldest quarter in insertion order** (Map preserves insertion order),
+  keeping the same capacity ceiling but making eviction gradual rather than one full rebuild spike.
+
+### 🐛 Fixed: login challenge code used predictable `java.util.Random`
+
+- **Symptom**: the login challenge code was theoretically reversible.
+- **Root cause**: `RandomCodeUtil` used a shared `java.util.Random` — a linear congruential PRNG
+  whose internal state can be reconstructed from a short output sequence. This class generates the
+  `MD5(MD5(password) + code)` challenge, so predictability allows precomputing the digest.
+  Concurrent `nextInt` calls also lose seed updates.
+- **Fix**: switched to `SecureRandom` (thread-safe and cryptographically secure) while keeping the
+  static singleton reuse (to avoid re-initializing the entropy source), plus a guard for `length <= 0`.
+
+### 🐛 Fixed: `WorkspacePane` attached a document listener at setup top level
+
+- **Symptom**: functionality was correct today, but the pattern was fragile: SSR throws outright,
+  and if the component were later wrapped in `<KeepAlive>` or toggled by `v-if`, `setup` runs only
+  once while `onBeforeUnmount` removes the listener every unmount — losing it permanently.
+- **Fix**: moved to `onMounted` so registration and removal are strictly paired.
+
+### ✅ Verified as already correct
+
+The following modules were cross-checked this round and confirmed **correct**, left unchanged:
+
+- The entire `ToolExecutor.REQUIRED_PARAMS` table (all six tool families) checked field by field
+  against what each tool actually reads; `file_writer` was the only mismatch;
+- `ConversationController` message-pagination contract (`beforeId`/`rounds` names match, `rounds`
+  capped at 50);
+- `getMessagesPage` round-cursor algorithm (`${offset}` bounded 0–49 by the service, no injection risk);
+- `execute_sql`'s three layers of protection (single statement + type whitelist + length limit);
+- every `*Drawer.vue`'s `watch` back-fill and `submit`'s `finally` reset;
+- `P2pChatDrawer` lifecycle (keydown listener and polling both strictly paired);
+- Electron `before-quit`'s three-layer cleanup chain (PTY sessions / browser bridge / backend process);
+- Electron download integrity check and the double validation of the "already downloaded" state.
+
+### 🔢 Version sync
+
+- `pom.xml` project version → 3.3.1
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.3.1.jar`) + `package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- README badges (zh/en), 13 docs headers and packaging examples
+
+### 📋 Verification record
+
+All of the following were run before this release and passed:
+
+- `mvn -DskipTests compile` → `BUILD SUCCESS`
+- all 5 `main`-method self-check programs passed, **57 assertions total, 0 failures**:
+  `TokenEstimatorTest` (6), `ToolResultBudgetTest` (34), `LogServiceSearchTest` (6),
+  `ContextBuilderTrimTest` (5), `SnapshotDirGuardTest` (6)
+- `frontend-v3` typecheck + build: 0 errors
+- `frontend` (classic) typecheck + build: 0 errors
+- `pickAsset` verified across 7 platform/architecture combinations, all correct
+
+### ⚠️ Upgrade notes
+
+- **A backend restart and frontend reload are required** (the backend embeds the frontend build into
+  `static/`, so a rebuild is needed for changes to take effect).
+- No schema changes, **no migration**; in-place upgrade works.
+- For the two user-visible defects, please confirm after upgrading: for the input height, type
+  10+ lines, send, and observe whether it returns to the default height; for the session list,
+  delete one session while another is streaming in the background and observe whether the sidebar
+  removes it immediately.
+
+---
+
 ## [3.3.0] - 2026-11-16
 
 > **Context and log-visibility release**: fixes the model "amnesia" caused by tool-loop trimming

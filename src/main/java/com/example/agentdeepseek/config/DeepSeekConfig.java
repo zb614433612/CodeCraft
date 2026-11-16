@@ -185,8 +185,32 @@ public class DeepSeekConfig {
      * @return 生效的 token 上限
      */
     public int resolveMaxContextTokens(String providerCode) {
-        if (providerCode != null && !providerCode.isBlank()) {
-            Integer override = providerMaxContextTokens.get(providerCode.trim().toLowerCase());
+        if (providerCode != null && !providerCode.isBlank() && !providerMaxContextTokens.isEmpty()) {
+            String key = providerCode.trim().toLowerCase();
+            Integer override = providerMaxContextTokens.get(key);
+            /*
+              ⚠️ 大小写不一致时不能静默回落（2026-11-16 修复）。
+
+              Spring 绑定 Map<String, Integer> 时**原样保留** yml 里的 key（不做小写化），
+              而 providerCode 理论上也可能带大小写。此前只做 providerCode 这一侧 toLowerCase，
+              一旦 yml 写成 `HuoShan:` / `DeepSeek:`（首字母大写很常见），
+              map 里存的是 "HuoShan"，查的是 "huoshan" → 查不到 → 静默回落到全局上限，
+              用户完全无感知（表现为「配了 400000 却仍按 300000 提前压缩」）。
+              因此查不到时再做一次忽略大小写的兜底匹配，命中即视为有效配置。
+             */
+            if (override == null) {
+                for (Map.Entry<String, Integer> entry : providerMaxContextTokens.entrySet()) {
+                    if (entry.getKey() != null && entry.getKey().trim().equalsIgnoreCase(key)) {
+                        override = entry.getValue();
+                        break;
+                    }
+                }
+                if (override != null) {
+                    log.warn("provider-max-context-tokens 的 key '{}' 大小写与 Provider code '{}' 不一致，" +
+                                    "已按忽略大小写匹配生效。建议在 application.yml 中统一使用小写 key 以避免歧义。",
+                            providerCode, key);
+                }
+            }
             if (override != null && override > 0) {
                 return override;
             }
