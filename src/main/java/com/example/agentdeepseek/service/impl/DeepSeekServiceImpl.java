@@ -1487,7 +1487,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         String reasoning = extracted.get("reasoning");
                         if (content == null || content.isEmpty()) {
                             content = contextBuilder.cleanSseContent(fullResponse);
-                            log.warn("未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
+                            if (content == null || content.isBlank()) {
+                                // 空回合（无工具路径）：模型思考完直接 stop，正文全空。
+                                // 既不能把原始 SSE JSON 当正文（cleanSseContent 已改为「仍像协议帧则返回空串」），
+                                // 也不能保存空消息（前端只会显示一条空气泡，用户毫无线索）。
+                                content = EMPTY_ROUND_NOTICE;
+                                log.warn("空回合（无工具路径）：模型未产出正文，reasoning 长度={}，已用提示文案替代",
+                                        reasoning != null ? reasoning.length() : 0);
+                            } else {
+                                log.warn("未能从流式响应解析出content, 使用清洗后的 fullResponse（len={}）",
+                                        content.length());
+                            }
                         }
                         messagePersister.saveAssistantMessage(storageConversationId, content, reasoning);
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
@@ -2884,6 +2894,26 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     /** 弯路预警前缀标记：用于幂等判断（同一消息重复拼接会让内容每轮漂移） */
     private static final String DETOUR_HINT_MARK = "[踩坑经验-弯路预警]";
 
+    /**
+     * 空回合的可见提示文案（2026-11-18 新增）。
+     *
+     * <p><b>为什么必须有</b>：模型在超长上下文中偶尔会「思考完直接 stop」——
+     * {@code finish_reason=stop}、{@code completion_tokens} 大多花在 {@code reasoning_tokens}、
+     * {@code delta.content} 一个字符都没吐（实测 iteration=0 时 reasoning=669~1817 tokens、content 全空）。
+     * 旧实现有两条错误兜底：</p>
+     * <ol>
+     *   <li>把 {@code cleanSseContent(fullResponse)} 的返回值当正文 —— 而它会把「多帧拼接的原始 SSE JSON」
+     *       原样返回（实测落库 62,192 字符），用户在前端看到 {@code {"choices":[...}}，
+     *       主观就是「输出到一半秒断」；</li>
+     *   <li>无工具路径直接保存空消息 —— 前端显示一条空气泡，没有任何线索可查。</li>
+     * </ol>
+     * <p>工具循环路径已改走「空回合续写」（{@code _finishReason=empty}）；
+     * 无工具路径无法续写，因此用本文案替代，让用户明确知道发生了什么以及可以怎么办。</p>
+     */
+    private static final String EMPTY_ROUND_NOTICE =
+            "⚠️ 模型本次未产出正文（思考完直接结束，常见于超长上下文）。"
+                    + "可以直接重发一次，或降低思考档位 / 缩短上下文后重试。";
+
     /** 把 content（String 或多模态块列表）转成纯文本；无可用文本时返回 null */
     private static String contentToPlainText(Object content) {
         if (content instanceof String text) {
@@ -4243,8 +4273,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         if (content == null || content.isEmpty()) {
                             content = contentCollector.toString();
                             if (content.isEmpty()) {
+                                // 只接受「能提取出正文」的清洗结果：cleanSseContent 遇到
+                                // 「多帧拼接的原始 SSE JSON」会返回空串（详见其方法注释）。
+                                // 这样下面的空回合检测（emptyRound，以 content 非空为前提）
+                                // 才能生效，走 `_finishReason=empty` 追加续写，
+                                // 而不是把 6 万字符的原始 JSON 当正文存库（用户侧表现为「秒断 + 一坨 JSON」）。
                                 content = contextBuilder.cleanSseContent(fullResponse);
-                                log.warn("工具循环中未能从流式响应解析出content, 使用清洗后的fullResponse: {}", content);
+                                if (content == null || content.isBlank()) {
+                                    content = "";
+                                    log.warn("工具循环中未能提取正文（清洗后无有效文本），将走空回合续写判定");
+                                } else {
+                                    log.warn("工具循环中未能从流式响应解析出content, 使用清洗后的 fullResponse（len={}）",
+                                            content.length());
+                                }
                             }
                         }
 

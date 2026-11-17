@@ -1120,6 +1120,24 @@ public class ContextBuilder {
                 // ignored
             }
         }
+        /*
+          ★ 2026-11-18 修复「输出过程中秒断，末尾蹦出一坨 JSON」。
+
+          因果链（实测 conversationId=257 消息 25926，62,192 字符）：
+            模型空回合（finish_reason=stop、delta.content 全空、只有 reasoning）
+            → 流里全是 delta.content="" 的多帧 JSON，readTree 对「多帧拼接」必然失败
+            → 旧实现直接 `return cleaned`，把整段原始 JSON 当正文返回
+            → 用户在前端看到 `{"choices":[...` —— 主观感受就是「输出到一半突然断了」
+            → 更糟的是：工具循环的空回合检测以「content 非空」为前提，于是被完全绕过，
+               `_finishReason=empty` 的续写通道永远走不到，
+              这条 6 万字符脏消息还会被后续每轮重新加载，污染前缀缓存与上下文。
+
+          因此：清洗后仍以 `{` / `[` 开头 → 判定为「无可提取正文」，返回空串。
+          调用方据此走空回合处理：工具循环追加续写；无工具路径用提示文案替代。
+        */
+        if (cleaned.startsWith("{") || cleaned.startsWith("[")) {
+            return "";
+        }
         return cleaned;
     }
 
