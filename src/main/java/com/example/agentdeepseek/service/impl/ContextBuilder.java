@@ -281,31 +281,42 @@ public class ContextBuilder {
         //    因此只在 compact（救急模式）执行；balanced 只剔 reasoning（构建阶段就不加入），
         //    工具结果原样保留、前缀保持稳定，这是"省钱但不丢准确性"的最优切分点。
         if (effectiveMode.shouldCompactToolResults()) {
-            int beforeCompact = TokenEstimator.estimateMessages(result);
+            int beforeCompact = TokenEstimator.estimateMessages(result, providerCode);
             compactHistoryMessages(result);
-            int afterCompact = TokenEstimator.estimateMessages(result);
+            int afterCompact = TokenEstimator.estimateMessages(result, providerCode);
             log.info("compact 模式：历史工具结果摘要化完成, 消息数={}, Token: {} → {} (节省 {}%)",
                     result.size(), beforeCompact, afterCompact,
                     beforeCompact > 0 ? (beforeCompact - afterCompact) * 100 / beforeCompact : 0);
             ToolCallSequenceSanitizer.sanitize(result);
         }
 
-        // 4. 三级阈值上下文管理：先尝试压缩，兜底丢弃
-        //    上限按 Provider 解析（火山 1049K / DeepSeek 1M / 中转站可能只有 128K）——
-        //    用全局单值管所有 Provider 会「偏小则提前裁剪、偏大则直接 400」，见 resolveMaxContextTokens。
+        // 4. 三级阈值上下文管理（2026-11-17 改造：只压缩，不裁剪）
+        //    上限按 Provider 解析（火山 1049K / DeepSeek 1M / 中转站可能只有 128K）。
+        //
+        //    【为什么废除裁剪 / 滑动窗口丢弃】
+        //    裁剪（trimToolLoopToBudget / trimToTokenBudget）只会改写**内存** messages，
+        //    无法保证与 DB 中的历史一致：下一轮用户发言时从 DB 重建，tool 消息又变回完整原文，
+        //    而上一轮内存里是「[CC-TRIM][工具…]」摘要 —— 同一条消息两种形态 → 前缀不再是上一次的真前缀
+        //    → 从差异点起全部按未命中重新 prefill（实测 125K 上下文 ≈ 30 秒）。
+        //    实测佐证：llm_token_usage 中 iteration=0 的 cache_hit_tokens 从 45952(98.8%)
+        //    变成全部 0，而同一轮内的 iteration≥1 始终 95%+（同轮复用同一内存列表）。
+        //
+        //    【现在唯一手段：压缩并入库】
+        //    compactionService.compact 会把被压缩区间写成 conversation_compaction 记录，
+        //    之后每次 buildMessagesFromHistory 都由 applyCompactionRecords 重建出
+        //    「system + 摘要 + 其后消息」这一**稳定前缀**。历史原文仍完整保留在
+        //    conversation_message 表中（用户可查询聊天记录），只是不再参与上下文重建。
         int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
-        int estimatedTokens = TokenEstimator.estimateMessages(result);
+        int estimatedTokens = TokenEstimator.estimateMessages(result, providerCode);
+        boolean compactionEnabled = deepSeekConfig.getCompaction().isEnabled();
 
-        if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
+        if (compactionEnabled
+                && estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
             /*
               同步压缩会阻塞调用一次 LLM（compact() → callCompactionLlm → blockingChat，最长 60 秒），
               它直接加在「首 token 之前」的路径上，属于最昂贵的操作，因此必须先过防抖：
-
               ① 刚压缩过就跳过：压缩本身要几十秒，而它只把历史摘要化一次；
-                 若上下文刚好卡在阈值附近，不做防抖会「每一条请求都压一次」，
-                 表现为首 token 从 10 秒退化到 20~30 秒，而且压缩收益往往为负。
-              ② 与异步预压缩共用同一个间隔常量，避免两条路径互相踩踏
-                 （异步路径压完 5 秒后同步路径又压一次，等于白等两遍）。
+              ② 与异步预压缩共用同一个间隔常量，避免两条路径互相踩踏。
              */
             if (compactionService.isRecentlyCompacted(conversationId)) {
                 log.debug("跳过同步压缩：距上次压缩不足防抖间隔，直接使用现有上下文。估算 {} tokens, 上限 {}",
@@ -313,7 +324,8 @@ public class ContextBuilder {
             } else {
                 log.info("历史上下文超限（压缩阈值），尝试智能压缩：估算 {} tokens, 上限 {}",
                         estimatedTokens, maxTokens);
-                int afterCompactTokens = compactionService.compact(conversationId, result);
+                // ★ 必须传 providerCode：压缩内部要用同一 provider 的上限来算收益与目标
+                int afterCompactTokens = compactionService.compact(conversationId, result, providerCode);
                 if (afterCompactTokens > 0) {
                     estimatedTokens = afterCompactTokens;
                     log.info("智能压缩完成，压缩后 {} tokens", estimatedTokens);
@@ -321,10 +333,37 @@ public class ContextBuilder {
             }
         }
 
-        if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
-            log.warn("智能压缩后仍超限，执行滑动窗口丢弃：估算 {} tokens, 上限 {}",
+        if (compactionEnabled
+                && estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
+            /*
+              压缩后仍越过「丢弃阈值」时的处理（2026-11-17 改造）：
+
+              旧实现走 trimToTokenBudget（滑动窗口丢消息）——丢弃会让上下文与历史彻底错位，
+              且下一轮重建时被丢弃的消息又回来，前缀反复断裂。现改为「再压一次（绕过防抖）」：
+              压缩是幂等且入库的，压完重建出的前缀是稳定的；实在压不动（保护带本身过大）
+              也不丢弃，只告警——宁可让 API 侧偶发 400，也不要每轮都全量 prefill。
+             */
+            log.warn("压缩后仍超限（越过丢弃阈值），尝试强制压缩（不裁剪）：估算 {} tokens, 上限 {}",
                     estimatedTokens, maxTokens);
-            trimToTokenBudget(result, maxTokens);
+            int afterForceTokens = compactionService.compact(conversationId, result, providerCode);
+            if (afterForceTokens > 0) {
+                estimatedTokens = afterForceTokens;
+            }
+            if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
+                log.warn("强制压缩后仍超限（可能保护带本身过大），保留完整历史不做裁剪："
+                                + "估算 {} tokens, 上限 {}。若后续 API 返回超限错误，请调小 compaction.protect-rounds "
+                                + "或调大 provider 的 max-context-tokens",
+                        estimatedTokens, maxTokens);
+            }
+        }
+
+        // 压缩功能被显式关闭时的兜底：此时没有「入库摘要」可用，只能退回丢弃。
+        // （正常配置下 compaction.enabled=true，这条分支不会走到）
+        if (!compactionEnabled
+                && estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
+            log.warn("压缩功能已关闭，退回滑动窗口丢弃：估算 {} tokens, 上限 {}",
+                    estimatedTokens, maxTokens);
+            trimToTokenBudget(result, maxTokens, providerCode);
         }
 
         // 压缩/裁剪都可能切断 assistant(tool_calls) 与 tool 消息的配对关系，返回前再净化一次（幂等）
@@ -345,7 +384,58 @@ public class ContextBuilder {
             log.debug("reasoning_content 兜底补齐 {} 条 assistant 消息（空串占位）", padded);
         }
 
+        // ★ 6. system 消息归位（2026-11-17 修复「跨轮前缀结构不一致」）
+        //   首次会话的落库顺序是「先存 user 消息、再存 system 消息」——
+        //   因为 prepareConversationContext 是先 buildMessagesFromHistory（此时 user 已在库），
+        //   再发现 hasSystemMessage=false 才补存 system。于是 DB 中 system 的 id 比首条 user 更大，
+        //   按 id 升序重建时 system 落到第 2 位；而首轮内存里用的是 add(0) 把 system 放在第 1 位。
+        //   两种结构开头就不同 → 跨轮前缀缓存无法命中。
+        //   这里统一把全部 system 提到最前（保持相对顺序），使重建结果与首轮内存结构完全一致。
+        hoistSystemMessages(result);
+
         return result;
+    }
+
+    /**
+     * 把全部 system 消息提到列表最前面（保持它们彼此的相对顺序，其余消息相对顺序不变）。
+     *
+     * <p><b>为什么需要</b>：DB 中 system 的插入位置不可靠 —— 首次会话先把用户消息落库，
+     * 之后才补存 system，导致 {@code id(system) > id(第一条 user)}。按 id 升序重建时
+     * system 会落到第二位，与「首轮内存 add(0)」的结构不一致，前缀缓存跨轮必然失效。</p>
+     *
+     * <p><b>为什么是确定性操作</b>：同样的消息集合永远得到同样的排列，
+     * 因此不会引入「每轮结构漂移」（这正是前缀缓存最怕的）。</p>
+     *
+     * @param messages 消息列表（原地修改）
+     */
+    private void hoistSystemMessages(List<Map<String, Object>> messages) {
+        if (messages == null || messages.size() < 2) {
+            return;
+        }
+        List<Map<String, Object>> headSystems = new ArrayList<>();
+        List<Map<String, Object>> middleSystems = new ArrayList<>();
+        List<Map<String, Object>> others = new ArrayList<>();
+        boolean seenNonSystem = false;
+        for (Map<String, Object> msg : messages) {
+            boolean isSystem = "system".equals(msg.get("role"));
+            if (isSystem) {
+                if (seenNonSystem) {
+                    middleSystems.add(msg);
+                } else {
+                    headSystems.add(msg);
+                }
+            } else {
+                seenNonSystem = true;
+                others.add(msg);
+            }
+        }
+        if (middleSystems.isEmpty()) {
+            return; // 已是规范形态（或没有 system 混在中间），无需重排
+        }
+        messages.clear();
+        messages.addAll(headSystems);
+        messages.addAll(middleSystems);
+        messages.addAll(others);
     }
 
     /**
@@ -503,9 +593,20 @@ public class ContextBuilder {
      * @param maxTokens token 上限
      */
     public void trimToTokenBudget(List<Map<String, Object>> messages, int maxTokens) {
+        trimToTokenBudget(messages, maxTokens, null);
+    }
+
+    /**
+     * 滑动窗口丢弃（带 provider 校准口径）。
+     *
+     * @param messages     消息列表（会直接修改）
+     * @param maxTokens    token 上限（真实 token 口径）
+     * @param providerCode Provider 编码，用于把估算换算到与 maxTokens 同一口径
+     */
+    public void trimToTokenBudget(List<Map<String, Object>> messages, int maxTokens, String providerCode) {
         if (messages == null || messages.isEmpty()) return;
 
-        int estimatedTokens = TokenEstimator.estimateMessages(messages);
+        int estimatedTokens = TokenEstimator.estimateMessages(messages, providerCode);
         if (estimatedTokens <= maxTokens) return;
 
         int beforeSize = messages.size();
@@ -524,7 +625,7 @@ public class ContextBuilder {
             if (step > 0) {
                 log.warn("保护带（{} 轮）内已无更多可裁内容，降级保护带至 {} 轮后重试裁剪", protectRoundsSteps[step - 1], rounds);
             }
-            estimatedTokens = trimWithinProtectBand(messages, maxTokens, rounds);
+            estimatedTokens = trimWithinProtectBand(messages, maxTokens, rounds, providerCode);
             if (estimatedTokens <= maxTokens) break;
         }
 
@@ -545,9 +646,11 @@ public class ContextBuilder {
      * @param messages     消息列表（会直接修改）
      * @param maxTokens    token 上限
      * @param protectRounds 保护带轮数（最近的 N 轮 user 对话不裁）
+     * @param providerCode Provider 编码（用于把估算换算到与 maxTokens 同一口径）
      * @return 裁剪后的估算 token 数
      */
-    private int trimWithinProtectBand(List<Map<String, Object>> messages, int maxTokens, int protectRounds) {
+    private int trimWithinProtectBand(List<Map<String, Object>> messages, int maxTokens,
+                                      int protectRounds, String providerCode) {
         int idx = 1;
         int lastIdx = resolveTrimUpperBound(messages, protectRounds);
 
@@ -572,11 +675,11 @@ public class ContextBuilder {
             /* 删除后保护带与当前轮次起点都会左移，必须重算上界 */
             lastIdx = resolveTrimUpperBound(messages, protectRounds);
 
-            int estimatedTokens = TokenEstimator.estimateMessages(messages);
+            int estimatedTokens = TokenEstimator.estimateMessages(messages, providerCode);
             if (estimatedTokens <= maxTokens) return estimatedTokens;
         }
 
-        return TokenEstimator.estimateMessages(messages);
+        return TokenEstimator.estimateMessages(messages, providerCode);
     }
 
     /**
@@ -641,7 +744,22 @@ public class ContextBuilder {
      *
      * @param messages 消息列表（会直接修改）
      * @param maxTokens token 上限
+     * @deprecated 2026-11-17 起<b>不再使用</b>，请改用 {@code CompactionService#compact}（压缩并入库）。
+     *
+     *             <p><b>原因</b>：本方法只改写内存 messages，无法与 DB 保持一致 ——
+     *             下一轮用户发言时 {@link #buildMessagesFromHistory} 从 DB 重建，
+     *             tool 消息又变回完整原文，而上一轮内存里是「[CC-TRIM][工具…]」摘要。
+     *             同一条消息两种形态 → 本次请求不再是上一次的真前缀
+     *             → 从差异点起全部按未命中重新 prefill（实测 125K 上下文 ≈ 30 秒）。
+     *             实测佐证：{@code llm_token_usage} 中 {@code iteration=0} 的
+     *             {@code cache_hit_tokens} 从 45952(98.8%) 掉到全部 0，
+     *             而同一轮内 {@code iteration>=1} 始终 95%+（因为同轮复用同一内存列表）。</p>
+     *
+     *             <p>压缩（compaction）与裁剪的本质区别：前者把摘要<b>写入
+     *             {@code conversation_compaction}</b>，之后每次重建都得到
+     *             「system + 摘要 + 其后消息」这一稳定前缀；后者只改内存，必然破坏前缀。</p>
      */
+    @Deprecated
     public void trimToolLoopToBudget(List<Map<String, Object>> messages, int maxTokens) {
         if (messages == null || messages.isEmpty()) return;
 
@@ -1021,23 +1139,50 @@ public class ContextBuilder {
     }
 
     /**
-     * 将语言强制指令注入到最后一条用户消息的内容开头。
-     * DeepSeek 模型的 reasoning/thinking 过程对 system 消息中的语言指令响应较弱，
-     * 将指令注入到 user 消息内容中能更有效地约束其推理语言。
-     * 仅修改内存中的消息对象，不影响数据库存储。
+     * 将语言强制指令注入到<b>每一条</b>用户消息的内容开头。
+     *
+     * <p>DeepSeek 模型的 reasoning/thinking 过程对 system 消息中的语言指令响应较弱，
+     * 将指令注入到 user 消息内容中能更有效地约束其推理语言。</p>
+     *
+     * <p><b>⚠️ 为什么是「每一条」而不是「最后一条」（2026-11-17 修复前缀缓存）</b>：
+     * 本方法只改内存、不落库，而前缀缓存要求「本次请求必须是上次请求的真前缀」。
+     * 旧实现只注入「最后一条 user」——上一轮实际发出的那条被改写成「指令 + 原文」，
+     * 下一轮从 DB 重建时它退化为「中间的历史 user」而不再被注入，形态回退成 DB 原文，
+     * 于是断裂点正好落在它之后，其后的全部工具结果（实测 14 次 ≈14 万字符）不再命中，
+     * iteration=0 每次全量 prefill（TTFB 14~25 秒），只有同轮内的后续迭代靠增量命中。</p>
+     *
+     * <p>改为遍历全部 user 消息后，「DB 重建 + 注入」的结果与上次发出时逐字一致
+     * ——指令是常量，且注入前用标记做幂等判断，重复调用不会累积。</p>
      */
-    public void injectLanguageIntoLastUserMessage(List<Map<String, Object>> messages) {
+    public void injectLanguageIntoUserMessages(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
         String instruction = "\n\n【系统强制】你接下来必须用中文思考！所有推理（reasoning/thinking）都必须使用中文，严禁使用英文推理。这是最高优先级指令。";
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            Map<String, Object> msg = messages.get(i);
-            if ("user".equals(msg.get("role"))) {
-                String content = (String) msg.get("content");
-                if (content != null && !content.contains("【系统强制】你接下来必须用中文思考")) {
-                    msg.put("content", instruction + "\n" + content);
-                }
-                break;
+        for (Map<String, Object> msg : messages) {
+            if (!"user".equals(msg.get("role"))) {
+                continue;
+            }
+            Object contentObj = msg.get("content");
+            if (!(contentObj instanceof String content)) {
+                continue; // 多模态 content（List 块）不处理
+            }
+            if (!content.contains("【系统强制】你接下来必须用中文思考")) {
+                msg.put("content", instruction + "\n" + content);
             }
         }
+    }
+
+    /**
+     * 兼容旧调用入口。
+     *
+     * @deprecated 改用 {@link #injectLanguageIntoUserMessages(List)}：
+     *             必须对全部 user 消息注入，否则下一轮重建时历史 user 会回退成 DB 原文，
+     *             导致前缀缓存断裂（每轮首请求全量 prefill）。
+     */
+    @Deprecated
+    public void injectLanguageIntoLastUserMessage(List<Map<String, Object>> messages) {
+        injectLanguageIntoUserMessages(messages);
     }
 
     // ==================== 工具名称格式化 ====================

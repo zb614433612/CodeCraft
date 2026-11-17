@@ -359,7 +359,7 @@ function readOptimizeError(data: unknown): string {
  *
  * @param message 原始用户消息
  */
-export async function optimizePrompt(message: string): Promise<OptimizePromptResult> {
+export async function optimizePrompt(message: string, providerCode?: string): Promise<OptimizePromptResult> {
   const startedAt = Date.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), OPTIMIZE_TIMEOUT)
@@ -367,10 +367,17 @@ export async function optimizePrompt(message: string): Promise<OptimizePromptRes
   try {
     const authHeader = await getAuthHeaders()
 
+    /*
+      ★ 2026-11-17：必须带上「当前会话的 providerCode」。
+
+      后端已改为「未指定 Provider 就不执行优化」——不再回退默认 Provider。
+      原因：用户 Provider 列表里 deepseek（id=1）与 huoshan（id=34）的 sortOrder 同为 0，
+      "默认"实际会落到 deepseek 官网，于是点一下「✨优化」扣的是另一个账户的余额。
+    */
     const response = await fetch('/api/prompt/optimize', {
       method: 'POST',
       headers: { ...authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify(providerCode ? { message, providerCode } : { message }),
       signal: controller.signal
     })
 

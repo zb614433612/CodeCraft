@@ -152,7 +152,9 @@ public class CompactionService {
         if (!deepSeekConfig.getCompaction().isEnabled()) {
             return CompactionDecision.NONE;
         }
-        int estimatedTokens = TokenEstimator.estimateMessages(messages);
+        // ★ 必须传 providerCode：估算经在线校准后才是「与真实 token 同口径」的值，
+        //   否则 CL100K 对中文虚高约 3.4 倍，会把「实际只有 7.5 万 token」判成「已超 25.5 万」。
+        int estimatedTokens = TokenEstimator.estimateMessages(messages, providerCode);
         int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
         double ratio = (double) estimatedTokens / maxTokens;
@@ -205,8 +207,19 @@ public class CompactionService {
             return -1;
         }
 
-        // 索引 0 通常是 system 消息，从索引 1 开始压缩
-        int compressStart = 1;
+        // ★ 2026-11-17 修复：不能假设「索引 0 就是 system」。
+        //   首次会话的落库顺序是「先存 user 消息、再补存 system」（system 的 id 更大），
+        //   按 id 升序重建时顺序是 [user, system, ...]。若仍从索引 1 开始压缩，
+        //   就会把 system 一起压进摘要 —— 系统提示词（身份 / 工具规范 / 工作目录）永久丢失，
+        //   而且每轮重建的开头变成「LLM 生成的、非确定性的摘要」，前缀彻底无法稳定。
+        //   实测证据：conversation_compaction 记录 417 的 start_message_id=23298，
+        //   正是该会话 system 消息的 id（本不该被压缩）。
+        //   修正为「跳过开头连续的 system」，从第一条非 system 消息开始压缩。
+        int compressStart = 0;
+        while (compressStart < messages.size()
+                && "system".equals(messages.get(compressStart).get("role"))) {
+            compressStart++;
+        }
         int compressEnd = protectEnd; // 不包含
 
         if (compressEnd - compressStart < 2) {
@@ -287,7 +300,7 @@ public class CompactionService {
         }
 
         // 5. 计算节省的 token 数
-        int beforeTokens = TokenEstimator.estimateMessages(messages);
+        int beforeTokens = TokenEstimator.estimateMessages(messages, providerCode);
         String originalText = formatMessagesForCompaction(toCompress);
         int originalTokens = TokenEstimator.estimate(originalText);
         int summaryTokens = TokenEstimator.estimate(summary);
@@ -332,7 +345,7 @@ public class CompactionService {
 
         // 压缩前后真实对比：这是判断「压缩到底亏不亏」的唯一可靠观测点。
         // 注意 afterTokens 必然低于 beforeTokens（savings > 0 已在前置校验），否则说明口径有偏差。
-        int afterTokens = TokenEstimator.estimateMessages(messages);
+        int afterTokens = TokenEstimator.estimateMessages(messages, providerCode);
         log.info("压缩前后对比：conversationId={}, {} tokens → {} tokens（消息 {} 条 → {} 条）",
                 conversationId, beforeTokens, afterTokens, compressEnd - compressStart, messages.size());
         return afterTokens;
@@ -386,7 +399,7 @@ public class CompactionService {
                 // 与 ContextBuilder 一致的 API 口径估算（含 TOOL 消息的工具结果、tool_calls 开销）
                 List<Map<String, Object>> apiMessages =
                         toApiMessages(messages, deepSeekConfig.isStripHistoryReasoning());
-                int estimatedTokens = TokenEstimator.estimateMessages(apiMessages);
+                int estimatedTokens = TokenEstimator.estimateMessages(apiMessages, providerCode);
                 // 上限按 Provider 解析：异步预压缩若用全局值，火山（1049K 窗口）会被
                 // 30 万阈值频繁触发压缩，既浪费额度又让前缀缓存反复失效。
                 int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
@@ -477,6 +490,16 @@ public class CompactionService {
         List<CompactionRecord> reversed = new ArrayList<>(records);
         Collections.reverse(reversed);
 
+        /*
+          跨记录共享的「已保留 system」集合（2026-11-17 新增）。
+
+          为什么需要：每条压缩记录都会把「区间内的真实 SYSTEM 消息」原样保留在前面，
+          而老数据（system 落在 user 之后）可能被多条记录先后覆盖到同一段 ——
+          不共享去重就会把同一条 system 复制成多份，白占 token。
+          （即使重复也不会破坏前缀稳定性——排列依然是确定性的——但属于无谓膨胀。）
+        */
+        Set<Long> preservedSystemIds = new HashSet<>();
+
         for (CompactionRecord record : reversed) {
             // 找到 startMessageId 和 endMessageId 在 dbMessages 中的索引
             int startIdx = -1;
@@ -516,9 +539,26 @@ public class CompactionService {
                     + ",\"replacedCount\":" + (endIdx - startIdx + 1) + "}");
             compactMsg.setCreatedAt(dbMessages.get(startIdx).getCreatedAt());
 
-            // 替换 [startIdx, endIdx] 为 compactMsg
+            // ★ 保留区间内的 system 消息（2026-11-17 修复）
+            //   系统提示词是「最稳定的前缀头部」，绝不能进入摘要：一旦被摘要化，
+            //   它的内容会随每次压缩重新生成而漂移，前缀从第 0 条起就无法命中缓存。
+            //   对「老数据（system 落在 user 之后，压缩区间不得不覆盖它）」做兜底：
+            //   区间内 id>0 的真实 SYSTEM 消息原样保留，只把其余消息折叠成摘要。
+            //   注意排除旧摘要（id<0 的合成消息）——它们应由新摘要吸收，避免摘要层层套娃。
+            List<ConversationMessage> preservedSystems = new ArrayList<>();
+            for (int i = startIdx; i <= endIdx; i++) {
+                ConversationMessage candidate = dbMessages.get(i);
+                if (candidate.getRole() == MessageRole.SYSTEM
+                        && candidate.getId() != null && candidate.getId() > 0
+                        && preservedSystemIds.add(candidate.getId())) {
+                    preservedSystems.add(candidate);
+                }
+            }
+
+            // 替换 [startIdx, endIdx] 为 [保留的 system 消息..., compactMsg]
             List<ConversationMessage> remaining = new ArrayList<>();
             remaining.addAll(dbMessages.subList(0, startIdx));
+            remaining.addAll(preservedSystems);
             remaining.add(compactMsg);
             remaining.addAll(dbMessages.subList(endIdx + 1, dbMessages.size()));
 
@@ -540,9 +580,24 @@ public class CompactionService {
         String historyText = formatMessagesForCompaction(messages);
         String prompt = buildCompactionPrompt(historyText);
 
-        LLMClient client = (providerCode != null && !providerCode.isEmpty())
-                ? llmClientManager.resolveClientByCode(providerCode)
-                : llmClientManager.getDefaultClient();
+        /*
+          ★ 2026-11-17 关键修复（费用泄露 / 扣错账户余额）。
+
+          旧实现 providerCode 为空时回退 llmClientManager.getDefaultClient()，
+          而 getFirstClient() 是按 sortOrder 取第一个 —— 用户的 Provider 列表里
+          deepseek（id=1）与 huoshan（id=34）的 sortOrder 同为 0，于是「第一个」极可能落到
+          deepseek 官网；再叠加 compaction.model 留空 → 回退 default-model（deepseek-v4-pro），
+          压缩摘要请求就被原样发往 api.deepseek.com。
+          实测后果：用户全程用火山方舟跑会话，官网余额却从 1 元多掉到 0.21 元。
+
+          压缩只是「可选的上下文优化」，宁可本轮回退到不压缩（下轮还有机会），
+          也绝不能猜一个 Provider 去花钱。调用方必须显式传入 providerCode 才会调用 LLM。
+        */
+        if (providerCode == null || providerCode.isEmpty()) {
+            log.warn("压缩跳过：未提供 providerCode。为避免误用默认 Provider（极可能扣到另一个账户的余额），本次不做 LLM 压缩");
+            return null;
+        }
+        LLMClient client = llmClientManager.resolveClientByCode(providerCode);
         if (client == null) {
             log.error("无法获取 LLMClient，providerCode={}, 跳过压缩", providerCode);
             return null;
@@ -563,7 +618,19 @@ public class CompactionService {
         Map<String, Object> requestBody = client.buildRequestBody(msgs, model, 0.3, "non-thinking", false, null);
 
         try {
-            String responseBody = client.blockingChat(requestBody, java.time.Duration.ofSeconds(60));
+            /*
+              ★ 2026-11-17：超时从 60 秒收紧到 20 秒。
+
+              compact 是**同步阻塞**调用（blockingChat），调用方可能是：
+                · http-nio 请求线程（ContextBuilder 入口）——阻塞只影响本请求，表现为「首 token 慢」；
+                · reactor-http-nio 调度线程（工具循环守卫的重入路径）——一旦阻塞，
+                  该线程上承载的所有 SSE 流会一起停摆，前端表现为
+                  「回复正文已结束、【方案取舍】也收到了，但此后既不吐 token 也不调工具，只能手动停止」。
+              摘要生成本身实测 5~10 秒足够；60 秒的窗口远超必要，
+              且对端限流/挂起时会把调用线程占满整整一分钟。
+              收紧到 20 秒后失败即降级（返回 null、本轮不压缩），由后续轮次继续压缩，不影响正确性。
+            */
+            String responseBody = client.blockingChat(requestBody, java.time.Duration.ofSeconds(20));
             return client.extractContentFromBlockingResponse(responseBody);
         } catch (Exception e) {
             log.error("调用 LLM 压缩失败: {}", e.getMessage());

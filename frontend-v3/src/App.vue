@@ -783,6 +783,16 @@ function dropConversationState(key: string) {
   if (m18) conversationAgentMap.value = m18
   const m19 = dropKey(conversationTitleMap.value)
   if (m19) conversationTitleMap.value = m19
+  /*
+    上下文压缩边界（2026-11-17 新增，遵循本函数注释里的约定：新增分片 ref 必须登记）。
+    不清的后果：会话 id 被复用（草稿 key / DB 自增一般不重用但草稿会）时，
+    新会话会继承旧会话的压缩边界 ——「上下文 xx」把不该排除的消息排掉，
+    口径直接错位，且很难从界面看出原因。
+  */
+  const m20 = dropKey(compactedUpToMap.value)
+  if (m20) compactedUpToMap.value = m20 as Record<string, number | null>
+  const m21 = dropKey(compactedSummaryTokensMap.value)
+  if (m21) compactedSummaryTokensMap.value = m21
   streamAborts.delete(key)
   pendingUuidMap.delete(key)
   // 会话都没了，针对它的子Agent轮询也必须停（否则定时器会一直空转）
@@ -851,6 +861,15 @@ function migrateConversationKey(from: string, to: string) {
   if (m16) hasMoreMap.value = m16
   const m17 = move(browserTabsMap.value)
   if (m17) browserTabsMap.value = m17 as Record<string, BrowserTab[]>
+  /*
+    上下文压缩边界随会话 key 一起迁移（2026-11-17 新增）。
+    草稿转正时若漏迁，新 key 上读不到边界 →「上下文 xx」把已折叠的历史又算一遍，
+    表现为草稿转正后数字突然跳大，用户会以为压缩失效了。
+  */
+  const m20 = move(compactedUpToMap.value)
+  if (m20) compactedUpToMap.value = m20 as Record<string, number | null>
+  const m21 = move(compactedSummaryTokensMap.value)
+  if (m21) compactedSummaryTokensMap.value = m21
   // 轮询定时器跟着会话 key 迁移，否则草稿 key 下的定时器会失去归属
   if (subAgentTimers.has(from)) {
     window.clearInterval(subAgentTimers.get(from)!)
@@ -898,8 +917,18 @@ const tasks = computed<TaskItem[]>(() => {
  * 流式期间轮询 3s 一次看状态流转，切回会话时拉一次覆盖历史回放。</p>
  */
 const subAgentMap = ref<Record<string, SubAgentRun[]>>({})
-/** 当前会话的子Agent列表 */
-const chatSubAgents = computed<SubAgentRun[]>(() => subAgentMap.value[activeConversationId.value] ?? [])
+/**
+ * 当前会话的子Agent列表（只展示运行中的）。
+ *
+ * ★ 2026-11-17 修复「子Agent面板一直显示历史卡片」：
+ * 后端 listSubAgents 返回该会话的全部 fork 记录（含 failed / completed / timeout 终态），
+ * 旧实现整份塞进面板 —— 于是昨天失败的 4 个子Agent卡片每次进会话都会重新出现，
+ * 重启甚至重装都无效（数据持久化在 sub_agent_log 表里，重装不会删用户数据目录）。
+ * 面板语义是「正在跑的子Agent进度」，终态记录不该常驻；这里只保留 running，
+ * 任务结束后卡片自动消失（历史仍可通过数据库/审计查询）。
+ */
+const chatSubAgents = computed<SubAgentRun[]>(() =>
+  (subAgentMap.value[activeConversationId.value] ?? []).filter(run => run.status === 'running'))
 
 /* ============================================================
  * AI 浏览器（browser 工具）窗口状态
@@ -1327,6 +1356,25 @@ const staleTask = computed(() => !!staleTaskKeys.value[activeConversationId.valu
  */
 const cursorMap = ref<Record<string, number | null>>({})
 const hasMoreMap = ref<Record<string, boolean>>({})
+
+/*
+  上下文压缩边界（按会话 key 隔离，2026-11-17 新增）。
+
+  后端压缩后重建上下文只用「system + 压缩摘要 + 摘要之后的消息」，
+  被压缩的历史不再计入上下文（原文仍保留、翻页可查）。
+  前端「上下文 xx」若不跟随这个口径，长会话会虚高数倍（把已经折叠进摘要的
+  几十万字符又算一遍），用户看到的是假数字。
+
+  compactedUpToMap        会话 → 已折叠进摘要的最后一条消息 id（含）；null = 未压缩
+  compactedSummaryTokensMap 会话 → 被折叠那段历史压缩成摘要后占用的 token
+
+  ⚠️ 这两个是「按会话 key 分片」的 ref，必须同时登记到
+  dropConversationState（删除会话）与 migrateConversationKey（草稿转正），
+  否则会出现「删了会话徽章还在」或「草稿转正后上下文口径丢失」——见那两处的注释约定。
+*/
+const compactedUpToMap = ref<Record<string, number | null>>({})
+const compactedSummaryTokensMap = ref<Record<string, number>>({})
+
 /** 当前会话的分页游标：本页最早一条消息 id */
 const chatCursor = computed(() => cursorMap.value[activeConversationId.value] ?? null)
 const chatHasMore = computed(() => hasMoreMap.value[activeConversationId.value] ?? false)
@@ -1733,6 +1781,18 @@ function refreshContextTokens(key = activeConversationId.value) {
   if (!key) return
   const list = messagesMap.value[key] ?? []
   const compact = chatContextMode.value === 'compact'
+  /*
+    ★ 压缩边界（2026-11-17 新增）：与后端「重建上下文」保持同一口径。
+
+    后端压缩后，重建出的上下文是「system + 压缩摘要 + 摘要之后的消息」——
+    被压缩的那段历史**不再进入请求**（原文仍留在 DB，翻页照样看得见）。
+    若这里仍把那段历史按原文字符算进去，长会话的「上下文 xx」会虚高数倍：
+    实测同一会话后端真实 prompt_tokens=130290，而前端把已折叠历史累加后
+    显示到 40 万+，用户看到的是完全错误的数据。
+  */
+  const compactedUpTo = compactedUpToMap.value[key] ?? null
+  const compactedSummaryTokens = compactedSummaryTokensMap.value[key] ?? 0
+
   // compact 模式「本轮」起点：最后一条 user 消息的下标（找不到就全按历史轮次处理）
   let lastUserIdx = -1
   if (compact) {
@@ -1745,8 +1805,20 @@ function refreshContextTokens(key = activeConversationId.value) {
   }
   let total = 0
   for (let i = 0; i < list.length; i++) {
+    // 已折叠进摘要的历史消息：不再逐条计入（其体量由下面的 summaryTokens 统一代表）
+    if (compactedUpTo !== null) {
+      const msgId = Number(list[i].id)
+      if (!Number.isNaN(msgId) && msgId > 0 && msgId <= compactedUpTo) continue
+    }
     const isHistoryRound = compact && i < lastUserIdx
     total += estimateMessageTokens(list[i], compact, isHistoryRound)
+  }
+  /*
+    摘要本身仍然占上下文，且与「当前页是否包含被压缩消息」无关：
+    只要发生过压缩，后端每次重建都会带上它，所以无条件累加。
+  */
+  if (compactedUpTo !== null && compactedSummaryTokens > 0) {
+    total += compactedSummaryTokens
   }
   contextTokensMap.value = { ...contextTokensMap.value, [key]: total }
 }
@@ -2035,6 +2107,20 @@ async function loadConversationMessages(conversationId: string, before?: number 
     }
     hasMoreMap.value = { ...hasMoreMap.value, [key]: !!page.hasMore }
     cursorMap.value = { ...cursorMap.value, [key]: page.nextBeforeId ?? null }
+    /*
+      上下文压缩边界由后端分页接口回传（见 MessagePageResponse 注释）。
+      字段缺失时写成 null / 0 → 语义是「不排除任何消息」，与改动前完全一致（向后兼容）。
+      注意：这两个值必须与 hasMore/cursor 一样「每次都覆盖写」——压缩随时可能发生，
+      沿用旧边界会让上下文估算长期停在过期值上。
+    */
+    compactedUpToMap.value = {
+      ...compactedUpToMap.value,
+      [key]: page.compactedUpToMessageId ?? null
+    }
+    compactedSummaryTokensMap.value = {
+      ...compactedSummaryTokensMap.value,
+      [key]: page.compactedSummaryTokens ?? 0
+    }
     // 任务清单没有独立存储：从刚加载的消息里回溯最近一次 task_manager 输出
     restoreTasksFromMessages(convId, key)
     // 上下文估算随消息变化，加载完重算一次（正文 + 思考 + 工具返回）
@@ -3808,7 +3894,9 @@ async function onOptimize() {
   })
 
   try {
-    const result = await optimizePrompt(draft)
+    // ★ 2026-11-17：传「当前会话的 Provider」，让优化也随主会话走
+    //   （后端已不再回退默认 Provider，不传就会直接返回「未指定 Provider」失败）
+    const result = await optimizePrompt(draft, chatProviderCode.value)
     const seconds = ((result.elapsedMs ?? 0) / 1000).toFixed(1)
 
     if (!result.ok) {

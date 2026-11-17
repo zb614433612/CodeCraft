@@ -58,12 +58,25 @@ public class PromptOptimizeService {
     }
 
     /**
-     * 优化用户消息
+     * 优化用户消息（兼容旧入口）。
+     *
+     * @deprecated 改用 {@link #optimize(String, String)} 并显式传入当前会话的 providerCode：
+     *             不传 Provider 现在会直接失败，而不是回退默认 Provider（那会扣到另一个账户的钱）。
+     */
+    @Deprecated
+    public OptimizeResult optimize(String originalMessage) {
+        return optimize(originalMessage, null);
+    }
+
+    /**
+     * 优化用户消息（指定 Provider）。
      *
      * @param originalMessage 原始用户消息
+     * @param providerCode    当前会话使用的 Provider 编码；为空时拒绝执行
+     *                        （避免回退默认 Provider 扣错账户）
      * @return 结构化结果；失败时 {@code optimized} 回落为原文，并带上可读的 {@code error}
      */
-    public OptimizeResult optimize(String originalMessage) {
+    public OptimizeResult optimize(String originalMessage, String providerCode) {
         long startedAt = System.currentTimeMillis();
         if (originalMessage == null || originalMessage.trim().isEmpty()) {
             return OptimizeResult.fail(originalMessage, "消息不能为空", 0L, null);
@@ -79,10 +92,23 @@ public class PromptOptimizeService {
                         System.currentTimeMillis() - startedAt, null);
             }
 
-            // 2. 使用默认 Provider 的 LLMClient（API Key 由 LLMWebClientManager 自动管理）
-            LLMClient client = llmClientManager.getDefaultClient();
+            /*
+              ★ 2026-11-17（费用泄露修复 · 提示词优化通道）：不再使用 getDefaultClient()。
+
+              Provider 列表里 deepseek（id=1）与 huoshan（id=34）的 sortOrder 同为 0，
+              getDefaultClient() = getFirstClient() 会取 id 更小的 deepseek 官网 ——
+              用户在用火山方舟，点一下「优化」却扣了官网余额。
+              现在要求调用方（PromptOptimizeController）显式传 providerCode；
+              传不到就明确失败并提示，绝不替用户猜账户。
+            */
+            if (providerCode == null || providerCode.isEmpty()) {
+                return OptimizeResult.fail(originalMessage,
+                        "未指定 Provider：为避免误用默认 Provider（可能扣到另一个账户的余额），本次不执行优化",
+                        System.currentTimeMillis() - startedAt, null);
+            }
+            LLMClient client = llmClientManager.resolveClientByCode(providerCode);
             if (client == null) {
-                return OptimizeResult.fail(originalMessage, "未配置可用的模型 Provider",
+                return OptimizeResult.fail(originalMessage, "无法解析 Provider [" + providerCode + "]",
                         System.currentTimeMillis() - startedAt, null);
             }
             model = llmClientManager.getDefaultModel(client.getProviderCode());

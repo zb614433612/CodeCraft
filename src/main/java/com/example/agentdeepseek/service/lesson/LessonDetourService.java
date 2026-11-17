@@ -206,9 +206,17 @@ public class LessonDetourService {
     private void doDetour(String projectKey, DetourSignalDetector.DetourSignal signal,
                           String finalAnswer, LLMClient client, String model) {
         try {
-            LLMClient activeClient = client != null ? client : llmClientManager.getFirstClient();
+            /*
+              ★ 2026-11-17（费用泄露修复 · 弯路提炼通道）：不再回退默认 Provider。
+
+              client 正常由 detourReviewAsync 从 apiRequest._llmClient 传入（已随主会话）；
+              拿到 null 时宁可跳过提炼，也不猜一个账户去花钱 ——
+              getFirstClient() 按 sortOrder 取第一个，而 deepseek 的 sortOrder 与 huoshan 同为 0，
+              「第一个」实际是 id 更小的 deepseek 官网。
+            */
+            LLMClient activeClient = client;
             if (activeClient == null) {
-                log.warn("弯路提炼跳过：无可用 LLM 客户端");
+                log.warn("弯路提炼跳过：未提供主会话 LLM 客户端（拒绝回退默认 Provider，避免扣错账户）");
                 return;
             }
             String activeModel = model;

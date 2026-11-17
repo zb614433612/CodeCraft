@@ -330,6 +330,23 @@ export async function* readSseStream(
   const parser = new SseParser()
   let buffer = ''
 
+  /*
+    ★ 空闲超时兜底（2026-11-17 修复「内容已输出完但前端仍显示生成中」）。
+
+    现象：后端日志已打出「流式响应完成」（Controller 的 doOnComplete），
+    但前端 for-await 迟迟不结束，消息一直停在生成中，用户只能手动点「停止生成」。
+
+    根因：`await reader.read()` 没有超时保护。SSE 依赖「服务端关闭连接 → read() 返回 done」
+    来收尾；但在 HTTP/2 / Electron 的 fetch 实现下，服务端正常结束时 read() 可能长期
+    pending 而不返回 done（同轮日志里还出现了 HTTP/2 `ignoring DATA frame` 痕迹），
+    生成器就永久挂在这一次 read 上，上层的 finally 永远不执行。
+
+    修法：给每次 read() 套空闲超时（后端静默 15s 会补心跳，这里取 90s ≈ 6 倍余量）。
+    超时即判定连接已死，取消 reader 并正常跳出循环 —— 后面的 `yield { type: 'complete' }`
+    照常执行，前端状态正常收尾；「用户主动停止」走上面的 signal.aborted 分支，不受影响。
+  */
+  const READ_IDLE_TIMEOUT_MS = 90_000
+
   try {
     while (true) {
       // 检查是否已被用户中止（AbortController.abort()）
@@ -340,7 +357,22 @@ export async function* readSseStream(
         throw new DOMException('The operation was aborted', 'AbortError')
       }
 
-      const { done, value } = await reader.read()
+      // 空闲超时守卫：避免「服务端已结束但 read() 不返回 done」时永久悬挂
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const idleGuard = new Promise<'__IDLE__'>((resolve) => {
+        idleTimer = setTimeout(() => resolve('__IDLE__'), READ_IDLE_TIMEOUT_MS)
+      })
+      const readResult = await Promise.race([reader.read(), idleGuard])
+      if (idleTimer) clearTimeout(idleTimer)
+      if (readResult === '__IDLE__') {
+        // 长时间无任何数据（含心跳）→ 判定连接已死，主动取消并正常收尾
+        try {
+          await reader.cancel()
+        } catch { /* 连接已断，忽略 */ }
+        break
+      }
+
+      const { done, value } = readResult
       if (done) break
 
       // 读取到数据后再检查一次（避免在 reader.read() 阻塞期间 abort 但未抛错）

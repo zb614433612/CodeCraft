@@ -7,6 +7,7 @@ import com.example.agentdeepseek.model.entity.LessonNormCache;
 import com.example.agentdeepseek.model.entity.LessonRule;
 import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
+import com.example.agentdeepseek.util.ToolContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -178,8 +179,22 @@ public class LessonNormalizerService {
                 return;
             }
 
+            /*
+              ★ 2026-11-17（费用泄露修复 · 经验归一化通道）：Provider 必须随主会话。
+
+              本方法在**工具执行线程**（boundedElastic）被 LessonRecorder 调用，此时 ToolContext
+              里还带着主会话的 providerCode；而真正的 LLM 调用在 executor 提交后的**异步线程**
+              执行，那里 ThreadLocal 已丢失 —— 所以必须在这里（提交前）捕获，再随任务传进去。
+
+              旧实现直接在异步线程里 llmClientManager.getFirstClient()，而
+              deepseek(id=1) 与 huoshan(id=34) 的 sortOrder 同为 0 →「第一个」是 deepseek 官网，
+              「经验归一化」这种纯后台增强动作一直在扣另一个账户的钱。
+            */
+            final String providerCode = ToolContext.getProviderCode();
+
             // 2. 提交异步 LLM 归一化（调用线程只做提交与缓存检查）
-            executor.submit(() -> doNormalize(projectKey, lessonId, toolName, argumentsJson, errorText, cacheKey));
+            executor.submit(() -> doNormalize(projectKey, lessonId, toolName, argumentsJson, errorText,
+                    cacheKey, providerCode));
         } catch (Exception e) {
             log.warn("提交归一化任务失败（不影响主流程）: err={}", e.getMessage());
         }
@@ -190,11 +205,17 @@ public class LessonNormalizerService {
     // ============================================================
 
     private void doNormalize(String projectKey, Long lessonId, String toolName,
-                             String argumentsJson, String errorText, String cacheKey) {
+                             String argumentsJson, String errorText, String cacheKey,
+                             String providerCode) {
         try {
-            LLMClient client = llmClientManager.getFirstClient();
+            // ★ 2026-11-17：随主会话 Provider；缺失则跳过（绝不回退默认 Provider 扣错账户）
+            if (providerCode == null || providerCode.isEmpty()) {
+                log.debug("归一化跳过：未捕获到主会话 providerCode（拒绝回退默认 Provider）");
+                return;
+            }
+            LLMClient client = llmClientManager.resolveClientByCode(providerCode);
             if (client == null) {
-                log.warn("归一化跳过：无可用 LLM 客户端");
+                log.warn("归一化跳过：无法解析 Provider [{}]", providerCode);
                 return;
             }
             String model = llmClientManager.getDefaultModel(client.getProviderCode());

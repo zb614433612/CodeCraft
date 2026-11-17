@@ -71,6 +71,22 @@ export interface MessagePageResponse {
   nextBeforeId?: number | null
   /** 实际返回的轮数 */
   rounds?: number
+  /*
+   * ── 上下文压缩边界（2026-11-17 新增，对应后端 ConversationMessagePageVO）──
+   *
+   * 后端压缩后重建上下文只使用「system + 压缩摘要 + 摘要之后的消息」，
+   * 被压缩的历史**不再计入上下文**，但原文仍完整保留在 conversation_message 表里
+   * （用户向上翻页照样能看到历史聊天记录）。
+   *
+   * 前端「输入区下方『上下文 xx』」是独立的前端字符估算，必须用同一口径，
+   * 否则长会话会虚高数倍，显示的是错误数据。
+   *
+   * · compactedUpToMessageId：已折叠进摘要的最后一条消息 id（含）→ id ≤ 它的消息不计入
+   * · compactedSummaryTokens：被折叠那段历史压缩成摘要后占用的 token（多条摘要累加）
+   * · 均可能为缺省（后端未发生压缩 / 老接口），此时行为与改动前完全一致
+   */
+  compactedUpToMessageId?: number | null
+  compactedSummaryTokens?: number
 }
 
 /**

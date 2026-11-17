@@ -390,9 +390,20 @@ public class LessonReviewService {
                           List<FailedToolCall> failures, String finalAnswer,
                           LLMClient client, String model) {
         try {
-            LLMClient activeClient = client != null ? client : llmClientManager.getFirstClient();
+            /*
+              ★ 2026-11-17（费用泄露修复 · 复盘通道）：不再回退默认 Provider。
+
+              旧实现 client 为 null 时走 llmClientManager.getFirstClient()，
+              而用户 Provider 列表里 deepseek（id=1）与 huoshan（id=34）sortOrder 同为 0，
+              getFirstClient 按 sortOrder 排序取第一个 → 极可能落到 deepseek 官网，
+              于是「复盘」这个纯增强的后台动作在扣另一个账户的钱。
+              client 正常由 reviewTurnAsync 从 apiRequest._llmClient 传入（已随主会话）；
+              真拿到 null 时宁可跳过复盘，也不猜一个账户去花钱。
+            */
+            LLMClient activeClient = client;
             if (activeClient == null) {
-                log.warn("对话复盘跳过：无可用 LLM 客户端，conversationId={}", conversationId);
+                log.warn("对话复盘跳过：未提供主会话 LLM 客户端（拒绝回退默认 Provider，避免扣错账户），conversationId={}",
+                        conversationId);
                 return;
             }
             String activeModel = model;

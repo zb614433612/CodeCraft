@@ -18,6 +18,54 @@ public class TokenEstimator {
 
     private static final EncodingRegistry registry = Encodings.newDefaultEncodingRegistry();
 
+    /*
+     ═══════════════════════════════════════════════════════════════════════════
+     在线校准（2026-11-17 修复「估算虚高 3.4 倍 → 误触发压缩/裁剪」）
+
+     【为什么必须有校准】
+     jtokkit 的 CL100K_BASE 是 OpenAI 的分词器。实测同一份请求：
+       · 本类估算：438225 tokens
+       · API 实际：130290 tokens（llm_token_usage.prompt_tokens）
+     相差 3.36 倍。中英文混合（大量中文 + 代码）场景下 CL100K 会把一个汉字拆成
+     1~2 个 token，而 DeepSeek 的 tokenizer 对中文效率高得多（约 0.6 token/汉字）。
+
+     【后果有多严重】
+     守卫阈值是按「真实 token」设计的（max-context-tokens=300000 → 85% = 255000）。
+     拿虚高 3.4 倍的估算去比 → 实际上下文到 7.5 万 token 就误判超限 → 每轮都压缩
+     → 每轮都改写历史 → 前缀缓存命中率 0% → 全量 prefill（125K 上下文 ≈ 30 秒）。
+
+     【校准怎么做】
+     每个请求的响应都带 usage.prompt_tokens（真实值），据此反推比率：
+       observed = actual / finalEstimate
+       ratio_new = ratio_old × ((1-α) + α × observed)
+     其中 finalEstimate = raw × ratio_old，故上式等价于让 ratio 逼近 actual/raw。
+     用滑动平均（α=0.3）抗单次噪声；异常观测（&lt;0.10 或 &gt;2.0）直接丢弃。
+
+     【口径说明】
+     · estimate(String) 返回 **raw 值**（不乘比率）——它只用于同口径的相对比较
+       （如压缩前后 savings），两侧同为 raw，比值关系不受比率影响。
+     · estimateMessages(...) 返回 **校准后的值**——它用于与真实 maxTokens 比较。
+     两者不可混用，否则会重新引入口径错位。
+     ═══════════════════════════════════════════════════════════════════════════
+    */
+
+    /** providerCode（小写） → 校准比率；键 {@link #GLOBAL_RATIO_KEY} 为跨 provider 兜底 */
+    private static final java.util.Map<String, Double> CALIBRATION =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 全局比率的键（空串，避免与真实 providerCode 冲突） */
+    private static final String GLOBAL_RATIO_KEY = "";
+
+    /** 尚未观测到任何真实 usage 时的比率：1.0 表示「不修正」，即保持历史行为 */
+    private static final double DEFAULT_RATIO = 1.0;
+
+    /** 滑动平均的新观测权重（0.3 表示单次观测只挪动 30%，抗噪声） */
+    private static final double CALIBRATION_ALPHA = 0.3;
+
+    /** 比率合理区间：超出视为解析异常（跨 provider 混用 / usage 帧错乱），丢弃该次观测 */
+    private static final double MIN_RATIO = 0.10;
+    private static final double MAX_RATIO = 2.00;
+
     /**
      * 估算单段文本的 token 数
      * @param text 输入文本
@@ -36,12 +84,49 @@ public class TokenEstimator {
     }
 
     /**
-     * 估算 API 消息列表的总 token 数
-     * 包含每条消息的角色开销、content、reasoning_content、tool_calls 等
-     * @param messages API 格式的消息列表（Map 包含 role/content/reasoning_content/tool_calls 等键）
-     * @return 总 token 数
+     * 估算 API 消息列表的总 token 数（<b>校准后</b>，可直接与 maxTokens 比较）。
+     *
+     * <p>无 provider 上下文时使用全局校准比率；这是兼容旧调用点的入口，
+     * 新代码请优先使用 {@link #estimateMessages(List, String)} 传入真实 provider，
+     * 因为不同平台的分词效率不同（实测 DeepSeek 中文场景比 CL100K 低约 3.4 倍）。</p>
+     *
+     * @param messages API 格式的消息列表
+     * @return 校准后的总 token 数
      */
     public static int estimateMessages(List<Map<String, Object>> messages) {
+        return estimateMessages(messages, null);
+    }
+
+    /**
+     * 估算 API 消息列表的总 token 数（按 provider 校准后）。
+     *
+     * @param messages     API 格式的消息列表
+     * @param providerCode Provider 编码（deepseek/huoshan/openai/...）；{@code null} 用全局比率
+     * @return 校准后的总 token 数，可直接与「真实 maxTokens」比较
+     */
+    public static int estimateMessages(List<Map<String, Object>> messages, String providerCode) {
+        int raw = estimateMessagesRaw(messages);
+        if (raw <= 0) {
+            return 0;
+        }
+        long calibrated = Math.round(raw * ratioOf(providerCode));
+        if (calibrated < 1) {
+            calibrated = 1;
+        }
+        return (int) Math.min(Integer.MAX_VALUE, calibrated);
+    }
+
+    /**
+     * 未校准的原始估算（cl100k 口径）。
+     *
+     * <p><b>⚠️ 不要拿它与 maxTokens 比较</b>——它是 OpenAI 分词口径，中文场景比
+     * DeepSeek 真实 token 高约 3.4 倍，直接比较会导致「实际没超限却判定超限」。
+     * 它只用于「同口径的相对比较」（如压缩前后 savings 差值）。</p>
+     *
+     * @param messages API 格式的消息列表
+     * @return 原始（未校准）token 估算
+     */
+    public static int estimateMessagesRaw(List<Map<String, Object>> messages) {
         if (messages == null || messages.isEmpty()) return 0;
         int total = 0;
         for (Map<String, Object> msg : messages) {
@@ -153,5 +238,213 @@ public class TokenEstimator {
             return estimate(text);
         }
         return estimate(String.valueOf(toolCalls));
+    }
+
+    // ==================== 含 tools 的总量口径 ====================
+
+    /**
+     * 估算 tools 定义段的 raw token（CL100K 口径）。
+     *
+     * <p><b>为什么必须单独算它</b>：{@link #estimateMessagesRaw} 只统计 messages，
+     * 而服务端返回的 {@code usage.prompt_tokens} <b>包含 tools 定义</b>。
+     * 本项目约 20~31 个工具的 schema 恒占 ~14 万字符 ≈ 6 万真实 token，
+     * 这是一块「压不掉也删不得」的固定地板。</p>
+     *
+     * <p>若不把它计入估算，就会出现口径错位：拿「不含 tools 的估算」去比
+     * 「含 tools 的真实值」，比率被迫放大到 2.0 上限仍追不上，
+     * 或者反过来把兜底观测判成异常值丢弃（实测 observed≈3.2 → 超 MAX_RATIO 被丢弃）。</p>
+     *
+     * @param tools 请求体里的 {@code tools} 字段（JsonNode / List / Map / String 均可）
+     * @return raw token 估算；{@code tools} 为空时返回 0
+     */
+    public static int estimateToolsRaw(Object tools) {
+        if (tools == null) {
+            return 0;
+        }
+        if (tools instanceof com.fasterxml.jackson.databind.JsonNode node) {
+            if (node.isNull() || node.isMissingNode()) {
+                return 0;
+            }
+            return estimate(node.toString());
+        }
+        return estimate(String.valueOf(tools));
+    }
+
+    /**
+     * 估算请求的总 raw token = messages raw + tools raw（<b>校准前</b>）。
+     *
+     * <p>这是与服务端 {@code prompt_tokens} 同口径的基数 —— 两者都含 tools。
+     * 返回值仍需经 {@link #applyRatio(int, String)} 应用校准比率后才可与 maxTokens 比较。</p>
+     *
+     * @param messages API 格式的消息列表
+     * @param tools    请求体的 tools 字段
+     * @return raw 总 token 估算（至少为 1）
+     */
+    public static int estimateTotalRaw(List<Map<String, Object>> messages, Object tools) {
+        long total = (long) estimateMessagesRaw(messages) + estimateToolsRaw(tools);
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, total));
+    }
+
+    /**
+     * 对 raw token 应用校准比率（{@link #ratioOf(String)}）。
+     *
+     * <p>调用方拿到的是「含 tools 的 raw 总量」，乘比率后即与真实 prompt_tokens 同口径，
+     * 可直接与配置的 maxTokens 比较。</p>
+     *
+     * @param raw          {@link #estimateTotalRaw} 或 {@link #estimateMessagesRaw} 的结果
+     * @param providerCode Provider 编码
+     * @return 校准后的 token 估算
+     */
+    public static int applyRatio(int raw, String providerCode) {
+        if (raw <= 0) {
+            return 0;
+        }
+        long calibrated = Math.round(raw * ratioOf(providerCode));
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, calibrated));
+    }
+
+    // ==================== 在线校准 ====================
+
+    /**
+     * 用一次真实请求的 usage 校准估算比率（每个请求结束后调用一次）。
+     *
+     * <p><b>推导</b>：设 raw 为原始估算、ratio_old 为当前比率，
+     * 则发送前的 finalEstimate = raw × ratio_old；真实值为 actual。
+     * 理想比率应满足 raw × ratio_new ≈ actual，即
+     * {@code ratio_new ≈ actual / raw = ratio_old × (actual / finalEstimate)}。
+     * 令 {@code observed = actual / finalEstimate}，
+     * 则 {@code ratio_new = ratio_old × ((1-α) + α × observed)}（滑动平均，抗单次噪声）。</p>
+     *
+     * <p>异常观测（observed 超出 [{@value #MIN_RATIO}, {@value #MAX_RATIO}]）直接丢弃：
+     * 常见于 usage 帧解析错乱、闸道代理改写 usage、或跨 provider 复用同一比率。</p>
+     *
+     * @param providerCode Provider 编码（可为 null，计入全局比率）
+     * @param finalEstimate 发送前用 {@link #estimateMessages(List, String)} 算出的值
+     *                      （必须与实际发出的 messages 对应，否则校准会引入偏差）
+     * @param actualPromptTokens API 返回的真实 {@code usage.prompt_tokens}
+     */
+    public static synchronized void calibrate(String providerCode, int finalEstimate, int actualPromptTokens) {
+        if (finalEstimate <= 0 || actualPromptTokens <= 0) {
+            return;
+        }
+        double observed = (double) actualPromptTokens / (double) finalEstimate;
+        if (observed < MIN_RATIO || observed > MAX_RATIO) {
+            log.warn("Token 校准观测异常，已丢弃该次样本: provider={}, 发送前估算={}, 真实={}, 观测比率={}",
+                    providerCode, finalEstimate, actualPromptTokens, String.format("%.3f", observed));
+            return;
+        }
+
+        // ① 按 provider 单独校准
+        String key = normalizeProviderKey(providerCode);
+        double oldRatio = CALIBRATION.getOrDefault(key, DEFAULT_RATIO);
+        double newRatio = clampRatio(oldRatio * (1 - CALIBRATION_ALPHA + CALIBRATION_ALPHA * observed));
+        CALIBRATION.put(key, newRatio);
+
+        // ② 同步全局比率（供不带 provider 的调用点兜底；各 provider 差异大时以分 provider 为准）
+        if (!GLOBAL_RATIO_KEY.equals(key)) {
+            double gOld = CALIBRATION.getOrDefault(GLOBAL_RATIO_KEY, DEFAULT_RATIO);
+            double gNew = clampRatio(gOld * (1 - CALIBRATION_ALPHA + CALIBRATION_ALPHA * observed));
+            CALIBRATION.put(GLOBAL_RATIO_KEY, gNew);
+        }
+
+        log.info("[Token校准] provider={} 比率 {} → {}（发送前估算={}, 真实={}, 观测={}）",
+                providerCode == null || providerCode.isEmpty() ? "<global>" : providerCode,
+                String.format("%.3f", oldRatio), String.format("%.3f", newRatio),
+                finalEstimate, actualPromptTokens, String.format("%.3f", observed));
+    }
+
+    /**
+     * 读取当前生效的校准比率（供诊断与自检使用）。
+     *
+     * @param providerCode Provider 编码；{@code null} 读全局比率
+     * @return 当前比率（未观测到时返回 {@value #DEFAULT_RATIO}）
+     */
+    public static double ratioOf(String providerCode) {
+        String key = normalizeProviderKey(providerCode);
+        Double exact = CALIBRATION.get(key);
+        if (exact != null) {
+            return exact;
+        }
+        return CALIBRATION.getOrDefault(GLOBAL_RATIO_KEY, DEFAULT_RATIO);
+    }
+
+    /**
+     * 直接设置比率（供自检程序与「从配置恢复」场景使用，生产链路只走 {@link #calibrate}）。
+     *
+     * @param providerCode Provider 编码；{@code null} 表示全局
+     * @param ratio        目标比率，会被夹到 [{@value #MIN_RATIO}, {@value #MAX_RATIO}]
+     */
+    public static synchronized void setRatio(String providerCode, double ratio) {
+        CALIBRATION.put(normalizeProviderKey(providerCode), clampRatio(ratio));
+    }
+
+    // ==================== 字符数兜底观测 ====================
+
+    /**
+     * 请求体字符数 → 真实 prompt_tokens 的经验系数。
+     *
+     * <p><b>为什么必须有这条兜底通道</b>：{@code handleStreamingPhase} 里用
+     * {@code takeWhile(chunk -> shouldContinue.get())} 在「工具调用参数收齐」时立即停止处理后续帧，
+     * 而 usage 帧位于流末尾（{@code data: [DONE]} 之前）。于是<b>带 tool_calls 的请求绝大多数
+     * 拿不到 usage</b> —— {@link #calibrate} 连一个样本都收不到，比率恒为
+     * {@link #DEFAULT_RATIO}=1.0，CL100K 的虚高原样存在，守卫仍然每轮误判超限。</p>
+     *
+     * <p><b>为什么是 0.425</b>：把 app.log 的 {@code requestBodySize}
+     * （{@code requestBody.toString().length()}，即 Map 形态长度）与
+     * {@code llm_token_usage.prompt_tokens} 逐轮配对实测（火山 deepseek-v4.1-flash，
+     * 同一会话连续 5 轮）：</p>
+     * <pre>
+     *   请求体 chars   真实 prompt_tokens   比值
+     *   163 966        69 690              0.425
+     *   173 924        74 309              0.427
+     *   179 329        76 381              0.426
+     *   183 313        77 911              0.425
+     *   184 918        78 510              0.425
+     * </pre>
+     * <p>波动仅 ±0.5%，样本覆盖「中文 + 代码 + JSON 结构」的典型混合内容。</p>
+     *
+     * <p><b>与 {@link #estimateMessagesRaw} 的口径差异（关键）</b>：
+     * {@code estimateMessagesRaw} 只统计 messages（content / reasoning / tool_calls），
+     * <b>不含 tools 定义</b>；而本系数基于完整请求体，<b>含 tools</b>
+     * （本项目约 20 个工具的 schema 恒占 ~14 万字符 ≈ 6 万 token，压不掉也删不得）。
+     * 两者结合后，校准出的比率恰好让 {@code estimateMessages} 对上<b>含 tools 的总 prompt</b>，
+     * 这正是守卫阈值（按真实总 token 设计）需要的口径。</p>
+     *
+     * <p><b>漂移风险</b>：tools 是常量、messages 是变量，故 messages 大幅增长时该系数会产生
+     * 约 10% 的偏移；由 85% 阈值留出的 15% 保护带 + 每轮重新校准吸收，不影响判定。</p>
+     */
+    public static final double CHARS_TO_TOKEN_RATIO = 0.425;
+
+    /**
+     * 由请求体字符数反推真实 prompt_tokens（usage 帧丢失时的兜底观测值）。
+     *
+     * <p>精度低于 API 返回的 {@code usage.prompt_tokens}，但远好于「不校准」
+     * （后者虚高 4 倍导致每轮误压）。观测噪声由 {@link #calibrate} 的滑动平均（α=0.3）吸收。</p>
+     *
+     * @param requestChars 请求体字符数（含 tools 定义）
+     * @return 估算的真实 prompt_tokens；{@code requestChars<=0} 时返回 0，表示本条观测不可用
+     */
+    public static int estimateFromRequestChars(int requestChars) {
+        if (requestChars <= 0) {
+            return 0;
+        }
+        long value = Math.round(requestChars * CHARS_TO_TOKEN_RATIO);
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, value));
+    }
+
+    /** 清空全部校准状态（仅自检程序使用，生产链路不要调用） */
+    public static synchronized void resetCalibration() {
+        CALIBRATION.clear();
+    }
+
+    private static String normalizeProviderKey(String providerCode) {
+        return providerCode == null ? GLOBAL_RATIO_KEY : providerCode.trim().toLowerCase();
+    }
+
+    private static double clampRatio(double ratio) {
+        if (Double.isNaN(ratio) || ratio <= 0) {
+            return DEFAULT_RATIO;
+        }
+        return Math.max(MIN_RATIO, Math.min(MAX_RATIO, ratio));
     }
 }

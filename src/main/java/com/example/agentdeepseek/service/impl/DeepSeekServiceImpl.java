@@ -42,6 +42,7 @@ import com.example.agentdeepseek.service.lesson.FailureNormalizer;
 import com.example.agentdeepseek.service.lesson.LessonService;
 import com.example.agentdeepseek.service.lesson.LessonReviewService;
 import com.example.agentdeepseek.service.lesson.LessonDetourService;
+import com.example.agentdeepseek.service.support.DetourHintCacheStore;
 import com.example.agentdeepseek.service.lesson.DetourBlockParser;
 import com.example.agentdeepseek.projectcontext.ProjectContextProvider;
 import com.example.agentdeepseek.util.TokenEstimator;
@@ -142,6 +143,35 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final LLMClientManager llmClientManager;
     private final LessonService lessonService;
     private final FailureNormalizer failureNormalizer;
+
+    /**
+     * 连续「空回复」最大重试次数（2026-11-17 修复「任务静默中断」）。
+     *
+     * <p>模型在超长上下文下偶发把输出额度全花在 reasoning 的回合：实测
+     * {@code completion_tokens=1850} 而 {@code reasoning_tokens=1817}，
+     * {@code delta.content} 一个字符都没有、也没有 tool_calls。
+     * 旧实现把这种回合当成「任务说完」直接收尾 —— 前端计时器停止、输入框恢复，
+     * 用户看到的是「任务执行中断」，而日志里 finish_reason 还是漂亮的 {@code stop}，
+     * 完全查不出问题（本会话连续三次「继续未完成任务」被中断即此因）。
+     * 现改为追加续写请求重试；超过本阈值才真正放弃，避免死循环。</p>
+     */
+    /**
+     * 空回复最多重试次数（2026-11-17 二次调整：3 → 1）。
+     *
+     * <p><b>为什么必须从 3 降到 1</b>：空回复的成因是模型在超长上下文下「思考完直接 stop」
+     * （实测 {@code completion_tokens=1850} 中 {@code reasoning_tokens=1817}、{@code delta.content} 全空、
+     * {@code finish_reason="stop"}），不是 max_tokens 截断，重试并不保证能产出正文。</p>
+     *
+     * <p>而每次重试都要追加一条续写 user 消息 → 前缀改变 → 必然全量 miss。
+     * 实测上下文 33 万 token 时单次 miss 的 prefill 是 41 秒，重试 3 次等于把
+     * 「一次空回复」放大成「两分钟无响应」，用户侧看到的就是「结果都出来了但会话不结束」，
+     * 只能手动停止 —— 这比空回复本身更糟。</p>
+     *
+     * <p>因此只保留 1 次重试机会（偶尔能成功），仍为空则立即收尾并给出明确提示，
+     * 绝不继续追加请求。</p>
+     */
+    private static final int MAX_EMPTY_ROUNDS = 1;
+
     /** Phase 19 智能体互调（@Lazy 打破循环：AgentInvokeServiceImpl → DeepSeekService → 本类 → AgentInvokeService） */
     private final AgentInvokeService agentInvokeService;
 
@@ -885,8 +915,34 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             contextMode = deepSeekConfig.resolveContextMode();
         }
 
+        /*
+          ★ 2026-11-17（问题 1 / 2 同源修复）：构建历史消息必须带上本次真实 Provider。
+
+          双参重载就是 buildMessagesFromHistory(id, mode, null)，providerCode=null 会导致：
+            ① 上下文上限回退到全局 300000（而不是 huoshan 的覆盖值）→ 用户体感「300K 就压缩」；
+            ② 压缩时 providerCode 为空 → 旧实现回退默认 Provider
+               → Provider 列表里 deepseek 的 sortOrder 与 huoshan 相同且 id 更小，
+                 摘要请求极可能发往 api.deepseek.com（扣的是官网余额，实测 1 元多 → 0.21 元）。
+
+          这里与下方「LLM 选型」（request 显式指定 → Agent 绑定 providerCode → providerId）保持同一套
+          优先级，只取 providerCode 本身、不额外创建 client。
+          两者都拿不到时保持 null —— 此时 CompactionService 会直接跳过压缩，
+          宁可不压，也绝不猜一个账户去花钱。
+        */
+        String entryProviderCode = request.getProviderCode();
+        if (entryProviderCode == null || entryProviderCode.isEmpty()) {
+            if (agentConfigId != null) {
+                AgentConfig agentCfgForHistory = agentConfigMapper.selectById(agentConfigId).orElse(null);
+                if (agentCfgForHistory != null && agentCfgForHistory.getProviderCode() != null
+                        && !agentCfgForHistory.getProviderCode().isEmpty()) {
+                    entryProviderCode = agentCfgForHistory.getProviderCode();
+                }
+            }
+        }
+
         // 构建历史消息（包括本次用户消息），按上下文模式决定 reasoning 剔除 / 工具结果摘要
-        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId, contextMode);
+        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(
+                conversationId, contextMode, entryProviderCode);
 
         // 检查是否为首次会话（是否已存在SYSTEM消息）
         boolean hasSystemMessage = historyMessages.stream()
@@ -1453,8 +1509,36 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // iteration 传 0：本路径没有工具循环，只有一次请求。
                     .doFinally(signalType -> persistTokenUsageSafely(
                             conversationId, (String) apiRequest.get("_turnId"), 0,
-                            providerCode, chatUsageModel, chatUsageRef.get())));
+                            providerCode, chatUsageModel, chatUsageRef.get(),
+                            readEstimatedPromptTokens(apiRequest), readRequestChars(apiRequest))));
         }
+    }
+
+    /**
+     * 读取「发送前估算值」（由工具循环/主链路写入 {@code _estimatedPromptTokens}）。
+     *
+     * <p>缺失时返回 0，表示本次不做校准（例如没有埋点的旧路径）。</p>
+     */
+    private static int readEstimatedPromptTokens(Map<String, Object> apiRequest) {
+        if (apiRequest == null) {
+            return 0;
+        }
+        Object value = apiRequest.get("_estimatedPromptTokens");
+        return value instanceof Number number ? number.intValue() : 0;
+    }
+
+    /**
+     * 读取「本次请求体字符数」（由 {@code handleStreamingPhase} 写入 {@code _requestChars}）。
+     *
+     * <p>用于 usage 帧丢失时的兜底校准：{@link TokenEstimator#estimateFromRequestChars(int)}
+     * 把它换算成真实 token 的经验值。缺失时返回 0，表示本条观测不可用。</p>
+     */
+    private static int readRequestChars(Map<String, Object> apiRequest) {
+        if (apiRequest == null) {
+            return 0;
+        }
+        Object value = apiRequest.get("_requestChars");
+        return value instanceof Number number ? number.intValue() : 0;
     }
 
     // ===== 后台任务管理 =====
@@ -1882,7 +1966,22 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 构建初始消息列表
         List<Map<String, Object>> messages = new ArrayList<>();
         String contextMode = (String) initialApiRequest.getOrDefault("_contextMode", ContextMode.DEFAULT.getValue());
-        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(conversationId, contextMode);
+        /*
+          ★ 2026-11-17（问题 1 / 2 同源修复）：必须显式传 providerCode。
+
+          双参重载内部就是 buildMessagesFromHistory(id, mode, null)，providerCode=null 会引发两件事：
+            ① 上下文上限回退到全局 300000（而不是 huoshan 的 provider 覆盖值）
+               → 用户侧体感是「上下文才 300K 就被压缩了」；
+            ② 压缩时 callCompactionLlm(..., null) 走旧的默认 Provider 兜底
+               → Provider 列表里 deepseek 的 sortOrder 与 huoshan 相同且 id 更小，
+                 极可能把摘要请求发到 api.deepseek.com，扣的是官网余额。
+          这里能直接拿到 initialApiRequest，取其 _llmClient 的 providerCode 即可。
+        */
+        String loopProviderCodeForHistory = resolveProviderCode(initialApiRequest);
+        // contextMode 此处是配置字符串（取自 _contextMode），需转成 ContextMode 才能走带 providerCode 的重载
+        ContextMode loopContextMode = ContextMode.from(contextMode, deepSeekConfig.resolveContextMode());
+        List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(
+                conversationId, loopContextMode, loopProviderCodeForHistory);
         for (Map<String, Object> msg : historyMessages) {
             Map<String, Object> mutableMsg = new HashMap<>(msg);
             messages.add(mutableMsg);
@@ -1929,14 +2028,30 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             log.info("技能目录注入(toolLoop): 已注入技能目录到 system 消息, 长度={}", skillsSection.length());
         }
 
-        // 注入语言强制指令（工具循环中同样需要）
+        /*
+          ★ 2026-11-17 修复前缀缓存（第三处断裂源）：语言指令必须「位置固定 + 全文注入」。
+
+          两处历史写法都在制造跨轮断裂：
+            ① messages.add(langInstruction) —— 追加到**末尾**：上一轮它落在
+               「历史之后、工具结果之前」，本轮重建后它落在「本轮新增内容之后」，位置每轮都不同；
+            ② injectLanguageIntoLastUserMessage —— 只改内存、且只注入「最后一条 user」：
+               上一轮实际发出的那条已被改写成「指令 + 原文」，下一轮它退化为中间的历史 user
+               而不再被注入，形态回退成 DB 原文（实测 content_len=2）
+               → 断裂点正好落在它之后，其后的 14 次工具结果（≈14 万字符）全部作废。
+
+          现在：system 指令插到**头部**（位置恒定），user 指令对**全部 user 消息**注入
+          （指令为常量 + 注入带幂等标记 → DB 重建后与上次发出时逐字一致）。
+
+          注：下方 FileVisionService.injectBlocksIntoLastUserMessage 同样是「只注入最后一条」，
+          但本会话无图片块（imageBlocks 为空时不触发），故本次不改，留作已知隐患。
+        */
         Map<String, Object> langInstruction = new HashMap<>();
         langInstruction.put("role", "system");
         langInstruction.put("content", contextBuilder.buildLanguageInstruction());
-        messages.add(langInstruction);
+        messages.add(0, langInstruction);
 
-        // 同时将语言指令注入到最后一条用户消息内容中
-        contextBuilder.injectLanguageIntoLastUserMessage(messages);
+        // 语言指令注入到全部用户消息（常量 + 幂等，保证跨轮形态一致）
+        contextBuilder.injectLanguageIntoUserMessages(messages);
 
         // 📝 成长体系 P2：任务启动 DETOUR 弯路预警（新用户消息进入工具循环前，按任务关键词检索弯路经验并注入 system 提示）
         String toolProjectRoot = (String) initialApiRequest.get("_projectRoot");
@@ -2119,22 +2234,80 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
             log.debug("半流式工具调用循环迭代 {}，消息数量: {}", iteration + 1, messages.size());
 
-            // ★ 工具循环上下文预算守卫：防止多轮工具调用累积导致上下文超限（API 400）
-            //   每次迭代请求前检查，超限则执行工具循环专用裁剪（旧 tool 消息摘要化 + 超大消息首尾截断）。
-            //   阈值取「该 Provider 实际生效上限」的 85%，预留输出空间与 token 估算偏差——
-            //   此前用全局 maxContextTokens，火山（1049K 窗口）会被 30 万阈值频繁误裁。
+            // ★ 工具循环上下文预算守卫（2026-11-17 改造：只压缩，绝不裁剪）
+            //
+            //   阈值取「该 Provider 实际生效上限」的 85%，预留输出空间与估算偏差。
+            //
+            //   【为什么废除旧的 trimToolLoopToBudget】
+            //   旧实现把历史 tool 消息 content 就地替换成「[CC-TRIM][工具…]」摘要，但只改内存：
+            //   下一轮用户发言时 buildMessagesFromHistory 从 DB 重建，tool 消息又变回完整原文，
+            //   与上一轮内存中的摘要形态不同 → 本次请求不再是上一次的真前缀
+            //   → 从差异点起全部按未命中重新 prefill（125K 上下文 ≈ 30 秒）。
+            //   实测：iteration=0 的 cache_hit_tokens 全部为 0，而 iteration≥1 始终 95%+。
+            //
+            //   现在改为「压缩并入库」：压缩区间写入 conversation_compaction，
+            //   之后每次重建都得到「system + 摘要 + 其后消息」这一稳定前缀。
             final String loopProviderCode = resolveProviderCode(initialApiRequest);
             int toolLoopGuardLimit = (int) (deepSeekConfig.resolveMaxContextTokens(loopProviderCode) * 0.85);
-            int loopEstimatedTokens = TokenEstimator.estimateMessages(messages);
+            /*
+              ★ 口径统一（2026-11-17 修复「校准比率顶到 2.0 上限 / 兜底样本被丢弃」）
+
+              服务端的 usage.prompt_tokens <b>包含 tools 定义</b>，而 estimateMessages 只统计 messages。
+              本项目约 20~31 个工具的 schema 恒占 ~14 万字符 ≈ 6 万真实 token（压不掉也删不得）。
+              两者错位会引发两种失效：
+                · 拿「不含 tools 的估算」追「含 tools 的真实」→ 比率被顶到 MAX_RATIO=2.0 仍不够；
+                · 拿「含 tools 的字符数兜底观测」比「不含 tools 的估算」→ observed≈3.2，
+                  超过 MAX_RATIO 被判异常直接丢弃（实测日志里一条校准都没有，正是这个原因）。
+              因此守卫统一改用「messages raw + tools raw」的总量口径。
+            */
+            Object loopToolsDef = initialApiRequest.get("tools");
+            int loopRawTokens = TokenEstimator.estimateTotalRaw(messages, loopToolsDef);
+            int loopEstimatedTokens = TokenEstimator.applyRatio(loopRawTokens, loopProviderCode);
             if (loopEstimatedTokens > toolLoopGuardLimit) {
-                log.warn("工具循环上下文超限预警：估算 {} tokens > 守卫上限 {}（provider={}），执行裁剪",
-                        loopEstimatedTokens, toolLoopGuardLimit, loopProviderCode);
-                contextBuilder.trimToolLoopToBudget(messages, toolLoopGuardLimit);
+                /*
+                  ★ 防抖 + 线程保护（2026-11-17，Bug A/B 双修）。
+
+                  守卫在**每一次工具迭代**都会执行，而 compact 内部是同步 blockingChat
+                  （已从 60 秒收紧到 20 秒）。缺少防抖时，只要「压缩后仍超限」或「估算偏高」，
+                  每次迭代都会白等一次 LLM 往返：
+                    · 用户侧：任务长时间静默无输出，最终手动中断
+                      （本会话连续三次「继续未完成任务」被中断即此因）；
+                    · 若此时重入路径跑在 reactor 调度线程上，还会连带阻塞该线程上所有 SSE 流
+                      → 前端表现为「回复已结束但既不吐 token 也不调工具」。
+                  这里与 ContextBuilder 的同步压缩共用同一个防抖间隔（isRecentlyCompacted），
+                  保证两条路径不互相踩踏。
+                */
+                if (compactionService.isRecentlyCompacted(storageConversationId)) {
+                    log.debug("工具循环超限但距上次压缩不足防抖间隔，本轮跳过压缩：估算 {} tokens, 守卫上限 {}",
+                            loopEstimatedTokens, toolLoopGuardLimit);
+                } else {
+                    log.warn("工具循环上下文超限预警：估算 {} tokens（raw={}，tools 已计入）> 守卫上限 {}（provider={}），执行压缩（不裁剪）",
+                            loopEstimatedTokens, loopRawTokens, toolLoopGuardLimit, loopProviderCode);
+                    int afterLoopCompact = compactionService.compact(storageConversationId, messages, loopProviderCode);
+                    if (afterLoopCompact > 0) {
+                        /*
+                          compact 返回的是「不含 tools 的 messages 估算」，不能直接当守卫值用。
+                          压缩可能已原地修改 messages（replaceWithCompaction），这里按含 tools 的口径重算一遍，
+                          保证 _estimatedPromptTokens 与真正要发送的请求体同源 —— 否则校准会引入系统性偏差。
+                         */
+                        loopRawTokens = TokenEstimator.estimateTotalRaw(messages, loopToolsDef);
+                        loopEstimatedTokens = TokenEstimator.applyRatio(loopRawTokens, loopProviderCode);
+                        log.info("工具循环内压缩完成：压缩服务返回 {} tokens（不含 tools），重估含 tools={} tokens（raw={}）",
+                                afterLoopCompact, loopEstimatedTokens, loopRawTokens);
+                    }
+                    if (loopEstimatedTokens > toolLoopGuardLimit) {
+                        log.warn("压缩后仍超限（保护带或本轮新增内容过大），不做裁剪、继续请求：估算 {} tokens, 上限 {}",
+                                loopEstimatedTokens, toolLoopGuardLimit);
+                    }
+                }
             }
 
             // 构建当前迭代的API请求
             Map<String, Object> apiRequest = new HashMap<>(initialApiRequest);
             apiRequest.put("messages", messages);
+            // ★ 记录「发送前的校准后估算值」：响应回来后用它和真实 usage.prompt_tokens 比对，
+            //   持续修正 TokenEstimator 的 provider 比率（_ 前缀字段不会被放进请求体发给 API）。
+            apiRequest.put("_estimatedPromptTokens", loopEstimatedTokens);
 
             // 始终使用流式请求
             // ★ 在 Flux 完成后兜底检查补充队列：当 AI 以纯文本回复结束时（没有更多 tool_calls），
@@ -2152,17 +2325,24 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                           （包括把没收完的 tool_calls 补出来）。注意：不消耗额外的 iteration 上限之外
                           的任何计数，续写仍受 maxIterations 与既有守卫约束，不会无限循环。
                          */
-                        if ("length".equals(String.valueOf(apiRequest.get("_finishReason")))) {
+                        String finishMarker = String.valueOf(apiRequest.get("_finishReason"));
+                        boolean needContinue = "length".equals(finishMarker) || "empty".equals(finishMarker);
+                        if (needContinue) {
                             apiRequest.remove("_finishReason");
+                            boolean emptyCase = "empty".equals(finishMarker);
                             Map<String, Object> continueMsg = new HashMap<>();
                             continueMsg.put("role", "user");
-                            continueMsg.put("content",
-                                    "【系统自动续写】上一次输出因长度上限被截断，请从中断处**继续**完成任务，"
-                                            + "不要重复已输出的内容，也不要重新开始。"
-                                            + "如果还需要调用工具，请直接发起工具调用。");
+                            continueMsg.put("content", emptyCase
+                                    ? "【系统自动续写】上一次回复为空（你只输出了思考过程，正文与工具调用都是空的）。"
+                                    + "请现在**直接**输出面向用户的正文，或直接发起工具调用；"
+                                    + "不要再复述思考过程，也不要重新开始任务。"
+                                    : "【系统自动续写】上一次输出因长度上限被截断，请从中断处**继续**完成任务，"
+                                    + "不要重复已输出的内容，也不要重新开始。"
+                                    + "如果还需要调用工具，请直接发起工具调用。");
                             messages.add(continueMsg);
-                            log.warn("检测到 finish_reason=length（输出被截断），追加续写请求并重新进入工具循环: " +
+                            log.warn("检测到 {}，追加续写请求并重新进入工具循环: " +
                                             "conversationId={}, iteration={}, provider={}",
+                                    emptyCase ? "_finishReason=empty（空回复）" : "finish_reason=length（输出被截断）",
                                     conversationId, iteration, resolveProviderCode(apiRequest));
                             /*
                               ⚠️ iteration 必须 +1（2026-11-16 修复）。
@@ -2175,9 +2355,23 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                               `iteration >= maxIterations` 永不成立 → messages 无限膨胀
                               → 上下文撑爆、或递归深度失控。
                              */
+                            /*
+                              ★ 2026-11-17 关键修复：重入必须切到弹性线程池（Bug B 根因）。
+
+                              本 lambda 由 Flux.defer 在 reactor 调度线程（reactor-http-nio-x）上执行，
+                              而 handleToolCallIteration 内部含有**同步阻塞**调用：
+                                · 工具循环守卫里的 compactionService.compact → blockingChat（超时 60 秒）
+                                · 评委扩权判定 → 同步 LLM 调用
+                                · 工具执行、DB 读写等
+                              一旦在 reactor 线程上阻塞，该线程上承载的**所有 SSE 流**一起停摆。
+                              前端表现：回复正文已结束、【方案取舍】块也已收到，
+                              此后既不吐 token 也不发起工具调用，界面一直转圈，只能手动停止任务
+                              （本会话多轮复现，且只在「有方案取舍块 / 有续写 / 有补充需求」的轮次高发）。
+                            */
                             return Flux.just(createReasoningSSEEvent("✂️ 输出达到长度上限，正在自动续写..."))
-                                    .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
-                                            messages, iteration + 1, maxIterations));
+                                    .concatWith(Flux.defer(() -> handleToolCallIteration(conversationId, storageConversationId,
+                                                    initialApiRequest, messages, iteration + 1, maxIterations))
+                                            .subscribeOn(Schedulers.boundedElastic()));
                         }
 
                         // 检查补充需求队列
@@ -2199,9 +2393,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             // 发送提示事件并重新进入ToolLoop
                             // ⚠️ iteration 必须 +1（2026-11-16 修复）：本分支会再发起一次 LLM 请求，
                             //    此前原样透传会让补充需求循环完全绕过 maxIterations 限制。
+                            // ★ 2026-11-17 同上：重入必须切到弹性线程池，避免阻塞 reactor 线程导致 SSE 停摆
                             return Flux.just(createReasoningSSEEvent("💡 收到用户补充需求（共 " + deferredSupplements.size() + " 条），正在调整执行..."))
-                                    .concatWith(handleToolCallIteration(conversationId, storageConversationId, initialApiRequest,
-                                            messages, iteration + 1, maxIterations));
+                                    .concatWith(Flux.defer(() -> handleToolCallIteration(conversationId, storageConversationId,
+                                                    initialApiRequest, messages, iteration + 1, maxIterations))
+                                            .subscribeOn(Schedulers.boundedElastic()));
                         }
                         return Flux.empty();
                     }));
@@ -2573,66 +2769,147 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
     /**
      * P2 任务启动 DETOUR 自动注入：新用户消息进入工具循环前，
-     * 用用户消息关键词检索弯路经验（type=detour），命中则在 system 区注入弯路预警。
-     * 同步检索（DB 毫秒级，不阻塞）；会话级去重（同会话只注入一次）。
-     * 定位：工具循环入口（executeSemiStreamingToolCycle）语言指令注入后调用。
+     * 用用户消息关键词检索弯路经验（type=detour），命中则把弯路预警**追加到当前用户消息末尾**。
+     *
+     * <p><b>⚠️ 为什么必须追加到 user 消息，而不是新增 system 消息（2026-11-17 修复）</b>：
+     * 旧实现把预警作为一条新的 system 消息插到「全部 system 之后、第一条历史消息之前」，
+     * 于是后面每一条历史消息都整体后移一位 —— DeepSeek 的前缀缓存要求「本次 prompt 是上次的真前缀」，
+     * 从插入点起全部不再匹配。实测后果：{@code llm_token_usage} 里 iteration=0 的
+     * {@code cache_hit_tokens} 直接归零，125K 上下文每次首 token 要 30 秒。
+     * 追加到 user 消息则只影响「本轮新增内容」，前缀（system + 历史）一字不动，缓存继续命中。</p>
+     *
+     * <p>同时修复去重失效：旧实现调用 {@link #markDetourHintInjected} 却丢弃返回值，
+     * 导致「会话级只注入一次」从未生效 —— 每轮都注入，且检索结果随当前消息变化，
+     * 等于每轮都在改写请求。现在先查后写，真正实现会话级去重。</p>
      */
+    /**
+     * 会话级弯路预警文本缓存：同一会话每轮注入必须<b>一字不差</b>。
+     *
+     * <p>弯路预警的检索结果依赖「本轮用户消息关键词」，天然不确定；若每轮重新检索，
+     * system 段每轮都变 → 前缀缓存全断。这里按会话缓存首次命中文本，后续所有轮次复用同一份字节。</p>
+     *
+     * <p><b>2026-11-17 升级为跨进程持久化</b>（{@link DetourHintCacheStore}）：原先只用进程内 Map，
+     * 进程重启后缓存清空 → 重新检索出不同文本（检索依赖本轮关键词）→ 注入第一条 system →
+     * 从第一个 token 起全部不匹配。实测 {@code iteration=0} 全量 miss：
+     * {@code 输入=154490(命中0/未命中154490)}、费用 {@code ¥0.155}，是同轮内命中时（{@code ¥0.007}）的 21 倍。
+     * 现在文本落盘到 {@code <userData>/runtime/detour-hint-cache.json}（带 24h TTL），
+     * 重启后仍复用同一份字节，不再产生「重启即 miss」。</p>
+     */
+    @Autowired
+    private DetourHintCacheStore detourHintCacheStore;
+
     private void injectDetourHintAtTaskStart(List<Map<String, Object>> messages,
                                              String projectRoot, Long conversationId) {
-        if (lessonService == null || messages == null || messages.isEmpty()) {
+        if (lessonService == null || messages == null || messages.isEmpty() || conversationId == null) {
             return;
         }
         try {
-            // H2 修复：去重标记移到「成功注入后」——未命中弯路经验时不占用去重 key，
-            // 避免「首轮无匹配、后续轮任务才相关」的会话中预警机制彻底失效
-            // 取最新一条 user 消息作为任务目标关键词
-            String userText = null;
-            for (int i = messages.size() - 1; i >= 0; i--) {
-                if ("user".equals(messages.get(i).get("role"))) {
-                    Object c = messages.get(i).get("content");
-                    if (c != null && !String.valueOf(c).isBlank()) {
-                        userText = String.valueOf(c);
-                        break;
+            /*
+              ★ 2026-11-17 二次修复：弯路预警必须「文本稳定 + 位置固定」。
+
+              上一版（把预警追加到「最后一条 user 消息」）看似不移动历史，实际仍是每轮漂移：
+                · 位置不稳定：本轮新 user 在列表末尾，上一轮的 user 在列表中段；
+                · 文本不稳定：会话级去重（isDetourHintInjected）让「上轮注入 / 本轮跳过」交替发生，
+                  而 DB 里那条 user 消息始终只有原文（实测 content_len=2），
+                  于是重建出的 user 消息与上次实际发出的（74 字符）不一致。
+              实测后果：断裂点正好落在倒数第二条 user 消息之后，那里往后的 14 次工具结果
+              （≈14 万字符）全部不再是上次的真前缀 —— iteration=0 每次全量 prefill
+              （TTFB 14~25 秒），iteration>=1 才靠同轮内存一致命中。
+
+              现在改成两条铁律：
+                ① 文本稳定：按会话缓存 hint 文本，同进程内每轮注入完全相同的字节；
+                ② 位置固定：注入到第一条 system 消息（hoist 之后 system 恒在最前），不再碰 user 消息。
+              代价：首次注入会让 system 段变化一次（该轮本就需要 prefill）；此后恒稳定。
+            */
+            String hintText = detourHintCacheStore.get(conversationId);
+            if (hintText == null) {
+                // 首次：按本轮任务关键词检索一次，结果缓存供后续所有轮次复用
+                String userText = null;
+                for (int i = messages.size() - 1; i >= 0; i--) {
+                    if ("user".equals(messages.get(i).get("role"))) {
+                        String text = contentToPlainText(messages.get(i).get("content"));
+                        if (text != null && !text.isBlank()) {
+                            userText = text;
+                            break;
+                        }
                     }
                 }
+                if (userText == null) {
+                    return;
+                }
+                // P0-3：整段交给检索端拆词器（中文 2-gram + ASCII 分词，多词 OR 匹配 goal/keywords）
+                String keyword = userText.length() > 300 ? userText.substring(0, 300) : userText;
+                String projectKey = failureNormalizer.extractProjectKey(projectRoot);
+                String result = lessonService.searchLessons(projectKey, null, null, keyword, null, Lesson.TYPE_DETOUR);
+                if (result == null || !result.startsWith("📚")) {
+                    // 无命中：缓存空串，既避免后续每轮重复检索，也保证「不注入」这件事本身是稳定的
+                    detourHintCacheStore.put(conversationId, "");
+                    log.debug("任务启动弯路预警：本会话无命中，后续轮次不再检索（conversationId={}）", conversationId);
+                    return;
+                }
+                hintText = result;
+                // 容量淘汰（超 1000 条时按落盘时间淘汰最旧 1/4）由 DetourHintCacheStore 内部处理
+                detourHintCacheStore.put(conversationId, hintText);
+                log.info("任务启动弯路预警检索完成(会话级缓存): conversationId={}, project={}, userLen={}, hintLen={}",
+                        conversationId, projectKey, userText.length(), hintText.length());
             }
-            if (userText == null) {
+            if (hintText.isEmpty()) {
                 return;
             }
-            // P0-3：不再用「前 80 字整段 LIKE」（自然语言长句与 goal 短句互为子串概率≈0 → 必然失配），
-            // 整段交给检索端拆词器（中文 2-gram + ASCII 分词，多词 OR 匹配 goal/keywords）
-            String keyword = userText.length() > 300 ? userText.substring(0, 300) : userText;
-            String projectKey = failureNormalizer.extractProjectKey(projectRoot);
-            String result = lessonService.searchLessons(projectKey, null, null, keyword, null, Lesson.TYPE_DETOUR);
-            if (result == null || !result.startsWith("📚")) {
-                return; // 无弯路经验命中（"📭 未找到"不注入）
-            }
-            // 注入 system 消息（所有 system 之后、第一条非 system 之前）
-            Map<String, Object> hintMsg = new HashMap<>();
-            hintMsg.put("role", "system");
-            hintMsg.put("content", "[踩坑经验-弯路预警] 当前任务与历史弯路经验相关，规划方案前请参考以下「已知不可行方案」：\n" + result);
-            int insertIdx = 0;
-            for (int i = 0; i < messages.size(); i++) {
-                Object role = messages.get(i).get("role");
-                if (!"system".equals(role)) {
-                    insertIdx = i;
-                    break;
+
+            // 位置固定：注入第一条 system 消息（内容固定 + 位置固定 = 前缀稳定）
+            for (Map<String, Object> msg : messages) {
+                if (!"system".equals(msg.get("role"))) {
+                    continue;
                 }
-                insertIdx = i + 1;
+                Object contentObj = msg.get("content");
+                if (!(contentObj instanceof String existingContent)) {
+                    // 多模态 system：弯路预警是增强项，跳过无害
+                    log.debug("跳过弯路预警注入：system 消息为多模态内容");
+                    return;
+                }
+                if (existingContent.contains(DETOUR_HINT_MARK)) {
+                    return; // 幂等：本轮已拼过
+                }
+                msg.put("content", existingContent + "\n\n" + DETOUR_HINT_MARK + hintText);
+                log.info("任务启动弯路预警注入(system 段): conversationId={}, hintLen={}",
+                        conversationId, hintText.length());
+                return;
             }
-            messages.add(insertIdx, hintMsg);
-            // H2：仅在成功注入后占用去重 key（复用 lessonHintInjected 表，key 带 detour 前缀）
-            if (conversationId != null) {
-                markDetourHintInjected(conversationId);
-            }
-            log.info("任务启动弯路预警注入: conversationId={}, project={}, userLen={}",
-                    conversationId, projectKey, userText.length());
         } catch (Exception e) {
             log.warn("任务启动弯路预警注入失败（不影响主流程）: {}", e.getMessage());
         }
     }
 
-    /** P2 会话级去重：同会话只注入一次任务启动弯路预警 */
+    /** 弯路预警前缀标记：用于幂等判断（同一消息重复拼接会让内容每轮漂移） */
+    private static final String DETOUR_HINT_MARK = "[踩坑经验-弯路预警]";
+
+    /** 把 content（String 或多模态块列表）转成纯文本；无可用文本时返回 null */
+    private static String contentToPlainText(Object content) {
+        if (content instanceof String text) {
+            return text;
+        }
+        if (content instanceof List<?> parts) {
+            StringBuilder sb = new StringBuilder();
+            for (Object item : parts) {
+                if (item instanceof Map<?, ?> block && "text".equals(block.get("type"))) {
+                    Object text = block.get("text");
+                    if (text != null) {
+                        sb.append(text);
+                    }
+                    sb.append('\n');
+                }
+            }
+            return sb.length() == 0 ? null : sb.toString();
+        }
+        return content == null ? null : String.valueOf(content);
+    }
+
+    /** P2 会话级去重：同会话是否已注入过任务启动弯路预警 */
+    private boolean isDetourHintInjected(Long conversationId) {
+        return lessonHintInjected.containsKey(conversationId + ":detour-start");
+    }
+
     private boolean markDetourHintInjected(Long conversationId) {
         String key = conversationId + ":detour-start";
         long now = System.currentTimeMillis();
@@ -3242,6 +3519,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         int requestBodySize = requestBody.toString().length();
         log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
                 conversationId, iteration, requestBodySize);
+        // ★ 校准兜底（2026-11-17）：工具调用参数一收齐，第 3437 行就把 shouldContinue 置 false，
+        //   takeWhile 随即取消上游订阅 —— 而 usage 帧位于流末尾（data: [DONE] 之前），
+        //   于是「带 tool_calls 的请求」绝大多数拿不到 usage，doFinally 里 snapshot==null 直接早退，
+        //   TokenEstimator 一个校准样本都收不到，比率恒为 1.0（虚高 4 倍 → 每轮误压 → 前缀全断）。
+        //   这里把「请求体字符数」留给 doFinally：拿不到 usage 时用它按经验系数反推真实 token。
+        //   requestBody 已剔除 _ 前缀字段，故该键不会被发给 API。
+        apiRequest.put("_requestChars", requestBodySize);
 
         // ===== 缓存保护：前缀指纹检查 =====
         // 只盯住「系统提示词」与「工具定义」这两段——它们是缓存前缀的头部，
@@ -3314,9 +3598,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     responseBuilder.append(chunk);
                 })
                 .filter(chunk -> {
-                    // 过滤掉空行和[DONE]事件
                     String trimmed = chunk.trim();
-                    return !trimmed.isEmpty();
+                    if (trimmed.isEmpty()) {
+                        return false;
+                    }
+                    /*
+                      ★ 2026-11-17：真正过滤掉 [DONE] 结束标记。
+                      这里的注释一直写着「过滤掉空行和[DONE]事件」，实现却只判断了 isEmpty——
+                      于是 `data: [DONE]` 被送进 flatMap 当 JSON 解析，每轮流末尾必抛
+                      "Unrecognized token 'DONE'" 并记一条 WARN。该 WARN 每轮都刷，
+                      恰好把真正的故障线索（本轮为何空回复 / 为何提前收尾）淹没了，
+                      排查时极易被当成无害噪音跳过。
+                    */
+                    return !trimmed.contains("[DONE]");
                 })
                 .takeWhile(chunk -> shouldContinue.get())  // 检测到工具调用后停止处理后续事件
                 .flatMap(chunk -> {
@@ -3955,6 +4249,52 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         }
 
                         /*
+                          ★ 2026-11-17 修复「任务静默中断」（用户侧「真断了」的根因）。
+
+                          现象（实测 conversationId=257 @21:49:48）：
+                            finish_reason="stop"、completion_tokens=1850（其中 reasoning_tokens=1817）、
+                            delta.content 全为空、也没有 tool_calls —— 模型把输出额度全花在思考链上，
+                           正文一个字符都没吐。
+                          旧行为：因为「没有 tool_calls」就直接判定「任务说完」，保存一条空 assistant
+                          消息并收尾。前端计时器停止、输入框恢复，用户以为任务被中断，实际是被系统
+                          判了「已完成」，而日志里 finish_reason 还是漂亮的 stop，毫无线索可查。
+
+                          现在：content 为空且无 tool_calls 视为「空回合」，不保存、不收尾，
+                          标记 _finishReason=empty，由外层 handleToolCallIteration 的 concatWith
+                          追加续写请求重新进入工具循环（与 finish_reason=length 共用同一重试通道）。
+                          连续超过 MAX_EMPTY_ROUNDS 次才真正放弃，避免死循环。
+
+                          注意：本段必须放在下方 truncated 分支之前 —— 那个分支会 return 走截断续写，
+                          若空回合落在它之后将永远不执行。
+                        */
+                        boolean emptyRound = (content == null || content.trim().isEmpty());
+                        if (emptyRound) {
+                            int emptyRounds = 1;
+                            Object prevEmpty = apiRequest.get("_emptyRounds");
+                            if (prevEmpty instanceof Number prevNum) {
+                                emptyRounds = prevNum.intValue() + 1;
+                            }
+                            apiRequest.put("_emptyRounds", emptyRounds);
+                            if (emptyRounds <= MAX_EMPTY_ROUNDS) {
+                                log.warn("检测到空回复（content 为空且无 tool_calls）：provider={}, iteration={}, "
+                                                + "reasoning长度={}, 连续第{}次。不判定任务完成，将追加续写请求。",
+                                        resolveProviderCode(apiRequest), iteration,
+                                        reasoning != null ? reasoning.length() : 0, emptyRounds);
+                                apiRequest.put("_finishReason", "empty");
+                                // 本轮的空回复与 reasoning 一并入上下文，模型下轮才能接着写
+                                Map<String, Object> emptyAssistant = new HashMap<>();
+                                emptyAssistant.put("role", "assistant");
+                                ReasoningPassback.putHistory(emptyAssistant, reasoning,
+                                        ReasoningPassback.modeOf(apiRequest));
+                                messages.add(emptyAssistant);
+                                return;
+                            }
+                            log.error("连续 {} 次空回复，放弃续写以免死循环：provider={}, iteration={}，"
+                                            + "建议排查 max_tokens 是否过小（思考链可能挤占正文额度）",
+                                    emptyRounds, resolveProviderCode(apiRequest), iteration);
+                        }
+
+                        /*
                           截断场景（finish_reason=length）走这里的特殊分支：
                           把已输出的半截内容作为 assistant 消息入上下文（模型下轮才能接着写），
                           但**不做**「最终回复」的收尾动作（不复盘、不收尾），
@@ -4010,7 +4350,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 // 成本可观测：流终止（正常完成 / 取消 / 异常）统一落库，保证每次请求一条记录
                 .doFinally(signalType -> persistTokenUsageSafely(
                         conversationId, (String) apiRequest.get("_turnId"), iteration,
-                        usageProvider, usageModel, usageRef.get()));
+                        usageProvider, usageModel, usageRef.get(),
+                        readEstimatedPromptTokens(apiRequest), readRequestChars(apiRequest)));
     }
 
     /**
@@ -4090,8 +4431,67 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
                                          String provider, String model,
                                          TokenUsageParser.UsageSnapshot snapshot) {
+        persistTokenUsageSafely(conversationId, turnId, iteration, provider, model, snapshot, 0, 0);
+    }
+
+    /**
+     * 成本可观测：把单次请求的 usage 落库，并顺带校准 token 估算比率。
+     *
+     * @param expectedPromptTokens 发送前 {@link TokenEstimator#estimateMessages(List, String)}
+     *                             算出的校准后估算值；{@code <=0} 表示本次不校准
+     */
+    private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
+                                         String provider, String model,
+                                         TokenUsageParser.UsageSnapshot snapshot,
+                                         int expectedPromptTokens) {
+        persistTokenUsageSafely(conversationId, turnId, iteration, provider, model, snapshot,
+                expectedPromptTokens, 0);
+    }
+
+    /**
+     * 成本可观测 + 在线校准（含「usage 帧丢失」的兜底通道）。
+     *
+     * @param requestChars 本次请求体字符数（{@code apiRequest._requestChars}）；
+     *                     为 0 时兜底通道不生效（只依赖真实 usage）
+     */
+    private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
+                                         String provider, String model,
+                                         TokenUsageParser.UsageSnapshot snapshot,
+                                         int expectedPromptTokens, int requestChars) {
         if (snapshot == null || snapshot.getTotalTokens() <= 0) {
+            /*
+              ★ usage 帧丢失 → 改走兜底校准（2026-11-17 修复「校准从未生效」）
+
+              handleStreamingPhase 的 takeWhile（第 3397 行）在「工具调用参数收齐」时立刻把
+              shouldContinue 置为 false，Reactor 随即取消上游订阅；而 usage 帧排在流末尾
+              （data: [DONE] 之前）。实测结果：凡是带 tool_calls 的请求，snapshot 基本都是 null。
+
+              旧实现到这里直接 return —— calibrate 一个样本都收不到，比率恒为 1.0，
+              估算虚高 4 倍 → 守卫每轮误判超限 → 每轮压缩 → 前缀每轮重建 → 首 token 18 秒。
+
+              现在改用「请求体字符数 × 0.425」反推真实 prompt_tokens 作为观测值：
+              精度不如真实 usage，但足以把比率拉到正确量级（≈0.24），
+              让守卫恢复「只在真正接近上限时才压缩」。
+              注意：此处不落库 —— 估算值记进成本看板会污染真实计费数据。
+            */
+            calibrateFromRequestChars(provider, expectedPromptTokens, requestChars);
             return;
+        }
+        /*
+         * ★ 在线校准（2026-11-17 新增）：这是整条链路上唯一能拿到「真实 prompt_tokens」的地方。
+         *   TokenEstimator 用 CL100K_BASE 估 DeepSeek token，中文场景实测高估约 3.4 倍
+         *   （估算 438225 vs 实际 130290），导致「实际只有 7.5 万 token」就被判成「已超 25.5 万」
+         *   → 每轮误触发压缩/裁剪 → 前缀缓存全量失效 → 首 token 30 秒。
+         *   这里用真实值反推比率，后续估算自动收敛到真实口径。
+         *
+         * 放在 try 之外：即使后续落库失败（老库缺列等），校准也不应丢掉。
+         */
+        if (expectedPromptTokens > 0 && snapshot.getPromptTokens() > 0) {
+            try {
+                TokenEstimator.calibrate(provider, expectedPromptTokens, snapshot.getPromptTokens());
+            } catch (Exception e) {
+                log.trace("token 估算校准失败（忽略）: {}", e.getMessage());
+            }
         }
         try {
             LlmTokenUsage entity = tokenUsageParser.toEntity(
@@ -4117,6 +4517,49 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         } catch (Exception e) {
             log.warn("用量记录落库失败（不影响对话主流程）: conversationId={}, turnId={}, iteration={}, err={}",
                     conversationId, turnId, iteration, e.getMessage());
+        }
+    }
+
+    /**
+     * usage 帧丢失时的兜底校准：用请求体字符数反推真实 prompt_tokens。
+     *
+     * <p>为什么需要它：{@code persistTokenUsageSafely} 的 {@code snapshot==null} 分支说明了根因 ——
+     * {@code takeWhile} 在工具调用收齐时提前取消上游，usage 帧（流末尾）收不到，
+     * 真实观测源整体断供，校准永远停在默认比率 1.0。</p>
+     *
+     * <p>换算规则见 {@link TokenEstimator#estimateFromRequestChars(int)}（系数 0.425，
+     * 实测 5 样本波动 ±0.5%）。观测噪声由滑动平均（α=0.3）吸收，
+     * 异常值由 {@link TokenEstimator#calibrate} 的 [0.10, 2.00] 区间丢弃。</p>
+     *
+     * @param provider              Provider 编码（用于分平台隔离比率）
+     * @param expectedPromptTokens  本次发送前的校准后估算值（对应实际发出的 messages）
+     * @param requestChars          本次请求体字符数（含 tools 定义）
+     */
+    private void calibrateFromRequestChars(String provider, int expectedPromptTokens, int requestChars) {
+        int observedTokens = TokenEstimator.estimateFromRequestChars(requestChars);
+        /*
+          ★ 诊断日志（2026-11-17）：无条件打印三个关键值。
+          线上曾出现「兜底通道看似接了、却一条 [Token校准] 都没有」的情况，
+          而两个入参任一为 0 时本方法会静默 return，无法从日志区分「没触发」还是「触发了但被丢」。
+          留这一条后，下次只需 grep [Token校准-兜底] 就能判定：
+            · requestChars=0        → handleStreamingPhase 的埋点未生效（请求体字符数没传到 doFinally）
+            · expectedPromptTokens=0 → 守卫处的估算值没写进 apiRequest（或该请求走了无埋点的旧路径）
+            · observedTokens 落在 [0.10, 2.00] 之外的实际比率 → 说明估算口径仍有偏差
+        */
+        log.info("[Token校准-兜底] provider={} expectedPromptTokens={} requestChars={} observedTokens={}",
+                provider, expectedPromptTokens, requestChars, observedTokens);
+        if (expectedPromptTokens <= 0 || requestChars <= 0) {
+            return;
+        }
+        if (observedTokens <= 0) {
+            return;
+        }
+        try {
+            TokenEstimator.calibrate(provider, expectedPromptTokens, observedTokens);
+            log.debug("[Token校准-兜底] provider={} 请求体={} chars → 观测真实值≈{} tokens（usage 帧丢失，走字符数反推）",
+                    provider, requestChars, observedTokens);
+        } catch (Exception e) {
+            log.trace("兜底 token 校准失败（忽略）: {}", e.getMessage());
         }
     }
 

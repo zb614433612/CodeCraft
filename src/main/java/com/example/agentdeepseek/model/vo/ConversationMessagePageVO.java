@@ -32,6 +32,29 @@ public class ConversationMessagePageVO {
     @Schema(description = "本次返回覆盖的轮数（实际被截取的用户消息轮数，上限为请求的 rounds）")
     private int rounds;
 
+    /*
+     ═══════════════════════════════════════════════════════════════════════════
+      上下文压缩边界（2026-11-17 新增）
+
+      【为什么前端需要它】
+      上下文压缩后，后端重建会话上下文时只使用「system + 压缩摘要 + 摘要之后的消息」，
+      被压缩的历史**不再计入上下文**（但原文仍完整保留在 conversation_message 表中，
+      用户向上翻页照样能看到历史聊天记录）。
+      前端「输入区下方『上下文 xx』」是另一套独立的前端字符估算，若仍把被压缩的历史算进去，
+      就会与后端真实上下文严重不符（长会话可能虚高几倍），用户看到的是错误的数据。
+
+      【口径约定】
+      · {@code compactedUpToMessageId} 为「已折叠进摘要的最后一条消息 id」：
+        id ≤ 该值的消息不参与上下文计算，由 {@code compactedSummaryTokens} 统一代表。
+      · 未发生任何压缩时为 null，前端行为与改动前完全一致（向后兼容）。
+      ═══════════════════════════════════════════════════════════════════════════
+     */
+    @Schema(description = "已压缩到的消息 id（含）：id≤该值的消息不再计入上下文；null 表示未发生压缩")
+    private Long compactedUpToMessageId;
+
+    @Schema(description = "被压缩区间折叠成摘要后的估算 token 数（多条摘要累加），用于前端上下文口径修正")
+    private int compactedSummaryTokens;
+
     public ConversationMessagePageVO() {
     }
 
@@ -40,6 +63,22 @@ public class ConversationMessagePageVO {
         this.hasMore = hasMore;
         this.nextBeforeId = nextBeforeId;
         this.rounds = rounds;
+    }
+
+    public Long getCompactedUpToMessageId() {
+        return compactedUpToMessageId;
+    }
+
+    public void setCompactedUpToMessageId(Long compactedUpToMessageId) {
+        this.compactedUpToMessageId = compactedUpToMessageId;
+    }
+
+    public int getCompactedSummaryTokens() {
+        return compactedSummaryTokens;
+    }
+
+    public void setCompactedSummaryTokens(int compactedSummaryTokens) {
+        this.compactedSummaryTokens = compactedSummaryTokens;
     }
 
     public List<ConversationMessage> getMessages() {

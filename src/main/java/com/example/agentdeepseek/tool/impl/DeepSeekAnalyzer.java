@@ -123,10 +123,27 @@ public class DeepSeekAnalyzer {
      */
     private String analyzeInternal(List<Map<String, Object>> messages, int timeoutSeconds,
                                     boolean enableThinking, String providerCode) {
-        // ===== 解析 LLM Client：providerCode > 默认 Provider =====
-        LLMClient client = (providerCode != null && !providerCode.isEmpty())
-                ? llmClientManager.resolveClientByCode(providerCode)
-                : llmClientManager.getDefaultClient();
+        /*
+          ★ 2026-11-17（费用泄露修复 · 评审通道）：providerCode 为空时不再回退默认 Provider。
+
+          评审（评委扩权判定）由主 Agent 触发，调用方 DeepSeekServiceImpl 已显式传入主会话的
+          providerCode；但一旦它为空（例如 _llmClient 缺失），旧实现会回退 getDefaultClient()——
+          而 getFirstClient() 按 sortOrder 取第一个，用户 Provider 列表里 deepseek（id=1）
+          与 huoshan（id=34）sortOrder 同为 0，于是评委请求被发往 api.deepseek.com，
+          扣的是官网余额（用户全程用火山方舟）。
+
+          评审属于「可跳过的增强」，这里返回 null 让上层走「询问用户是否继续」的降级路径
+          （DeepSeekServiceImpl 对 result==null 已有该处理），绝不猜一个账户去花钱。
+        */
+        if (providerCode == null || providerCode.isEmpty()) {
+            log.warn("评审跳过：未提供 providerCode。为避免误用默认 Provider（可能扣到另一个账户的余额），本次不执行评委判定");
+            return null;
+        }
+        LLMClient client = llmClientManager.resolveClientByCode(providerCode);
+        if (client == null) {
+            log.warn("评审跳过：无法解析 Provider [{}]，本次不执行评委判定", providerCode);
+            return null;
+        }
         String model = llmClientManager.getDefaultModel(client.getProviderCode());
 
         // ===== 思考模式：false=non-thinking（评委快速响应），true=跟随 Agent 配置 =====

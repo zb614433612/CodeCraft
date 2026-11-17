@@ -377,23 +377,47 @@ public class Diagnostic {
         Process process = null;
         try {
             process = pb.start();
+            final Process proc = process;
+            /*
+              ★ 2026-11-17 修复「修改文件工具偶发卡死」（用户侧：file_writer 一直转圈只有手动停止）。
 
-            // 读取输出
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()));
+              旧实现先用 while((line = reader.readLine()) != null) 读完输出，
+              再 waitFor(timeoutMs) 判超时 —— 顺序颠倒导致超时机制形同虚设：
+              readLine() 本身就是**无限期阻塞读**，只要子进程既不退出也不吐字节
+              （诊断命令挂起、等待 stdin、被杀毒软件拦截等），循环永远不结束，
+              下面那行 waitFor 的超时检查根本执行不到，工具调用就此永久卡死。
+
+              正确做法：输出交给独立守护线程消费（顺带避免管道缓冲区写满反过来阻塞子进程），
+              主线程只负责 waitFor(timeoutMs) 判超时并 destroyForcibly。
+            */
             StringBuilder output = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
-            }
+            Thread readerThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(proc.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        synchronized (output) {
+                            output.append(line).append('\n');
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // 子进程被强制销毁时读取流会异常中断，属预期
+                }
+            }, "diag-output-reader");
+            readerThread.setDaemon(true);
+            readerThread.start();
 
             boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
             if (!finished) {
                 process.destroyForcibly();
                 throw new Exception("诊断命令执行超时（" + timeoutMs + "ms）");
             }
+            // 进程已退出：给读取线程一点收尾时间；读不到的尾巴不影响诊断结论
+            readerThread.join(1000);
 
-            return output.toString().trim();
+            synchronized (output) {
+                return output.toString().trim();
+            }
         } finally {
             if (process != null && process.isAlive()) {
                 process.destroyForcibly();

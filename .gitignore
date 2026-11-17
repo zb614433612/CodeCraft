@@ -63,6 +63,7 @@ src/main/resources/v3-static/
 ### Runtime data ###
 data/
 logs/
+runtime/
 
 ### Spring Boot (extracted jar)
 BOOT-INF/

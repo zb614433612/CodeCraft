@@ -5,6 +5,112 @@
 
 ---
 
+## [3.3.3] - 2026-11-17
+
+> **性能回归修复版本**：修掉长上下文会话「首 token 从 10 秒退化到 30~60 秒」的 P0 回归，
+> 并修复「编辑文件工具偶发卡死」「内容输出完会话不结束」「多 Provider 扣错账户」三个高频故障。
+> 核心是一条**前缀缓存全断**的连锁反应：token 估算虚高 3.4 倍 → 每轮误判超限 → 误压缩/裁剪
+> → 请求前缀每轮重组 → DeepSeek 上下文缓存 100% miss。
+> 本版**必须重启后端**（前端改动需重新加载页面）；未改数据库结构，
+> 新增 1 个可自动创建的缓存文件，可覆盖安装。
+
+### 🔥 修复：长上下文首 token 从 10 秒退化到 30~60 秒（用户报告，P0）
+
+- **症状**：同一会话聊到 10 万 token 以上后，每轮第一条请求（`iteration=0`）首字节要 24~41 秒，
+  而同轮内工具迭代（`iteration>=1`）只要 1~3 秒。数据库实测
+  `llm_token_usage` 中 `iteration=0` 的 `cache_hit_tokens` 从 98.8% 直接掉到 **0**。
+- **根因（四条链路叠加）**：
+  1. **token 估算虚高 3.4 倍**：`TokenEstimator` 用固定字符系数估算中文 + 代码，
+     实测估算 438,225 vs 真实 130,290（3.36 倍）；
+  2. **估算虚高 → 每轮误判超限 → 误触发压缩/裁剪**：`ContextBuilder` 在 85% 阈值就压缩，
+     且裁剪只改内存不回写 DB，下一轮重建出的前缀必然断裂；
+  3. **弯路预警注入位置每轮漂移**：注入到「最后一条 user 消息」或新增 system 消息，
+     导致插入点之后的历史全部不再是上次请求的真前缀；
+  4. **SYSTEM 消息顺序错乱**：历史重建时 system 散布在中间，与上次请求的排列不同。
+- **修复（四层）**：
+  1. `TokenEstimator` 新增**按 Provider 在线校准**：用真实 `usage.prompt_tokens` 反推比率
+     （滑动平均 α=0.3，观测区间 [0.10, 2.00]），挂载在唯一能拿到真值的
+     `persistTokenUsageSafely`；估算口径统一为「messages + tools」
+     （工具 schema 约 6 万 token 的固定地板必须计入）；`usage` 帧丢失时用
+     「请求体字符数 × 0.425」兜底校准；
+  2. **废除裁剪、改为纯压缩落库**：超 85% 触发压缩、超 95% 强制压缩，
+     压缩写入 `conversation_compaction` 后统一由 DB 重建前缀，保证跨轮一致；
+     压缩范围跳过开头连续 system，并保留区间内真实 system 消息；
+  3. 弯路预警改为**注入第一条 system 消息**（文本按会话缓存一字不差 + 位置固定），
+     并把这份文本**跨进程持久化**到 `<userData>/runtime/detour-hint-cache.json`（24h TTL），
+     消除「重启后重新检索 → 文本不同 → 全量 miss」；
+  4. `ContextBuilder` 新增 `hoistSystemMessages()`，把全部 system 提到最前（保持相对顺序）。
+- **验证（同一会话实测对比）**：
+  - 修复前：`iteration=0` 全量 miss（`输入=154490(命中0/未命中154490)`、费用 ¥0.155），
+    同轮 `iteration>=1` 命中 99.7%（费用 ¥0.007/次），相差 **21 倍**；
+  - 修复后：`ContextFingerprint` 零告警（system/tools 指纹全程稳定），
+    `iteration=0` 的 TTFB 回落至 **357~443ms**，上下文规模单调增长无跳变；
+  - 自检用例 `TokenEstimatorTest` **25 通过 / 0 失败**。
+
+### 🔥 修复：编辑文件工具偶发卡死（用户报告）
+
+- **症状**：`file_writer` 调用后长时间无响应（数十秒到数分钟）；命中缓存时 222ms 完成。
+- **根因**：编辑后处理无条件执行 `mvn spotless:apply` 与 `mvn javaformat:format`，
+  但本项目 `pom.xml` 从未声明这两个插件 → 命令必然失败，而 Maven 启动 + 解析 pom +
+  尝试解析插件坐标（本地无缓存 / 网络抖动时）可耗十几秒到数分钟，两次叠加 → 卡死。
+  同类风险：`npx --yes prettier` 在本地无 prettier 时会自动联网下载。
+- **修复**：
+  - `Formatter.formatJavaFile` 先读 `pom.xml` 文本，未声明插件则完全跳过 Maven；
+  - `Formatter.formatWithPrettier` 的 `npx --yes` → `npx --no-install`（禁止联网下载）；
+  - `Diagnostic.execCommandWithOutput` 输出改由独立守护线程读取，主线程只
+    `waitFor(timeoutMs)`，让超时机制真正生效（原先输出读取阻塞导致超时形同虚设）。
+- **验证**：替换 jar 后连续两次 `file_writer` 调用均秒回成功。
+
+### 🔥 修复：内容输出完但会话不结束（用户报告）
+
+- **症状**：模型内容已完整输出，前端仍显示「生成中」，需手动点停止。
+- **定位**：后端日志 `后台任务完成` 与 `流式响应完成` 均正常触发（比用户手动结束早 35 秒）
+  → **后端无 bug，问题在前端读取层**。
+- **根因**：前端 `await reader.read()` 无超时保护，HTTP/2 / Electron 下服务端已关闭连接
+  但 `read()` 长期 pending → 生成器挂住 → `finally` 收尾不执行。
+- **修复**：两套前端（`frontend-v3` 与 `frontend`）的 `sse-client.ts` 各加 **90 秒空闲超时兜底**
+  （`Promise.race` + `reader.cancel()` + 正常 `yield complete`）；
+  用户主动停止走 `signal.aborted` 分支，不受影响。
+
+### 🔥 修复：多 Provider 场景辅助调用扣错账户（用户报告）
+
+- **症状**：Agent 绑定火山方舟（`huoshan`）时，压缩 / 评审 / 子 Agent / 复盘等**辅助调用**
+  却打到 DeepSeek 官方账户 → 扣错账户、模型行为不一致。
+- **根因**：默认 Provider 选择依赖 `sort_order`，而 `deepseek` 与 `huoshan` 的 `sort_order` 相同；
+  辅助调用链路未强制透传当前会话的 `providerCode`，为空时静默回退到默认 Provider。
+- **修复**：7 处辅助调用链路（压缩 / 评审 / 子 Agent / 复盘 / 弯路提炼 / 归一化 / 提示词优化）
+  在 `providerCode` 为空时**拒绝回退默认 Provider**并抛出明确异常，强制上游透传真实 provider。
+
+### ⚙️ 变更：上下文上限提升至 1M（按用户偏好）
+
+- `application.yml` 的 `provider-max-context-tokens.huoshan`：`400000` → **`1000000`**，
+  压缩触发水位因此变为 **850K**（`compact-threshold=0.85`），目标是「尽量少压缩、保住前缀缓存」。
+  > 权衡提示：85 万 token 一次全量 prefill 约 105 秒，34 万约 15 秒。
+  > 若希望更快的恢复速度，可把该值调回 `400000`。
+
+### 🔧 其它修复
+
+- **会话消息分页接口**新增 `compactedUpToMessageId` / `compactedSummaryTokens` 两个字段，
+  两套前端据此**排除已压缩消息**并叠加摘要 token，前后端上下文用量口径统一
+  （此前前端显示 171K 而后端真实约 5 万，偏高约 3.4 倍）。
+- **空回合重试上限从 3 降到 1**：空回复成因是模型在超长上下文下「思考完直接 stop」
+  （`finish_reason=stop`，`completion_tokens=1850` / `reasoning_tokens=1817`，content 全空），
+  非 `max_tokens` 截断，重试不保证成功；而每次重试都改动前缀 → 必然 miss → 每轮白等 41 秒。
+- **压缩服务 LLM 调用超时**从 60 秒收紧到 20 秒，避免压缩本身成为新的卡顿源。
+- **压缩间隔防抖**（`MIN_COMPACT_INTERVAL_MS=120s`）修复重复压缩。
+- **子 Agent 面板**只显示 `running` 状态的条目，不再堆叠已完成记录。
+
+### ⚠️ 升级提示
+
+- **必须重启后端**（token 校准、压缩策略、弯路预警持久化缓存均在启动时初始化）。
+- **前后端需一起更新**（SSE 空闲超时与压缩边界字段在前端侧）。
+- 未改数据库结构；首次启动会按需自动创建
+  `<userData>/runtime/detour-hint-cache.json`（可安全删除，删除后下一次请求自动重建）。
+- **本版会经历一次「重启后首次 miss」**：升级后的第一次请求需要重新建立缓存基线，
+  之后的重启不再产生 miss（文本已落盘；仅 24h TTL 到期时会再产生一次）。
+
+---
+
 ## [3.3.2] - 2026-11-16
 
 > **单点修复版本**：修掉「设备互联 → Agent 授权」接口必现的 HTTP 500。

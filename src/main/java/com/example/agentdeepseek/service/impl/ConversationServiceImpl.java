@@ -1,15 +1,18 @@
 package com.example.agentdeepseek.service.impl;
 
+import com.example.agentdeepseek.mapper.CompactionMapper;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.mapper.FileReferenceMapper;
 import com.example.agentdeepseek.mapper.LlmTokenUsageMapper;
 import com.example.agentdeepseek.mapper.SubAgentLogMapper;
+import com.example.agentdeepseek.model.entity.CompactionRecord;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.vo.ConversationMessagePageVO;
 import com.example.agentdeepseek.service.ConversationService;
 import com.example.agentdeepseek.service.files.FileAssetService;
+import com.example.agentdeepseek.util.TokenEstimator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -50,6 +53,10 @@ public class ConversationServiceImpl implements ConversationService {
     /** 成本可观测：会话删除时级联清理该会话的用量记录（用户要求） */
     @Autowired
     private LlmTokenUsageMapper llmTokenUsageMapper;
+
+    /** 上下文压缩记录（供分页接口回传「上下文重建起点」，前端上下文口径需要它） */
+    @Autowired
+    private CompactionMapper compactionMapper;
 
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -109,7 +116,52 @@ public class ConversationServiceImpl implements ConversationService {
         log.debug("分页查询会话消息: conversationId={}, beforeId={}, rounds={}, startId={}, 返回={}, hasMore={}",
                 conversationId, beforeId, safeRounds, startId, messages.size(), hasMore);
 
-        return new ConversationMessagePageVO(messages, hasMore, nextBeforeId, safeRounds);
+        ConversationMessagePageVO page = new ConversationMessagePageVO(messages, hasMore, nextBeforeId, safeRounds);
+        fillCompactionBoundary(page, conversationId);
+        return page;
+    }
+
+    /**
+     * 回填「上下文压缩边界」（2026-11-17 新增）。
+     *
+     * <p><b>为什么需要回传</b>：压缩后后端重建上下文只使用
+     * 「system + 压缩摘要 + 摘要之后的消息」，被压缩的历史不再计入上下文
+     * （但原文仍完整保留在 conversation_message 表中，用户翻页照样能查到历史聊天记录）。
+     * 前端另有一套「输入区下方『上下文 xx』」的字符估算，若仍把被压缩历史算进去，
+     * 显示值会与后端真实上下文相差数倍，属于误导性数据。</p>
+     *
+     * <p><b>口径</b>：{@code compactedUpToMessageId} 取所有<b>未被取代</b>压缩记录的
+     * 最大 {@code end_message_id}；{@code compactedSummaryTokens} 为这些摘要的估算 token 累加，
+     * 用来替代「被折叠掉的那段历史」在上下文中的占比。</p>
+     *
+     * <p>查询失败不影响分页（降级为「未压缩」语义，前端行为回到改动前）。</p>
+     */
+    private void fillCompactionBoundary(ConversationMessagePageVO page, Long conversationId) {
+        try {
+            List<CompactionRecord> records = compactionMapper.selectActiveByConversationId(conversationId);
+            if (records == null || records.isEmpty()) {
+                return;
+            }
+            Long maxEndId = null;
+            int summaryTokens = 0;
+            for (CompactionRecord record : records) {
+                if (record.getEndMessageId() != null
+                        && (maxEndId == null || record.getEndMessageId() > maxEndId)) {
+                    maxEndId = record.getEndMessageId();
+                }
+                String summary = record.getSummary();
+                if (summary != null && !summary.isEmpty()) {
+                    // 摘要 token 用未校准口径即可：它只与前端同一套字符估算做比较，不参与后端阈值判断
+                    summaryTokens += TokenEstimator.estimate(summary);
+                }
+            }
+            if (maxEndId != null && maxEndId > 0) {
+                page.setCompactedUpToMessageId(maxEndId);
+                page.setCompactedSummaryTokens(summaryTokens);
+            }
+        } catch (Exception e) {
+            log.warn("回填压缩边界失败（不影响分页）: conversationId={}, err={}", conversationId, e.getMessage());
+        }
     }
 
     @Override

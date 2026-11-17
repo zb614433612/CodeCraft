@@ -3783,23 +3783,47 @@ const totalContextTokens = computed(() => {
   const msgs = currentMessages.value
   if (msgs.length === 0) return 0
 
-  // full 模式：直接累加所有消息的 tokenCount
+  /*
+    ★ 压缩边界（2026-11-17 新增）：与后端「重建上下文」保持同一口径。
+
+    后端压缩后，进入请求的是「system + 压缩摘要 + 摘要之后的消息」——
+    被压缩那段历史不再占上下文（原文仍留在 DB，向上翻页照样看得见）。
+    若这里仍按原文字符累加，长会话的「上下文 xx」会把已折叠的几十万字符再算一遍，
+    与后端真实 prompt_tokens 相差数倍，属于误导性数据。
+  */
+  const convKey = currentConversationId.value
+  const compactedUpTo = compactedUpToMessages.value[convKey] ?? null
+  const summaryTokens = compactedSummaryTokens.value[convKey] ?? 0
+
+  // 排除已折叠进摘要的消息（id 为合成值（如 id#1）时 Number 会 NaN，此类消息一律保留）
+  const effectiveMsgs =
+    compactedUpTo === null
+      ? msgs
+      : msgs.filter((m) => {
+          const id = Number(m.id)
+          return Number.isNaN(id) || id <= 0 || id > compactedUpTo
+        })
+
+  // 摘要本身仍占上下文；只要发生过压缩就无条件计入（与当前页是否包含被压缩消息无关）
+  const summaryPart = compactedUpTo !== null ? summaryTokens : 0
+
+  // full 模式：直接累加所有（未压缩的）消息的 tokenCount
   if (settingsStore.contextMode !== 'compact') {
-    return msgs.reduce((sum, msg) => sum + (msg.tokenCount || 0), 0)
+    return effectiveMsgs.reduce((sum, msg) => sum + (msg.tokenCount || 0), 0) + summaryPart
   }
 
   // compact 模式：找到最后一条 user 消息作为"本轮对话"起点
   let lastUserIdx = -1
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === 'user') {
+  for (let i = effectiveMsgs.length - 1; i >= 0; i--) {
+    if (effectiveMsgs[i].role === 'user') {
       lastUserIdx = i
       break
     }
   }
 
   let total = 0
-  for (let i = 0; i < msgs.length; i++) {
-    const msg = msgs[i]
+  for (let i = 0; i < effectiveMsgs.length; i++) {
+    const msg = effectiveMsgs[i]
     if (i >= lastUserIdx) {
       // 本轮对话：完整计入
       total += msg.tokenCount || 0
@@ -3818,7 +3842,7 @@ const totalContextTokens = computed(() => {
       }
     }
   }
-  return total
+  return total + summaryPart
 })
 
 /* ============================ 真实用量（成本 / 缓存命中 / token） ============================ */
@@ -4009,6 +4033,20 @@ const MESSAGE_PAGE_ROUNDS = 5
 const hasMoreMessages = ref<Record<string, boolean>>({})
 /** 各会话的分页游标：本页最早一条 DB 消息 id（继续往前翻时作为 beforeId） */
 const messageCursors = ref<Record<string, number | null>>({})
+
+/*
+  上下文压缩边界（按会话隔离，2026-11-17 新增）。
+
+  后端压缩后重建上下文只用「system + 压缩摘要 + 摘要之后的消息」，
+  被压缩的历史不再计入上下文（原文仍保留，向上翻页可查）。
+  「上下文 xx」必须跟随这个口径，否则长会话会把已折叠的几十万字符再算一遍，
+  显示值比后端真实 prompt_tokens 高出数倍 —— 用户看到的是假数据。
+
+  ⚠️ 与 hasMoreMessages / messageCursors 一样按 conversationId 分片，
+  删除会话 / 新会话时要同步清理，避免复用 id 时继承旧边界。
+*/
+const compactedUpToMessages = ref<Record<string, number | null>>({})
+const compactedSummaryTokens = ref<Record<string, number>>({})
 /**
  * 正在加载更早历史的会话集合（按会话隔离）。
  * 原来用全局 boolean：会话 A 的请求未完成时切到会话 B，B 的顶部加载会被 A 的 loading 直接拦掉，
@@ -4065,6 +4103,9 @@ const fetchMessages = async (conversationId: string, force = false) => {
       // 记录分页状态（是否还有更早历史 + 下一页游标）
       hasMoreMessages.value[conversationId] = !!response.data.hasMore
       messageCursors.value[conversationId] = response.data.nextBeforeId ?? null
+      // 记录上下文压缩边界（后端可能随时压缩，必须每次覆盖写，不能沿用旧值）
+      compactedUpToMessages.value[conversationId] = response.data.compactedUpToMessageId ?? null
+      compactedSummaryTokens.value[conversationId] = response.data.compactedSummaryTokens ?? 0
       // 历史消息加载后，匹配回滚快照
       matchSnapshotsForMessages(conversationId)
       // 真实用量：会话汇总 + 按轮明细（历史消息的「本轮成本」靠这一步点亮）
@@ -4119,6 +4160,9 @@ const loadMoreMessages = async (conversationId: string) => {
     // 分页状态始终更新：即使是空页也要落 hasMore=false，避免反复空请求
     hasMoreMessages.value[conversationId] = !!res.data.hasMore
     messageCursors.value[conversationId] = res.data.nextBeforeId ?? null
+    // 上下文压缩边界同样每次覆盖写（翻页期间后端可能刚好压缩过）
+    compactedUpToMessages.value[conversationId] = res.data.compactedUpToMessageId ?? null
+    compactedSummaryTokens.value[conversationId] = res.data.compactedSummaryTokens ?? 0
     if (toAdd.length === 0) {
       // 本页没有可合并的新消息 → 视为到底，避免与「内容不足一屏自动补加载」互相触发形成死循环
       hasMoreMessages.value[conversationId] = false
@@ -4170,8 +4214,14 @@ const migratePaginationState = (fromConvId: string, toConvId: string) => {
   if (!fromConvId || !toConvId || fromConvId === toConvId) return
   hasMoreMessages.value[toConvId] = hasMoreMessages.value[fromConvId] ?? false
   messageCursors.value[toConvId] = messageCursors.value[fromConvId] ?? null
+  // 上下文压缩边界同步迁移（2026-11-17 新增）：漏迁会让草稿转正后「上下文 xx」
+  // 把已折叠的历史又按原文算一遍，数字突然跳大，看起来像压缩失效
+  compactedUpToMessages.value[toConvId] = compactedUpToMessages.value[fromConvId] ?? null
+  compactedSummaryTokens.value[toConvId] = compactedSummaryTokens.value[fromConvId] ?? 0
   delete hasMoreMessages.value[fromConvId]
   delete messageCursors.value[fromConvId]
+  delete compactedUpToMessages.value[fromConvId]
+  delete compactedSummaryTokens.value[fromConvId]
 }
 
 const matchSnapshotsForMessages = async (convId: string) => {

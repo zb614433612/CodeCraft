@@ -48,8 +48,15 @@ public class PromptOptimizeController {
             return empty;
         }
 
-        log.info("收到提示词优化请求: 消息长度={}", message.length());
-        PromptOptimizeService.OptimizeResult result = promptOptimizeService.optimize(message);
+        /*
+          ★ 2026-11-17：Provider 必须由调用方指定（前端传当前会话的 providerCode）；
+          服务端不再替用户猜默认 Provider（deepseek 的 sortOrder 与 huoshan 相同，
+          「默认」实际会落到 deepseek 官网，点一下优化就扣另一个账户的钱）。
+          未传时服务层直接返回失败提示，不会发起任何 LLM 调用。
+        */
+        String providerCode = body == null ? null : body.get("providerCode");
+        log.info("收到提示词优化请求: 消息长度={}, providerCode={}", message.length(), providerCode);
+        PromptOptimizeService.OptimizeResult result = promptOptimizeService.optimize(message, providerCode);
 
         // LinkedHashMap 而非 Map.of：error/model 在成功/失败时可能为 null，Map.of 不允许 null 值
         Map<String, Object> payload = new LinkedHashMap<>();

@@ -589,10 +589,29 @@ public class AgentForkManager {
             // 构建API请求（传入 providerCode，跟随主Agent的Provider选择）
             Map<String, Object> apiRequest = buildApiRequest(messages, toolsDef, hasTools, context.getTemperature(), context.getProviderCode());
 
-            // 获取 LLMClient（用于 Provider 适配层提取响应内容）
-            LLMClient client = (context.getProviderCode() != null && !context.getProviderCode().isEmpty())
-                    ? llmClientManager.resolveClientByCode(context.getProviderCode())
-                    : llmClientManager.getDefaultClient();
+            /*
+              ★ 2026-11-17（费用泄露修复 · 子Agent通道）：providerCode 为空时不再回退默认 Provider。
+
+              子Agent 的 providerCode 传播链是
+                DeepSeekServiceImpl（ToolContext.setProviderCode(_llmClient.getProviderCode())）
+                → AgentTool → ForkContext，
+              正常情况下必然跟随主会话。但只要 `_llmClient` 缺失，整条链就会传 null，
+              而旧实现在这里回退 getDefaultClient() —— 用户 Provider 列表里 deepseek（id=1）
+              与 huoshan（id=34）sortOrder 同为 0 → 子Agent 的全部 LLM 调用被发往 api.deepseek.com，
+              扣的是官网余额（用户全程用火山方舟，官网余额 1 元多 → 0.21 元）。
+
+              子Agent 没有明确的 Provider 就无法保证「花谁的钱」，这里直接失败，
+              让上层看到明确错误，而不是静默扣到另一个账户。
+            */
+            if (context.getProviderCode() == null || context.getProviderCode().isEmpty()) {
+                throw new IllegalStateException("子Agent " + context.getAgentId()
+                        + " 缺少 providerCode：拒绝回退默认 Provider（会扣到另一个账户的余额），请检查主会话的 Provider 绑定");
+            }
+            LLMClient client = llmClientManager.resolveClientByCode(context.getProviderCode());
+            if (client == null) {
+                throw new IllegalStateException("子Agent " + context.getAgentId()
+                        + " 无法解析 Provider [" + context.getProviderCode() + "]，请检查 Provider 是否已启用");
+            }
 
             // 调用 LLM API（非流式）
             String response = client.blockingChat(apiRequest, Duration.ofSeconds(300));
@@ -1061,9 +1080,14 @@ public class AgentForkManager {
     private Map<String, Object> buildApiRequest(List<Map<String, Object>> messages,
                                                 ArrayNode toolsDef, boolean hasTools,
                                                 Double temperature, String providerCode) {
-        LLMClient client = (providerCode != null && !providerCode.isEmpty())
-                ? llmClientManager.resolveClientByCode(providerCode)
-                : llmClientManager.getDefaultClient();
+        // ★ 2026-11-17（费用泄露修复）：子Agent 请求构建同样拒绝回退默认 Provider
+        if (providerCode == null || providerCode.isEmpty()) {
+            throw new IllegalStateException("子Agent buildApiRequest 缺少 providerCode：拒绝回退默认 Provider（会扣到另一个账户余额）");
+        }
+        LLMClient client = llmClientManager.resolveClientByCode(providerCode);
+        if (client == null) {
+            throw new IllegalStateException("子Agent buildApiRequest 无法解析 Provider [" + providerCode + "]");
+        }
 
         List<Map<String, Object>> toolsList = null;
         if (hasTools && toolsDef != null && toolsDef.size() > 0) {
@@ -1084,9 +1108,14 @@ public class AgentForkManager {
      * 使用默认 Provider 的 LLMClient，API Key 由 LLMWebClientManager 自动管理
      */
     private String callDeepSeekApi(Map<String, Object> apiRequest, String providerCode) {
-        LLMClient client = (providerCode != null && !providerCode.isEmpty())
-                ? llmClientManager.resolveClientByCode(providerCode)
-                : llmClientManager.getDefaultClient();
+        // ★ 2026-11-17（费用泄露修复）：同样拒绝回退默认 Provider
+        if (providerCode == null || providerCode.isEmpty()) {
+            throw new IllegalStateException("子Agent callDeepSeekApi 缺少 providerCode：拒绝回退默认 Provider（会扣到另一个账户余额）");
+        }
+        LLMClient client = llmClientManager.resolveClientByCode(providerCode);
+        if (client == null) {
+            throw new IllegalStateException("子Agent callDeepSeekApi 无法解析 Provider [" + providerCode + "]");
+        }
         return client.blockingChat(apiRequest, Duration.ofSeconds(300));
     }
 
@@ -1224,6 +1253,15 @@ public class AgentForkManager {
         String response = deepSeekAnalyzer.analyzeWithoutThinking(judgePrompt, judgeContext, 180, providerCode);
 
         // 4. 检查是否返回错误
+        /*
+          ★ 2026-11-17：analyzeWithoutThinking 在 providerCode 为空时会返回 null
+          （评审通道已改为「拒绝回退默认 Provider」，避免扣到另一个账户）。这里必须先判空，
+          否则下面的 response.startsWith 会 NPE，把「可降级」变成「子Agent 崩溃」。
+        */
+        if (response == null || response.isEmpty()) {
+            log.warn("子Agent评委跳过：无有效 Provider 或评委响应为空，使用降级逻辑");
+            return evaluateWithSubJudgeFallback(messages);
+        }
         if (response.startsWith("错误：")) {
             log.warn("子Agent评委 API 调用失败，使用降级逻辑: {}", response);
             return evaluateWithSubJudgeFallback(messages);

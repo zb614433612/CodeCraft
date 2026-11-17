@@ -5,6 +5,132 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.3] - 2026-11-17
+
+> **Performance-regression release**: fixes the P0 regression where long-context conversations saw
+> first-token latency degrade from 10 seconds to 30~60 seconds, plus three high-frequency faults:
+> "edit-file tool occasionally hangs", "session never ends after content finishes", and
+> "auxiliary calls charged to the wrong provider account".
+> The core issue is a chain reaction that **broke the prompt prefix cache entirely**:
+> token estimation inflated by 3.4x → every turn falsely judged as over-limit → unnecessary
+> compaction/trimming → request prefix reassembled each turn → DeepSeek context cache 100% miss.
+> This release **requires a backend restart** (frontend changes require reloading the page);
+> no database schema changes, one auto-created cache file is added, in-place upgrade works.
+
+### 🔥 Fixed: first-token latency degraded from 10s to 30~60s on long contexts (user-reported, P0)
+
+- **Symptom**: once a conversation exceeded ~100K tokens, the first request of each turn
+  (`iteration=0`) took 24~41 seconds to first byte, while in-turn tool iterations
+  (`iteration>=1`) only took 1~3 seconds. Database measurement showed `cache_hit_tokens` for
+  `iteration=0` in `llm_token_usage` dropping from 98.8% to **0**.
+- **Root cause (four compounding links)**:
+  1. **Token estimation inflated by 3.4x**: `TokenEstimator` used a fixed character coefficient for
+     Chinese + code, measured at 438,225 estimated vs 130,290 actual (3.36x);
+  2. **Inflated estimates → false over-limit → unnecessary compaction/trimming**:
+     `ContextBuilder` compacted at the 85% threshold, and trimming only modified memory without
+     writing back to the DB, guaranteeing prefix breakage on the next rebuild;
+  3. **Detour-hint injection position drifted every turn**: injected into the "last user message"
+     or as a new system message, invalidating every history message after the insertion point;
+  4. **SYSTEM message ordering was scrambled**: system messages were scattered in the middle when
+     rebuilding history, differing from the previous request's ordering.
+- **Fix (four layers)**:
+  1. `TokenEstimator` gained **per-provider online calibration**: deriving the ratio from the real
+     `usage.prompt_tokens` (sliding average α=0.3, observation band [0.10, 2.00]), hooked into
+     `persistTokenUsageSafely` — the only place the true value is available. Estimation scope is
+     unified as "messages + tools" (the ~60K-token tool schema floor must be included);
+     when the usage frame is lost, calibration falls back to "request body chars × 0.425";
+  2. **Trimming removed in favor of pure compaction persisted to the DB**: compaction triggers at 85%,
+     forced compaction at 95%, and the prefix is always rebuilt from `conversation_compaction`
+     records, guaranteeing cross-turn consistency; the compaction range skips leading system
+     messages and preserves real system messages inside the range;
+  3. Detour hints are now **injected into the first system message** (text cached per conversation
+     byte-for-byte, position fixed), and that text is **persisted across processes** to
+     `<userData>/runtime/detour-hint-cache.json` (24h TTL), eliminating
+     "restart → re-search → different text → full miss";
+  4. `ContextBuilder` gained `hoistSystemMessages()`, moving all system messages to the front
+     while preserving their relative order.
+- **Verification (same conversation, measured)**:
+  - Before: `iteration=0` fully missed (`input=154490 (hit 0 / miss 154490)`, cost ¥0.155), while
+    `iteration>=1` hit 99.7% (¥0.007/call) — a **21x** difference;
+  - After: `ContextFingerprint` reported zero warnings (system/tools fingerprints stable throughout),
+    `iteration=0` TTFB dropped to **357~443ms**, context size grew monotonically without jumps;
+  - Self-test `TokenEstimatorTest`: **25 passed / 0 failed**.
+
+### 🔥 Fixed: edit-file tool occasionally hangs (user-reported)
+
+- **Symptom**: `file_writer` calls hung for tens of seconds to minutes; 222ms when cache hit.
+- **Root cause**: post-edit processing unconditionally ran `mvn spotless:apply` and
+  `mvn javaformat:format`, but this project's `pom.xml` never declares either plugin — the commands
+  were guaranteed to fail, yet Maven startup + pom parsing + plugin coordinate resolution
+  (no local cache / flaky network) could take tens of seconds each; two of them stacked → hang.
+  Same risk: `npx --yes prettier` auto-downloads when prettier is absent locally.
+- **Fix**:
+  - `Formatter.formatJavaFile` now reads `pom.xml` first and skips Maven entirely when the plugins
+    are not declared;
+  - `Formatter.formatWithPrettier`: `npx --yes` → `npx --no-install` (no network downloads);
+  - `Diagnostic.execCommandWithOutput` now reads output on a dedicated daemon thread, leaving the
+    main thread to `waitFor(timeoutMs)`, making the timeout actually effective.
+- **Verification**: two consecutive `file_writer` calls returned instantly after jar replacement.
+
+### 🔥 Fixed: session never ends after content finishes (user-reported)
+
+- **Symptom**: content was fully streamed, yet the frontend still showed "generating" and required
+  a manual stop.
+- **Diagnosis**: backend logs showed `后台任务完成` and `流式响应完成` firing normally (35 seconds
+  before the user manually stopped) → **backend was fine; the problem was the frontend read layer**.
+- **Root cause**: frontend `await reader.read()` had no timeout protection; under HTTP/2 / Electron
+  the server had closed the connection but `read()` stayed pending → the generator hung → `finally`
+  never ran.
+- **Fix**: both frontends (`frontend-v3` and `frontend`) add a **90-second idle timeout guard** in
+  `sse-client.ts` (`Promise.race` + `reader.cancel()` + normal `yield complete`);
+  user-initiated stops go through the `signal.aborted` branch and are unaffected.
+
+### 🔥 Fixed: auxiliary calls charged to the wrong provider account (user-reported)
+
+- **Symptom**: with an Agent bound to Volcengine Ark (`huoshan`), auxiliary calls
+  (compaction / review / sub-agent / retrospective) were charged to the DeepSeek official account.
+- **Root cause**: default provider selection relied on `sort_order`, and `deepseek` and `huoshan`
+  share the same `sort_order`; auxiliary call paths did not force-pass the session's `providerCode`
+  and silently fell back to the default provider when empty.
+- **Fix**: 7 auxiliary call paths (compaction / review / sub-agent / retrospective / detour
+  extraction / normalization / prompt optimization) now **refuse to fall back** when `providerCode`
+  is empty and throw an explicit error, forcing upstreams to pass the real provider.
+
+### ⚙️ Changed: context limit raised to 1M (per user preference)
+
+- `application.yml` `provider-max-context-tokens.huoshan`: `400000` → **`1000000`**, so compaction
+  triggers at **850K** (`compact-threshold=0.85`), aiming to compact less and preserve the prefix
+  cache.
+  > Trade-off: a full 850K-token prefill takes ~105 seconds vs ~15 seconds at 340K.
+  > Adjust back to `400000` if faster recovery is preferred.
+
+### 🔧 Other fixes
+
+- **Conversation message page API** gained `compactedUpToMessageId` / `compactedSummaryTokens`;
+  both frontends now exclude compacted messages and add summary tokens, unifying context-usage
+  accounting (the frontend previously showed 171K vs an actual ~50K, ~3.4x too high).
+- **Empty-round retry cap lowered from 3 to 1**: empty replies come from the model "thinking then
+  stopping" on very long contexts (`finish_reason=stop`, `completion_tokens=1850` /
+  `reasoning_tokens=1817`, empty content), not `max_tokens` truncation; retrying does not guarantee
+  success while each retry perturbs the prefix → guaranteed miss → 41 seconds wasted per attempt.
+- **Compaction LLM call timeout** tightened from 60s to 20s.
+- **Compaction interval debounce** (`MIN_COMPACT_INTERVAL_MS=120s`) prevents duplicate compaction.
+- **Sub-agent panel** now only lists `running` entries.
+
+### ⚠️ Upgrade notes
+
+- **Backend restart required** (token calibration, compaction strategy, and the persistent
+  detour-hint cache all initialize at startup).
+- **Update backend and frontend together** (SSE idle timeout and compaction-boundary fields live
+  in the frontend).
+- No database schema changes; `<userData>/runtime/detour-hint-cache.json` is created on demand
+  (safe to delete, it will be rebuilt on the next request).
+- **This release will experience one "first miss after restart"**: the first request after upgrading
+  needs to rebuild the cache baseline; subsequent restarts no longer miss
+  (text is persisted; only 24h TTL expiry causes another single miss).
+
+---
+
 ## [3.3.2] - 2026-11-16
 
 > **Single-fix release**: resolves a reproducible HTTP 500 on the "Device Link → Agent Authorization"

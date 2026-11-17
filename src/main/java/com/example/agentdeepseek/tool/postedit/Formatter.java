@@ -86,8 +86,41 @@ public class Formatter {
             return new FormatResult(false, "", false, "项目根目录无效：" + projectRoot);
         }
 
-        // 方案1：Maven spotless:apply（最推荐，支持多种 Java 风格配置）
-        if (Files.exists(projectDir.resolve("pom.xml"))) {
+        /*
+          ★ 2026-11-17 修复「修改文件工具卡死」的第二个根因（第一个是 Diagnostic 的 readLine 顺序）。
+
+          旧实现只要有 pom.xml 就无条件执行 `mvn spotless:apply`，失败后再执行 `mvn javaformat:format`。
+          但本项目 pom.xml 并未声明这两个插件（日志原话：未找到可用的 Java 格式化工具，
+          项目需配置 Maven spotless 或 javaformat 插件）—— 命令必然失败，
+          而失败前 Maven 仍要启动 JVM、解析 pom、并尝试去中央仓库解析插件坐标；
+          本地仓库无缓存或网络抖动时，这一步可吃掉十几秒到数分钟，再叠加第二方案重复一次，
+          用户侧表现就是 file_writer 一直转圈只能手动停止。
+
+          实测对照：同一次编辑，Maven 缓存命中的那轮 222ms 就打出「编辑后处理完成」，
+          未命中的那轮 AUDIT 之后再无任何日志。
+
+          修法：先用纯文本检查 pom.xml 里是否真的声明了 spotless / javaformat，
+          没有就完全跳过 Maven 方案（不启动 Maven 就不会卡），有声明才执行并保留超时兜底。
+          注意这只是「避免空跑」，不是放弃格式化能力 —— 真正配了插件的项目行为不变。
+        */
+        Path pomPath = projectDir.resolve("pom.xml");
+        if (Files.exists(pomPath)) {
+            String pomText = null;
+            try {
+                pomText = Files.readString(pomPath, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception readErr) {
+                log.debug("读取 pom.xml 失败，按未声明插件处理: {}", readErr.getMessage());
+            }
+            boolean declaresFormatter = pomText != null
+                    && (pomText.contains("spotless") || pomText.contains("javaformat"));
+            if (!declaresFormatter) {
+                log.debug("pom.xml 未声明 spotless/javaformat 插件，跳过 Maven 格式化（避免空跑 Maven 导致工具卡顿）: {}",
+                        projectDir);
+                return new FormatResult(false, "", false,
+                        "未找到可用的 Java 格式化工具（项目需配置 Maven spotless 或 javaformat 插件）");
+            }
+
+            // 方案1：Maven spotless:apply（最推荐，支持多种 Java 风格配置）
             try {
                 String[] cmd = {"mvn", "spotless:apply", "-q",
                         "-f", projectDir.toAbsolutePath().toString()};
@@ -161,7 +194,7 @@ public class Formatter {
             }
 
             // 回退：使用 npx（fileArg 经过 Path 标准化，无注入风险）
-            String[] cmd = {"npx", "--yes", "prettier", "--write", fileArg};
+            String[] cmd = {"npx", "--no-install", "prettier", "--write", fileArg};
             int exitCode = execCommand(cmd, projectDir.toAbsolutePath().toString(),
                     config.getFormatter().getTimeout());
             if (exitCode == 0) {
