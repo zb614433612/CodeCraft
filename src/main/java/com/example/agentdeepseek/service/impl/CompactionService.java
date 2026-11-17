@@ -417,8 +417,13 @@ public class CompactionService {
                         return;
                     }
 
-                    log.info("异步预压缩触发：conversationId={}, 估算 tokens={}（已应用压缩记录）, 比例={}",
-                            conversationId, estimatedTokens, ratio);
+                    // 诊断信息必须自带 provider 与生效上限：此前的日志只有「估算 tokens + 比例」，
+                    // 分母是多少完全看不出来 —— 实测出现过「yml 配了 huoshan: 1000000，
+                    // 但运行实际走 deepseek（无覆盖）→ 静默回落 300000 → 18 万被判超标反复压缩」
+                    // 的错配，只能靠反算 ratio 才发现。这里把 provider / 上限一并打出来。
+                    log.info("异步预压缩触发：conversationId={}, provider={}, 估算 tokens={}（已应用压缩记录）, 生效上限={}, 比例={}",
+                            conversationId, providerCode, estimatedTokens, maxTokens,
+                            String.format("%.5f", ratio));
 
                     // 传入「已应用压缩记录」的消息列表：compact() 内部会重新查 DB 并再次应用压缩记录，
                     // 两者逐条对齐后 compressStart/compressEnd 索引才有意义
