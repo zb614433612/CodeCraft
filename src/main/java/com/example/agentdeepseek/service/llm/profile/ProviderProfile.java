@@ -153,6 +153,21 @@ public class ProviderProfile {
      */
     private List<String> quotaModeUrlKeywords = new ArrayList<>();
 
+    /**
+     * 峰谷计价规格（按时段差异定价）。
+     *
+     * <h3>为什么放进档案而不是写在计价代码里</h3>
+     * <p>
+     * 「哪个平台分峰谷、高峰窗口是几点、节假日按哪个地区的日历」属于<b>平台事实</b>，
+     * 与 {@link #pricingMode}（按 token 还是套餐）、{@link #usageProtocol}（usage 在哪一帧）
+     * 是同一层信息。写进档案后，新增平台的峰谷能力只需在本类加一个 {@code buildXxx()} 分支
+     * （或给已有分支补几行），<b>计价链路完全不改</b> —— 这正是项目要求的「像适配器一样加功能」。
+     * </p>
+     *
+     * <p>默认 {@code enabled=false}：绝大多数 Provider 全天一个价，行为与改造前完全一致。</p>
+     */
+    private PeakPricingSpec peakPricing = new PeakPricingSpec();
+
     /** 界面展示规格（中文标签 / 配色 / 下拉排序） */
     private DisplaySpec display = new DisplaySpec();
 
@@ -270,6 +285,72 @@ public class ProviderProfile {
          * <p>不产生费用，界面不显示金额，也不会因「未配单价」而显示「—」。</p>
          */
         FREE
+    }
+
+    /**
+     * 峰谷计价规格（平台档案的一部分）。
+     *
+     * <h3>字段来源与判定口径</h3>
+     * <p>
+     * DeepSeek 官方价格页（2026-11-18）：<b>北京时间周一至周五（不含中国法定节假日）
+     * 09:00–12:00、14:00–18:00 为高峰时段</b>；其余时段（含周末 / 节假日全天）为空闲时段；
+     * 空闲价 = 高峰价的 50%。
+     * </p>
+     *
+     * <p><b>调休上班日</b>（官方安排了上班的周六 / 周日）官网未明确说明，
+     * 因此由 {@link #honorMakeupWorkdays} 显式声明：默认 {@code false}
+     * 表示<b>严格按官网字面</b>「周一至周五」判定（周末一律空闲）。</p>
+     *
+     * <p><b>计费主链路绝不联网</b>：节假日数据由 {@code HolidayCalendar} 在启动期 / 每日凌晨
+     * 异步预热并缓存，判定只读内存。</p>
+     */
+    @Data
+    public static class PeakPricingSpec {
+        /** 节假日地区：中国法定节假日 */
+        public static final String REGION_CN = "CN";
+        /** 不使用节假日日历（仅按星期判定） */
+        public static final String REGION_NONE = "NONE";
+
+        /**
+         * 是否启用峰谷计价。
+         * <p><b>默认 false</b>：保持改造前「全天一个价」的行为。只有显式开启的平台
+         * 才会去读 {@code llm.pricing.models.<模型>.peak-*} 字段。</p>
+         */
+        private boolean enabled = false;
+
+        /** 判定时区（必须显式，不能依赖 JVM 默认时区，否则服务器跑 UTC 时全天会被判成空闲） */
+        private String zone = "Asia/Shanghai";
+
+        /**
+         * 高峰窗口，格式 {@code HH:mm-HH:mm}，<b>左闭右开</b>
+         * （{@code 09:00-12:00} 表示 09:00:00 起、12:00:00 整不算高峰）。
+         *
+         * <p><b>留空 = 继承全局配置</b>（{@code llm.pricing.peak-period.windows}）。
+         * 这样「改配置文件就能调整高峰时段」是真正生效的，不需要改代码；
+         * 只有平台的窗口确实与全局不同时，才在这里显式写死。</p>
+         */
+        private List<String> windows = new ArrayList<>();
+
+        /**
+         * 视为工作日的星期（{@code MON..SUN}，大小写不敏感）。
+         * <p><b>留空 = 继承全局配置</b>（{@code llm.pricing.peak-period.workdays}，默认周一至周五）。</p>
+         */
+        private List<String> workdays = new ArrayList<>();
+
+        /** 节假日地区（{@link #REGION_CN} / {@link #REGION_NONE}） */
+        private String holidayRegion = REGION_CN;
+
+        /**
+         * 调休上班日是否按工作日算高峰。
+         * <p>{@code false}（默认）= 严格按官网字面，周末一律空闲；
+         * {@code true} = 官方调休安排的上班日视为工作日。</p>
+         */
+        private boolean honorMakeupWorkdays = false;
+
+        /** 便捷判断：本平台是否真的启用了峰谷计价 */
+        public boolean isActive() {
+            return enabled;
+        }
     }
 
     /**

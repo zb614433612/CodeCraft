@@ -9,6 +9,7 @@ import com.example.agentdeepseek.service.llm.profile.ProviderProfile.FilesApiPro
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile.FilesApiSpec;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile.HostSpec;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile.ImageBlockFormat;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.PeakPricingSpec;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile.PricingMode;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile.SearchProvider;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile.SearchSpec;
@@ -608,6 +609,35 @@ public final class ProviderRegistry {
         p.setFilesApi(files);
 
         p.setPricingMode(PricingMode.TOKEN);
+
+        /*
+          ==================== 峰谷计价（DeepSeek 官方独有） ====================
+
+          官方价格页（2026-11-18 抓取）：
+            北京时间周一至周五（不含中国法定节假日）09:00-12:00、14:00-18:00 = 高峰时段；
+            其余时段（含周末 / 节假日全天）= 空闲时段；空闲价 = 高峰价的 50%。
+
+          ⚠️ 本档案只声明「这个平台的时段规则」，具体单价在 llm.pricing.models 里配：
+             cache-hit-input / cache-miss-input / output   → 空闲价
+             peak-cache-hit-input / peak-cache-miss-input / peak-output → 高峰价
+
+          ★ 扩展方式（项目约定「像适配器一样加功能」）：
+             其它平台要支持峰谷时，只需在自己的 buildXxx() 里补一段同样的 PeakPricingSpec
+             （并在 yml 里配 peak-* 单价），TokenUsageParser 的计价链路一行都不用改。
+         */
+        PeakPricingSpec peak = new PeakPricingSpec();
+        peak.setEnabled(true);
+        peak.setZone("Asia/Shanghai");
+        /*
+          窗口 / 工作日刻意不写死：留空即继承 llm.pricing.peak-period.windows / workdays。
+          默认值就是官网口径（09:00-12:00、14:00-18:00 + 周一至周五），所以行为不变；
+          但用户改用 application.yml 调整时段时是真正生效的（否则配置成了死配置）。
+         */
+        peak.setHolidayRegion(PeakPricingSpec.REGION_CN);
+        // 官网原文只说「周一至周五（不含法定节假日）」，未提调休上班日 → 默认严格按字面：周末一律空闲
+        peak.setHonorMakeupWorkdays(false);
+        p.setPeakPricing(peak);
+
         p.setHostDetection(new HostSpec("api.deepseek.com", list()));
         p.setDisplay(display("DeepSeek", "", 1));
         return p;

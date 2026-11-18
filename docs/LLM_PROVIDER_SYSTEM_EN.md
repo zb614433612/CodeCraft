@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 LLM_PROVIDER_SYSTEM](./LLM_PROVIDER_SYSTEM.md)
 # Multi LLM Provider Support System
 
-> Version: v3.3.3 | Updated: 2026-11-17 | Audience: Developers / AI Collaborators
+> Version: v3.3.5 | Updated: 2026-11-18 | Audience: Developers / AI Collaborators
 > This document describes CodeCraft's multi LLM Provider support system, including architecture design, data model, core components, and usage patterns.
 
 ---
@@ -688,6 +688,69 @@ POST /api/llm-providers
 4. Selected Provider will be persisted to current Agent config
 
 ---
+
+### Peak / Off-Peak Pricing (v3.3.5)
+
+DeepSeek charges two prices depending on call time; **off-peak = 50% of peak**.
+
+| Item | Rule |
+|---|---|
+| Peak | Weekdays (Mon–Fri, excluding Chinese public holidays) 09:00–12:00 & 14:00–18:00 **Beijing time**, half-open intervals |
+| Off-peak | Everything else (weekends / holidays all day) |
+| Timezone | Forced `Asia/Shanghai` — never the JVM default (a UTC server would otherwise treat the whole day as off-peak) |
+| Make-up workdays | Declared per profile (`honorMakeupWorkdays`); default `false` = literal reading (weekends always off-peak) |
+
+**Config (`application.yml`)**:
+
+```yaml
+llm:
+  pricing:
+    peak-period:
+      enabled: true              # master switch; false = off-peak only (instant rollback)
+      zone: Asia/Shanghai
+      peak-multiplier: 2.0
+      windows: [09:00-12:00, 14:00-18:00]
+      workdays: [MON, TUE, WED, THU, FRI]
+      holiday:
+        source: AUTO             # AUTO | BUILTIN_CN | REMOTE | CONFIG_ONLY | NONE
+        remote-url: "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json"
+        cache-dir: data/holiday-cache
+    models:
+      deepseek-flash:
+        peak-pricing: true
+        cache-hit-input: 0.02
+        cache-miss-input: 1.0
+        output: 4.0
+        peak-cache-hit-input: 0.04
+        peak-cache-miss-input: 2.0
+        peak-output: 8.0
+```
+
+**Responsibilities**:
+
+| Component | Responsibility |
+|---|---|
+| `ProviderProfile.PeakPricingSpec` | Platform facts: whether peak pricing applies, timezone, windows (empty = inherit global), holiday region, make-up-day policy |
+| `ProviderRegistry.buildDeepSeek()` | Registers the spec for DeepSeek official |
+| `PeakPeriodProperties` | Global policy: master switch, default windows/workdays, multiplier, holiday source |
+| `PeakPeriodPolicy` | Pure resolution: `isPeak` / `periodOf` / `nextSwitchAt` (no IO/network) |
+| `HolidayCalendar` | 3-layer holiday source (built-in → cache → remote) + startup warm-up + daily 03:00 refresh (the billing hot path never touches the network) |
+| `TokenPricingConfig.resolveFor(model, isPeak, multiplier)` | Picks the period price |
+| `TokenUsageParser.resolveProviderContext(provider)` | **Single entry**: profile → pricing mode + peak spec |
+| `TokenUsageService.pricingContext(provider)` | Context for the UI (current period / next switch / both prices) |
+
+**Billing snapshot columns** (`llm_token_usage`): `pricing_period`, `pricing_version`,
+`unit_price_snapshot`. **Historical rows are never recomputed.**
+
+**Adding peak pricing to another provider — two changes only**:
+
+1. Set `PeakPricingSpec` in `ProviderRegistry.buildXxx()`;
+2. Add `peak-pricing: true` and `peak-*` prices in `application.yml`.
+
+> The billing chain needs **no changes** — the structural guarantee for "add features like adapters".
+
+**Relationship with QUOTA**: `PricingMode.QUOTA` (package/credit plans) never estimates money;
+peak switches do not apply. `PeakPricingSpec.enabled` AND `PriceItem.peakPricing` must both be `true`.
 
 ## 9. Extension Guide
 

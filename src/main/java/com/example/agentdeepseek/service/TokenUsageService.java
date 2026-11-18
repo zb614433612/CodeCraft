@@ -1,22 +1,29 @@
 package com.example.agentdeepseek.service;
 
 import com.example.agentdeepseek.config.TokenPricingConfig;
+import com.example.agentdeepseek.config.pricing.PeakPeriodPolicy;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.LlmTokenUsageMapper;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
 import com.example.agentdeepseek.model.vo.TokenUsageGroupVO;
+import com.example.agentdeepseek.model.vo.TokenPricingContextVO;
+import com.example.agentdeepseek.model.vo.TokenUsagePeriodBreakdownVO;
 import com.example.agentdeepseek.model.vo.TokenUsageSummaryVO;
 import com.example.agentdeepseek.model.vo.TokenUsageTurnVO;
 import com.example.agentdeepseek.service.llm.TokenUsageParser;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.PeakPricingSpec;
+import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -51,15 +58,19 @@ public class TokenUsageService {
     private final ConversationMapper conversationMapper;
     private final TokenPricingConfig pricingConfig;
     private final TokenUsageParser tokenUsageParser;
+    /** 峰谷时段策略（用于「费用结构」按各时段单价拆分 + 展示当前时段） */
+    private final PeakPeriodPolicy peakPeriodPolicy;
 
     public TokenUsageService(LlmTokenUsageMapper usageMapper,
                              ConversationMapper conversationMapper,
                              TokenPricingConfig pricingConfig,
-                             TokenUsageParser tokenUsageParser) {
+                             TokenUsageParser tokenUsageParser,
+                             PeakPeriodPolicy peakPeriodPolicy) {
         this.usageMapper = usageMapper;
         this.conversationMapper = conversationMapper;
         this.pricingConfig = pricingConfig;
         this.tokenUsageParser = tokenUsageParser;
+        this.peakPeriodPolicy = peakPeriodPolicy;
     }
 
     /**
@@ -84,10 +95,13 @@ public class TokenUsageService {
             vo = new TokenUsageSummaryVO();
         }
         // 一次性取出范围内的 Provider 列表：既作为「计费模式闸门」的输入，
-        // 也用于把 pricingMode 透传给前端（让用户看懂金额为何不可用）
+        // 也用于把 pricingMode / 峰谷规格透传给前端（让用户看懂金额为何不可用、当前按哪档价）
         List<String> providers = collectProvidersInRange(range, conversationId);
-        enrichSummary(vo, resolveReferencePrice(range, conversationId, providers));
+        enrichSummary(vo,
+                resolveReferencePricePair(range, conversationId, providers),
+                loadPeriodBreakdown(range, conversationId));
         vo.setPricingMode(resolveEffectivePricingMode(providers).name());
+        applyPeakContext(vo, providers);
         return vo;
     }
 
@@ -190,26 +204,68 @@ public class TokenUsageService {
     // ==================== 内部方法 ====================
 
     /**
-     * 填充汇总派生指标（命中率 + 三段费用拆分）
+     * 填充汇总派生指标（命中率 + 三段费用拆分 + 峰谷费用分布）。
      *
-     * @param price 参照单价（可为 null：表示范围内没有任何模型配置单价，
-     *              此时三段拆分为 0 且 {@code breakdownAvailable=false}，前端隐藏结构条）
+     * <h3>为什么三段拆分要按「模型 + 时段」分组做</h3>
+     * <p>
+     * 峰谷计价上线后，同一个统计范围里会同时存在<b>高峰记录</b>与<b>空闲记录</b>，
+     * 两者的输出单价可能相差一倍。若仍用「单一参照价」把范围内所有 token 重算一遍，
+     * 三段结构必然失真（总额来自 {@code SUM(cost_estimate)} 仍是对的，但结构条会指向错误结论）。
+     * 因此这里按 {@code (model, pricing_period)} 分组，每组用该时段单价算三段后累加。
+     * </p>
+     *
+     * @param pair      参照单价对（{@code null} 表示范围内存在未配单价的模型 / 套餐制 Provider，
+     *                  或存在多套不同单价 → 隐藏结构条，避免给出一个看似合理实则错误的结构）
+     * @param breakdown 按 (模型, 时段) 分组的真实 token 量
      */
-    private void enrichSummary(TokenUsageSummaryVO vo, TokenPricingConfig.PriceItem price) {
+    private void enrichSummary(TokenUsageSummaryVO vo, PricePair pair,
+                               List<TokenUsagePeriodBreakdownVO> breakdown) {
         int denom = (int) (vo.getCacheHitTokens() + vo.getCacheMissTokens());
         vo.setCacheHitRate(denom > 0 ? (double) vo.getCacheHitTokens() / denom : -1d);
 
-        if (price == null) {
-            vo.setCacheHitCost(0d);
-            vo.setCacheMissCost(0d);
-            vo.setOutputCost(0d);
-            vo.setBreakdownAvailable(false);
+        if (pair == null || breakdown == null || breakdown.isEmpty()) {
+            clearBreakdown(vo);
             return;
         }
-        vo.setCacheHitCost(round6(vo.getCacheHitTokens() / 1_000_000d * price.getCacheHitInput()));
-        vo.setCacheMissCost(round6(vo.getCacheMissTokens() / 1_000_000d * price.getCacheMissInput()));
-        vo.setOutputCost(round6(vo.getCompletionTokens() / 1_000_000d * price.getOutput()));
+        double hitCost = 0d;
+        double missCost = 0d;
+        double outputCost = 0d;
+        double peakCost = 0d;
+        double offPeakCost = 0d;
+        for (TokenUsagePeriodBreakdownVO row : breakdown) {
+            TokenPricingConfig.PriceItem price = pair.forPeriod(row.getPricingPeriod());
+            if (price == null) {
+                clearBreakdown(vo);
+                return;
+            }
+            double h = row.getCacheHitTokens() / 1_000_000d * price.getCacheHitInput();
+            double m = row.getCacheMissTokens() / 1_000_000d * price.getCacheMissInput();
+            double o = row.getCompletionTokens() / 1_000_000d * price.getOutput();
+            hitCost += h;
+            missCost += m;
+            outputCost += o;
+            if (isPeakPeriod(row.getPricingPeriod())) {
+                peakCost += h + m + o;
+            } else {
+                offPeakCost += h + m + o;
+            }
+        }
+        vo.setCacheHitCost(round6(hitCost));
+        vo.setCacheMissCost(round6(missCost));
+        vo.setOutputCost(round6(outputCost));
         vo.setBreakdownAvailable(true);
+        vo.setPeakCostEstimate(round6(peakCost));
+        vo.setOffPeakCostEstimate(round6(offPeakCost));
+    }
+
+    /** 结构条不可用：三段清零并置标记（前端据此隐藏「费用结构」） */
+    private void clearBreakdown(TokenUsageSummaryVO vo) {
+        vo.setCacheHitCost(0d);
+        vo.setCacheMissCost(0d);
+        vo.setOutputCost(0d);
+        vo.setPeakCostEstimate(0d);
+        vo.setOffPeakCostEstimate(0d);
+        vo.setBreakdownAvailable(false);
     }
 
     /**
@@ -237,8 +293,8 @@ public class TokenUsageService {
      *
      * <p>只在没有全局兜底价时才额外查一次模型列表，常见单 Provider 场景无额外开销。</p>
      */
-    private TokenPricingConfig.PriceItem resolveReferencePrice(String range, Long conversationId,
-                                                              List<String> providers) {
+    private PricePair resolveReferencePricePair(String range, Long conversationId,
+                                                List<String> providers) {
         /*
           第一道闸：计费模式 —— 优先级高于「全局兜底价」。
 
@@ -258,31 +314,38 @@ public class TokenUsageService {
         TokenPricingConfig.PriceItem globalPrice = pricingConfig.resolve(null);
         if (globalPrice != null) {
             // 显式配了全局兜底价：作者已声明「所有未知模型都按此价估算」，可安全用于结构拆分
-            return globalPrice;
+            return new PricePair(globalPrice,
+                    globalPrice.effective(true, peakPeriodPolicy.peakMultiplier()));
         }
         try {
             List<String> models = collectModelsInRange(range, conversationId);
             if (models.isEmpty()) {
                 return null;
             }
-            TokenPricingConfig.PriceItem reference = null;
+            TokenPricingConfig.PriceItem refBase = null;
+            TokenPricingConfig.PriceItem refPeak = null;
             for (String model : models) {
-                TokenPricingConfig.PriceItem price = pricingConfig.resolve(model);
-                if (price == null) {
-                    // 范围内存在「未配置单价」的模型（如火山方舟 deepseek-v4.1-flash）：
-                    // 绝不能拿别家单价给它算 —— 那会得出一个看似合理实则完全错误的成本结构。
+                TokenPricingConfig.PriceItem base = pricingConfig.resolve(model);
+                if (base == null) {
+                    // 范围内存在「未配置单价」的模型：绝不能拿别家单价给它算 ——
+                    // 那会得出一个看似合理实则完全错误的成本结构。
                     log.debug("费用结构不可用：模型 [{}] 未配置单价（不套用其他模型的单价）", model);
                     return null;
                 }
-                if (reference == null) {
-                    reference = price;
-                } else if (!samePrice(reference, price)) {
-                    // 混合单价：单一结构条无法同时表达两套价，隐藏比给一个加权平均值更诚实
+                // 峰谷价：未开启 peak-pricing 的模型会原样返回 base（结构上无需特判）
+                TokenPricingConfig.PriceItem peak = pricingConfig.resolveFor(
+                        model, true, peakPeriodPolicy.peakMultiplier());
+                if (refBase == null) {
+                    refBase = base;
+                    refPeak = peak;
+                } else if (!samePrice(refBase, base) || !samePrice(refPeak, peak)) {
+                    // 混合单价：单一结构条无法同时表达两套价（峰谷下还要再加两档），
+                    // 隐藏比给一个加权平均值更诚实
                     log.debug("费用结构不可用：范围内存在多套单价（当前 [{}]）", model);
                     return null;
                 }
             }
-            return reference;
+            return refBase == null ? null : new PricePair(refBase, refPeak);
         } catch (Exception e) {
             log.debug("解析参照单价失败（忽略，结构条将隐藏）: {}", e.getMessage());
         }
@@ -419,6 +482,159 @@ public class TokenUsageService {
         return a.getCacheHitInput() == b.getCacheHitInput()
                 && a.getCacheMissInput() == b.getCacheMissInput()
                 && a.getOutput() == b.getOutput();
+    }
+
+    /**
+     * 按 (模型, 时段) 分组的 token 明细 —— 费用结构拆分的数据源。
+     *
+     * <p>老库未成功迁移 {@code pricing_period} 列时查询会失败：此时降级为「不拆结构」
+     * （{@code breakdownAvailable=false}），<b>不影响</b>汇总金额（总额来自
+     * {@code SUM(cost_estimate)}，与本次查询无关）。</p>
+     */
+    private List<TokenUsagePeriodBreakdownVO> loadPeriodBreakdown(String range, Long conversationId) {
+        try {
+            List<TokenUsagePeriodBreakdownVO> rows = conversationId != null
+                    ? usageMapper.summarizeBreakdownByConversation(conversationId)
+                    : usageMapper.summarizeBreakdownByRange(resolveFrom(range), LocalDateTime.now().plusDays(1));
+            return rows == null ? List.of() : rows;
+        } catch (Exception e) {
+            log.debug("费用结构分组查询失败（降级为不拆分）: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 填充峰谷上下文（是否启用 + 当前时段），供前端提示「现在按高峰价计费」。
+     */
+    private void applyPeakContext(TokenUsageSummaryVO vo, List<String> providers) {
+        PeakPricingSpec spec = resolvePeakSpec(providers);
+        boolean enabled = spec != null && peakPeriodPolicy.isGloballyEnabled();
+        vo.setPeakPricingEnabled(enabled);
+        if (!enabled) {
+            vo.setCurrentPeriod(null);
+            return;
+        }
+        vo.setCurrentPeriod(peakPeriodPolicy.periodOf(spec, peakPeriodPolicy.nowOf(spec)));
+    }
+
+    /** 取范围内第一个「启用峰谷」的平台规格（混合平台时以有峰谷者为准，便于统一展示口径） */
+    private PeakPricingSpec resolvePeakSpec(List<String> providers) {
+        if (providers == null || providers.isEmpty()) {
+            return null;
+        }
+        for (String provider : providers) {
+            PeakPricingSpec spec = tokenUsageParser.resolvePeakPricing(provider);
+            if (spec != null && spec.isActive()) {
+                return spec;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 峰谷计价上下文（前端展示「当前时段 / 下次切换 / 各模型两档单价」）。
+     *
+     * <p>只读内存配置与日历，<b>不查库、不联网</b>，可被前端在成本看板 / 聊天页高频调用。</p>
+     *
+     * @param provider Provider 编码（可为空：为空时只返回全局信息与模型单价表，{@code period=null}）
+     */
+    public TokenPricingContextVO pricingContext(String provider) {
+        TokenPricingContextVO vo = new TokenPricingContextVO();
+        PeakPricingSpec spec = tokenUsageParser.resolvePeakPricing(provider);
+        if (spec == null || !spec.isActive()) {
+            /*
+              成本看板是「全局页面」，前端调用时不带 provider（它也没有单一平台上下文）。
+              若这里因 spec=null 直接判 enabled=false，界面的时段提示会永远不出现 —— 功能形同虚设。
+              因此退化为「任一启用峰谷的平台档案」：时段窗口 / 节假日地区本就是平台事实，
+              全局展示不绑定具体平台，语义仍然正确。
+             */
+            spec = anyPeakSpec();
+        }
+        boolean enabled = spec != null && spec.isActive() && peakPeriodPolicy.isGloballyEnabled();
+        vo.setEnabled(enabled);
+        vo.setZone(peakPeriodPolicy.zoneOf(spec).getId());
+        vo.setPeakMultiplier(peakPeriodPolicy.peakMultiplier());
+
+        ZonedDateTime now = peakPeriodPolicy.nowOf(spec);
+        /*
+          必须用 OffsetDateTime 而不是 ZonedDateTime.toString()：
+          后者的输出是 `2026-11-18T22:09:04+08:00[Asia/Shanghai]`，末尾的 [zone] 不是 ISO-8601 的一部分，
+          Safari / Firefox 的 new Date() 会直接得到 Invalid Date → 前端「下次切换」文案失效。
+         */
+        vo.setNow(now.toOffsetDateTime().toString());
+        if (enabled) {
+            vo.setPeriod(peakPeriodPolicy.periodOf(spec, now));
+            vo.setWindows(peakPeriodPolicy.windowsOf(spec));
+            ZonedDateTime next = peakPeriodPolicy.nextSwitchAt(spec, now);
+            vo.setNextSwitchAt(next == null ? null : next.toOffsetDateTime().toString());
+        }
+
+        String effective = enabled ? vo.getPeriod() : null;
+        Map<String, TokenPricingConfig.PriceItem> configured = pricingConfig.getModels();
+        if (configured != null) {
+            for (Map.Entry<String, TokenPricingConfig.PriceItem> entry : configured.entrySet()) {
+                TokenPricingConfig.PriceItem base = entry.getValue();
+                if (base == null) {
+                    continue;
+                }
+                TokenPricingContextVO.ModelPrice modelPrice = new TokenPricingContextVO.ModelPrice();
+                modelPrice.setModel(entry.getKey());
+                modelPrice.setOffPeak(toPriceView(base));
+                modelPrice.setPeak(toPriceView(base.effective(true, peakPeriodPolicy.peakMultiplier())));
+                modelPrice.setEffective(effective);
+                vo.getModels().add(modelPrice);
+            }
+        }
+        return vo;
+    }
+
+    /**
+     * 取第一个启用峰谷的平台档案（provider 未知时的全局视角）。
+     *
+     * <p>注意：这里只是「时段规则」的兜底，<b>不涉及任何用户配置</b> ——
+     * 平台档案是代码内的静态事实（{@code ProviderRegistry}），所以不会把 A 平台的时段
+     * 套到 B 平台的金额上（金额仍按各记录的 provider 独立解析）。</p>
+     */
+    private PeakPricingSpec anyPeakSpec() {
+        for (ProviderProfile profile : ProviderRegistry.orderedByDisplay()) {
+            PeakPricingSpec spec = profile.getPeakPricing();
+            if (spec != null && spec.isActive()) {
+                return spec;
+            }
+        }
+        return null;
+    }
+
+    /** 单价项 → 前端视图 */
+    private static TokenPricingContextVO.Price toPriceView(TokenPricingConfig.PriceItem item) {
+        TokenPricingContextVO.Price price = new TokenPricingContextVO.Price();
+        price.setCacheHitInput(item.getCacheHitInput());
+        price.setCacheMissInput(item.getCacheMissInput());
+        price.setOutput(item.getOutput());
+        return price;
+    }
+
+    /** 是否高峰时段标识 */
+    private static boolean isPeakPeriod(String period) {
+        return period != null && PeakPeriodPolicy.PERIOD_PEAK.equalsIgnoreCase(period.trim());
+    }
+
+    /**
+     * 参照单价对：空闲价 + 高峰价。
+     * <p>平台未启用峰谷时两者是同一个对象（{@code forPeriod} 恒返回空闲价），行为与改造前一致。</p>
+     */
+    private static final class PricePair {
+        private final TokenPricingConfig.PriceItem offPeak;
+        private final TokenPricingConfig.PriceItem peak;
+
+        private PricePair(TokenPricingConfig.PriceItem offPeak, TokenPricingConfig.PriceItem peak) {
+            this.offPeak = offPeak;
+            this.peak = peak == null ? offPeak : peak;
+        }
+
+        private TokenPricingConfig.PriceItem forPeriod(String period) {
+            return isPeakPeriod(period) ? peak : offPeak;
+        }
     }
 
     /**

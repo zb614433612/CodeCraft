@@ -1,18 +1,24 @@
 package com.example.agentdeepseek.service.llm;
 
 import com.example.agentdeepseek.config.TokenPricingConfig;
+import com.example.agentdeepseek.config.pricing.HolidayCalendar;
+import com.example.agentdeepseek.config.pricing.PeakPeriodPolicy;
+import com.example.agentdeepseek.config.pricing.PeakPeriodProperties;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
 import com.example.agentdeepseek.model.entity.ProviderConfig;
 import com.example.agentdeepseek.service.llm.profile.ProviderProfile;
+import com.example.agentdeepseek.service.llm.profile.ProviderProfile.PeakPricingSpec;
 import com.example.agentdeepseek.service.llm.profile.ProviderRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
 
 /**
  * Provider 用量（usage）解析与计费估算
@@ -75,12 +81,41 @@ public class TokenUsageParser {
      */
     private final ObjectProvider<LLMClientManager> llmClientManagerProvider;
 
+    /** 峰谷时段判定策略（仅当平台档案声明峰谷时才真正参与计价） */
+    private final PeakPeriodPolicy peakPeriodPolicy;
+
+    /**
+     * Spring 注入入口（<b>生产链路用这个</b>）。
+     */
+    @Autowired
     public TokenUsageParser(ObjectMapper objectMapper,
                             TokenPricingConfig pricingConfig,
-                            ObjectProvider<LLMClientManager> llmClientManagerProvider) {
+                            ObjectProvider<LLMClientManager> llmClientManagerProvider,
+                            PeakPeriodPolicy peakPeriodPolicy) {
         this.objectMapper = objectMapper;
         this.pricingConfig = pricingConfig;
         this.llmClientManagerProvider = llmClientManagerProvider;
+        this.peakPeriodPolicy = peakPeriodPolicy;
+    }
+
+    /**
+     * 兼容构造器（既有测试 / 无峰谷场景用）。
+     *
+     * <p>内部构造一个「总开关关闭」的时段策略 → 计价恒用基准价，
+     * 与改造前行为<b>逐位一致</b>。这也是既有测试（{@code PricingModeGuardTest} /
+     * {@code TokenUsageMultiProtocolTest}）无需改动的原因。</p>
+     */
+    public TokenUsageParser(ObjectMapper objectMapper,
+                            TokenPricingConfig pricingConfig,
+                            ObjectProvider<LLMClientManager> llmClientManagerProvider) {
+        this(objectMapper, pricingConfig, llmClientManagerProvider, disabledPolicy(objectMapper));
+    }
+
+    /** 构造一个「不启用峰谷」的时段策略（峰谷判定恒为 false） */
+    private static PeakPeriodPolicy disabledPolicy(ObjectMapper objectMapper) {
+        PeakPeriodProperties props = new PeakPeriodProperties();
+        props.setEnabled(false);
+        return new PeakPeriodPolicy(props, new HolidayCalendar(props, objectMapper));
     }
 
     /**
@@ -99,35 +134,103 @@ public class TokenUsageParser {
      * @param provider Provider 编码（如 {@code huoshan} / {@code deepseek}）
      */
     public ProviderProfile.PricingMode resolvePricingMode(String provider) {
-        if (provider == null || provider.isBlank()) {
+        ProviderContext ctx = resolveProviderContext(provider);
+        if (ctx == null) {
             return ProviderProfile.PricingMode.TOKEN;
+        }
+        try {
+            return ctx.getProfile().resolvePricingMode(ctx.getBaseUrl());
+        } catch (Exception e) {
+            log.debug("解析计费模式失败，按 TOKEN 处理: provider={}, err={}", provider, e.getMessage());
+            return ProviderProfile.PricingMode.TOKEN;
+        }
+    }
+
+    /**
+     * 统一入口：解析 Provider 的档案上下文（档案 + baseUrl）。
+     *
+     * <p>计价需要同时拿到「计费模式（档案）」「baseUrl（同一 Provider 两种计费形态）」
+     * 「峰谷规格（档案）」，如果各自查一次配置会重复 3 次；这里收敛成一次查询。</p>
+     *
+     * <p><b>为什么用 {@code resolveFor} 而不是「template 精确匹配」</b>：旧代码是
+     * 「template 空才用 code」+ 精确查找，遇到 {@code code=volcengine-custom} 这类命名会查不到档案
+     * → 退回 TOKEN → 火山 Coding Plan 被按 token 估出虚假金额。计费判定错会直接产生错误金额，
+     * 因此这里必须与其他消费方用同一个入口。</p>
+     *
+     * @return 档案上下文；Provider 已删除 / 未启用 / 识别不出时返回 {@code null}
+     *         （调用方按「TOKEN + 无峰谷」的保守默认处理）
+     */
+    public ProviderContext resolveProviderContext(String provider) {
+        if (provider == null || provider.isBlank()) {
+            return null;
         }
         try {
             LLMClientManager manager = llmClientManagerProvider == null
                     ? null : llmClientManagerProvider.getIfAvailable();
             if (manager == null) {
-                return ProviderProfile.PricingMode.TOKEN;
+                return null;
             }
             ProviderConfig config = manager.getProviderConfig(provider);
             if (config == null) {
                 // Provider 已被删除 / 未启用：历史数据仍要显示，按单价表沿用旧行为
-                return ProviderProfile.PricingMode.TOKEN;
+                return null;
             }
-            /*
-              用 resolveFor（模板精确 → code 前缀兜底）。旧代码是「template 空才用 code」+ 精确查找，
-              遇到 code=volcengine-custom 这类命名会查不到档案 → 退回 TOKEN
-              → 火山 Coding Plan 又被按 token 估出虚假金额（正是 T4 要根治的那个 bug 的另一条路）。
-             PricingMode 判错会直接产生错误金额，因此这里必须与其他消费方用同一个入口。
-             */
             ProviderProfile profile = ProviderRegistry.resolveFor(
                     config.getRequestTemplate(), config.getCode(), config.getBaseUrl());
             if (profile == null) {
-                return ProviderProfile.PricingMode.TOKEN;
+                return null;
             }
-            return profile.resolvePricingMode(config.getBaseUrl());
+            return new ProviderContext(profile, config.getBaseUrl());
         } catch (Exception e) {
-            log.debug("解析计费模式失败，按 TOKEN 处理: provider={}, err={}", provider, e.getMessage());
-            return ProviderProfile.PricingMode.TOKEN;
+            log.debug("解析 Provider 档案失败: provider={}, err={}", provider, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 解析该 Provider 的峰谷规格。
+     *
+     * @return 档案声明的规格；档案不可用时返回 {@code null}（调用方按「无峰谷」处理）
+     */
+    public PeakPricingSpec resolvePeakPricing(String provider) {
+        ProviderContext ctx = resolveProviderContext(provider);
+        return ctx == null ? null : ctx.getProfile().getPeakPricing();
+    }
+
+    /** Provider 档案上下文（档案 + baseUrl），避免计价链路重复查配置 */
+    public static final class ProviderContext {
+        private final ProviderProfile profile;
+        private final String baseUrl;
+
+        public ProviderContext(ProviderProfile profile, String baseUrl) {
+            this.profile = profile;
+            this.baseUrl = baseUrl;
+        }
+
+        public ProviderProfile getProfile() {
+            return profile;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+    }
+
+    /**
+     * 一次计价的结果快照：金额 + 时段 + 生效单价。
+     * <p>落库时三项一起写，保证「这个金额是按哪个时段、哪套单价算的」事后可追溯。</p>
+     */
+    private static final class Quote {
+        private final Double cost;
+        private final String period;
+        private final TokenPricingConfig.PriceItem price;
+        private final boolean peak;
+
+        private Quote(Double cost, String period, TokenPricingConfig.PriceItem price, boolean peak) {
+            this.cost = cost;
+            this.period = period;
+            this.price = price;
+            this.peak = peak;
         }
     }
 
@@ -389,15 +492,76 @@ public class TokenUsageParser {
         if (!pricingConfig.isEstimable(model, mode)) {
             return null;
         }
-        TokenPricingConfig.PriceItem price = pricingConfig.resolve(model);
-        if (price == null) {
+        return computeCost(snapshot, pricingConfig.resolve(model));
+    }
+
+    /**
+     * <b>峰谷感知的计价入口（生产链路请一律用这个）</b>。
+     *
+     * <p>与旧重载的区别：旧重载只吃 {@code model + mode}，无法知道「这次调用发生在高峰还是空闲」，
+     * 因此只能用基准价；本方法从 {@code provider} 解析出<b>平台档案</b>，
+     * 由档案声明的 {@link PeakPricingSpec} 决定是否分峰谷，再按 {@code requestTime} 选价。</p>
+     *
+     * <h3>为什么时间要由调用方传入</h3>
+     * <p>
+     * 流式请求可能跑几分钟，横跨 12:00 / 18:00 的峰谷边界。落库时刻（{@code doFinally}）与
+     * 请求发起时刻可能落在不同时段，而 Provider 是按<b>请求发起时刻</b>计费 ——
+     * 所以这里必须用「请求发起时间」，不能内部 {@code now()}。
+     * </p>
+     *
+     * @param provider    Provider 编码（用于解析档案中的峰谷规格）
+     * @param model       模型名
+     * @param snapshot    用量快照
+     * @param requestTime 请求发起时刻（{@code null} 时按平台时区的当前时间）
+     * @return 费用；不可估算（未配单价 / 套餐制 / 免费）时返回 {@code null}
+     */
+    public Double calculateCost(String provider, String model, UsageSnapshot snapshot, ZonedDateTime requestTime) {
+        return quote(provider, model, snapshot, requestTime).cost;
+    }
+
+    /**
+     * 一次性算出「金额 + 时段 + 生效单价」，供落库写入计价快照。
+     *
+     * <p>把四处信息（档案 / 计费模式 / 峰谷规格 / 单价）收敛在一次解析里，
+     * 避免落库链路重复查 Provider 配置。</p>
+     */
+    private Quote quote(String provider, String model, UsageSnapshot snapshot, ZonedDateTime requestTime) {
+        ProviderContext ctx = resolveProviderContext(provider);
+        ProviderProfile.PricingMode mode = ProviderProfile.PricingMode.TOKEN;
+        PeakPricingSpec peakSpec = null;
+        if (ctx != null && ctx.getProfile() != null) {
+            try {
+                mode = ctx.getProfile().resolvePricingMode(ctx.getBaseUrl());
+            } catch (Exception e) {
+                // 计费模式判定失败时沿用旧行为（按单价表），不会凭空禁用已有金额
+                mode = ProviderProfile.PricingMode.TOKEN;
+            }
+            peakSpec = ctx.getProfile().getPeakPricing();
+        }
+        ZonedDateTime at = requestTime != null ? requestTime : peakPeriodPolicy.nowOf(peakSpec);
+        boolean peak = peakPeriodPolicy.isPeak(peakSpec, at);
+        String period = peakPeriodPolicy.periodOf(peakSpec, at);
+
+        if (!pricingConfig.isEstimable(model, mode)) {
+            return new Quote(null, period, null, peak);
+        }
+        TokenPricingConfig.PriceItem price = pricingConfig.resolveFor(
+                model, peak, peakPeriodPolicy.peakMultiplier());
+        return new Quote(computeCost(snapshot, price), period, price, peak);
+    }
+
+    /**
+     * 四项相加（保证旧 / 新两个入口的算法<b>逐位一致</b>）。
+     * <p>保留 6 位小数，与 {@code DECIMAL(14,6)} 对齐。</p>
+     */
+    private Double computeCost(UsageSnapshot snapshot, TokenPricingConfig.PriceItem price) {
+        if (snapshot == null || price == null) {
             return null;
         }
         double cacheHitCost = snapshot.getCacheHitTokens() / 1_000_000d * price.getCacheHitInput();
         double cacheWriteCost = snapshot.getCacheCreationTokens() / 1_000_000d * price.cacheWritePrice();
         double cacheMissCost = snapshot.getCacheMissTokens() / 1_000_000d * price.getCacheMissInput();
         double outputCost = snapshot.getCompletionTokens() / 1_000_000d * price.getOutput();
-        // 保留 6 位小数（与 DECIMAL(14,6) 对齐）
         return Math.round((cacheHitCost + cacheWriteCost + cacheMissCost + outputCost) * 1_000_000d)
                 / 1_000_000d;
     }
@@ -413,8 +577,38 @@ public class TokenUsageParser {
      * @param model          模型名
      * @param snapshot       本次请求的用量快照
      */
+    /**
+     * 构造可落库的用量实体（兼容入口：按落库时刻判定时段）。
+     *
+     * @param conversationId 会话 ID（可空）
+     * @param turnId         轮次 ID（前端生成，可空；空值只参与会话/时间维度汇总）
+     * @param messageId      关联消息 ID（当前落库时机拿不到，传 null）
+     * @param iteration      工具循环迭代轮次
+     * @param provider       Provider 编码
+     * @param model          模型名
+     * @param snapshot       本次请求的用量快照
+     */
     public LlmTokenUsage toEntity(Long conversationId, String turnId, Long messageId, int iteration,
                                   String provider, String model, UsageSnapshot snapshot) {
+        return toEntity(conversationId, turnId, messageId, iteration, provider, model, snapshot, null);
+    }
+
+    /**
+     * 构造可落库的用量实体（<b>峰谷感知版，生产链路请用这个</b>）。
+     *
+     * <p>除金额外，额外写入三个「计价快照」字段，解决「历史记录按哪套价算的，事后查不出来」：</p>
+     * <ul>
+     *   <li>{@code pricingPeriod}：{@code peak} / {@code off-peak} / {@code null}（平台无峰谷）</li>
+     *   <li>{@code pricingVersion}：计价口径版本，用于区分新旧两批数据（历史不回算）</li>
+     *   <li>{@code unitPriceSnapshot}：当时生效的三档单价（JSON，审计用）</li>
+     * </ul>
+     *
+     * @param requestTime <b>请求发起时刻</b>（不是落库时刻：流式请求可能跨峰谷边界，
+     *                    Provider 按发起时刻计费）；{@code null} 时按平台时区当前时间
+     */
+    public LlmTokenUsage toEntity(Long conversationId, String turnId, Long messageId, int iteration,
+                                  String provider, String model, UsageSnapshot snapshot,
+                                  ZonedDateTime requestTime) {
         LlmTokenUsage entity = new LlmTokenUsage();
         entity.setConversationId(conversationId);
         entity.setTurnId(turnId);
@@ -428,11 +622,39 @@ public class TokenUsageParser {
         entity.setCacheHitTokens(snapshot.getCacheHitTokens());
         entity.setCacheMissTokens(snapshot.getCacheMissTokens());
         entity.setReasoningTokens(snapshot.getReasoningTokens());
-        // null = 不可估算（三种原因：未配单价 / 套餐制 / 本地免费），
+
+        // 一次解析拿到「金额 + 时段 + 生效单价」（null = 不可估算：未配单价 / 套餐制 / 本地免费）
         // 前端据此隐藏金额，而不是显示一个错的价格或 ¥0
-        entity.setCostEstimate(calculateCost(model, snapshot, resolvePricingMode(provider)));
+        Quote quote = quote(provider, model, snapshot, requestTime);
+        entity.setCostEstimate(quote.cost);
+        entity.setPricingPeriod(quote.period);
+        entity.setPricingVersion(PRICING_VERSION);
+        entity.setUnitPriceSnapshot(describePrice(quote.price, quote.period));
         entity.setCreatedAt(LocalDateTime.now());
         return entity;
+    }
+
+    /**
+     * 计价口径版本号。
+     * <p>历史数据<b>一律不回算</b>（改了就等于篡改当时的账），靠本字段区分
+     * 「2026-11-18 之前按旧价算的」与「之后按峰谷价算的」两批记录。</p>
+     */
+    public static final String PRICING_VERSION = "2026-11-18-peak-v1";
+
+    /** 单价快照（紧凑 JSON，字段长度上限 200 以免撑爆列宽）；不可估算时为 null */
+    private String describePrice(TokenPricingConfig.PriceItem price, String period) {
+        if (price == null) {
+            return null;
+        }
+        try {
+            String json = "{\"period\":\"" + (period == null ? "none" : period)
+                    + "\",\"hit\":" + price.getCacheHitInput()
+                    + ",\"miss\":" + price.getCacheMissInput()
+                    + ",\"output\":" + price.getOutput() + "}";
+            return json.length() > 200 ? json.substring(0, 200) : json;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // ==================== 内部工具 ====================

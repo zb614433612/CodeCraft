@@ -49,6 +49,8 @@
             <span class="label">估算费用</span>
             <strong class="value">{{ summaryCostText }}</strong>
             <span class="sub">{{ summaryCostHint }}</span>
+            <!-- 峰谷时段提示：未启用峰谷的平台 peakHint 为空串，不渲染 -->
+            <span v-if="peakHint" class="sub peak-hint">{{ peakHint }}</span>
           </div>
           <div class="card">
             <span class="label">总 Token</span>
@@ -181,10 +183,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import {
+  getPricingContext,
   getUsageByConversation,
   getUsageByModel,
   getUsageDetail,
   getUsageSummary,
+  type TokenPricingContext,
   type TokenUsageDetail,
   type TokenUsageGroup,
   type TokenUsageSummary,
@@ -210,6 +214,39 @@ const activeConversation = ref('')
 const detailList = ref<TokenUsageDetail[]>([])
 const detailLoading = ref(false)
 
+/**
+ * 峰谷计价上下文（当前时段 / 下次切换）。
+ * <p>取不到（旧后端 / 未启用峰谷）时为 null，界面不展示任何时段提示。</p>
+ */
+const pricingContext = ref<TokenPricingContext | null>(null)
+
+/**
+ * 时段提示文案。
+ * <p>为什么必须展示：峰谷下同一任务高峰/空闲金额可差数倍，不说明时段
+ * 用户会以为「统计坏了」或「换模型变贵了」。</p>
+ */
+const peakHint = computed(() => {
+  const ctx = pricingContext.value
+  if (!ctx?.enabled) return ''
+  const isPeak = ctx.period === 'peak'
+  const next = ctx.nextSwitchAt ? formatClock(ctx.nextSwitchAt) : ''
+  return isPeak
+    ? `当前：高峰时段${next ? ` · ${next} 后转空闲` : ''}`
+    : `当前：空闲时段${next ? ` · ${next} 起转高峰` : ''}`
+})
+
+/**
+ * ISO 时刻 → HH:mm（按<b>后端时区</b>展示，不做本地时区换算）。
+ *
+ * <p>为什么不用 new Date()：峰谷规则以平台时区（北京时间）为准，
+ * 若按浏览器本地时区换算，海外用户会看到「10:00 后转空闲」，
+ * 而规则实际写的是北京时间 18:00 —— 文案与事实不符。</p>
+ */
+function formatClock(iso: string): string {
+  const m = /\d{2}:\d{2}/.exec(iso ?? '')
+  return m ? m[0] : ''
+}
+
 const hitRateText = computed(() => rateText(summary.value.cacheHitRate))
 
 const hitClass = computed(() => {
@@ -226,14 +263,17 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [s, c, m] = await Promise.all([
+    const [s, c, m, pc] = await Promise.all([
       getUsageSummary(range.value),
       getUsageByConversation(range.value, 10),
-      getUsageByModel(range.value)
+      getUsageByModel(range.value),
+      // 峰谷上下文是「锦上添花」信息：取不到不应该让整个看板报错
+      getPricingContext().catch(() => null)
     ])
     summary.value = s || emptySummary()
     conversations.value = c || []
     models.value = m || []
+    pricingContext.value = pc
   } catch (e: any) {
     error.value = e?.message || '加载失败，请确认后端服务已启动'
   } finally {
@@ -405,6 +445,11 @@ function pct(part: number): number {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* 峰谷时段提示：用强调色区分「当前按高峰价计费」，避免与普通说明文字混淆 */
+.peak-hint {
+  color: var(--accent);
 }
 
 .state {

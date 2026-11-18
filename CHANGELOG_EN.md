@@ -5,6 +5,90 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.5] - 2026-11-18
+
+> **Billing accuracy release (DeepSeek official peak/off-peak pricing)**: fixes
+> "the cost dashboard estimate is much lower than the actual bill". Two root causes:
+> ① the price table was stale (`deepseek-flash` output price was only 50% of the official
+> off-peak price; `deepseek-v4-pro` was far below official for all three items);
+> ② the project had **no concept of peak/off-peak** — DeepSeek charges two prices
+> (peak: weekdays 09:00–12:00 & 14:00–18:00 Beijing time; off-peak: everything else
+> including weekends/holidays; off-peak = 50% of peak).
+> **Backend restart required**; 3 new DB columns (auto-migrated at startup);
+> **DeepSeek official only** — all other providers (incl. Volcengine Ark) behave exactly as before.
+
+### ✨ New: DeepSeek official peak/off-peak pricing
+
+- **Price table corrected to official values** (`application.yml` → `llm.pricing.models`, fetched 2026-11-18):
+
+  | Model | Item | Old | Off-peak (new) | Peak (new) |
+  |---|---|---|---|---|
+  | deepseek-flash | hit / miss / output | 0.02 / 1.0 / **2.0** | 0.02 / 1.0 / **4.0** | 0.04 / 2.0 / 8.0 |
+  | deepseek-v4-pro | hit / miss / output | **0.025 / 3.0 / 6.0** | **0.15 / 4.5 / 13.5** | 0.30 / 9.0 / 27.0 |
+  | deepseek-v4-flash (legacy name) | hit / miss / output | — | 0.02 / 1.0 / 4.0 | 0.04 / 2.0 / 8.0 |
+
+- **Period resolution** (`PeakPeriodPolicy`): Beijing time (`Asia/Shanghai`, explicit zone,
+  never the JVM default), weekday windows 09:00–12:00 / 14:00–18:00 (half-open),
+  weekends and public holidays are off-peak all day.
+- **Automatic holiday calendar** (`HolidayCalendar`): 3 layers — built-in
+  `resources/holidays/cn-holidays.json` (2026 official schedule, offline fallback), local cache
+  `data/holiday-cache/cn-<year>.json`, optional remote `holiday-cn` (startup warm-up + daily
+  03:00 refresh; **the billing hot path never touches the network**). `extra-holidays` /
+  `extra-workdays` can override. Make-up workdays are declared per provider profile
+  (`honorMakeupWorkdays`), default **literal reading of the official page** (weekends always off-peak).
+- **Billing snapshot persisted**: `llm_token_usage` gains `pricing_period` (peak / off-peak),
+  `pricing_version`, `unit_price_snapshot`. **Historical rows are never recomputed**
+  (rewriting history would falsify the then-current bill); `pricing_version` separates the batches.
+- **Cost breakdown grouped by (model, period)**: `TokenUsageService.enrichSummary` now sums
+  per-group token volumes priced with that group's period price, so peak and off-peak are
+  never mixed under a single reference price.
+- **Provider-profile driven (extensible, not scattered)**: peak rules live in
+  `ProviderProfile.PeakPricingSpec`, registered alongside `pricingMode` / `usageProtocol`;
+  the billing chain has a single entry
+  `TokenUsageParser.resolveProviderContext(provider)` → `PeakPeriodPolicy.isPeak()` →
+  `TokenPricingConfig.resolveFor(model, isPeak)`.
+  **Future providers only need a few lines in `ProviderRegistry` plus `peak-*` prices — no billing code changes.**
+- **New API** `GET /api/token-usage/pricing-context`: current period, next switch time,
+  windows and per-model prices (in-memory read, no DB/network).
+- **Frontend (classic + v3)**: the cost dashboard shows "Current: Peak · switches to off-peak at 18:00";
+  time is rendered in the platform timezone (no local conversion).
+
+### 🛡️ Compatibility & rollback
+
+- **Other providers unaffected**: providers without a peak spec keep `enabled=false`;
+  models without `peak-pricing` get the original `PriceItem` object → amounts **bit-identical**
+  (Volcengine Ark QUOTA plans still never estimate money).
+- **Existing tests unchanged**: `TokenUsageParser` keeps a 3-arg compatibility constructor
+  (internally a "master switch off" policy).
+- **Two rollback switches** (no code change):
+  `llm.pricing.peak-period.enabled: false` (global off-peak) / per-model `peak-pricing: false`.
+- **Dual migration safety**: both `schema.sql` and startup `DeepSeekServiceImpl` attempt
+  `ADD COLUMN IF NOT EXISTS`.
+
+### 🧪 Verification
+
+- `PeakPricingTest`: **37 passed / 0 failed** (7 boundaries, weekends, holidays, make-up-day
+  modes, UTC timezone conversion, master switch, dual prices/multiplier, cacheWrite not
+  double-scaled, next switch, global config inheritance).
+- `mvn -DskipTests compile`: 378 Java files + both frontends **BUILD SUCCESS**.
+
+### ⚠️ Known limitations
+
+- Historical rows are not recomputed (by design).
+- Chat page (`ChatComposer` / `CodeAssistantView`) does not show the period badge yet.
+- The missing `usage` frame on tool-call iterations (`takeWhile` early cancel) is an
+  **independent issue**, untouched in this release.
+- Built-in holiday table covers 2026 only; 2027 relies on the remote source or `extra-holidays`.
+
+### 🔁 Version sync
+
+- `pom.xml` project version → 3.3.5
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.3.5.jar`) + `package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- `README.md` / `README_EN.md` badges
+
 ## [3.3.3] - 2026-11-17
 
 > **Performance-regression release**: fixes the P0 regression where long-context conversations saw

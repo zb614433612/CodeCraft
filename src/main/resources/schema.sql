@@ -708,6 +708,9 @@ CREATE TABLE IF NOT EXISTS llm_token_usage (
   cache_miss_tokens INT DEFAULT 0 COMMENT '缓存未命中输入 token（prompt_cache_miss_tokens）',
   reasoning_tokens INT DEFAULT 0 COMMENT '思考链 token（completion_tokens_details.reasoning_tokens）',
   cost_estimate DECIMAL(14,6) DEFAULT 0 COMMENT '估算费用（元），按该模型单价计算；NULL=模型未配置单价，不估算（≠免费）',
+  pricing_period VARCHAR(10) COMMENT '计价时段：peak/off-peak；NULL=平台未启用峰谷或历史数据',
+  pricing_version VARCHAR(32) COMMENT '计价口径版本（区分新旧两批数据；历史不回算）',
+  unit_price_snapshot VARCHAR(200) COMMENT '当时生效的三档单价快照（JSON，审计用）',
   created_at DATETIME NOT NULL COMMENT '创建时间',
   INDEX idx_usage_conversation (conversation_id),
   INDEX idx_usage_turn (conversation_id, turn_id),
@@ -724,6 +727,22 @@ CREATE TABLE IF NOT EXISTS llm_token_usage (
 -- ============================================================
 ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS turn_id VARCHAR(64);
 ALTER TABLE llm_token_usage ADD COLUMN turn_id VARCHAR(64);
+
+-- ============================================================
+-- 老库迁移：llm_token_usage 增加峰谷计价快照三列（2026-11-18）
+-- 背景：DeepSeek 官方按「高峰 / 空闲」两套单价计费（空闲价 = 高峰价 50%），
+--      原表只存一个 cost_estimate，事后无法区分「这笔钱是按哪个时段哪套价算的」。
+-- 责任：pricing_period 记录判定结果，pricing_version 区分新旧口径（历史不回算），
+--      unit_price_snapshot 存当时生效的三档单价，便于对账与审计。
+-- 说明：H2 支持 IF NOT EXISTS；MySQL/MariaDB 不支持时由 continue-on-error 容忍，
+--      下一句不带 IF NOT EXISTS 的写法作为 MySQL 兜底（列已存在时同样被容忍）。
+-- ============================================================
+ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS pricing_period VARCHAR(10);
+ALTER TABLE llm_token_usage ADD COLUMN pricing_period VARCHAR(10);
+ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS pricing_version VARCHAR(32);
+ALTER TABLE llm_token_usage ADD COLUMN pricing_version VARCHAR(32);
+ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS unit_price_snapshot VARCHAR(200);
+ALTER TABLE llm_token_usage ADD COLUMN unit_price_snapshot VARCHAR(200);
 
 -- ============================================================
 -- 新增 SYSTEM 菜单：成本看板（LLM 用量与费用统计，只读页面）

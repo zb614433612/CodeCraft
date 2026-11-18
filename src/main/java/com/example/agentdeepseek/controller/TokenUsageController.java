@@ -2,6 +2,7 @@ package com.example.agentdeepseek.controller;
 
 import com.example.agentdeepseek.common.response.ApiResponse;
 import com.example.agentdeepseek.model.entity.LlmTokenUsage;
+import com.example.agentdeepseek.model.vo.TokenPricingContextVO;
 import com.example.agentdeepseek.model.vo.TokenUsageGroupVO;
 import com.example.agentdeepseek.model.vo.TokenUsageSummaryVO;
 import com.example.agentdeepseek.model.vo.TokenUsageTurnVO;
@@ -80,5 +81,15 @@ public class TokenUsageController {
             @Parameter(description = "会话ID", required = true)
             @RequestParam Long conversationId) {
         return ApiResponse.success(tokenUsageService.turnUsage(conversationId));
+    }
+
+    @Operation(summary = "峰谷计价上下文",
+            description = "返回当前时段（高峰/空闲）、下次切换时刻、高峰窗口与各模型两档单价；"
+                    + "供成本看板与聊天页说明「现在按哪档价计费」。未启用峰谷的平台 enabled=false")
+    @GetMapping("/pricing-context")
+    public ApiResponse<TokenPricingContextVO> pricingContext(
+            @Parameter(description = "Provider 编码（如 deepseek）；不传时只返回全局信息与单价表")
+            @RequestParam(required = false) String provider) {
+        return ApiResponse.success(tokenUsageService.pricingContext(provider));
     }
 }

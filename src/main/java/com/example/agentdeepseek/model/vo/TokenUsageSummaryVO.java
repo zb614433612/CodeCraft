@@ -70,6 +70,24 @@ public class TokenUsageSummaryVO {
      */
     private boolean breakdownAvailable;
 
+    // ==================== 峰谷计价（2026-11-18 新增） ====================
+
+    /**
+     * 是否启用峰谷计价。
+     * <p>为 {@code true} 时，前端应展示「当前时段」与「高峰/空闲分别花了多少」；
+     * 为 {@code false} 时这些字段一律无意义（平台全天一个价）。</p>
+     */
+    private boolean peakPricingEnabled;
+
+    /** 当前（此刻）所处时段：{@code peak} / {@code off-peak} / {@code null}；供看板提示「现在按高峰价计费」 */
+    private String currentPeriod;
+
+    /** 高峰时段记录的费用合计（元）—— 用于让用户直观看到「高峰比空闲贵多少」 */
+    private double peakCostEstimate;
+
+    /** 空闲时段记录的费用合计（元） */
+    private double offPeakCostEstimate;
+
     /**
      * 本次统计范围内生效的<b>计费模式</b>：{@code TOKEN} / {@code QUOTA} / {@code FREE}。
      *

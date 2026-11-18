@@ -34,6 +34,14 @@ export interface TokenUsageSummary {
   outputCost: number
   /** 三段费用拆分是否可用（false 时隐藏费用结构图） */
   breakdownAvailable: boolean
+  /** 是否启用峰谷计价（true 时下方时段字段才有意义；旧后端不返回按 false 处理） */
+  peakPricingEnabled?: boolean
+  /** 当前时段：peak / off-peak / null（未启用峰谷时为 null） */
+  currentPeriod?: 'peak' | 'off-peak' | null
+  /** 高峰时段记录的费用合计（元，结构参考值） */
+  peakCostEstimate?: number
+  /** 空闲时段记录的费用合计（元，结构参考值） */
+  offPeakCostEstimate?: number
 }
 
 /** 分组统计（按模型 / 按会话） */
@@ -132,4 +140,43 @@ export function getUsageDetail(conversationId: number) {
  */
 export function getUsageTurns(conversationId: number) {
   return fetchData<TokenUsageTurn[]>(`/token-usage/turns?conversationId=${conversationId}`)
+}
+
+/** 单模型两档单价（元 / 百万 tokens） */
+export interface TokenPricingPrice {
+  cacheHitInput: number
+  cacheMissInput: number
+  output: number
+}
+
+/**
+ * 峰谷计价上下文（当前时段 / 下次切换 / 各模型两档单价）。
+ *
+ * <p>峰谷下同一任务高峰/空闲金额可差数倍，界面必须能把「为什么金额变了」讲清楚。</p>
+ * <p>{@code enabled=false} 时 {@code period / nextSwitchAt / windows} 均为空，前端不展示时段 UI。</p>
+ */
+export interface TokenPricingContext {
+  zone: string
+  now: string
+  period: 'peak' | 'off-peak' | null
+  nextSwitchAt: string | null
+  windows: string[]
+  enabled: boolean
+  peakMultiplier: number
+  models: Array<{
+    model: string
+    offPeak: TokenPricingPrice
+    peak: TokenPricingPrice
+    effective: 'peak' | 'off-peak' | null
+  }>
+}
+
+/**
+ * 峰谷计价上下文（只读内存配置，不查库不联网，可高频调用）
+ *
+ * @param provider Provider 编码（如 deepseek）；不传时只返回全局信息与单价表
+ */
+export function getPricingContext(provider?: string) {
+  const query = provider ? `?provider=${encodeURIComponent(provider)}` : ''
+  return fetchData<TokenPricingContext>(`/token-usage/pricing-context${query}`)
 }

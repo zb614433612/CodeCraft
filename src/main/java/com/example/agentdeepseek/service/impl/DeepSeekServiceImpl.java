@@ -491,6 +491,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             } catch (Exception e) {
                 log.debug("添加llm_token_usage.turn_id列失败（可能已存在）: {}", e.getMessage());
             }
+            /*
+              峰谷计价快照三列（2026-11-18）：schema.sql 里已有同样语句，这里再显式尝试一次。
+              为什么必须双保险：insert 语句现在包含这三列，一旦列缺失，两条 insert（带/不带 turn_id）
+              都会整条失败 → 用量完全不落库 → 成本看板静默清零。这比「缺少时段信息」严重得多。
+             */
+            try {
+                jdbcTemplate.execute("ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS pricing_period VARCHAR(10)");
+                jdbcTemplate.execute("ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS pricing_version VARCHAR(32)");
+                jdbcTemplate.execute("ALTER TABLE llm_token_usage ADD COLUMN IF NOT EXISTS unit_price_snapshot VARCHAR(200)");
+                log.debug("llm_token_usage 峰谷计价快照列就绪（pricing_period / pricing_version / unit_price_snapshot）");
+            } catch (Exception e) {
+                log.debug("添加 llm_token_usage 峰谷计价列失败（可能已存在）: {}", e.getMessage());
+            }
 
             // 添加user_id索引（如果不存在）
             try {
@@ -1434,6 +1447,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             final String chatUsageProtocol = ctxClient != null
                     ? ctxClient.getUsageProtocol() : TokenUsageParser.PROTOCOL_OPENAI;
             final String chatUsageModel = (String) apiRequest.get("model");
+            // 峰谷计价：记录「请求发起时刻」（落库发生在 doFinally，可能已跨过 12:00/18:00 的峰谷边界，
+            // 而 Provider 按发起时刻计费；跨边界时用落库时刻会算成另一档价）
+            final java.time.ZonedDateTime chatRequestStartedAt = java.time.ZonedDateTime.now();
             WebClient.RequestBodySpec chatRequestSpec = activeWebClient.post()
                     .uri(ctxClient != null ? ctxClient.getChatEndpoint() : "/v1/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON);
@@ -1520,7 +1536,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     .doFinally(signalType -> persistTokenUsageSafely(
                             conversationId, (String) apiRequest.get("_turnId"), 0,
                             providerCode, chatUsageModel, chatUsageRef.get(),
-                            readEstimatedPromptTokens(apiRequest), readRequestChars(apiRequest))));
+                            readEstimatedPromptTokens(apiRequest), readRequestChars(apiRequest),
+                            chatRequestStartedAt)));
         }
     }
 
@@ -3504,6 +3521,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // ===== 性能诊断：记录请求发起时间 =====
         final long requestStartNanos = System.nanoTime();
+        // 峰谷计价：请求发起时刻（不是 doFinally 的落库时刻；跨 12:00/18:00 边界时按发起时刻计费）
+        final java.time.ZonedDateTime requestStartedAt = java.time.ZonedDateTime.now();
         final AtomicBoolean firstChunkLogged = new AtomicBoolean(false);
 
         // 收集原始响应块，用于调试和保存
@@ -4392,7 +4411,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 .doFinally(signalType -> persistTokenUsageSafely(
                         conversationId, (String) apiRequest.get("_turnId"), iteration,
                         usageProvider, usageModel, usageRef.get(),
-                        readEstimatedPromptTokens(apiRequest), readRequestChars(apiRequest)));
+                        readEstimatedPromptTokens(apiRequest), readRequestChars(apiRequest),
+                        requestStartedAt));
     }
 
     /**
@@ -4471,8 +4491,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      */
     private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
                                          String provider, String model,
-                                         TokenUsageParser.UsageSnapshot snapshot) {
-        persistTokenUsageSafely(conversationId, turnId, iteration, provider, model, snapshot, 0, 0);
+                                         TokenUsageParser.UsageSnapshot snapshot,
+                                         java.time.ZonedDateTime requestStartedAt) {
+        persistTokenUsageSafely(conversationId, turnId, iteration, provider, model, snapshot, 0, 0, requestStartedAt);
     }
 
     /**
@@ -4484,9 +4505,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
                                          String provider, String model,
                                          TokenUsageParser.UsageSnapshot snapshot,
-                                         int expectedPromptTokens) {
+                                         int expectedPromptTokens,
+                                         java.time.ZonedDateTime requestStartedAt) {
         persistTokenUsageSafely(conversationId, turnId, iteration, provider, model, snapshot,
-                expectedPromptTokens, 0);
+                expectedPromptTokens, 0, requestStartedAt);
     }
 
     /**
@@ -4498,7 +4520,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private void persistTokenUsageSafely(Long conversationId, String turnId, int iteration,
                                          String provider, String model,
                                          TokenUsageParser.UsageSnapshot snapshot,
-                                         int expectedPromptTokens, int requestChars) {
+                                         int expectedPromptTokens, int requestChars,
+                                         java.time.ZonedDateTime requestStartedAt) {
         if (snapshot == null || snapshot.getTotalTokens() <= 0) {
             /*
               ★ usage 帧丢失 → 改走兜底校准（2026-11-17 修复「校准从未生效」）
@@ -4536,7 +4559,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
         try {
             LlmTokenUsage entity = tokenUsageParser.toEntity(
-                    conversationId, turnId, null, iteration, provider, model, snapshot);
+                    conversationId, turnId, null, iteration, provider, model, snapshot, requestStartedAt);
             try {
                 llmTokenUsageMapper.insert(entity);
             } catch (Exception insertError) {

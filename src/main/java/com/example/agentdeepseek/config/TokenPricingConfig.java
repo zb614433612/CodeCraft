@@ -82,6 +82,40 @@ public class TokenPricingConfig {
          */
         private double cacheWriteInput;
 
+        // ==================== 峰谷双价（2026-11-18 新增） ====================
+
+        /**
+         * 该模型是否启用峰谷计价。
+         *
+         * <p><b>默认 false</b>：保持「全天一个价」的原有行为。只有显式开启的模型才会去读
+         * 下面的 {@code peak-*} 字段 —— 因为绝大多数 Provider（OpenAI / Anthropic / Ollama /
+         * 中转站）并没有分时价格，盲目按倍率翻倍会凭空多算一倍。</p>
+         *
+         * <p>⚠️ 本开关与平台档案
+         * {@link com.example.agentdeepseek.service.llm.profile.ProviderProfile.PeakPricingSpec#isActive()}
+         * 是<b>与关系</b>：两者都为 true 才真正按时段计价。档案声明「这个平台分峰谷」，
+         * 本开关声明「这个模型配了高峰价」。</p>
+         */
+        private boolean peakPricing = false;
+
+        /** 高峰：缓存命中输入单价（缺省 0 表示未配置 → 基准价 × 倍率） */
+        private double peakCacheHitInput;
+
+        /** 高峰：缓存未命中输入单价（缺省 0 表示未配置 → 基准价 × 倍率） */
+        private double peakCacheMissInput;
+
+        /** 高峰：输出单价（缺省 0 表示未配置 → 基准价 × 倍率） */
+        private double peakOutput;
+
+        /** 高峰：缓存写入单价（仅 Anthropic 适用；缺省 0 表示未配置 → 按倍率或未命中价） */
+        private double peakCacheWriteInput;
+
+        /**
+         * 模型级倍率覆盖（缺省 0 表示用全局 {@code llm.pricing.peak-period.peak-multiplier}）。
+         * <p>用于「高峰不是整 2 倍」的平台。</p>
+         */
+        private double peakMultiplier;
+
         public PriceItem() {
         }
 
@@ -101,6 +135,45 @@ public class TokenPricingConfig {
          */
         public double cacheWritePrice() {
             return cacheWriteInput > 0 ? cacheWriteInput : cacheMissInput;
+        }
+
+        /**
+         * 取本单价的「时段视图」。
+         *
+         * <p><b>空闲 / 未启用峰谷时返回 {@code this} 本身</b>（不新建对象），保证改造前的
+         * 调用点行为逐位不变 —— 这也是「默认不改任何现有金额」的结构性保证。</p>
+         *
+         * @param peak               是否高峰
+         * @param fallbackMultiplier 全局兜底倍率（模型级 {@link #peakMultiplier} 优先）
+         * @return 高峰时返回一份按 {@code peak-*} 覆盖后的价格视图
+         */
+        public PriceItem effective(boolean peak, double fallbackMultiplier) {
+            if (!peak || !peakPricing) {
+                return this;
+            }
+            double multiplier = peakMultiplier > 0
+                    ? peakMultiplier
+                    : (fallbackMultiplier > 0 ? fallbackMultiplier : 2.0);
+            PriceItem p = new PriceItem(
+                    peakOrScale(peakCacheHitInput, cacheHitInput, multiplier),
+                    peakOrScale(peakCacheMissInput, cacheMissInput, multiplier),
+                    peakOrScale(peakOutput, output, multiplier));
+            p.setPeakPricing(true);
+            p.setPeakMultiplier(multiplier);
+            /*
+              缓存写入（仅 Anthropic）：显式高峰价优先；否则对「已配置的写入价」按倍率放大。
+              刻意不在这里把 0 回退成 cacheMissInput —— 那一步由 cacheWritePrice() 统一负责，
+              否则会出现「miss 价被放大两次」的双重计费。
+             */
+            p.setCacheWriteInput(peakCacheWriteInput > 0
+                    ? peakCacheWriteInput
+                    : (cacheWriteInput > 0 ? cacheWriteInput * multiplier : 0d));
+            return p;
+        }
+
+        /** 未配高峰价时按倍率放大基准价（显式配置优先） */
+        private static double peakOrScale(double peakValue, double baseValue, double multiplier) {
+            return peakValue > 0 ? peakValue : baseValue * multiplier;
         }
     }
 
@@ -137,6 +210,29 @@ public class TokenPricingConfig {
      */
     public boolean isPriced(String model) {
         return resolve(model) != null;
+    }
+
+    /**
+     * 解析某模型在<b>指定时段</b>生效的单价（峰谷视图）。
+     *
+     * <p>空闲 / 未启用峰谷时与 {@link #resolve(String)} 完全等价（返回同一对象），
+     * 因此「不配峰谷的模型」行为逐位不变。</p>
+     *
+     * <h3>调用方须知</h3>
+     * <p>
+     * 是否「高峰」由 <b>平台档案</b>（{@code ProviderProfile.PeakPricingSpec}）+
+     * {@code PeakPeriodPolicy} 判定后传进来，本类不关心时间逻辑 ——
+     * 这样新增平台的峰谷只需注册档案，计价链路不用改。
+     * </p>
+     *
+     * @param model              模型名（支持精确 / 前缀匹配）
+     * @param peak               是否高峰时段
+     * @param fallbackMultiplier 全局兜底倍率（模型级 {@code peak-multiplier} 优先）
+     * @return 该时段生效的单价；模型未配置单价时返回 {@code null}
+     */
+    public PriceItem resolveFor(String model, boolean peak, double fallbackMultiplier) {
+        PriceItem base = resolve(model);
+        return base == null ? null : base.effective(peak, fallbackMultiplier);
     }
 
     // ==================== 计费模式（T4：根治「套餐制被按 token 估价」） ====================

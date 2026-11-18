@@ -5,6 +5,85 @@
 
 ---
 
+## [3.3.5] - 2026-11-18
+
+> **计费精度版本（DeepSeek 官网峰谷计价）**：修掉「成本看板估算金额比实际账单少很多」的问题。
+> 根因两条：① 单价表停在旧价（`deepseek-flash` 输出价只有官网空闲价的 50%，
+> `deepseek-v4-pro` 三项全部大幅偏低）；② 项目完全没有「峰谷时段」概念 ——
+> DeepSeek 官网按**北京时间工作日 09:00–12:00、14:00–18:00（高峰）**与其余时段（空闲）
+> 两套单价计费，空闲价仅为高峰价的 50%。
+> 本版**必须重启后端**；新增 3 个数据库列（启动自动迁移，可覆盖安装）；
+> **只影响 DeepSeek 官网**，其他 Provider（含火山方舟）行为完全不变。
+
+### ✨ 新增：DeepSeek 官网峰谷计价（空闲价 / 高峰价双价）
+
+- **价格表按官网现价修正**（`application.yml` → `llm.pricing.models`，2026-11-18 抓取）：
+
+  | 模型 | 计费项 | 旧配置 | 空闲价（新） | 高峰价（新） |
+  |---|---:|---:|---:|---:|
+  | deepseek-flash | 命中 / 未命中 / 输出 | 0.02 / 1.0 / **2.0** | 0.02 / 1.0 / **4.0** | 0.04 / 2.0 / 8.0 |
+  | deepseek-v4-pro | 命中 / 未命中 / 输出 | **0.025 / 3.0 / 6.0** | **0.15 / 4.5 / 13.5** | 0.30 / 9.0 / 27.0 |
+  | deepseek-v4-flash（旧模型名兜底） | 命中 / 未命中 / 输出 | — | 0.02 / 1.0 / 4.0 | 0.04 / 2.0 / 8.0 |
+
+- **时段判定**（`PeakPeriodPolicy`）：北京时间（`Asia/Shanghai`，**强制显式时区，不依赖 JVM 默认**），
+  周一至周五 09:00–12:00、14:00–18:00 为高峰（**左闭右开**：12:00 整算空闲），
+  周末与法定节假日全天空闲。
+- **节假日自动判断**（`HolidayCalendar`）：三层数据源
+  ① 内置表 `resources/holidays/cn-holidays.json`（2026 年官方安排，离线永久兜底）；
+  ② 本地缓存 `data/holiday-cache/cn-<year>.json`；
+  ③ 远端 `holiday-cn`（启动预热 + 每日 03:00 异步刷新，**计费主链路绝不联网**）。
+  另支持 `extra-holidays` / `extra-workdays` 手工覆盖；调休上班日口径由平台档案
+  `honorMakeupWorkdays` 声明，默认**严格按官网字面**（周末一律空闲）。
+- **计价快照落库**：`llm_token_usage` 新增 `pricing_period`（peak / off-peak）、
+  `pricing_version`（口径版本）、`unit_price_snapshot`（当时生效单价，审计用）；
+  **历史数据一律不回算**（改历史等于篡改当时的账），靠 `pricing_version` 区分两批记录。
+- **费用结构按 (模型, 时段) 分组拆分**：`TokenUsageService.enrichSummary` 改为按
+  `(model, pricing_period)` 取真实 token 量、各用该时段单价算三段后累加，
+  避免「单一参照价」把高峰与空闲混算导致结构失真。
+- **平台档案化（可扩展，不散落）**：峰谷规则挂在 `ProviderProfile.PeakPricingSpec`，
+  与 `pricingMode` / `usageProtocol` 同源注册；计价链路统一入口
+  `TokenUsageParser.resolveProviderContext(provider)` → `PeakPeriodPolicy.isPeak()` →
+  `TokenPricingConfig.resolveFor(model, isPeak)`。
+  **其他 Provider 将来要支持峰谷，只需在 `ProviderRegistry` 补几行档案 + 配置 `peak-*` 单价，
+  计价代码无需改动。**
+- **新接口** `GET /api/token-usage/pricing-context`：返回当前时段、下次切换时刻、
+  高峰窗口与各模型两档单价（只读内存，不查库不联网）。
+- **前端（经典版 + v3 双端）**：成本看板「估算费用」卡片新增
+  「当前：高峰时段 · 18:00 后转空闲」提示；时间按平台时区展示
+  （不做本地时区换算，避免海外用户看到与规则不符的时间）。
+
+### 🛡️ 兼容与回滚
+
+- **不影响其他 Provider**：档案未声明峰谷的平台 `enabled=false`；模型未开 `peak-pricing` 时
+  `PriceItem.effective()` 直接返回原对象 → 金额**逐位不变**（火山方舟 QUOTA 套餐制仍不估算金额）。
+- **既有测试零改动**：`TokenUsageParser` 保留 3 参兼容构造器（内部使用「总开关关闭」策略）。
+- **两级回滚开关**（均无需改代码）：
+  `llm.pricing.peak-period.enabled: false`（全局按空闲价）/ 模型级 `peak-pricing: false`。
+- **老库迁移双保险**：`schema.sql` 与启动期 `DeepSeekServiceImpl` 都会尝试
+  `ADD COLUMN IF NOT EXISTS`；即使迁移失败也不影响对话主流程。
+
+### 🧪 验证
+
+- `PeakPricingTest`：**37 通过 / 0 失败**（时段 7 个边界、周末、国庆/春节/清明、调休两种口径、
+  UTC 时区换算、总开关、双价与倍率、`cacheWrite` 不双重放大、下次切换、全局配置继承）。
+- `mvn -DskipTests compile`：Java 378 文件 + 经典版 + v3 双前端 **BUILD SUCCESS**。
+
+### ⚠️ 已知限制
+
+- 历史记录不回算（设计选择：不篡改当时的账）。
+- 聊天页（`ChatComposer` / `CodeAssistantView`）暂未加时段标签，仅成本看板展示。
+- 工具调用轮的 `usage` 帧漏记（`takeWhile` 提前取消订阅导致）为**独立问题**，本版未修改。
+- 内置节假日表仅含 2026 年；2027 年依赖远端或 `extra-holidays` 手工补充。
+
+### 🔁 版本号同步
+
+- `pom.xml` 项目版本 → 3.3.5
+- `frontend/package.json` + `package-lock.json`
+- `frontend-v3/package.json` + `package-lock.json`
+- `electron/package.json`（`version` + `code-craft-3.3.5.jar`）+ `package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- `README.md` 版本徽章
+
 ## [3.3.3] - 2026-11-17
 
 > **性能回归修复版本**：修掉长上下文会话「首 token 从 10 秒退化到 30~60 秒」的 P0 回归，

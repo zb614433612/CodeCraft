@@ -80,6 +80,30 @@ public class LlmTokenUsage {
      */
     private Double costEstimate;
 
+    // ==================== 计价快照（峰谷计价，2026-11-18 新增） ====================
+
+    /**
+     * 计价时段：{@code peak} / {@code off-peak} / {@code null}。
+     *
+     * <p>{@code null} 有两种含义：① 该平台/模型没有启用峰谷（这个概念不适用）；
+     * ② 历史数据（本字段上线前的记录）。前端展示时据此隐藏时段标签。</p>
+     */
+    private String pricingPeriod;
+
+    /**
+     * 计价口径版本（如 {@code 2026-11-18-peak-v1}）。
+     *
+     * <p>历史数据<b>一律不回算</b>——改了就等于篡改当时的账。需要区分
+     * 「旧价算的记录」与「峰谷价算的记录」时，看这个字段即可。</p>
+     */
+    private String pricingVersion;
+
+    /**
+     * 当时生效的三档单价快照（紧凑 JSON，审计用）。
+     * <p>示例：{@code {"period":"peak","hit":0.04,"miss":2.0,"output":8.0}}</p>
+     */
+    private String unitPriceSnapshot;
+
     /** 创建时间 */
     private LocalDateTime createdAt;
 

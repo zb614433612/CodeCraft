@@ -1,7 +1,7 @@
 > 🌐 English Version：[🇬🇧 LLM_PROVIDER_SYSTEM_EN](./LLM_PROVIDER_SYSTEM_EN.md)
 # 多 LLM Provider 支持系统
 
-> 版本：v3.3.3 | 更新：2026-11-17 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.3.5 | 更新：2026-11-18 | 受众：开发者 / AI 协作伙伴
 > 本文档描述 CodeCraft 的多 LLM Provider 支持系统，包括架构设计、数据模型、核心组件和使用方式。
 
 ---
@@ -727,6 +727,77 @@ POST /api/llm-providers
 4. 选择的 Provider 会持久化到当前 Agent 配置
 
 ---
+
+### 峰谷计价（Peak / Off-Peak Pricing，v3.3.5 新增）
+
+DeepSeek 官方按**调用时段**分两档单价：**空闲价 = 高峰价的 50%**。
+
+| 项 | 规则 |
+|---|---|
+| 高峰时段 | 北京时间**周一至周五（不含中国法定节假日）09:00–12:00、14:00–18:00**（**左闭右开**：12:00 整算空闲） |
+| 空闲时段 | 其余全部时间（含周末、法定节假日全天） |
+| 时区 | 强制 `Asia/Shanghai`，**绝不依赖 JVM 默认时区**（否则服务器跑 UTC 会全天误判空闲、金额少一半） |
+| 调休上班日 | 由平台档案 `honorMakeupWorkdays` 声明；默认 `false` = 严格按官网字面（周末一律空闲） |
+
+**配置（`application.yml`）**：
+
+```yaml
+llm:
+  pricing:
+    peak-period:
+      enabled: true              # 总开关；false = 全天按基准价（紧急回滚，无需改代码）
+      zone: Asia/Shanghai
+      peak-multiplier: 2.0       # 模型未配 peak-* 时的兜底倍率
+      windows: [09:00-12:00, 14:00-18:00]
+      workdays: [MON, TUE, WED, THU, FRI]
+      holiday:
+        source: AUTO             # AUTO | BUILTIN_CN | REMOTE | CONFIG_ONLY | NONE
+        remote-url: "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json"
+        cache-dir: data/holiday-cache
+        extra-holidays: []       # 手工覆盖（优先级最高）
+        extra-workdays: []
+    models:
+      deepseek-flash:
+        peak-pricing: true       # 开启该模型的峰谷计价
+        cache-hit-input: 0.02    # 空闲价（基准）
+        cache-miss-input: 1.0
+        output: 4.0
+        peak-cache-hit-input: 0.04   # 高峰价（缺省时按 peak-multiplier 放大基准价）
+        peak-cache-miss-input: 2.0
+        peak-output: 8.0
+```
+
+**代码职责分工**：
+
+| 组件 | 职责 |
+|---|---|
+| `ProviderProfile.PeakPricingSpec` | **平台事实**：是否分峰谷、时区、窗口（**留空继承全局配置**）、节假日地区、调休口径 |
+| `ProviderRegistry.buildDeepSeek()` | 为 DeepSeek 官方注册 `PeakPricingSpec` |
+| `PeakPeriodProperties` | 全局策略：总开关 / 默认窗口与工作日 / 倍率 / 节假日数据源 |
+| `PeakPeriodPolicy` | 纯判定：`isPeak(spec, time)` / `periodOf` / `nextSwitchAt`（无 IO、无网络） |
+| `HolidayCalendar` | 节假日三层数据源（内置 → 本地缓存 → 远端）+ 启动预热 + 每日 03:00 刷新（**主链路不联网**） |
+| `TokenPricingConfig.resolveFor(model, isPeak, multiplier)` | 选价（空闲 / 高峰） |
+| `TokenUsageParser.resolveProviderContext(provider)` | **统一入口**：一次解析出档案 → 计费模式 + 峰谷规格 |
+| `TokenUsageService.pricingContext(provider)` | 前端展示上下文（当前时段 / 下次切换 / 双价） |
+
+**计价快照（`llm_token_usage` 三列）**：
+
+| 列 | 含义 |
+|---|---|
+| `pricing_period` | `peak` / `off-peak` / NULL（平台无峰谷，或本列上线前的历史数据） |
+| `pricing_version` | 口径版本（`2026-11-18-peak-v1`）；**历史数据不回算**，靠它区分新旧记录 |
+| `unit_price_snapshot` | 当时生效的三档单价（JSON，审计用） |
+
+**新增 Provider 支持峰谷 —— 只改两处**：
+
+1. `ProviderRegistry.buildXxx()` 里设置 `PeakPricingSpec`（`enabled=true` + 时区 / 节假日地区）；
+2. `application.yml` 给模型配 `peak-pricing: true` 与 `peak-*` 三档单价。
+
+> 计价链路（`TokenUsageParser` / `PeakPeriodPolicy` / `TokenUsageService`）**不需要任何改动** ——
+> 这是「像适配器一样加功能」的结构性保证。
+
+**与 QUOTA 的关系**：`PricingMode.QUOTA`（套餐 / 次数制）**永远不估算金额**，峰谷开关对它无效；
+`PeakPricingSpec.enabled` 与 `PriceItem.peakPricing` 是**与关系**，两者都为 `true` 才真正分时计价。
 
 ## 九、扩展指南
 
