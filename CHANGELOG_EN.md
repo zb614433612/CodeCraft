@@ -5,6 +5,101 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.6] - 2026-11-19
+
+> **Context compaction rewrite (Approach B)**: fixes two symptoms — the model repeating
+> "好。执行。" (fine, execute) in long contexts, and the model forgetting the current task
+> after a compaction and continuing old work.
+> The root cause was that **compaction never succeeded**: the old implementation sent the
+> entire compressible range in a single LLM request. At 600K context tokens the pending
+> history is already several hundred thousand tokens, prefill alone takes tens of seconds,
+> and the 20-second timeout always fired — in a measured session on 11-19, **122 requests
+> produced zero successful compactions**, context grew from 540K to 920K tokens, and the
+> model started token-level repetition (77 occurrences of "好。" inside a single 1288-char
+> reasoning block).
+> **Backend restart required**; no database schema change; compaction records stay
+> backward compatible (multiple legacy active rows are merged on read).
+
+### 🔧 Fix: compaction could never finish, causing model degeneration
+
+- **Root cause**: `CompactionService.compact` concatenated the whole
+  "watermark → protection band" range into one compaction prompt. In the measured session
+  that range was 1.74M characters — the compaction request alone was 400K~500K tokens,
+  which cannot be prefilled within the 20-second timeout. Every attempt threw, was caught,
+  returned -1, wrote no record, and was retried next round — **an endless failure loop**,
+  so the context could only grow.
+- **Batched compaction (Approach B)**: the range is split into batches of 150K characters
+  (also bounded by `batch-size` rounds), and each batch produces a **cumulative** summary
+  (the previous summary is fed into the next batch).
+  Critical invariant: **nothing is written until every batch succeeds** — from the model's
+  point of view the prefix changes once, so there is exactly one cache miss instead of one
+  per batch. Any failed batch aborts the whole attempt with zero database side effects.
+- **Cumulative summaries no longer lose history**: the old `toCompress` excluded previous
+  summaries (negative ids), yet the old records were then marked `superseded` — so a 40-day
+  history folded into a 2500-char summary silently dropped everything the earlier summaries
+  carried (one measured record claimed 17,055 messages while only ~25 were actually read).
+  New implementation feeds the previous summary back in; summaries only grow.
+- **All boundaries are message ids**: the old code computed `compressStart/compressEnd` as
+  indexes into the API message list, then walked the DB message list with those indexes.
+  The two lists can never be the same length (TOOL messages get skipped, the sanitizer drops
+  messages), so ranges were always misaligned — and it failed **silently**. The new code
+  locates ranges purely by `id > watermark` and `id < Nth-user-from-tail`.
+- **Off-by-one fixed**: `selectNthUserMessageIdFromTail` uses `OFFSET 0` for the newest user
+  message, while the range uses `id <` (exclusive), so passing `protectRounds` protected one
+  extra round. Now `protectRounds-1`.
+- **System prompt never compressed**: SYSTEM messages are excluded from compaction and kept
+  as-is on rebuild — identity, tool rules and working directory can never enter a summary.
+
+### 🔧 Fix: compaction summary was executed as if it were the current instruction
+
+- **Summary role changed from `system` to `user`**: the old code injected the summary as a
+  SYSTEM message and `hoistSystemMessages` moved it right below the system prompt — the model
+  treated it as a system-level requirement, which is exactly "forgets the current question,
+  keeps doing old work".
+- **Downgrade disclaimer added**: the summary body is prefixed with
+  "historical conversation summary · background reference only / unrelated to the current
+  round / plans and todos inside are past tense and must not be executed / if it conflicts
+  with the latest question, the latest question wins".
+- **Compaction prompt no longer uses present tense**: the old prompt demanded
+  "## In Progress" and "## TODO", effectively turning past state into current instructions.
+  The new prompt allows objective factual records only (past tense, no imperatives, no plans
+  or suggestions), keeping file paths / IPs / commands / config values / errors / conclusions.
+
+### 🔧 Fix: compaction cooldown could push the context into a 400
+
+- **Cooldown switched from rounds to characters**: one tool loop round may contain a few
+  messages or hundreds. Round-based cooldown lets large rounds blow past the window limit
+  during the cooldown window. Now the next compaction is allowed once
+  "400K characters (~170K tokens) have accumulated after the watermark".
+- **Cooldown only applies to async pre-compaction**: the synchronous / emergency path
+  (context already past the compact threshold) must ignore the cooldown — otherwise, right
+  after a compaction, a context that grows to 85% would be skipped and then hit 100% and fail.
+- **`batch-size` is finally used**: the setting was defined but never referenced anywhere in
+  the project; it now bounds how many rounds one batch may merge.
+
+### 🔢 Version sync
+
+- `pom.xml` project version → 3.3.6
+- `frontend/package.json` + `frontend-v3/package.json` + both `package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.3.6.jar`) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.3.6
+- README / README_EN badges, 8 docs headers (version + updated date 2026-11-19)
+- DEV_QUICKREF / RELEASE_CHECKLIST packaging examples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes + `application.yml` adjustments).
+- **No database schema change**: `conversation_compaction` keeps its columns; legacy
+  multiple active rows are merged into one summary on read (no content lost), and each new
+  compaction inserts one row and supersedes the rest.
+- **Overwrite install is fine**: the Electron installer can simply be installed over the
+  previous version.
+- **Note on historical conversations**: summaries damaged by the old logic (huge covered
+  range, tiny content) are not repaired automatically — the new logic only guarantees that
+  future compactions stop losing content.
+
+---
+
 ## [3.3.5] - 2026-11-18
 
 > **Billing accuracy release (DeepSeek official peak/off-peak pricing)**: fixes

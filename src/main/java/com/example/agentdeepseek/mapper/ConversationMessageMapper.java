@@ -74,6 +74,24 @@ public interface ConversationMessageMapper {
                                         @Param("offset") int offset);
 
     /**
+     * 统计某条消息之后累计的文本字符量（content + reasoning），用于压缩冷却判断。
+     *
+     * <p><b>为什么按字符而不是按轮数</b>：一轮工具循环可能只有几条消息（几千字符），
+     * 也可能上百条（上百万字符）。按轮数冷却会让「大轮次会话」在冷却期内暴涨到窗口上限，
+     * 按字符量则与真实上下文增长线性对应。</p>
+     *
+     * <p>TOOL 消息的工具结果存在 {@code reasoning} 字段，必须一起统计，否则严重低估。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param afterId        水位线消息 ID（只统计 id &gt; afterId 的）
+     * @return 累计字符数（无数据返回 0）
+     */
+    @Select("SELECT COALESCE(SUM(COALESCE(CHAR_LENGTH(content), 0) + COALESCE(CHAR_LENGTH(reasoning), 0)), 0) "
+            + "FROM conversation_message WHERE conversation_id = #{conversationId} AND id > #{afterId}")
+    long sumTextLengthAfterId(@Param("conversationId") Long conversationId,
+                              @Param("afterId") Long afterId);
+
+    /**
      * 按 id 范围查询一页消息（id 升序；startId/beforeId 均可为 null 表示不限该端）
      *
      * @param conversationId 会话ID

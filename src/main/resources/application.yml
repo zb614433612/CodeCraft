@@ -386,10 +386,10 @@ deepseek:
   compaction:
     enabled: true              # 是否启用智能压缩
     warning-threshold: 0.7     # 黄色预警阈值（token 用量 > 70% 时标记）
-    compact-threshold: 0.85    # 橙色压缩阈值（> 85% 时立即执行 LLM 压缩）
-    drop-threshold: 0.95       # 红色丢弃阈值（压缩后仍 > 95% 时执行滑动窗口丢弃）
-    protect-rounds: 2          # 保护带轮数（最近的 N 轮对话不压缩不丢弃）
-    batch-size: 10             # 每批压缩的最大轮数
+    compact-threshold: 0.85    # 同步兜底阈值（> 85% 立即压缩；正常情况异步预压缩已在 60% 提前压掉）
+    drop-threshold: 0.95       # 红色阈值（压缩后仍 > 95% 时告警，不裁剪）
+    protect-rounds: 2          # 保护最近 2 轮提问不被压缩（每轮工具循环可能几十上百条消息，保护过多会撑爆窗口）
+    batch-size: 10             # 每次压缩内部最多合并 10 轮（配合代码内 15 万字符/批的上限）
     model: ""                  # 压缩使用的模型（留空使用 default-model）
     async-precompress: true    # 是否启用异步预压缩（请求完成后后台压缩，下次请求零延迟）
   # 附件上传配置

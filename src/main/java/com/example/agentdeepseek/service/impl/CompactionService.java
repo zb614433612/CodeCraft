@@ -6,38 +6,156 @@ import com.example.agentdeepseek.mapper.ConversationMessageMapper;
 import com.example.agentdeepseek.model.entity.CompactionRecord;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
-import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.service.llm.LLMClient;
-import com.example.agentdeepseek.util.PromptUtil;
+import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.util.TokenEstimator;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
-import java.util.*;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 上下文智能压缩服务
+ * 上下文压缩服务（写法B：一次事务只改一次前缀）
  *
- * 核心职责：
- * 1. 将最早的历史对话用 LLM 压缩为结构化摘要
- * 2. 保存压缩记录，在后续 buildMessagesFromHistory 中用摘要替换原始消息
- * 3. 支持异步预压缩，降低请求延迟
- * 4. 提供三级阈值判断（黄色预警/橙色压缩/红色丢弃）
+ * <h3>这个类只做两件事</h3>
+ * <ol>
+ *   <li><b>压缩</b>：把「水位线之前的旧消息」折进一条<b>累进的摘要</b>，然后把水位线往前推。
+ *       内部按字符预算<b>分批</b>调用 LLM，<b>全部批次成功后才一次性落库</b> ——
+ *       对模型来说前缀只变一次，因此只会有一次缓存未命中（而不是每批一次）。</li>
+ *   <li><b>重建</b>：{@link #applyCompactionRecords} 把 {@code id <= 水位线} 的消息换成
+ *       一条<b>普通 user 消息</b>形态的历史背景文本，其余消息原样保留。</li>
+ * </ol>
+ *
+ * <h3>与旧实现的关键差异（每一条都是踩过的坑）</h3>
+ * <table border="1">
+ *   <caption>设计对比</caption>
+ *   <tr><th>维度</th><th>旧实现</th><th>现在</th></tr>
+ *   <tr>
+ *     <td>压缩记录</td>
+ *     <td>多条区间记录 + superseded 链，靠 start/end 消息 id 匹配</td>
+ *     <td><b>每会话一条</b>，只用一个水位线 {@code end_message_id}</td>
+ *   </tr>
+ *   <tr>
+ *     <td>边界定位</td>
+ *     <td>先用 API 列表下标算 compressStart/compressEnd，再拿它去遍历 DB 列表</td>
+ *     <td>全部用 message id（{@code id > 水位线 && id < 倒数第N条user}）</td>
+ *   </tr>
+ *   <tr>
+ *     <td>旧摘要</td>
+ *     <td>{@code toCompress} 排除旧摘要（负 id），但旧记录又被标记废弃 → <b>历史信息蒸发</b></td>
+ *     <td><b>旧摘要作为输入参与本次压缩</b> → 累进，只增不减</td>
+ *   </tr>
+ *   <tr>
+ *     <td>单次压缩量</td>
+ *     <td>整个可压区间一次性塞进 LLM（可达上千万字符）→ 必超时 → 永远压不动</td>
+ *     <td>{@link #MAX_BATCH_CHARS} 分批，单批可控</td>
+ *   </tr>
+ *   <tr>
+ *     <td>摘要身份</td>
+ *     <td>{@code role=SYSTEM} + 「## 进行中 / ## 待办事项」现在时措辞 → 模型当指令执行</td>
+ *     <td>{@code role=user} + 降权前缀，明确「历史背景、与本轮无关」</td>
+ *   </tr>
+ *   <tr>
+ *     <td>失败处理</td>
+ *     <td>失败即返回 -1，但已经写了部分记录</td>
+ *     <td><b>零副作用</b>：任何一批失败 → 整体放弃，水位线不动，下次重试</td>
+ *   </tr>
+ * </table>
+ *
+ * <h3>两个硬性保护</h3>
+ * <ul>
+ *   <li><b>本轮永不被压</b>：压缩上界是「倒数第 {@code protectRounds} 条 user 消息的 id」，
+ *       用 {@code id <} 取区间，最后一条 user 及其之后天然不在范围内。</li>
+ *   <li><b>刚压完不重复压</b>：水位线之后至少再积累 {@link #COMPACT_COOLDOWN_CHARS} 字符，
+ *       才允许下一次压缩 —— 否则每轮都改前缀，缓存命中率永远上不去。</li>
+ * </ul>
  */
 @Slf4j
 @Service
 public class CompactionService {
+
+    /**
+     * 异步预压缩触发阈值（占 max-context-tokens 的比例）。
+     *
+     * <p><b>取 0.60</b>：尽量少压缩——每次压缩都会改变前缀，让下一次请求全量未命中
+     * （命中 0.02 vs 未命中 1.0 元/百万）。60% 触发 + 40 万字符冷却，
+     * 相当于「大约每涨 17 万 token 压一次」，不会频繁扰动缓存。</p>
+     *
+     * <p><b>为什么 60% 现在能压得动（以前压不动）</b>：旧实现把「整个可压区间」一次性塞进
+     * 一个 LLM 请求 —— 60% 时待压历史动辄几十万 token，光 prefill 就要几十秒，
+     * 20 秒超时必然失败。实测 11-19 一整天（prompt 峰值 91.7 万 token）
+     * <b>122 次请求一次都没压成功</b>，上下文从 54 万一路涨到 92 万，模型在超长上下文里
+     * 开始 token 级重复（反复输出「好。执行。」）。</p>
+     *
+     * <p>现在内部按 {@link #MAX_BATCH_CHARS}（15 万字符/批）分批压缩，单批 prefill 只需几秒，
+     * 无论可压区间多大都能跑完 —— 所以 60% 触发是安全的，超时风险已由分批消化掉。</p>
+     */
+    private static final double ASYNC_PRECOMPRESS_THRESHOLD = 0.60;
+
+    /**
+     * 压缩冷却：水位线之后累计新增的<b>文本字符量</b>达到此值，才允许下一次压缩。
+     *
+     * <p>压缩必然改变上下文前缀 → 一次性全量未命中（命中 0.02 vs 未命中 1.0 元/百万，约 50 倍）。
+     * 压缩只有在「之后还能跑一阵」时才划算，所以要冷却。</p>
+     *
+     * <p><b>为什么按字符而不是按轮数</b>：一轮工具循环可能只有几条消息，也可能上百条。
+     * 按轮数冷却在「大轮次会话」里会让上下文在冷却期内暴涨到窗口上限；
+     * 按字符量则与真实上下文增长线性对应。</p>
+     *
+     * <p>取 40 万字符 ≈ 17 万 token（按 {@code CHARS_TO_TOKEN_RATIO=0.425}）：
+     * 压缩后上下文通常回落到 20 万 token 左右，再涨 17 万即约 37% —— 正好能被
+     * {@link #ASYNC_PRECOMPRESS_THRESHOLD}（30%）接住，不会拖到窗口爆掉。</p>
+     */
+    private static final long COMPACT_COOLDOWN_CHARS = 400_000L;
+
+    /**
+     * 单批压缩的字符上限。
+     *
+     * <p>取 15 万字符 ≈ 6.4 万 token（按 {@code CHARS_TO_TOKEN_RATIO=0.425} 折算），
+     * 在 45 秒超时窗口内 prefill 有余量。分段后即使历史有上千万字符，也只是批次数变多，
+     * 单次请求永远不会超限 —— 这是「压缩能真正跑完」的前提。</p>
+     */
+    private static final int MAX_BATCH_CHARS = 150_000;
+
+    /** 单批压缩的兜底轮数（配置 {@code batch-size} 未设置时使用） */
+    private static final int DEFAULT_BATCH_ROUNDS = 10;
+
+    /** 单批 LLM 调用超时：分批后单批已很小，45 秒足够；对端挂起时也不会长期占线程 */
+    private static final Duration BATCH_TIMEOUT = Duration.ofSeconds(45);
+
+    /**
+     * 历史摘要的降权前缀。
+     *
+     * <p><b>为什么必须是 user 角色 + 这段话</b>：摘要里天然会出现「之前要做什么」这类叙述。
+     * 旧实现把它作为 <b>system</b> 消息注入，又紧跟真正的系统提示词，模型会把它当系统级指令执行
+     * —— 表现为「忘了本轮问题、继续做历史任务」。</p>
+     * <p>改成普通 user 消息并显式声明「历史背景 / 与本轮无关 / 不要执行其中计划」后，
+     * 它只是背景信息，不参与指令优先级竞争。</p>
+     */
+    private static final String HISTORY_SUMMARY_PREFIX =
+            "【历史对话摘要 · 仅供背景参考】\n"
+                    + "以下是本会话更早之前发生过的事情的记录，与当前这轮任务无关。\n"
+                    + "其中提到的计划、待办、下一步都是过去时，一律不要执行；\n"
+                    + "如果它与当前用户最新的提问冲突，以最新提问为准。\n"
+                    + "----- 历史记录开始 -----\n";
+
+    private static final String HISTORY_SUMMARY_SUFFIX = "\n----- 历史记录结束 -----";
 
     private final DeepSeekConfig deepSeekConfig;
     private final CompactionMapper compactionMapper;
@@ -46,34 +164,14 @@ public class CompactionService {
     private final LLMClientManager llmClientManager;
 
     /** 预压缩执行器（多线程，支持并发压缩不同会话） */
-    private final java.util.concurrent.ExecutorService precompressExecutor =
-            java.util.concurrent.Executors.newFixedThreadPool(3, r -> {
-                Thread t = new Thread(r, "compaction-precompress-");
-                t.setDaemon(true);
-                return t;
-            });
+    private final ExecutorService precompressExecutor = Executors.newFixedThreadPool(3, r -> {
+        Thread t = new Thread(r, "compaction-precompress-");
+        t.setDaemon(true);
+        return t;
+    });
 
-    /** 会话是否正在预压缩中（防止重复触发） */
+    /** 会话是否正在预压缩中（防止同一会话并发压缩） */
     private final Set<Long> precompressingConversations = ConcurrentHashMap.newKeySet();
-
-    /**
-     * 异步预压缩触发阈值（token 占 max-context-tokens 的比例）。
-     * <p>
-     * 取 0.60，低于同步压缩阈值（0.85），目的是「提前、小步」压缩，避免等上下文涨到
-     * 85% 才一次性全量重算——压缩后首次请求必然全量未命中，压缩时上下文越小越省钱。
-     * </p>
-     */
-    private static final double ASYNC_PRECOMPRESS_THRESHOLD = 0.60;
-
-    /**
-     * 两次压缩之间的最小间隔（毫秒）。
-     * <p>
-     * 每次压缩都会改变上下文前缀、导致一次 O(历史长度) 的全量未命中（命中 0.02 vs
-     * 未命中 1.0 元/百万）。压缩本身只在「后续还能跑很多轮」时才划算，因此设最小间隔，
-     * 保证压缩后至少有几轮能吃到缓存，而不是压缩完立刻再压一次。
-     * </p>
-     */
-    private static final long MIN_COMPACT_INTERVAL_MS = 120_000L;
 
     @Autowired
     public CompactionService(DeepSeekConfig deepSeekConfig,
@@ -100,19 +198,13 @@ public class CompactionService {
     }
 
     /**
-     * 容器关闭时收敛预压缩线程池（2026-11-16 补）。
-     *
-     * <p>此前没有 @PreDestroy：虽然线程都设了 setDaemon(true)（JVM 退出不会卡住），
-     * 但 Spring 上下文重复创建（热部署、@SpringBootTest 多次刷新）时线程池会累积泄漏。
-     * 另外 {@code newFixedThreadPool} 用的是**无界队列**（LinkedBlockingQueue 默认容量
-     * Integer.MAX_VALUE），大量会话同时触发预压缩时任务会无限堆积 → 内存持续增长。
-     * 这里先 shutdownNow 中断在途任务并清空队列，再短暂等待收尾。</p>
+     * 容器关闭时收敛预压缩线程池。
      */
     @PreDestroy
     public void destroy() {
         try {
             precompressExecutor.shutdownNow();
-            if (!precompressExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (!precompressExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
                 log.warn("预压缩线程池在 5 秒内未能完全终止，已强制放弃等待");
             }
             log.info("预压缩线程池已关闭");
@@ -124,17 +216,11 @@ public class CompactionService {
         }
     }
 
-    // ==================== 对外接口 ====================
+    // ==================== 压缩决策（诊断用，不参与主链路） ====================
 
     /**
      * 压缩决策（Provider 无关版本，回退全局上限）。
      *
-     * <p><b>⚠️ 已废弃</b>：上下文上限已支持 Provider 级覆盖，请改用
-     * {@link #decide(List, String)} 并传入实际 providerCode，
-     * 否则火山等「窗口远大于全局配置」的平台会被提前压缩。</p>
-     *
-     * @param messages API 格式的消息列表
-     * @return 压缩决策：NONE / WARN（仅标记）/ COMPACT（执行压缩）/ DROP（丢弃兜底）
      * @deprecated 改用 {@link #decide(List, String)}，本方法等价于传入 {@code null}
      */
     @Deprecated
@@ -143,7 +229,7 @@ public class CompactionService {
     }
 
     /**
-     * 压缩决策：按 Provider 实际生效的上下文上限计算占比。
+     * 压缩决策：按 Provider 实际生效的上下文上限计算占比（仅用于日志与诊断）。
      *
      * @param messages     消息列表
      * @param providerCode Provider 编码（{@code null} 时回退全局上限）
@@ -160,200 +246,68 @@ public class CompactionService {
         double ratio = (double) estimatedTokens / maxTokens;
 
         if (ratio >= cfg.getDropThreshold()) {
-            log.warn("上下文压缩决策：DROP（红色丢弃）, tokens={}, 上限={}, 比例={}", estimatedTokens, maxTokens, ratio);
+            log.warn("上下文压缩决策：DROP（红色）, tokens={}, 上限={}, 比例={}", estimatedTokens, maxTokens, ratio);
             return CompactionDecision.DROP;
         }
         if (ratio >= cfg.getCompactThreshold()) {
-            log.info("上下文压缩决策：COMPACT（橙色压缩）, tokens={}, 上限={}, 比例={}", estimatedTokens, maxTokens, ratio);
+            log.info("上下文压缩决策：COMPACT（橙色）, tokens={}, 上限={}, 比例={}", estimatedTokens, maxTokens, ratio);
             return CompactionDecision.COMPACT;
         }
         if (ratio >= cfg.getWarningThreshold()) {
-            log.debug("上下文压缩决策：WARN（黄色预警）, tokens={}, 上限={}, 比例={}", estimatedTokens, maxTokens, ratio);
+            log.debug("上下文压缩决策：WARN（黄色）, tokens={}, 上限={}, 比例={}", estimatedTokens, maxTokens, ratio);
             return CompactionDecision.WARN;
         }
         return CompactionDecision.NONE;
     }
 
+    // ==================== 对外接口：压缩 ====================
+
     /**
-     * 执行智能压缩
+     * 执行压缩（兼容旧签名）。
      *
      * @param conversationId 会话 ID
-     * @param messages       API 格式的消息列表（会被修改：用压缩摘要替换最早历史）
-     * @return 压缩后的 token 数，如果不需要压缩返回 -1
+     * @param messages       本次请求的 API 格式消息列表（成功后会<b>原地</b>替换为压缩后的形态）
+     * @return 压缩后的 token 估算；未压缩返回 -1
      */
     public int compact(Long conversationId, List<Map<String, Object>> messages) {
         return compact(conversationId, messages, null);
     }
 
     /**
-     * 执行智能压缩
+     * 执行压缩（写法B）。
+     *
+     * <p>流程：内部按批压缩 → 全部成功才落库 → 再把内存里的 {@code messages} 同步成压缩后的形态。
+     * 内存同步是必需的：否则本次请求仍带着全量历史（继续超限），而且与下次重建的前缀不一致，
+     * 会导致连续两次未命中。</p>
      *
      * @param conversationId 会话 ID
-     * @param messages       API 格式的消息列表（会被修改：用压缩摘要替换最早历史）
-     * @param providerCode   LLM Provider Code（可选，为空则用默认）
-     * @return 压缩后的 token 数，如果不需要压缩返回 -1
+     * @param messages       本次请求的 API 格式消息列表（会被原地更新）
+     * @param providerCode   LLM Provider Code（为空则不做 LLM 压缩）
+     * @return 压缩后的 token 估算；未压缩返回 -1
      */
     public int compact(Long conversationId, List<Map<String, Object>> messages, String providerCode) {
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
-        if (!cfg.isEnabled() || messages == null || messages.size() < 4) {
+        if (!cfg.isEnabled() || conversationId == null) {
             return -1;
         }
 
-        // 1. 确定可压缩范围（保留保护带）
-        int protectEnd = findProtectZoneEnd(messages, cfg.getProtectRounds());
-        if (protectEnd <= 2) {
-            // 保护带覆盖了全部历史，无法压缩
-            log.debug("压缩跳过：保护带覆盖全部历史，protectEnd={}", protectEnd);
+        CompactionRecord record = doCompact(conversationId, providerCode, true);
+        if (record == null) {
             return -1;
         }
 
-        // ★ 2026-11-17 修复：不能假设「索引 0 就是 system」。
-        //   首次会话的落库顺序是「先存 user 消息、再补存 system」（system 的 id 更大），
-        //   按 id 升序重建时顺序是 [user, system, ...]。若仍从索引 1 开始压缩，
-        //   就会把 system 一起压进摘要 —— 系统提示词（身份 / 工具规范 / 工作目录）永久丢失，
-        //   而且每轮重建的开头变成「LLM 生成的、非确定性的摘要」，前缀彻底无法稳定。
-        //   实测证据：conversation_compaction 记录 417 的 start_message_id=23298，
-        //   正是该会话 system 消息的 id（本不该被压缩）。
-        //   修正为「跳过开头连续的 system」，从第一条非 system 消息开始压缩。
-        int compressStart = 0;
-        while (compressStart < messages.size()
-                && "system".equals(messages.get(compressStart).get("role"))) {
-            compressStart++;
+        // 内存侧同步：把「倒数第 protectRounds 条 user 之前」的非 system 消息换成摘要
+        if (messages != null && !messages.isEmpty() && record.getSummary() != null) {
+            replaceInMemory(messages, cfg.getProtectRounds(), record.getSummary());
         }
-        int compressEnd = protectEnd; // 不包含
-
-        if (compressEnd - compressStart < 2) {
-            log.debug("压缩跳过：可压缩区过小，compressStart={}, compressEnd={}", compressStart, compressEnd);
-            return -1;
-        }
-
-        // 2. 从 DB 获取原始 ConversationMessage 对象
-        List<ConversationMessage> allMessages = conversationMessageMapper.selectByConversationId(conversationId);
-        if (allMessages == null || allMessages.isEmpty()) {
-            return -1;
-        }
-
-        // 按创建时间排序（与 messages 列表顺序一致）
-        allMessages.sort(Comparator.comparing(ConversationMessage::getCreatedAt));
-
-        // ★ 关键修复：对 allMessages 也应用压缩记录，保持与 messages 参数索引一致
-        // 因为 buildMessagesFromHistory 中已经先调用了 applyCompactionRecords 再组装 messages，
-        // 所以这里也需要对 DB 消息执行同样的操作才能对齐索引
-        applyCompactionRecords(conversationId, allMessages);
-
-        // ★ 找到对应的消息 ID 范围（跳过摘要消息）：
-        // applyCompactionRecords 注入的摘要消息 id 为负数（-recordId），并非真实 DB 消息。
-        // 若直接用索引位置的 id 落库，后续轮次 applyCompactionRecords 用该 id 在 DB 消息中
-        // 匹配会失败（负数 id 在 DB 中不存在），压缩记录被跳过、压缩链断裂。
-        // 因此 startMsgId/endMsgId 必须取区间内第一条/最后一条真实消息（id > 0）的 id。
-        Long startMsgId = null;
-        for (int i = compressStart; i < allMessages.size(); i++) {
-            Long id = allMessages.get(i).getId();
-            if (id != null && id > 0) {
-                startMsgId = id;
-                break;
-            }
-        }
-        Long endMsgId = null;
-        for (int i = Math.min(compressEnd - 1, allMessages.size() - 1); i >= 0; i--) {
-            Long id = allMessages.get(i).getId();
-            if (id != null && id > 0) {
-                endMsgId = id;
-                break;
-            }
-        }
-        if (startMsgId == null || endMsgId == null || startMsgId > endMsgId) {
-            log.info("压缩跳过：可压缩范围内没有真实消息（历史已全部是摘要），startMsgId={}, endMsgId={}", startMsgId, endMsgId);
-            return -1;
-        }
-
-        // 3. 收集被压缩的消息内容，构建压缩 prompt
-        // ★ 只用区间内的真实消息（id > 0），排除旧摘要（负 id）：
-        // compressStart 固定为 1，若之前压缩过，旧摘要就位于 index 1 附近，
-        // 用 subList 会把它包进来导致：旧摘要被重复压缩进新摘要（内容冗余、LLM 浪费），
-        // 且 record 落库区间 [startMsgId, endMsgId] 与 toCompress 实际内容不一致。
-        final Long fStartMsgId = startMsgId;
-        final Long fEndMsgId = endMsgId;
-        List<ConversationMessage> toCompress = allMessages.stream()
-                .filter(m -> {
-                    Long id = m.getId();
-                    return id != null && id >= fStartMsgId && id <= fEndMsgId;
-                })
-                .collect(Collectors.toList());
-
-        if (toCompress.isEmpty()) {
-            return -1;
-        }
-
-        // 4. 调用 LLM 压缩
-        String summary;
-        try {
-            summary = callCompactionLlm(toCompress, providerCode);
-        } catch (Exception e) {
-            log.error("LLM 压缩调用失败，跳过压缩: {}", e.getMessage());
-            return -1;
-        }
-
-        if (summary == null || summary.trim().isEmpty()) {
-            log.warn("压缩结果为空，跳过");
-            return -1;
-        }
-
-        // 5. 计算节省的 token 数
-        int beforeTokens = TokenEstimator.estimateMessages(messages, providerCode);
-        String originalText = formatMessagesForCompaction(toCompress);
-        int originalTokens = TokenEstimator.estimate(originalText);
-        int summaryTokens = TokenEstimator.estimate(summary);
-        int savings = originalTokens - summaryTokens;
-
-        // ★ 收益保护：压缩后不比原来小，就根本不值得压缩。
-        // 每次压缩都会让 applyCompactionRecords 注入的摘要改变索引 1 附近的内容，
-        // 进而导致下一次请求的整段前缀失效（50 倍价差）。若压缩本身没有正收益，
-        // 就是纯亏：既损失了历史细节，又白白丢掉一次全量缓存。
-        if (savings <= 0) {
-            log.info("压缩跳过：无收益（原始 {} tokens → 摘要 {} tokens），保持上下文不变以复用前缀缓存",
-                    originalTokens, summaryTokens);
-            return -1;
-        }
-
-        // 6. 保存压缩记录到 DB
-        CompactionRecord record = new CompactionRecord(conversationId, summary, startMsgId, endMsgId, savings);
-        compactionMapper.insert(record);
-        log.info("压缩完成：conversationId={}, 压缩 {} 条消息, 节省 {} tokens, recordId={}",
-                conversationId, toCompress.size(), savings, record.getId());
-
-        // 7. 将之前已有的、被本压缩完全覆盖的旧压缩记录标记为废弃
-        // 废弃条件：旧记录的消息区间 [start, end] 完全落在本次压缩区间 [startMsgId, endMsgId] 内
-        // 之前用 old.getEndMessageId() <= endMsgId 判断，会导致相邻区间的旧记录被误废弃
-        // （例如第一次压缩 [1,10]、第二次压缩 [11,20] 时，第一次记录 end=10 <= 20 被错误标记废弃，
-        //   其摘要失效后原始消息重新进入上下文，压缩链条断裂）
-        List<CompactionRecord> activeRecords = compactionMapper.selectActiveByConversationId(conversationId);
-        for (CompactionRecord old : activeRecords) {
-            Long oldStart = old.getStartMessageId();
-            Long oldEnd = old.getEndMessageId();
-            if (!old.getId().equals(record.getId())
-                    && oldStart != null && oldEnd != null
-                    && oldStart >= startMsgId && oldEnd <= endMsgId) {
-                compactionMapper.markSuperseded(old.getId());
-                log.debug("标记旧压缩记录为废弃: id={}, 区间[{},{}] 被本次 [{},{}] 完全覆盖",
-                        old.getId(), oldStart, oldEnd, startMsgId, endMsgId);
-            }
-        }
-
-        // 8. 在内存消息列表中，用压缩摘要替换原始消息
-        replaceWithCompaction(messages, compressStart, compressEnd, summary);
-
-        // 压缩前后真实对比：这是判断「压缩到底亏不亏」的唯一可靠观测点。
-        // 注意 afterTokens 必然低于 beforeTokens（savings > 0 已在前置校验），否则说明口径有偏差。
-        int afterTokens = TokenEstimator.estimateMessages(messages, providerCode);
-        log.info("压缩前后对比：conversationId={}, {} tokens → {} tokens（消息 {} 条 → {} 条）",
-                conversationId, beforeTokens, afterTokens, compressEnd - compressStart, messages.size());
-        return afterTokens;
+        return TokenEstimator.estimateMessages(messages, providerCode);
     }
 
     /**
-     * 异步预压缩：在请求返回后，后台提前压缩最早的历史
-     * 这样下次请求时 buildMessagesFromHistory 可以直接使用压缩结果，无需等待 LLM
+     * 异步预压缩：在请求返回后，后台提前压缩最早的历史。
+     *
+     * <p>压缩成功后，下一次 {@code buildMessagesFromHistory} 会自动使用新水位线，
+     * 因此本次请求不需要等待它完成。</p>
      *
      * @param conversationId 会话 ID
      */
@@ -361,9 +315,15 @@ public class CompactionService {
         asyncPrecompress(conversationId, null);
     }
 
+    /**
+     * 异步预压缩（带 Provider）。
+     *
+     * @param conversationId 会话 ID
+     * @param providerCode   Provider 编码
+     */
     public void asyncPrecompress(Long conversationId, String providerCode) {
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
-        if (!cfg.isEnabled() || !cfg.isAsyncPrecompress()) {
+        if (!cfg.isEnabled() || !cfg.isAsyncPrecompress() || conversationId == null) {
             return;
         }
         if (!precompressingConversations.add(conversationId)) {
@@ -373,63 +333,37 @@ public class CompactionService {
 
         CompletableFuture.runAsync(() -> {
             try {
-                // 获取当前消息列表检查是否需要压缩
-                List<ConversationMessage> messages = conversationMessageMapper.selectByConversationId(conversationId);
-                if (messages == null || messages.size() < 6) {
-                    return; // 消息太少，无需压缩
+                // 1. 按「真实请求的组装顺序」估算：排序 → 应用已有摘要 → 转 API 口径
+                List<ConversationMessage> dbMessages =
+                        conversationMessageMapper.selectByConversationId(conversationId);
+                if (dbMessages == null || dbMessages.size() < 6) {
+                    return;
                 }
-
-                // ★★★ P0 修复（缓存全量失效的根因）★★★
-                // 原实现调用 estimateDbMessages(messages)：无差别累加 DB 里「全部原始消息」的
-                // content + reasoning，完全忽略已经落库的压缩记录。
-                // 后果：历史一旦被压缩过，DB 原文仍然存在，估算值只增不减 ——
-                //   实测 430 万字符 ≈ 215 万 token，而 max-context-tokens = 100 万，
-                //   ratio 永久 ≈ 2.15 > 0.60，于是「每一次请求返回后」都触发一次预压缩。
-                // 每次压缩都会产出新的摘要文本并被 applyCompactionRecords 注入到索引 1 附近，
-                // 导致下一次请求的整段前缀全部改变 → 前缀缓存 100% 失效（命中单价 0.02 vs
-                // 未命中 1.0 元/百万，50 倍价差），实测 15 次压缩中 9 次造成全量失效。
-                //
-                // 修正：先按「真实请求的组装顺序」处理 —— 排序 + 应用已有压缩记录 —— 再估算。
-                // 这样估算口径与 ContextBuilder.buildMessagesFromHistory 下发给模型的上下文一致，
-                // 压缩记录覆盖掉的历史不会再被重复计入。
-                messages.sort(Comparator.comparing(ConversationMessage::getCreatedAt,
+                dbMessages.sort(Comparator.comparing(ConversationMessage::getCreatedAt,
                         Comparator.nullsLast(Comparator.naturalOrder())));
-                applyCompactionRecords(conversationId, messages);
+                applyCompactionRecords(conversationId, dbMessages);
 
-                // 与 ContextBuilder 一致的 API 口径估算（含 TOOL 消息的工具结果、tool_calls 开销）
                 List<Map<String, Object>> apiMessages =
-                        toApiMessages(messages, deepSeekConfig.isStripHistoryReasoning());
+                        toApiMessages(dbMessages, deepSeekConfig.isStripHistoryReasoning());
                 int estimatedTokens = TokenEstimator.estimateMessages(apiMessages, providerCode);
-                // 上限按 Provider 解析：异步预压缩若用全局值，火山（1049K 窗口）会被
-                // 30 万阈值频繁触发压缩，既浪费额度又让前缀缓存反复失效。
                 int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
                 double ratio = (double) estimatedTokens / maxTokens;
 
-                // 异步预压缩阈值比同步更低：超过 60% 就开始预压缩
-                if (ratio >= ASYNC_PRECOMPRESS_THRESHOLD) {
-                    // ★ 防抖动：刚压缩过就跳过。
-                    // 即便估算口径已修正，边界情况下（摘要 + 保护带本身就接近阈值）仍可能在
-                    // 相邻两轮连续压缩。每压缩一次前缀就变一次、缓存就全量失效一次，
-                    // 而压缩本身收益有限，因此设一个最小间隔，让「压缩 → 复用缓存」至少跑几轮。
-                    if (isRecentlyCompacted(conversationId)) {
-                        log.debug("异步预压缩跳过：距上次压缩不足 {} 秒，conversationId={}",
-                                MIN_COMPACT_INTERVAL_MS / 1000, conversationId);
-                        return;
-                    }
-
-                    // 诊断信息必须自带 provider 与生效上限：此前的日志只有「估算 tokens + 比例」，
-                    // 分母是多少完全看不出来 —— 实测出现过「yml 配了 huoshan: 1000000，
-                    // 但运行实际走 deepseek（无覆盖）→ 静默回落 300000 → 18 万被判超标反复压缩」
-                    // 的错配，只能靠反算 ratio 才发现。这里把 provider / 上限一并打出来。
-                    log.info("异步预压缩触发：conversationId={}, provider={}, 估算 tokens={}（已应用压缩记录）, 生效上限={}, 比例={}",
-                            conversationId, providerCode, estimatedTokens, maxTokens,
-                            String.format("%.5f", ratio));
-
-                    // 传入「已应用压缩记录」的消息列表：compact() 内部会重新查 DB 并再次应用压缩记录，
-                    // 两者逐条对齐后 compressStart/compressEnd 索引才有意义
-                    // （原实现传的是未压缩的全量列表，索引与 compact 内部不一致，会压错区间）。
-                    compact(conversationId, apiMessages, providerCode);
+                if (ratio < ASYNC_PRECOMPRESS_THRESHOLD) {
+                    return;
                 }
+                if (isRecentlyCompacted(conversationId)) {
+                    log.debug("异步预压缩跳过：冷却期内（水位线之后新增不足 {} 字符），conversationId={}",
+                            COMPACT_COOLDOWN_CHARS, conversationId);
+                    return;
+                }
+
+                log.info("异步预压缩触发：conversationId={}, provider={}, 估算 tokens={}（已应用摘要）, 生效上限={}, 比例={}",
+                        conversationId, providerCode, estimatedTokens, maxTokens,
+                        String.format("%.4f", ratio));
+
+                // 异步路径受冷却约束：它是「提前小步压」，不值得为它频繁改前缀
+                doCompact(conversationId, providerCode, false);
             } catch (Exception e) {
                 log.warn("异步预压缩失败: conversationId={}, error={}", conversationId, e.getMessage());
             } finally {
@@ -439,167 +373,281 @@ public class CompactionService {
     }
 
     /**
-     * 判断该会话是否刚刚压缩过（防抖动）。
-     * <p>
-     * 取当前生效记录中最新的 createdAt 与当前时间比较；无记录则视为「未压缩过」。
-     * </p>
-     * <p>
-     * <b>为什么必须对外公开</b>：同步压缩路径（{@code ContextBuilder#buildMessagesFromHistory}
-     * 里超过 compact-threshold 时的一次性压缩）会<b>阻塞调一次 LLM</b>（{@code blockingChat}
-     * 最长 60 秒）。若不加这道判断，那么在「上下文刚好卡在阈值附近」的长会话里，
-     * <b>每一轮的每一条请求</b>都会先阻塞几十秒去做一次「压缩收益为负」的无用压缩，
-     * 表现为「首 token 从 10 秒退化到 20~30 秒」，且越用越明显。
-     * </p>
+     * 是否处于压缩后的冷却期（水位线之后累计新增不足 {@link #COMPACT_COOLDOWN_CHARS} 字符）。
+     *
+     * <p>供同步压缩路径与工具循环守卫使用：冷却期内直接跳过，避免「刚压完又压」
+     * 导致前缀每轮都变、缓存命中率永远上不去。</p>
+     *
+     * @param conversationId 会话 ID
+     * @return {@code true} 表示刚压缩过，应跳过本次压缩
      */
     public boolean isRecentlyCompacted(Long conversationId) {
         try {
-            List<CompactionRecord> records = compactionMapper.selectActiveByConversationId(conversationId);
-            if (records == null || records.isEmpty()) {
+            CompactState state = loadState(conversationId);
+            if (state.watermark <= 0) {
                 return false;
             }
-            LocalDateTime latest = null;
-            for (CompactionRecord record : records) {
-                LocalDateTime createdAt = record.getCreatedAt();
-                if (createdAt != null && (latest == null || createdAt.isAfter(latest))) {
-                    latest = createdAt;
-                }
-            }
-            if (latest == null) {
-                return false;
-            }
-            long elapsedMs = java.time.Duration.between(latest, LocalDateTime.now()).toMillis();
-            return elapsedMs >= 0 && elapsedMs < MIN_COMPACT_INTERVAL_MS;
+            long charsAfter = conversationMessageMapper.sumTextLengthAfterId(
+                    conversationId, state.watermark);
+            return charsAfter < COMPACT_COOLDOWN_CHARS;
         } catch (Exception e) {
-            log.debug("检查最近压缩时间失败（忽略该保护）: {}", e.getMessage());
+            log.debug("检查压缩冷却失败（忽略该保护）: {}", e.getMessage());
             return false;
         }
     }
 
     /**
-     * 在构建历史消息时，将压缩记录注入到消息列表中
-     * 在 buildMessagesFromHistory 中调用，用于将 DB 中的压缩摘要替换原始消息
+     * 读取会话当前的「有效摘要 + 水位线」。
+     *
+     * <p><b>兼容旧数据</b>：旧实现允许同一会话存在多条 active 记录（区间式），
+     * 这里按创建时间把它们<b>拼接</b>成一份、水位线取最大值 —— 升级后旧摘要内容不会丢，
+     * 新版产生的单条记录行为不变（拼接只有一条，等价于原样返回）。</p>
      *
      * @param conversationId 会话 ID
-     * @param dbMessages      从 DB 读出的原始消息列表（会修改）
+     * @return 合并后的状态；无记录时 summary=null、watermark=0
      */
-    public void applyCompactionRecords(Long conversationId, List<ConversationMessage> dbMessages) {
-        if (dbMessages == null || dbMessages.isEmpty()) return;
+    private CompactState loadState(Long conversationId) {
+        List<CompactionRecord> actives = compactionMapper.selectActiveByConversationId(conversationId);
+        if (actives == null || actives.isEmpty()) {
+            return new CompactState(null, 0L);
+        }
+        actives.sort(Comparator.comparing(CompactionRecord::getCreatedAt,
+                Comparator.nullsLast(Comparator.naturalOrder())));
 
-        List<CompactionRecord> records = compactionMapper.selectActiveByConversationId(conversationId);
-        if (records.isEmpty()) return;
-
-        // 按创建时间正序处理
-        records.sort(Comparator.comparing(CompactionRecord::getCreatedAt));
-
-        // 从后往前处理，避免索引错乱
-        List<CompactionRecord> reversed = new ArrayList<>(records);
-        Collections.reverse(reversed);
-
-        /*
-          跨记录共享的「已保留 system」集合（2026-11-17 新增）。
-
-          为什么需要：每条压缩记录都会把「区间内的真实 SYSTEM 消息」原样保留在前面，
-          而老数据（system 落在 user 之后）可能被多条记录先后覆盖到同一段 ——
-          不共享去重就会把同一条 system 复制成多份，白占 token。
-          （即使重复也不会破坏前缀稳定性——排列依然是确定性的——但属于无谓膨胀。）
-        */
-        Set<Long> preservedSystemIds = new HashSet<>();
-
-        for (CompactionRecord record : reversed) {
-            // 找到 startMessageId 和 endMessageId 在 dbMessages 中的索引
-            int startIdx = -1;
-            int endIdx = -1;
-            for (int i = 0; i < dbMessages.size(); i++) {
-                if (dbMessages.get(i).getId().equals(record.getStartMessageId())) {
-                    startIdx = i;
+        StringBuilder sb = new StringBuilder();
+        long maxWatermark = 0L;
+        for (CompactionRecord r : actives) {
+            if (r.getSummary() != null && !r.getSummary().isBlank()) {
+                if (sb.length() > 0) {
+                    sb.append("\n\n");
                 }
-                if (dbMessages.get(i).getId().equals(record.getEndMessageId())) {
-                    endIdx = i;
-                    break; // endIdx 一定在 startIdx 之后
-                }
+                sb.append(r.getSummary());
             }
-
-            if (startIdx < 0 || endIdx < 0 || endIdx < startIdx) {
-                log.warn("压缩记录索引无效，跳过: recordId={}, startIdx={}, endIdx={}", record.getId(), startIdx, endIdx);
-                continue;
+            if (r.getEndMessageId() != null && r.getEndMessageId() > maxWatermark) {
+                maxWatermark = r.getEndMessageId();
             }
+        }
+        return new CompactState(sb.length() == 0 ? null : sb.toString(), maxWatermark);
+    }
 
-            // 额外检查：确保索引在有效范围内
-            if (startIdx >= dbMessages.size() || endIdx >= dbMessages.size()) {
-                log.warn("压缩记录索引越界，跳过: recordId={}, startIdx={}, endIdx={}, dbMessages.size={}",
-                        record.getId(), startIdx, endIdx, dbMessages.size());
-                continue;
-            }
+    /** 压缩状态：一份累进摘要 + 一个水位线 */
+    private static final class CompactState {
+        private final String summary;
+        private final long watermark;
 
-            // 创建压缩摘要消息
-            ConversationMessage compactMsg = new ConversationMessage();
-            // ★ 使用负数合成 ID（数据库真实 ID 均为正数，不会冲突）：
-            // 摘要消息被后续压缩范围覆盖时，compact() 会以该 ID 作为 startMsgId/endMsgId 落库，
-            // 保证 applyCompactionRecords 的索引匹配仍能成立，压缩链不会断裂。
-            compactMsg.setId(-record.getId());
-            compactMsg.setConversationId(conversationId);
-            compactMsg.setRole(MessageRole.SYSTEM);
-            compactMsg.setContent(record.getSummary());
-            compactMsg.setToolCalls("{\"type\":\"compaction\",\"recordId\":" + record.getId()
-                    + ",\"replacedCount\":" + (endIdx - startIdx + 1) + "}");
-            compactMsg.setCreatedAt(dbMessages.get(startIdx).getCreatedAt());
-
-            // ★ 保留区间内的 system 消息（2026-11-17 修复）
-            //   系统提示词是「最稳定的前缀头部」，绝不能进入摘要：一旦被摘要化，
-            //   它的内容会随每次压缩重新生成而漂移，前缀从第 0 条起就无法命中缓存。
-            //   对「老数据（system 落在 user 之后，压缩区间不得不覆盖它）」做兜底：
-            //   区间内 id>0 的真实 SYSTEM 消息原样保留，只把其余消息折叠成摘要。
-            //   注意排除旧摘要（id<0 的合成消息）——它们应由新摘要吸收，避免摘要层层套娃。
-            List<ConversationMessage> preservedSystems = new ArrayList<>();
-            for (int i = startIdx; i <= endIdx; i++) {
-                ConversationMessage candidate = dbMessages.get(i);
-                if (candidate.getRole() == MessageRole.SYSTEM
-                        && candidate.getId() != null && candidate.getId() > 0
-                        && preservedSystemIds.add(candidate.getId())) {
-                    preservedSystems.add(candidate);
-                }
-            }
-
-            // 替换 [startIdx, endIdx] 为 [保留的 system 消息..., compactMsg]
-            List<ConversationMessage> remaining = new ArrayList<>();
-            remaining.addAll(dbMessages.subList(0, startIdx));
-            remaining.addAll(preservedSystems);
-            remaining.add(compactMsg);
-            remaining.addAll(dbMessages.subList(endIdx + 1, dbMessages.size()));
-
-            dbMessages.clear();
-            dbMessages.addAll(remaining);
-
-            log.debug("应用压缩记录: recordId={}, 替换了 {} 条消息为 {} tokens 的摘要",
-                    record.getId(), (endIdx - startIdx + 1),
-                    TokenEstimator.estimate(record.getSummary()));
+        private CompactState(String summary, long watermark) {
+            this.summary = summary;
+            this.watermark = watermark;
         }
     }
 
-    // ==================== 内部方法 ====================
+    // ==================== 对外接口：重建 ====================
 
     /**
-     * 调用 LLM 执行压缩（使用默认 Provider 的 LLMClient）
+     * 在构建历史消息时，把「已被摘要覆盖」的原始消息换成一条历史背景文本。
+     *
+     * <p><b>规则非常简单</b>：{@code id <= 水位线} 且不是真实 SYSTEM 的消息全部丢弃，
+     * 在原位置插入一条摘要（role=user）。没有区间匹配、没有负 id 叠加、没有从后往前遍历，
+     * 因此不可能出现旧实现那种「索引错位写错区间」。</p>
+     *
+     * <p>保留真实 SYSTEM 消息：系统提示词是身份/工具规范/工作目录，一旦被摘要化，
+     * 模型行为会整体漂移，而且前缀从第 0 条起就不稳定。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param dbMessages     从 DB 读出的原始消息列表（会被原地修改）
      */
-    private String callCompactionLlm(List<ConversationMessage> messages, String providerCode) {
-        String historyText = formatMessagesForCompaction(messages);
-        String prompt = buildCompactionPrompt(historyText);
+    public void applyCompactionRecords(Long conversationId, List<ConversationMessage> dbMessages) {
+        if (dbMessages == null || dbMessages.isEmpty()) {
+            return;
+        }
+        CompactState state = loadState(conversationId);
+        if (state.watermark <= 0 || state.summary == null || state.summary.isBlank()) {
+            return;
+        }
+        long watermark = state.watermark;
 
-        /*
-          ★ 2026-11-17 关键修复（费用泄露 / 扣错账户余额）。
+        ConversationMessage summaryMsg = buildSummaryMessage(conversationId, state.summary, watermark);
 
-          旧实现 providerCode 为空时回退 llmClientManager.getDefaultClient()，
-          而 getFirstClient() 是按 sortOrder 取第一个 —— 用户的 Provider 列表里
-          deepseek（id=1）与 huoshan（id=34）的 sortOrder 同为 0，于是「第一个」极可能落到
-          deepseek 官网；再叠加 compaction.model 留空 → 回退 default-model（deepseek-v4-pro），
-          压缩摘要请求就被原样发往 api.deepseek.com。
-          实测后果：用户全程用火山方舟跑会话，官网余额却从 1 元多掉到 0.21 元。
+        List<ConversationMessage> result = new ArrayList<>(dbMessages.size() + 1);
+        boolean placed = false;
+        for (ConversationMessage m : dbMessages) {
+            Long id = m.getId();
+            boolean realSystem = m.getRole() == MessageRole.SYSTEM && id != null && id > 0;
+            boolean covered = id != null && id > 0 && id <= watermark;
+            if (covered && !realSystem) {
+                if (!placed) {
+                    result.add(summaryMsg);
+                    placed = true;
+                }
+                continue;
+            }
+            result.add(m);
+        }
+        if (!placed) {
+            // 覆盖范围内一条消息都没有（例如消息被删除过）→ 摘要仍放最前，保证背景不丢
+            result.add(0, summaryMsg);
+        }
 
-          压缩只是「可选的上下文优化」，宁可本轮回退到不压缩（下轮还有机会），
-          也绝不能猜一个 Provider 去花钱。调用方必须显式传入 providerCode 才会调用 LLM。
-        */
-        if (providerCode == null || providerCode.isEmpty()) {
-            log.warn("压缩跳过：未提供 providerCode。为避免误用默认 Provider（极可能扣到另一个账户的余额），本次不做 LLM 压缩");
+        dbMessages.clear();
+        dbMessages.addAll(result);
+    }
+
+    // ==================== 核心实现 ====================
+
+    /**
+     * 压缩一次（写法B）：分批生成摘要 → 全部成功才落库。
+     *
+     * <p><b>为什么必须「全部成功才落库」</b>：每次落库都会改变下一次请求的前缀，
+     * 导致一次全量未命中。如果按批落库，一批一次未命中，成本直接翻 N 倍。
+     * 现在整个压缩过程对模型不可见，只在最后变一次。</p>
+     *
+     * @param ignoreCooldown {@code true} = 忽略冷却（同步/紧急路径：已越过阈值，不压就会 400）；
+     *                       {@code false} = 遵守冷却（异步预压缩：提前小步压，不值得频繁改前缀）
+     * @return 新落库的记录；未压缩或中途失败返回 {@code null}（此时数据库零变更）
+     */
+    private CompactionRecord doCompact(Long conversationId, String providerCode, boolean ignoreCooldown) {
+        DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
+
+        // 1. 当前状态：水位线 + 已有摘要（旧摘要要参与本次压缩，实现「累进」）
+        CompactState state = loadState(conversationId);
+        long watermark = state.watermark;
+        String prevSummary = state.summary;
+
+        // 2. 冷却：水位线之后至少再积累 COMPACT_COOLDOWN_CHARS 字符，避免「刚压完又压」
+        //    ⚠️ 紧急路径（上下文已越过压缩阈值）必须绕过：否则冷却期内涨到上限就是直接 400。
+        if (!ignoreCooldown) {
+            long charsAfter = conversationMessageMapper.sumTextLengthAfterId(conversationId, watermark);
+            if (charsAfter < COMPACT_COOLDOWN_CHARS) {
+                log.debug("压缩跳过：冷却期内（水位线之后新增 {} 字符 < {}）, conversationId={}",
+                        charsAfter, COMPACT_COOLDOWN_CHARS, conversationId);
+                return null;
+            }
+        }
+
+        // 3. 压缩上界：倒数第 protectRounds 条 user 消息的 id
+        //    ★ 用 id < 上界 取区间，最后一条 user 及其之后天然不在压缩范围内 → 本轮永不被压
+        //
+        //    ⚠️ offset 必须是 protectRounds-1（不是 protectRounds）：
+        //    selectNthUserMessageIdFromTail 的 OFFSET 0 = 最新一条 user，
+        //    而区间用的是「id < 上界」（不含上界本身）。
+        //    若直接传 protectRounds，会多保护一轮（protectRounds=8 实际保护 9 轮）。
+        //    protectRounds=0 时 offset 取 0 → 上界 = 最后一条 user，区间 = 它之前全部，
+        //    即「本轮永不压、历史全可压」，语义正确。
+        int boundaryOffset = Math.max(0, cfg.getProtectRounds() - 1);
+        Long boundaryExclusive = conversationMessageMapper.selectNthUserMessageIdFromTail(
+                conversationId, null, boundaryOffset);
+        if (boundaryExclusive == null || boundaryExclusive <= watermark) {
+            log.debug("压缩跳过：可压缩区间为空（保护带覆盖全部历史或历史轮数不足）, boundary={}, 水位线={}",
+                    boundaryExclusive, watermark);
+            return null;
+        }
+
+        // 4. 取待压缩消息（id > 水位线 && id < 上界）
+        //    ★ 排除 SYSTEM：系统提示词是身份/工具规范/工作目录，绝不能进摘要。
+        //      重建时 applyCompactionRecords 也会原样保留它，两边口径一致。
+        long startInclusive = watermark + 1;
+        List<ConversationMessage> pending = new ArrayList<>();
+        for (ConversationMessage m : conversationMessageMapper.selectRange(
+                conversationId, startInclusive, boundaryExclusive)) {
+            if (m.getRole() == MessageRole.SYSTEM) {
+                continue;
+            }
+            pending.add(m);
+        }
+        if (pending.size() < 2) {
+            log.debug("压缩跳过：可压缩消息过少（{} 条）, conversationId={}",
+                    pending.size(), conversationId);
+            return null;
+        }
+
+        // 5. 分批（单批有字符上限，保证单次 LLM 请求不会超时）
+        List<List<ConversationMessage>> batches = splitBatches(pending, cfg.getBatchSize());
+
+        // 6. 逐批累进生成摘要 —— 全部成功前不碰数据库
+        String rolling = prevSummary;
+        long newWatermark = watermark;
+        for (int i = 0; i < batches.size(); i++) {
+            List<ConversationMessage> batch = batches.get(i);
+            String next = summarizeOnce(rolling, batch, providerCode);
+            if (next == null || next.isBlank()) {
+                log.warn("压缩中止：第 {}/{} 批失败，本次整体放弃（数据库零变更，下次重试）, conversationId={}",
+                        i + 1, batches.size(), conversationId);
+                return null;
+            }
+            rolling = next;
+            newWatermark = batch.get(batch.size() - 1).getId();
+        }
+
+        // 7. 落库（一次性）
+        int beforeChars = textLen(prevSummary);
+        for (ConversationMessage m : pending) {
+            beforeChars += textLen(m.getContent()) + textLen(m.getReasoning());
+        }
+        int beforeTokens = TokenEstimator.estimate(String.valueOf(beforeChars));
+        int afterTokens = TokenEstimator.estimate(rolling);
+        int savings = Math.max(0, beforeTokens - afterTokens);
+
+        CompactionRecord record = new CompactionRecord(
+                conversationId, rolling, watermark, newWatermark, savings);
+        compactionMapper.insert(record);
+        compactionMapper.markSupersededExcept(conversationId, record.getId());
+
+        log.info("压缩完成（写法B）：conversationId={}, 批数={}, 消息={} 条, 水位线 {} → {}, 摘要 {} 字符",
+                conversationId, batches.size(), pending.size(), watermark, newWatermark, rolling.length());
+        return record;
+    }
+
+    /**
+     * 按「字符预算 + 轮数」切批。
+     *
+     * <p>切点优先落在 user 消息处（保持一轮的完整性），单批最多
+     * {@link #MAX_BATCH_CHARS} 字符 / {@code batchSize} 轮。</p>
+     *
+     * @param pending      待压缩消息（id 升序）
+     * @param cfgBatchSize 配置的每批轮数（&lt;=0 用默认值）
+     * @return 批次列表
+     */
+    private List<List<ConversationMessage>> splitBatches(List<ConversationMessage> pending, int cfgBatchSize) {
+        int roundLimit = cfgBatchSize > 0 ? cfgBatchSize : DEFAULT_BATCH_ROUNDS;
+        List<List<ConversationMessage>> batches = new ArrayList<>();
+        List<ConversationMessage> cur = new ArrayList<>();
+        int curChars = 0;
+        int curRounds = 0;
+
+        for (ConversationMessage m : pending) {
+            int len = textLen(m.getContent()) + textLen(m.getReasoning());
+            boolean isUser = m.getRole() == MessageRole.USER;
+            // 超字符预算、或已攒够轮数且遇到新一轮起点 → 切批（保证当前批至少 1 条）
+            if (!cur.isEmpty()
+                    && (curChars + len > MAX_BATCH_CHARS || (isUser && curRounds >= roundLimit))) {
+                batches.add(cur);
+                cur = new ArrayList<>();
+                curChars = 0;
+                curRounds = 0;
+            }
+            cur.add(m);
+            curChars += len;
+            if (isUser) {
+                curRounds++;
+            }
+        }
+        if (!cur.isEmpty()) {
+            batches.add(cur);
+        }
+        return batches;
+    }
+
+    /**
+     * 调用 LLM 生成一批的摘要（旧摘要 + 本批消息 → 新摘要，累进）。
+     *
+     * @param prevSummary  上一版摘要（可为 null）
+     * @param batch        本批消息
+     * @param providerCode Provider 编码（必须显式传入，避免误扣其他账户余额）
+     * @return 新摘要；失败返回 {@code null}
+     */
+    private String summarizeOnce(String prevSummary, List<ConversationMessage> batch, String providerCode) {
+        if (providerCode == null || providerCode.isBlank()) {
+            log.warn("压缩跳过：未提供 providerCode（避免误用默认 Provider 扣错账户）");
             return null;
         }
         LLMClient client = llmClientManager.resolveClientByCode(providerCode);
@@ -607,85 +655,70 @@ public class CompactionService {
             log.error("无法获取 LLMClient，providerCode={}, 跳过压缩", providerCode);
             return null;
         }
+
         String model = deepSeekConfig.getCompaction().getModel();
-        if (model == null || model.trim().isEmpty()) {
+        if (model == null || model.isBlank()) {
             model = llmClientManager.getDefaultModel(client.getProviderCode());
         }
 
-        // 构建消息列表
-        List<Map<String, Object>> msgs = new ArrayList<>();
+        String historyText = formatMessagesForCompaction(batch);
+        String prompt = buildCompactionPrompt(prevSummary, historyText);
+
+        List<Map<String, Object>> msgs = new ArrayList<>(1);
         Map<String, Object> userMsg = new HashMap<>();
         userMsg.put("role", "user");
         userMsg.put("content", prompt);
         msgs.add(userMsg);
 
-        // 使用 LLMClient 构建请求体 + 阻塞调用
         Map<String, Object> requestBody = client.buildRequestBody(msgs, model, 0.3, "non-thinking", false, null);
-
         try {
-            /*
-              ★ 2026-11-17：超时从 60 秒收紧到 20 秒。
-
-              compact 是**同步阻塞**调用（blockingChat），调用方可能是：
-                · http-nio 请求线程（ContextBuilder 入口）——阻塞只影响本请求，表现为「首 token 慢」；
-                · reactor-http-nio 调度线程（工具循环守卫的重入路径）——一旦阻塞，
-                  该线程上承载的所有 SSE 流会一起停摆，前端表现为
-                  「回复正文已结束、【方案取舍】也收到了，但此后既不吐 token 也不调工具，只能手动停止」。
-              摘要生成本身实测 5~10 秒足够；60 秒的窗口远超必要，
-              且对端限流/挂起时会把调用线程占满整整一分钟。
-              收紧到 20 秒后失败即降级（返回 null、本轮不压缩），由后续轮次继续压缩，不影响正确性。
-            */
-            String responseBody = client.blockingChat(requestBody, java.time.Duration.ofSeconds(20));
+            String responseBody = client.blockingChat(requestBody, BATCH_TIMEOUT);
             return client.extractContentFromBlockingResponse(responseBody);
         } catch (Exception e) {
-            log.error("调用 LLM 压缩失败: {}", e.getMessage());
+            log.error("压缩请求失败（本批 {} 条消息）: {}", batch.size(), e.getMessage());
             return null;
         }
     }
 
     /**
-     * 构建压缩 prompt
+     * 构建压缩 prompt：只记录「发生过什么」，禁止任何面向未来的表述。
+     *
+     * <p>旧 prompt 要求输出「## 进行中」「## 待办事项」，等于把历史状态写成当前指令，
+     * 模型读到就会继续执行历史任务（忘记本轮问题）。现在只允许客观事实记录。</p>
      */
-    private String buildCompactionPrompt(String historyText) {
-        return "你是一个对话上下文压缩专家。请将以下 AI 助手的对话历史压缩为结构化摘要。\n\n"
-                + "要求：\n"
-                + "1. 保留所有关键决策、技术方案、代码变更、文件路径\n"
-                + "2. 保持任务进度和待办事项的完整性\n"
-                + "3. 用简洁的要点形式输出，不要遗漏重要信息\n"
-                + "4. 必须使用中文输出\n"
-                + "5. 仅输出结构化摘要本身，不要额外解释\n\n"
-                + "请按以下结构输出：\n\n"
-                + "## 目标\n"
-                + "- [一句话概括当前任务]\n\n"
-                + "## 已完成\n"
-                + "- [已完成的子任务或关键步骤]\n\n"
-                + "## 进行中\n"
-                + "- [当前正在进行的工作]\n\n"
-                + "## 关键决策\n"
-                + "- [重要的技术决策及原因]\n\n"
-                + "## 待办事项\n"
-                + "- [下一步需要做的事]\n\n"
-                + "## 重要上下文\n"
-                + "- [文件路径、变量名、架构信息等需要记住的技术细节]\n\n"
-                + "待压缩的对话历史：\n"
-                + "---\n"
-                + historyText
-                + "\n---";
+    private String buildCompactionPrompt(String prevSummary, String historyText) {
+        StringBuilder sb = new StringBuilder(historyText.length() + 2048);
+        sb.append("你是一个对话记录整理员。请把下面的对话历史整理成一份**客观的事实记录**。\n\n");
+        sb.append("硬性要求：\n");
+        sb.append("1. 只用过去时陈述「发生过什么」，禁止输出「待办事项」「下一步」「进行中」「计划」这类面向未来的表述\n");
+        sb.append("2. 禁止写任何祈使句、命令、建议 —— 这份记录只作为背景资料，不会被当作任务执行\n");
+        sb.append("3. 保留关键事实：文件路径、IP、端口、命令、配置值、报错信息、已完成的改动、得出的结论\n");
+        sb.append("4. 用简洁要点输出，不要遗漏重要事实\n");
+        sb.append("5. 必须使用中文\n");
+        sb.append("6. 只输出记录本身，不要额外解释，不要复述本提示词\n\n");
+        if (prevSummary != null && !prevSummary.isBlank()) {
+            sb.append("## 更早的对话记录（需要与本次内容合并成一份完整记录）\n");
+            sb.append(prevSummary).append("\n\n");
+        }
+        sb.append("## 本次需要整理的对话\n---\n");
+        sb.append(historyText);
+        sb.append("\n---");
+        return sb.toString();
     }
 
     /**
-     * 将消息列表格式化为纯文本，供压缩 LLM 使用
+     * 把一批消息格式化为纯文本，供压缩 LLM 使用。
      */
     private String formatMessagesForCompaction(List<ConversationMessage> messages) {
         StringBuilder sb = new StringBuilder();
         for (ConversationMessage msg : messages) {
-            String role = msg.getRole().getValue(); // user / assistant / tool / system
+            String role = msg.getRole() != null ? msg.getRole().getValue() : "unknown";
             sb.append("【").append(role.toUpperCase()).append("】\n");
             if (msg.getContent() != null && !msg.getContent().isEmpty()) {
                 sb.append(msg.getContent()).append("\n");
             }
             if (msg.getReasoning() != null && !msg.getReasoning().isEmpty()) {
-                sb.append("【思考过程】\n").append(msg.getReasoning()).append("\n");
+                sb.append("【思考过程/工具结果】\n").append(msg.getReasoning()).append("\n");
             }
             sb.append("\n");
         }
@@ -693,23 +726,109 @@ public class CompactionService {
     }
 
     /**
-     * 将 ConversationMessage 列表转为「与真实请求逐条对齐」的 API 格式消息列表。
-     * <p>
-     * <b>为什么必须逐条对齐（一一映射，不跳过、不净化）</b>：{@link #compact} 内部会重新
-     * {@code selectByConversationId} 并 {@link #applyCompactionRecords}，然后用
-     * {@code compressStart / compressEnd} 索引在这份列表上定位压缩区间。调用方传入的列表
-     * 必须与之逐条对应，否则会压错区间（甚至压到保护带）。
-     * </p>
-     * <p>
-     * <b>口径必须与 ContextBuilder 一致</b>：
-     * <ul>
-     *   <li>TOOL 消息的 API {@code content} 取自 {@code reasoning} 字段（工具结果存在该字段），
-     *       且<b>不受 stripHistoryReasoning 影响</b>——它存的是工具结果，不是思考链。
-     *       原实现把它当 {@code reasoning_content} 直接丢弃，导致工具结果（本系统上下文的
-     *       绝对大头）完全不计入估算，估算值严重偏低。</li>
-     *   <li>ASSISTANT 消息的 {@code tool_calls} 也有 token 开销，需计入。</li>
-     * </ul>
-     * </p>
+     * 构造摘要消息（role=user，带降权前缀）。
+     *
+     * <p>id 用 {@code -watermark} 合成（真实 ID 均为正数，不会冲突），仅用于列表内识别；
+     * createdAt 留空 —— 它总是在排序之后插入，不参与排序。</p>
+     */
+    private ConversationMessage buildSummaryMessage(Long conversationId, String summary, long watermark) {
+        ConversationMessage m = new ConversationMessage();
+        m.setId(-Math.max(1L, watermark));
+        m.setConversationId(conversationId);
+        m.setRole(MessageRole.USER);
+        m.setContent(HISTORY_SUMMARY_PREFIX + summary + HISTORY_SUMMARY_SUFFIX);
+        return m;
+    }
+
+    /**
+     * 内存侧同步压缩结果：把「倒数第 protectRounds 条 user 之前」的非 system 消息换成摘要。
+     *
+     * <p>与 DB 侧用<b>同一套规则</b>（倒数第 N 条 user），因此不需要 message id，
+     * 也不存在「API 列表下标 vs DB 下标」的对齐问题 —— 两条链路看到的是同一批 user 消息。</p>
+     *
+     * <p><b>⚠️ 为什么第一步必须先删掉旧摘要</b>：摘要本身也是 {@code role=user}，
+     * 如果留在列表里，"倒数第 N 条 user"会把摘要也算进去 → 定位点整体前移，
+     * 结果就是压缩完变成两条摘要、且新摘要没覆盖任何真实历史。
+     * 先移除再定位，两种形态（首压 / 二次压）都能对齐。</p>
+     *
+     * @param messages      本次请求的 API 格式消息列表（原地修改）
+     * @param protectRounds 保护带轮数
+     * @param summary       新摘要正文
+     */
+    private void replaceInMemory(List<Map<String, Object>> messages, int protectRounds, String summary) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
+
+        // 1. 先清掉上一版摘要（幂等：没有则无操作，避免摘要套娃 / 轮次定位偏移）
+        messages.removeIf(m -> "user".equals(m.get("role"))
+                && m.get("content") instanceof String text
+                && text.startsWith(HISTORY_SUMMARY_PREFIX.substring(0, 12)));
+
+        // 2. 按 user 轮次定位压缩上界
+        int cut = findNthUserFromTailIndex(messages, protectRounds);
+        if (cut <= 0) {
+            return;
+        }
+
+        Map<String, Object> summaryMsg = new HashMap<>();
+        summaryMsg.put("role", "user");
+        summaryMsg.put("content", HISTORY_SUMMARY_PREFIX + summary + HISTORY_SUMMARY_SUFFIX);
+
+        List<Map<String, Object>> kept = new ArrayList<>(messages.size());
+        boolean placed = false;
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> m = messages.get(i);
+            boolean isSystem = "system".equals(m.get("role"));
+            if (i < cut && !isSystem) {
+                if (!placed) {
+                    kept.add(summaryMsg);
+                    placed = true;
+                }
+                continue;
+            }
+            kept.add(m);
+        }
+        if (!placed) {
+            kept.add(0, summaryMsg);
+        }
+        messages.clear();
+        messages.addAll(kept);
+    }
+
+    /**
+     * 返回「倒数第 protectRounds 条 user 消息」的下标；不足则返回 -1。
+     *
+     * <p>与 DB 侧 boundary 口径严格一致：压缩区间是 {@code [0, 返回值)}，
+     * 因此倒数第 protectRounds 条及之后（共 protectRounds 轮）全部受保护。
+     * protectRounds=0 时返回最后一条 user 的下标 —— 保住本轮提问。</p>
+     */
+    private int findNthUserFromTailIndex(List<Map<String, Object>> messages, int protectRounds) {
+        int target = Math.max(1, protectRounds);
+        int found = 0;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if ("user".equals(messages.get(i).get("role"))) {
+                found++;
+                if (found == target) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static int textLen(String s) {
+        return s == null ? 0 : s.length();
+    }
+
+    // ==================== 消息格式转换 ====================
+
+    /**
+     * 将 ConversationMessage 列表转为「与真实请求口径一致」的 API 格式消息列表。
+     *
+     * <p>用于异步预压缩的 token 估算：TOOL 消息的工具结果存在 {@code reasoning} 字段，
+     * 且<b>不受 stripHistoryReasoning 影响</b>（它存的是工具结果，不是思考链）。
+     * 漏算它会导致估算严重偏低、压缩判断失真。</p>
      *
      * @param messages               已经过排序 + {@link #applyCompactionRecords} 处理的 DB 消息
      * @param stripHistoryReasoning  是否剔除历史思考链（balanced / compact 模式为 true）
@@ -725,7 +844,7 @@ public class CompactionService {
             Map<String, Object> map = new HashMap<>();
             MessageRole role = msg.getRole();
 
-            // 角色缺失时保底占位，绝不能让条数变少（否则索引错位）
+            // 角色缺失时保底占位，绝不能让条数变少
             if (role == null) {
                 map.put("role", "system");
                 result.add(map);
@@ -757,52 +876,6 @@ public class CompactionService {
         return result;
     }
 
-    /**
-     * 在 API 格式的消息列表中，用压缩摘要替换指定范围的消息
-     */
-    private void replaceWithCompaction(List<Map<String, Object>> messages,
-                                       int startInclusive, int endExclusive, String summary) {
-        // 移除旧消息（从后往前）
-        for (int i = endExclusive - 1; i >= startInclusive; i--) {
-            messages.remove(i);
-        }
-
-        // 插入压缩摘要作为 system 消息
-        Map<String, Object> compactMsg = new HashMap<>();
-        compactMsg.put("role", "system");
-        compactMsg.put("content", "【上下文摘要 - 以下为之前对话的压缩记录】\n" + summary);
-        messages.add(startInclusive, compactMsg);
-
-        log.info("替换压缩摘要：位置 {}~{}, 摘要长度={}", startInclusive, endExclusive - 1, summary.length());
-    }
-
-    /**
-     * 查找保护带的结束位置（保护带内的消息不压缩不丢弃）
-     * 保护带指最近的 protectRounds 轮完整对话
-     */
-    private int findProtectZoneEnd(List<Map<String, Object>> messages, int protectRounds) {
-        if (messages == null || messages.isEmpty()) return 0;
-
-        int roundsFound = 0;
-        // 从最后一条消息往前找
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            Map<String, Object> msg = messages.get(i);
-            String role = (String) msg.get("role");
-            if ("user".equals(role)) {
-                roundsFound++;
-                if (roundsFound > protectRounds) {
-                    // 找到保护带起始位置
-                    int zoneEnd = i + 1;
-                    // 往前找到这一轮 user 消息的前一条消息的索引
-                    // zoneEnd 就是保护带中最早的消息索引
-                    return zoneEnd;
-                }
-            }
-        }
-        // 保护带覆盖全部消息
-        return 0;
-    }
-
     // ==================== 内部枚举 ====================
 
     public enum CompactionDecision {
@@ -812,7 +885,7 @@ public class CompactionService {
         WARN,
         /** 橙色压缩：执行 LLM 压缩 */
         COMPACT,
-        /** 红色丢弃：压缩后仍超限，执行滑动窗口丢弃 */
+        /** 红色：压缩后仍超限 */
         DROP
     }
 }

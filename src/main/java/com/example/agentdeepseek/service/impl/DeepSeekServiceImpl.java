@@ -2301,11 +2301,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                       （本会话连续三次「继续未完成任务」被中断即此因）；
                     · 若此时重入路径跑在 reactor 调度线程上，还会连带阻塞该线程上所有 SSE 流
                       → 前端表现为「回复已结束但既不吐 token 也不调工具」。
-                  这里与 ContextBuilder 的同步压缩共用同一个防抖间隔（isRecentlyCompacted），
-                  保证两条路径不互相踩踏。
-                */
+                   这里与 ContextBuilder 的同步压缩共用同一套冷却判断（isRecentlyCompacted），
+                   保证两条路径不互相踩踏。
+                 */
                 if (compactionService.isRecentlyCompacted(storageConversationId)) {
-                    log.debug("工具循环超限但距上次压缩不足防抖间隔，本轮跳过压缩：估算 {} tokens, 守卫上限 {}",
+                    log.debug("工具循环超限但处于压缩冷却期，本轮跳过压缩：估算 {} tokens, 守卫上限 {}",
                             loopEstimatedTokens, toolLoopGuardLimit);
                 } else {
                     log.warn("工具循环上下文超限预警：估算 {} tokens（raw={}，tools 已计入）> 守卫上限 {}（provider={}），执行压缩（不裁剪）",
@@ -2314,8 +2314,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     if (afterLoopCompact > 0) {
                         /*
                           compact 返回的是「不含 tools 的 messages 估算」，不能直接当守卫值用。
-                          压缩可能已原地修改 messages（replaceWithCompaction），这里按含 tools 的口径重算一遍，
-                          保证 _estimatedPromptTokens 与真正要发送的请求体同源 —— 否则校准会引入系统性偏差。
+                          压缩会原地把被覆盖的历史换成摘要（CompactionService#replaceInMemory），
+                          这里按含 tools 的口径重算一遍，保证 _estimatedPromptTokens 与真正要发送的
+                          请求体同源 —— 否则校准会引入系统性偏差。
                          */
                         loopRawTokens = TokenEstimator.estimateTotalRaw(messages, loopToolsDef);
                         loopEstimatedTokens = TokenEstimator.applyRatio(loopRawTokens, loopProviderCode);
