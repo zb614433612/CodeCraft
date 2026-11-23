@@ -5,6 +5,131 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.7] - 2026-11-23
+
+> **Context compaction guard consolidation**: fixes two problems — "compaction never
+> finishes yet is retried on every request", and "the compactor thinks it is fine while the
+> real request is already over the limit".
+> Three root causes: ① `loadState` concatenated every legacy interval-style record
+> (one measured session had **236 active rows totalling 867K characters**), and that whole
+> text was injected into the next compaction prompt, so prefill could never finish within
+> 45 seconds → failure writes nothing → watermark never advances → the next request retries,
+> forever; ② compaction decisions lived in three places with three different accounting
+> rules (whether tools / dynamic injections were counted differed per site); ③ context
+> rebuilding **read the entire conversation from the database** on every request
+> (31,426 rows / 44.1M characters measured) — compaction reduced what was sent to the model
+> but not what was read from the DB.
+> **Backend restart required**; no database schema change; overwrite installation is fine.
+
+### 🔧 Fix: endless "compaction never finishes but is retried every request"
+
+- **Root cause**: for backward compatibility with the legacy interval-style records,
+  `CompactionService.loadState` concatenated all `superseded=0` summaries with **no size
+  cap**. One measured session produced an **867K-character** summary, and every compaction
+  attempt injected it in full (plus a 150K-character batch), which always exceeded the
+  45-second timeout. A failed attempt writes nothing and does not advance the watermark,
+  so the next request triggers again — burning tens of seconds each time. The giant summary
+  also pushed the context near the threshold by itself.
+- **Oversized-summary merging**: `doCompact` now pre-checks the summary size. Above 30K
+  characters it first merges the old summary itself in 150K-character batches, then compacts
+  history; the merged result is persisted together with this run and legacy rows are
+  superseded.
+- **Hard summary cap**: every batch output goes through `enforceSummaryLimit` (30K chars,
+  truncated keeping the newer facts and aligning to a newline). This is mandatory: merging
+  does **not** advance the watermark, so without a hard cap the cooldown (based on
+  "characters added after the watermark") never applies and the system degrades into
+  "merge once per request".
+- **Failure circuit breaker**: after 3 consecutive failures a conversation enters a 10-minute
+  breaker (treated as "recently compacted") instead of waiting for another LLM timeout on
+  every request.
+- **Per-conversation mutex**: synchronous compaction and async pre-compaction share a
+  conversation-level lock, so two requests cannot start from the same watermark, call the
+  LLM twice and supersede each other.
+
+### 🔧 Fix: three inconsistent accounting rules for compaction
+
+- **The three old rules**: async pre-compaction (no tools, no dynamic injections),
+  `ContextBuilder` build phase (no tools, no injections, and evaluated before injection),
+  and the tool-loop guard (tools + injections included). Tool schemas alone are ~60K tokens
+  in this project, and skill catalog / knowledge base / attachment injections add tens of
+  thousands more characters, so the first two sites systematically under-counted — leading
+  to "compactor says fine, guard says over limit", and in the opposite direction "just
+  compacted yet judged over limit again", rewriting the prefix repeatedly.
+- **Unified request-time guard**: evaluated at the end of `prepareConversationContext`,
+  after every injection and after `tools` is built, using
+  `estimateTotalRaw(messages, tools)` with the provider calibration ratio.
+  `ContextBuilder` no longer compacts on its own (it only keeps the trim fallback when
+  compaction is disabled).
+- **Async pre-compaction now matches**: it receives `toolsRawTokens` and the **session's
+  effective contextMode**. Previously it used the global `isStripHistoryReasoning()`, while
+  the real request follows "request param > sys_config > global" — any mismatch over- or
+  under-counted the entire historical reasoning.
+- **compact mode specifics**: the estimate only counts tool results **before the last user
+  message** as summaries (same boundary as `ContextBuilder#compactHistoryMessages`), while
+  current-turn tool results stay at full length.
+
+### ✨ New: visible compaction progress + SSE heartbeat
+
+- **Event first, then compact**: the prepare phase now only decides whether compaction is
+  needed; the actual work moved to the head of the Flux — it emits
+  "🧹 上下文接近上限，正在整理历史上下文…" first, then compacts on `boundedElastic`.
+  Previously compaction blocked before the SSE stream existed, so users stared at a silent
+  "connecting" state for tens of seconds.
+- **15-second heartbeat**: long compactions emit "⏳ 仍在整理上下文…（已用 N 秒）" to survive
+  reverse-proxy 60-second idle timeouts; the heartbeat stops immediately when compaction
+  finishes (complete / error / cancel), leaving no dangling timer.
+- **Re-sanitize after compaction**: compaction can break `assistant(tool_calls)` / `tool`
+  pairing, so the message list goes through `ToolCallSequenceSanitizer` again (idempotent)
+  before sending.
+
+### ⚡ Performance: incremental context rebuild by watermark
+
+- **Root cause**: `buildMessagesFromHistory` called `selectByConversationId` and loaded the
+  entire conversation on every request (31,426 rows / 44.1M characters measured), then
+  discarded everything at or below the watermark in memory — compaction reduced what was
+  sent to the model but not the DB read volume.
+- **New `selectForContext`**: filters in SQL with `role='SYSTEM' OR id > watermark`
+  (SYSTEM never participates in compaction) and hits `idx_conversation_id` plus the primary
+  key. Both `ContextBuilder` and `asyncPrecompress` use it; the summary is re-inserted
+  before the first non-SYSTEM message, producing exactly the same sequence as the full path:
+  `system + summary + messages after watermark`.
+- **No duplicate tokenization**: with compaction enabled only the request-time guard
+  tokenizes (previously the same request was tokenized twice; a CL100K pass over hundreds of
+  thousands of tokens costs hundreds of milliseconds).
+
+### 🔧 Fix: minimum-gain gate (no more "compact 2 messages, rewrite the prefix")
+
+- **Symptom**: the compaction upper bound is "the second-to-last user message", which moves
+  forward with every new question. Without a gain check, each new turn compacts the tiny
+  window that just became compressible — one measured record (`start=81030, end=81031`)
+  covered **2 messages** but produced a 1308-character summary. Rewriting the prefix costs
+  far more than the saved tokens and looks like "context gets scrambled / repeated amnesia".
+- **Dynamic threshold**: `max(30K chars, effective limit × 5% ÷ 0.425)` — about 118K chars on
+  a 1M window, dropping to 30K on 128K relay providers so small windows do not inherit the
+  large-window absolute threshold and stall forever.
+
+### 🔢 Version bump
+
+- `pom.xml` project version → 3.3.7
+- `frontend/package.json` + `frontend-v3/package.json` + both `package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.3.7.jar`) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.3.7
+- README / README_EN badges, 8 docs headers (version + updated date 2026-11-23)
+- DEV_QUICKREF / RELEASE_CHECKLIST packaging examples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes; no config format change).
+- **No database schema change**: `conversation_compaction` columns are unchanged; legacy
+  multiple active rows are merged in batches on the first compaction (that run may take
+  tens of seconds longer — a one-time self-healing cost).
+- **Overwrite installation**: the Electron installer can be installed over the old version.
+- **API behaviour change**: compaction moved from "before the SSE stream" to "before the
+  first token", so the frontend receives one `reasoning` event (progress notice) plus
+  periodic heartbeat events; message and tool event ordering is unaffected.
+
+---
+
 ## [3.3.6] - 2026-11-19
 
 > **Context compaction rewrite (Approach B)**: fixes two symptoms — the model repeating

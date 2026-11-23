@@ -88,6 +88,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -246,6 +247,16 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private static final String DATA_PREFIX = "data: ";
     private static final String TEMPERATURE_FIELD = "temperature";
     private static final int MAX_TOOL_CALL_ITERATIONS = 50;
+
+    /**
+     * 上下文整理（压缩）期间的心跳间隔：每 15 秒推一条轻量事件。
+     *
+     * <p><b>为什么需要（2026-11-23）</b>：分批压缩可能耗时几十秒，期间只在开始时发过
+     * 一条「正在整理」事件。若前面有反向代理/网关配置了 60 秒读超时，会把这段「无数据」
+     * 判定为空闲连接并断开 SSE，用户侧表现为「整理完却收不到回复」。
+     * 用 {@code Flux.interval} 周期发一条 reasoning 事件，既保活又让用户看到进度。</p>
+     */
+    private static final Duration GUARD_HEARTBEAT_INTERVAL = Duration.ofSeconds(15);
     private static final double DEFAULT_TEMPERATURE = 0.3;
     private static final int SESSION_NAME_TRUNCATE_LENGTH = 6;
     private static final int MAX_JUDGE_GRANTED_ITERATIONS = 100; // 评委最多累计允许增加的迭代次数
@@ -1282,6 +1293,22 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             );
         }
 
+        // ===== 统一上下文守卫：这里只「判断」，真正的压缩推迟到 Flux 首事件之后（2026-11-23）=====
+        //
+        //  为什么不在 prepare 阶段直接压：压缩是同步阻塞（分批压缩可能几十秒），
+        //  而 SSE 流此时还没建立 —— 用户点发送后只会看到长时间「连接中」，以为卡死。
+        //  现在把「是否需要压缩」在这里算好（口径 = system + 最新摘要 + 水位线之后的对话 +
+        //  全部注入 + tools，与真正发出的请求体同源），真正的压缩放到 doStreamChat 的
+        //  Flux 首部：先推一条「正在整理上下文」事件，再做压缩，用户至少知道机器人在干活。
+        //
+        //  旧实现在 ContextBuilder 构建阶段判断压缩（注入尚未发生、也看不到 tools 定义），
+        //  口径系统性偏低 6 万 token 以上，导致「压缩器认为没超、真正请求却超限」；
+        //  一旦估算虚高，又会在压缩后仍判超限、反复压缩改前缀。
+        int preRequestEstimatedTokens = TokenEstimator.applyRatio(
+                TokenEstimator.estimateTotalRaw(historyMessages, toolsList), llmClient.getProviderCode());
+        boolean contextGuardNeeded = isContextGuardNeeded(
+                storageConversationId, preRequestEstimatedTokens, llmClient.getProviderCode());
+
         // ===== 使用 LLMClient 构建标准请求体（模型/消息/温度/思考/工具）=====
         Map<String, Object> apiRequest = new HashMap<>(llmClient.buildRequestBody(
                 historyMessages,
@@ -1291,6 +1318,16 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 stream,
                 toolsList
         ));
+
+        // 记录发送前的校准后估算值（与真正请求体同口径）：响应回来后用于在线校准。
+        // 工具循环会按每轮迭代覆盖它，两者口径一致（都含 tools）。
+        apiRequest.put("_estimatedPromptTokens", preRequestEstimatedTokens);
+        // 是否需要「请求前上下文整理」：prepare 阶段只判断，真正压缩在 Flux 首部执行
+        // （这样能先给前端推一条「正在整理上下文」事件，避免长时间无反馈）。
+        apiRequest.put("_guardNeeded", contextGuardNeeded);
+        // tools 的 raw 估算缓存：异步预压缩也要按「messages + tools」口径判断，
+        // 存下来避免它再对十几万字符的工具 schema 重复分词。
+        apiRequest.put("_toolsRawTokens", TokenEstimator.estimateToolsRaw(toolsList));
 
         // ===== 存储 LLMClient 引用（后续流式/阻塞调用时使用）=====
         apiRequest.put("_llmClient", llmClient);
@@ -1354,6 +1391,166 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
     }
 
+    /**
+     * 是否需要执行上下文整理（只做判断，不压缩）。
+     *
+     * <p>判断依据与 {@link #enforceContextGuard} 完全一致：估算值（含 tools）越过
+     * {@code compaction.compact-threshold}，且不处于压缩冷却/熔断期。
+     * 拿到 {@code true} 后，调用方可以先向用户推一条「正在整理上下文」事件，
+     * 再在 Flux 首部执行真正的压缩。</p>
+     *
+     * @param conversationId  会话 ID
+     * @param estimatedTokens 已按「messages + tools」口径校准的估算值
+     * @param providerCode    Provider 编码（决定上下文上限）
+     * @return true = 本次请求前需要压缩
+     */
+    private boolean isContextGuardNeeded(Long conversationId, int estimatedTokens, String providerCode) {
+        if (!deepSeekConfig.getCompaction().isEnabled()) {
+            return false;
+        }
+        int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
+        if (estimatedTokens <= maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
+            return false;
+        }
+        // 冷却/熔断期内不会真正压缩，也就不必发「整理中」事件（避免误导用户）
+        return !compactionService.isRecentlyCompacted(conversationId);
+    }
+
+    /**
+     * 请求前统一上下文守卫（2026-11-23）。
+     *
+     * <p><b>为什么必须统一</b>：上下文压缩的长度判断必须按<b>真正要发送的请求体</b>统计，
+     * 即 {@code system 提示词 + 最新压缩摘要 + 水位线之后的对话 + 技能/经验/附件/知识库注入 + tools 定义}。
+     * 旧实现在 {@link ContextBuilder#buildMessagesFromHistory} 构建阶段判断：那时所有动态注入还没发生，
+     * 也看不到 tools（本项目 20~31 个工具的 schema 恒占约 6 万 token）—— 口径系统性偏低，
+     * 于是出现「压缩器认为没超、工具循环守卫却判定超限」的错位；估算一旦偏反方向，
+     * 又会在压缩后仍判超限、反复压缩改前缀，用户感知就是「上下文被打乱、反复失忆」。</p>
+     *
+     * <p><b>为什么只压一次</b>：压缩必然改变前缀（一次全量未命中）。守卫只在越过阈值时压一次，
+     * 压缩后按同一口径重估并打日志；若仍超限（保护带或注入本身过大）不再重复压缩，
+     * 交由 {@link CompactionService} 的最小收益闸门与失败熔断兜底。</p>
+     *
+     * @param conversationId 会话 ID（存库标识）
+     * @param messages       即将发送的消息列表（压缩成功会被原地改写为「摘要 + 其后消息」）
+     * @param toolsList      即将发送的 tools 定义（作为「压不掉也删不得」的地板计入总量）
+     * @param providerCode   Provider 编码（决定上下文上限与校准比率）
+     * @return 与真实请求体同口径的校准后 token 估算
+     */
+    private int enforceContextGuard(Long conversationId,
+                                    List<Map<String, Object>> messages,
+                                    List<Map<String, Object>> toolsList,
+                                    String providerCode) {
+        int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
+        int rawTokens = TokenEstimator.estimateTotalRaw(messages, toolsList);
+        int estimatedTokens = TokenEstimator.applyRatio(rawTokens, providerCode);
+
+        boolean enabled = deepSeekConfig.getCompaction().isEnabled();
+        double compactThreshold = deepSeekConfig.getCompaction().getCompactThreshold();
+        if (!enabled || estimatedTokens <= maxTokens * compactThreshold) {
+            return estimatedTokens;
+        }
+
+        // 冷却/熔断期内跳过：压缩刚改过前缀，再压会把前缀反复推翻；连续失败时也不该反复白等超时。
+        if (compactionService.isRecentlyCompacted(conversationId)) {
+            log.debug("请求前守卫：上下文已超阈值但处于压缩冷却/熔断期，本轮跳过。估算 {} tokens, 上限 {}",
+                    estimatedTokens, maxTokens);
+            return estimatedTokens;
+        }
+
+        log.info("请求前守卫触发：估算 {} tokens（raw={}，含 tools 与全部注入）> 上限 {} × {}，执行压缩：conversationId={}",
+                estimatedTokens, rawTokens, maxTokens, compactThreshold, conversationId);
+        int afterCompact = compactionService.compact(conversationId, messages, providerCode);
+        if (afterCompact > 0) {
+            // compact 返回的是「不含 tools」的 messages 估算，这里按含 tools 口径重算，
+            // 保证 _estimatedPromptTokens 与真正发送的请求体同源（否则校准会引入系统性偏差）。
+            rawTokens = TokenEstimator.estimateTotalRaw(messages, toolsList);
+            estimatedTokens = TokenEstimator.applyRatio(rawTokens, providerCode);
+            log.info("请求前守卫压缩完成：压缩服务返回 {} tokens（不含 tools），重估含 tools={} tokens（raw={}）",
+                    afterCompact, estimatedTokens, rawTokens);
+        } else {
+            log.warn("请求前守卫：压缩未执行或失败（数据库零变更），按现有上下文继续请求。估算 {} tokens",
+                    estimatedTokens);
+        }
+        if (estimatedTokens > maxTokens * compactThreshold) {
+            log.warn("请求前守卫：压缩后仍超阈值（保护带或注入内容过大），不再重复压缩。估算 {} tokens, 上限 {}。"
+                            + "若频繁出现：说明最近 {} 轮对话本身已接近模型窗口 —— 应更换上下文更大的模型/Provider，"
+                            + "或减少单轮工具输出，而不是继续压缩（保护带是设计边界，不参与压缩）",
+                    estimatedTokens, maxTokens, deepSeekConfig.getCompaction().getProtectRounds());
+        }
+        return estimatedTokens;
+    }
+
+    /**
+     * 在 Flux 首部执行真正的上下文压缩（可阻塞，调用方必须放到 boundedElastic 线程）。
+     *
+     * <p><b>为什么单独拆出来（2026-11-23）</b>：压缩可能调用多次 LLM（分批），耗时几十秒。
+     * 放在 SSE 首部且用 {@code subscribeOn(boundedElastic)} 执行，可以做到「先推一条
+     * 整理中事件，再阻塞压缩」——既让用户看到反馈，又不占用 reactor 调度线程
+     * （否则会拖慢同进程其他会话的 SSE 输出）。</p>
+     *
+     * <p>压缩成功后 {@code replaceInMemory} 会原地改写 {@code apiRequest.messages}
+     * （与 {@code buildRequestBody} 传入的是同一个 List），因此无需重新构建请求体；
+     * 但压缩可能切断 assistant(tool_calls) 与 tool 的配对，必须再净化一次。</p>
+     *
+     * @param context prepare 阶段返回的会话上下文
+     */
+    @SuppressWarnings("unchecked")
+    private void applyDeferredContextGuard(ConversationContext context) {
+        try {
+            Map<String, Object> apiRequest = context.apiRequest();
+            List<Map<String, Object>> messages = (List<Map<String, Object>>) apiRequest.get("messages");
+            List<Map<String, Object>> toolsList = (List<Map<String, Object>>) apiRequest.get("tools");
+            String providerCode = resolveProviderCode(apiRequest);
+
+            int estimated = enforceContextGuard(
+                    context.storageConversationId(), messages, toolsList, providerCode);
+            apiRequest.put("_estimatedPromptTokens", estimated);
+            apiRequest.put("_toolsRawTokens", TokenEstimator.estimateToolsRaw(toolsList));
+
+            // 压缩会切断 assistant(tool_calls) 与 tool 消息的配对，发送前统一净化（幂等）
+            ToolCallSequenceSanitizer.sanitize(messages);
+        } catch (Exception e) {
+            // 压缩是「优化」不是「必需」：失败就按原上下文继续，错误留给后续 API 校验暴露
+            log.warn("上下文整理失败（已忽略，按原上下文继续请求）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 带心跳的上下文整理流（2026-11-23）。
+     *
+     * <p>结构：{@code Flux.merge(压缩本体, 心跳)}。</p>
+     * <ul>
+     *   <li><b>压缩本体</b>：{@code Mono.fromRunnable} + {@code subscribeOn(boundedElastic)}，
+     *       阻塞执行但不占用 reactor 线程；完成（含异常/取消）时通过 {@code Sinks.Empty} 发信号。</li>
+     *   <li><b>心跳</b>：{@code Flux.interval(15s)} 每 15 秒推一条 reasoning 事件，
+     *       {@code takeUntilOther(完成信号)} 保证压缩一结束就停止，不会泄漏定时器。</li>
+     * </ul>
+     *
+     * <p>压缩通常在 15 秒内完成，此时心跳一条都不会发出（interval 首次触发在 15 秒），
+     * 只有在真正长耗时的分批压缩时才会保活。</p>
+     *
+     * @param context 会话上下文（压缩会原地改写其中的 messages）
+     * @return 只包含心跳事件的事件流（无心跳时为空流）
+     */
+    private Flux<String> buildGuardWorkWithHeartbeat(ConversationContext context) {
+        // 压缩完成信号：正常/异常/取消都会触发，保证心跳一定能停
+        Sinks.Empty<Void> finished = Sinks.empty();
+
+        // 压缩本体：阻塞操作放到 boundedElastic，避免占住 reactor 调度线程
+        Flux<String> work = Mono.fromRunnable(() -> applyDeferredContextGuard(context))
+                .subscribeOn(Schedulers.boundedElastic())
+                .thenMany(Flux.<String>empty())
+                .doFinally(signal -> finished.tryEmitEmpty());
+
+        // 心跳：每 15 秒一条；压缩结束即终止（takeUntilOther），不会留下常驻定时器
+        Flux<String> heartbeat = Flux.interval(GUARD_HEARTBEAT_INTERVAL)
+                .map(seq -> createReasoningSSEEvent(
+                        "⏳ 仍在整理上下文…（已用 " + (seq + 1) * GUARD_HEARTBEAT_INTERVAL.toSeconds() + " 秒）"))
+                .takeUntilOther(finished.asMono());
+
+        return Flux.merge(work, heartbeat);
+    }
+
     @Override
     /**
      * 流式聊天接口
@@ -1411,11 +1608,34 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String sessionEventStr = "{\"sessionId\":" + conversationId + "}";
         Flux<String> sessionEvent = Flux.just(sessionEventStr);
 
+        /*
+          ===== 上下文整理前置流（2026-11-23）=====
+
+          为什么压缩放在这里：prepare 阶段压缩时 SSE 还没建立，用户点发送后只能干等
+          几十秒（分批压缩可能多次 LLM 往返），体感是「卡死」。现在改成：
+            ① sessionId 事件先发（前端立刻拿到会话 ID）
+            ② 若需要整理，先推「正在整理上下文…」事件（用户看到明确反馈）
+            ③ 在 boundedElastic 线程执行真正的压缩（不占用 reactor 线程）
+            ④ 再进入真正的请求流（压缩后的 messages 已原地生效）
+
+          压缩是否发生由 prepare 阶段算好的 _guardNeeded 决定（口径含 tools 与全部注入）。
+         */
+        boolean guardNeeded = Boolean.TRUE.equals(apiRequest.get("_guardNeeded"));
+        Flux<String> guardPrelude = guardNeeded
+                ? Flux.concat(
+                        Flux.just(createReasoningSSEEvent("🧹 上下文接近上限，正在整理历史上下文…")),
+                        // 压缩本体 + 每 15 秒心跳（长压缩时防止 SSE 被网关按空闲连接断开）
+                        buildGuardWorkWithHeartbeat(context))
+                : Flux.<String>empty();
+
         if (hasTools) {
             // 取消同一会话中正在运行的后台任务（避免同一会话并发多个工具循环互相干扰）
-            cancelRunningTask(conversationId);
-            // 在后台启动工具循环（断开不销毁），返回事件流
-            return Flux.concat(sessionEvent, startBackgroundTask(conversationId, storageConversationId, apiRequest));
+            // ★ 取消与启动整体放进 defer：必须等「整理前置流」完成后再开始新任务，
+            //   否则新任务会先在旧上下文上跑起来（压缩落库后它重建历史才会应用新水位线）。
+            return Flux.concat(sessionEvent, guardPrelude, Flux.defer(() -> {
+                cancelRunningTask(conversationId);
+                return startBackgroundTask(conversationId, storageConversationId, apiRequest);
+            }).subscribeOn(Schedulers.boundedElastic()));
         } else {
             // 没有工具定义，使用原有流式逻辑
             // 收集响应内容，用于保存助手消息
@@ -1457,7 +1677,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             if (ctxClient != null) {
                 ctxClient.getRequestHeaders().forEach(chatRequestSpec::header);
             }
-            return Flux.concat(sessionEvent, chatRequestSpec
+            // guardPrelude 先执行（含「整理中」事件 + 压缩），再订阅 WebClient 请求体流。
+            // WebClient 链是懒的（订阅时才真正发请求），所以这里不需要额外 defer；
+            // 压缩后 replaceInMemory 原地改写的正是 preparedBody.messages 引用的同一个 List。
+            return Flux.concat(sessionEvent, guardPrelude, chatRequestSpec
                     .bodyValue(preparedBody)
                     .accept(MediaType.TEXT_EVENT_STREAM) // 接受text/event-stream
                     .retrieve()
@@ -1519,7 +1742,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         log.debug("流式调用完成，保存助手消息，content长度: {}, reasoning长度: {}",
                                 content != null ? content.length() : 0, reasoning != null ? reasoning.length() : 0);
                         // 异步预压缩：提前压缩最早的历史，降低下次请求延迟
-                        compactionService.asyncPrecompress(conversationId, providerCode);
+                        // （带上 tools raw + 本次生效的 contextMode，保证估算与真实请求同口径）
+                        compactionService.asyncPrecompress(conversationId, providerCode,
+                                readToolsRawTokens(apiRequest),
+                                ContextMode.from((String) apiRequest.get("_contextMode"), ContextMode.DEFAULT));
                     })
                     .onErrorResume(error -> {
                         // ★ 用户友好错误反馈（无工具直连路径，与任务级 error 回调用同一转换器）：
@@ -1551,6 +1777,20 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             return 0;
         }
         Object value = apiRequest.get("_estimatedPromptTokens");
+        return value instanceof Number number ? number.intValue() : 0;
+    }
+
+    /**
+     * 读取「tools 定义的 raw token 估算」（由 prepareConversationContext 写入 {@code _toolsRawTokens}）。
+     *
+     * <p>异步预压缩用它把统计口径补齐为「messages raw + tools raw」，与请求前守卫、
+     * 工具循环守卫保持一致；缺失时返回 0（退化为仅 messages 口径）。</p>
+     */
+    private int readToolsRawTokens(Map<String, Object> apiRequest) {
+        if (apiRequest == null) {
+            return 0;
+        }
+        Object value = apiRequest.get("_toolsRawTokens");
         return value instanceof Number number ? number.intValue() : 0;
     }
 
@@ -1813,7 +2053,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 } catch (Exception ignored) {}
                             }
                             // 后台异步预压缩：提前压缩最早的历史，降低下次请求延迟
-                            compactionService.asyncPrecompress(conversationId, providerCode);
+                            // （带上 tools raw + 本次生效的 contextMode，保证估算与真实请求同口径）
+                            compactionService.asyncPrecompress(conversationId, providerCode,
+                                    readToolsRawTokens(apiRequest),
+                                    ContextMode.from((String) apiRequest.get("_contextMode"), ContextMode.DEFAULT));
                             // 2026-09-21 双写修复：条件注销（仅当总线仍为本任务的 sink），防迟到清理误拆新任务通道
                             agentEventBus.unregisterIfSame(conversationId, sink);
                             taskSubscriptions.remove(conversationId);
@@ -2324,8 +2567,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 afterLoopCompact, loopEstimatedTokens, loopRawTokens);
                     }
                     if (loopEstimatedTokens > toolLoopGuardLimit) {
-                        log.warn("压缩后仍超限（保护带或本轮新增内容过大），不做裁剪、继续请求：估算 {} tokens, 上限 {}",
-                                loopEstimatedTokens, toolLoopGuardLimit);
+                        log.warn("压缩后仍超限（保护带或本轮新增内容过大），不做裁剪、继续请求：估算 {} tokens, 上限 {}。"
+                                        + "若频繁出现：说明最近 {} 轮对话本身已接近模型窗口 —— 应更换上下文更大的模型/Provider，"
+                                        + "或减少单轮工具输出（保护带是设计边界，不参与压缩）",
+                                loopEstimatedTokens, toolLoopGuardLimit,
+                                deepSeekConfig.getCompaction().getProtectRounds());
                     }
                 }
             }

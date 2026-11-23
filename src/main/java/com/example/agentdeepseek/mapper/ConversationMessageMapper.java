@@ -48,6 +48,30 @@ public interface ConversationMessageMapper {
     List<ConversationMessage> selectByConversationId(Long conversationId);
 
     /**
+     * 按压缩水位线增量查询「构建上下文所需」的消息（2026-11-23）。
+     *
+     * <p><b>为什么需要它</b>：{@link #selectByConversationId} 会全量加载整个会话
+     * （实测某长会话 31426 条 / 4412 万字符），其中绝大部分都已被压缩记录覆盖、
+     * 加载后在内存里又被 {@code applyCompactionRecords} 丢掉 —— 等于每次请求都白白
+     * 读几十 MB。压缩只减少了发给模型的内容，并没有减少 DB 读取量。</p>
+     *
+     * <p><b>过滤规则</b>：保留全部 SYSTEM（系统提示词永不参与压缩）+ {@code id > afterId}
+     * （水位线之后仍需参与上下文的消息）。索引可直接命中
+     * {@code idx_conversation_id(conversation_id)} + 主键 id。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param afterId        压缩水位线（{@code conversation_compaction.end_message_id}）；
+     *                       没有压缩记录时不要调用本方法，仍走全量查询
+     * @return 消息列表（按 id 升序）
+     */
+    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at "
+            + "FROM conversation_message WHERE conversation_id = #{conversationId} "
+            + "AND (role = 'SYSTEM' OR id > #{afterId}) ORDER BY id ASC")
+    @ResultMap("ConversationMessageResultMap")
+    List<ConversationMessage> selectForContext(@Param("conversationId") Long conversationId,
+                                               @Param("afterId") long afterId);
+
+    /**
      * 查询会话中「倒数第 offset+1 个正常用户消息」的 id —— 作为按轮分页的页起点。
      *
      * <p>分页口径（2026-10-17 聊天记录懒加载改造）：</p>

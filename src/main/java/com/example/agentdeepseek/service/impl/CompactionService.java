@@ -1,5 +1,6 @@
 package com.example.agentdeepseek.service.impl;
 
+import com.example.agentdeepseek.common.enums.ContextMode;
 import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.CompactionMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
@@ -119,10 +120,46 @@ public class CompactionService {
      * 按字符量则与真实上下文增长线性对应。</p>
      *
      * <p>取 40 万字符 ≈ 17 万 token（按 {@code CHARS_TO_TOKEN_RATIO=0.425}）：
-     * 压缩后上下文通常回落到 20 万 token 左右，再涨 17 万即约 37% —— 正好能被
-     * {@link #ASYNC_PRECOMPRESS_THRESHOLD}（30%）接住，不会拖到窗口爆掉。</p>
+     * 压缩后上下文通常回落到 15~20 万 token 左右，再涨 17 万即约 35% —— 仍在
+     * {@link #ASYNC_PRECOMPRESS_THRESHOLD}（60%）之下，不会拖到窗口爆掉。</p>
      */
     private static final long COMPACT_COOLDOWN_CHARS = 400_000L;
+
+    /**
+     * 单次压缩的「最小收益」下限（字符）。实际阈值 =
+     * {@code max(本值, 生效上限 × 5% 折算字符)}。
+     *
+     * <p><b>为什么必须设下限（2026-11-23）</b>：压缩上界是「倒数第 protectRounds 条 user」，
+     * 它会随用户每次新提问向前移动。若不做收益判断，只要上下文仍在阈值附近，
+     * 用户每发一句就会「压掉刚空出来的一小段」——实测出现过一条记录只覆盖 2 条消息
+     * （start=81030, end=81031）却生成 1308 字摘要，改前缀的成本远大于省下的 token，
+     * 模型侧表现为「上下文被打乱、反复失忆」。</p>
+     *
+     * <p><b>为什么要按上限折算</b>：1M 窗口配 10 万字符闸门约等于 4% 窗口，合理；
+     * 但 128K 的中转站上 10 万字符≈33% 窗口，会「攒不够就一直不压」，
+     * 反而更容易撞上限。因此按 {@code maxTokens × 5% ÷ 0.425} 折算，下限保底 3 万字符。</p>
+     */
+    private static final long MIN_PENDING_CHARS_FLOOR = 30_000L;
+
+    /**
+     * 摘要正文的体积上限（字符）。
+     *
+     * <p><b>为什么需要（2026-11-23 修复「压缩永远失败」）</b>：{@link #loadState} 为兼容旧版
+     * 区间式记录会把多条 active 摘要拼接，实测某会话拼出 <b>86.7 万字符</b>。这段文本会被
+     * 完整拼进下一次压缩 prompt（再叠加单批 15 万字符），必然超出 {@link #BATCH_TIMEOUT}；
+     * 压缩失败 → 数据库零变更 → 水位线不动 → 下次请求继续触发，
+     * 形成「每次都压、永远压不动」的死循环。</p>
+     *
+     * <p>超过本上限时，先对「旧摘要本身」做分批归并（见
+     * {@link #mergeOversizedSummary(String, String)}），把摘要压回可控体积后再压历史。</p>
+     */
+    private static final int MAX_SUMMARY_CHARS = 30_000;
+
+    /** 连续压缩失败达到该次数后进入熔断，避免每次请求都白等一次 LLM 超时 */
+    private static final int MAX_CONSECUTIVE_FAILURES = 3;
+
+    /** 压缩失败熔断时长（毫秒）：熔断期内视为「刚压缩过」，直接跳过压缩 */
+    private static final long FAILURE_CIRCUIT_MILLIS = 10 * 60 * 1000L;
 
     /**
      * 单批压缩的字符上限。
@@ -172,6 +209,12 @@ public class CompactionService {
 
     /** 会话是否正在预压缩中（防止同一会话并发压缩） */
     private final Set<Long> precompressingConversations = ConcurrentHashMap.newKeySet();
+
+    /** 会话 → 连续压缩失败次数（一次成功即清零） */
+    private final Map<Long, Integer> consecutiveFailures = new ConcurrentHashMap<>();
+
+    /** 会话 → 熔断截止时间戳（毫秒）；存在且未过期表示「压缩暂停」 */
+    private final Map<Long, Long> failureCircuitUntil = new ConcurrentHashMap<>();
 
     @Autowired
     public CompactionService(DeepSeekConfig deepSeekConfig,
@@ -291,16 +334,31 @@ public class CompactionService {
             return -1;
         }
 
-        CompactionRecord record = doCompact(conversationId, providerCode, true);
-        if (record == null) {
+        /*
+          ★ 同一会话互斥（2026-11-23）：同步压缩与异步预压缩共用这把「会话级锁」。
+
+          并发压缩的后果：两条请求从同一水位线出发、各自调用 LLM 压同一段历史，
+          后写入的记录把先写入的 supersede 掉；数据虽不坏（摘要都是基于同一份旧摘要累进），
+          但会白花一次压缩成本，且两个请求内存里替换出的前缀形态不一致。
+         */
+        if (!precompressingConversations.add(conversationId)) {
+            log.debug("会话已有压缩在进行中，跳过本次同步压缩：conversationId={}", conversationId);
             return -1;
         }
+        try {
+            CompactionRecord record = doCompact(conversationId, providerCode, true);
+            if (record == null) {
+                return -1;
+            }
 
-        // 内存侧同步：把「倒数第 protectRounds 条 user 之前」的非 system 消息换成摘要
-        if (messages != null && !messages.isEmpty() && record.getSummary() != null) {
-            replaceInMemory(messages, cfg.getProtectRounds(), record.getSummary());
+            // 内存侧同步：把「倒数第 protectRounds 条 user 之前」的非 system 消息换成摘要
+            if (messages != null && !messages.isEmpty() && record.getSummary() != null) {
+                replaceInMemory(messages, cfg.getProtectRounds(), record.getSummary());
+            }
+            return TokenEstimator.estimateMessages(messages, providerCode);
+        } finally {
+            precompressingConversations.remove(conversationId);
         }
-        return TokenEstimator.estimateMessages(messages, providerCode);
     }
 
     /**
@@ -322,6 +380,45 @@ public class CompactionService {
      * @param providerCode   Provider 编码
      */
     public void asyncPrecompress(Long conversationId, String providerCode) {
+        asyncPrecompress(conversationId, providerCode, 0, ContextMode.DEFAULT);
+    }
+
+    /**
+     * 异步预压缩（带 Provider + tools 口径）。
+     *
+     * <p><b>为什么需要 toolsRawTokens（2026-11-23）</b>：服务端 {@code prompt_tokens} 包含 tools 定义，
+     * 本项目约 20~31 个工具的 schema 恒占约 6 万 token。此前异步预压缩只用
+     * {@code estimateMessages()}（不含 tools）去比 60% 阈值，真实占用会被系统性低估 6 万 token，
+     * 导致「本应提前压掉」的会话拖到请求前才同步压缩（用户侧多等几十秒）。
+     * 现在由调用方传入 tools 的 raw 估算，与请求前守卫、工具循环守卫使用同一套口径。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param providerCode   Provider 编码
+     * @param toolsRawTokens 本次请求 tools 定义的 raw token 估算（无工具传 0）
+     */
+    public void asyncPrecompress(Long conversationId, String providerCode, int toolsRawTokens) {
+        asyncPrecompress(conversationId, providerCode, toolsRawTokens, ContextMode.DEFAULT);
+    }
+
+    /**
+     * 异步预压缩（带 Provider + tools + 上下文模式）。
+     *
+     * <p><b>为什么还要传 mode（2026-11-23 修复口径漂移）</b>：旧实现固定用全局
+     * {@code isStripHistoryReasoning()} 估算，而实际请求是按「请求参数 &gt; sys_config &gt; 全局」
+     * 解析出的会话级 {@link ContextMode} 构建的 —— 两者不一致时估算会跑偏：</p>
+     * <ul>
+     *   <li>会话是 balanced/compact 但全局是 full → 把整段历史 reasoning 算进去 → <b>严重高估</b>，
+     *       60% 阈值提前触发，压缩频率与改前缀次数一起上升；</li>
+     *   <li>会话是 compact 时工具结果已被摘要化，旧实现仍按原文估算 → 同样高估；</li>
+     *   <li>反向组合（全局 balanced、请求级 full）→ 低估，压缩拖到接近上限才做。</li>
+     * </ul>
+     *
+     * @param conversationId 会话 ID
+     * @param providerCode   Provider 编码
+     * @param toolsRawTokens 本次请求 tools 定义的 raw token 估算（无工具传 0）
+     * @param mode           本次请求实际生效的上下文模式（{@code null} 视为默认 balanced）
+     */
+    public void asyncPrecompress(Long conversationId, String providerCode, int toolsRawTokens, ContextMode mode) {
         DeepSeekConfig.CompactionConfig cfg = deepSeekConfig.getCompaction();
         if (!cfg.isEnabled() || !cfg.isAsyncPrecompress() || conversationId == null) {
             return;
@@ -333,19 +430,30 @@ public class CompactionService {
 
         CompletableFuture.runAsync(() -> {
             try {
-                // 1. 按「真实请求的组装顺序」估算：排序 → 应用已有摘要 → 转 API 口径
-                List<ConversationMessage> dbMessages =
-                        conversationMessageMapper.selectByConversationId(conversationId);
+                // 1. 增量读取：只取「SYSTEM + 水位线之后」的消息（与请求路径同一口径），
+                //    避免后台在每次请求结束后都全量加载几万条已被摘要覆盖的历史。
+                CompactState state = loadState(conversationId);
+                List<ConversationMessage> dbMessages;
+                if (state.watermark > 0) {
+                    dbMessages = conversationMessageMapper.selectForContext(conversationId, state.watermark);
+                } else {
+                    dbMessages = conversationMessageMapper.selectByConversationId(conversationId);
+                }
                 if (dbMessages == null || dbMessages.size() < 6) {
                     return;
                 }
                 dbMessages.sort(Comparator.comparing(ConversationMessage::getCreatedAt,
                         Comparator.nullsLast(Comparator.naturalOrder())));
-                applyCompactionRecords(conversationId, dbMessages);
+                // 摘要必须在排序之后再插入：它没有 createdAt（nullsLast 会被排到末尾），
+                // 先插会把位置搞错，影响「真实请求的组装顺序」这一评估前提。
+                if (state.watermark > 0) {
+                    insertSummaryBefore(conversationId, dbMessages, state.summary, state.watermark);
+                }
 
-                List<Map<String, Object>> apiMessages =
-                        toApiMessages(dbMessages, deepSeekConfig.isStripHistoryReasoning());
-                int estimatedTokens = TokenEstimator.estimateMessages(apiMessages, providerCode);
+                List<Map<String, Object>> apiMessages = toApiMessages(dbMessages, mode);
+                // 与真实 prompt_tokens 同口径：messages raw + tools raw，再乘 provider 校准比率。
+                int rawTokens = TokenEstimator.estimateMessagesRaw(apiMessages) + Math.max(0, toolsRawTokens);
+                int estimatedTokens = TokenEstimator.applyRatio(rawTokens, providerCode);
                 int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
                 double ratio = (double) estimatedTokens / maxTokens;
 
@@ -358,9 +466,10 @@ public class CompactionService {
                     return;
                 }
 
-                log.info("异步预压缩触发：conversationId={}, provider={}, 估算 tokens={}（已应用摘要）, 生效上限={}, 比例={}",
-                        conversationId, providerCode, estimatedTokens, maxTokens,
-                        String.format("%.4f", ratio));
+                log.info("异步预压缩触发：conversationId={}, provider={}, 估算 tokens={}（已应用摘要，messagesRaw={} + toolsRaw={}）, 生效上限={}, 比例={}",
+                        conversationId, providerCode, estimatedTokens,
+                        TokenEstimator.estimateMessagesRaw(apiMessages), Math.max(0, toolsRawTokens),
+                        maxTokens, String.format("%.4f", ratio));
 
                 // 异步路径受冷却约束：它是「提前小步压」，不值得为它频繁改前缀
                 doCompact(conversationId, providerCode, false);
@@ -383,6 +492,12 @@ public class CompactionService {
      */
     public boolean isRecentlyCompacted(Long conversationId) {
         try {
+            // 熔断期内视为「刚压缩过」：连续失败后不再每次请求都白等一次 LLM 超时
+            // （2026-11-23：旧实现只看字符增量，压缩一直失败 + 水位线不推进时
+            //  会导致每次请求都重试压缩，用户侧表现为「反复压缩、卡住不动」。）
+            if (isCompactionCircuitOpen(conversationId)) {
+                return true;
+            }
             CompactState state = loadState(conversationId);
             if (state.watermark <= 0) {
                 return false;
@@ -431,7 +546,7 @@ public class CompactionService {
     }
 
     /** 压缩状态：一份累进摘要 + 一个水位线 */
-    private static final class CompactState {
+    public static final class CompactState {
         private final String summary;
         private final long watermark;
 
@@ -439,6 +554,59 @@ public class CompactionService {
             this.summary = summary;
             this.watermark = watermark;
         }
+
+        /** 累进摘要正文（没压过时为 null） */
+        public String summary() {
+            return summary;
+        }
+
+        /** 水位线（{@code end_message_id}），0 表示没有任何压缩记录 */
+        public long watermark() {
+            return watermark;
+        }
+    }
+
+    /**
+     * 读取会话当前的压缩快照（水位线 + 累进摘要），供 {@code ContextBuilder} 增量重建上下文。
+     *
+     * <p>与 {@link #applyCompactionRecords} 的区别：那个方法是「全量读出后在内存里替换」，
+     * 适合后台/兼容路径；本方法只给出水位线与摘要，调用方可以直接用
+     * {@code ConversationMessageMapper#selectForContext} 在 SQL 层过滤掉被压缩的历史，
+     * 避免每次请求都加载几十 MB 已废弃正文。</p>
+     *
+     * @param conversationId 会话 ID
+     * @return 快照（无记录时 summary=null、watermark=0）
+     */
+    public CompactState loadSnapshot(Long conversationId) {
+        return loadState(conversationId);
+    }
+
+    /**
+     * 在「按水位线增量查询」得到的消息列表里插入摘要消息。
+     *
+     * <p>位置：第一条<b>非 SYSTEM</b> 消息之前（这些消息的 id 都大于水位线）；
+     * 若列表里只有 SYSTEM，则追加到末尾。之后 {@code ContextBuilder} 会把 SYSTEM
+     * 提到列表最前，最终形态与全量路径完全一致：{@code system + 摘要 + 水位线之后的对话}。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param messages       增量查询得到的消息列表（会被原地插入摘要）
+     * @param summary        累进摘要正文
+     * @param watermark      水位线（仅用于摘要消息的合成 id 与日志）
+     */
+    public void insertSummaryBefore(Long conversationId, List<ConversationMessage> messages,
+                                    String summary, long watermark) {
+        if (messages == null || summary == null || summary.isBlank()) {
+            return;
+        }
+        ConversationMessage summaryMsg = buildSummaryMessage(conversationId, summary, watermark);
+        int insertAt = messages.size();
+        for (int i = 0; i < messages.size(); i++) {
+            if (messages.get(i).getRole() != MessageRole.SYSTEM) {
+                insertAt = i;
+                break;
+            }
+        }
+        messages.add(insertAt, summaryMsg);
     }
 
     // ==================== 对外接口：重建 ====================
@@ -524,6 +692,34 @@ public class CompactionService {
             }
         }
 
+        // 2.5 旧摘要体积预检与归并（2026-11-23，修复「旧摘要过大 → 压缩永远超时」）
+        //
+        //     旧版按区间写多条 active 记录，loadState 会全部拼接；实测某会话拼出 86.7 万字符。
+        //     若不处理，这段文本会被全量拼进压缩 prompt（再叠加单批 15 万字符），
+        //     45 秒内 prefill 必超时 → 压缩永远失败 → 水位线不动 → 每次请求都重试，
+        //     形成「反复压缩但零变更」的死循环，同时巨型摘要本身把上下文顶在上限附近。
+        //
+        //     这里先把它按 MAX_BATCH_CHARS 分块归并成一份精简摘要，再继续正常压缩流程；
+        //     归并结果随本次落库一起生效（不单独写库，避免多改一次前缀）。
+        boolean summaryMerged = false;
+        if (prevSummary != null && prevSummary.length() > MAX_SUMMARY_CHARS) {
+            log.warn("旧摘要过大（{} 字符 > {}），先做分批归并：conversationId={}",
+                    prevSummary.length(), MAX_SUMMARY_CHARS, conversationId);
+            String merged = mergeOversizedSummary(prevSummary, providerCode);
+            if (merged == null || merged.isBlank()) {
+                log.warn("旧摘要归并失败，本次放弃（数据库零变更）：conversationId={}", conversationId);
+                recordCompactionFailure(conversationId);
+                return null;
+            }
+            log.info("旧摘要归并完成：{} 字符 → {} 字符, conversationId={}",
+                    prevSummary.length(), merged.length(), conversationId);
+            // 硬上限兜底：归并输出仍可能超过阈值（模型长度不可控），必须截断——
+            // 否则 loadState 每次都会读到超限摘要，而归并不推进水位线、冷却判不出来，
+            // 会退化成「每次请求都归并一次」的死循环。
+            prevSummary = enforceSummaryLimit(merged, conversationId);
+            summaryMerged = true;
+        }
+
         // 3. 压缩上界：倒数第 protectRounds 条 user 消息的 id
         //    ★ 用 id < 上界 取区间，最后一条 user 及其之后天然不在压缩范围内 → 本轮永不被压
         //
@@ -537,6 +733,11 @@ public class CompactionService {
         Long boundaryExclusive = conversationMessageMapper.selectNthUserMessageIdFromTail(
                 conversationId, null, boundaryOffset);
         if (boundaryExclusive == null || boundaryExclusive <= watermark) {
+            // 无历史可压：如果刚刚做过「旧摘要归并」，仍要落库把它固化下来（自愈），
+            // 否则下次重建又会把巨型摘要拼回上下文，等于白归并一次。
+            if (summaryMerged) {
+                return persistMergedSummaryOnly(conversationId, prevSummary, watermark);
+            }
             log.debug("压缩跳过：可压缩区间为空（保护带覆盖全部历史或历史轮数不足）, boundary={}, 水位线={}",
                     boundaryExclusive, watermark);
             return null;
@@ -554,9 +755,26 @@ public class CompactionService {
             }
             pending.add(m);
         }
-        if (pending.size() < 2) {
-            log.debug("压缩跳过：可压缩消息过少（{} 条）, conversationId={}",
-                    pending.size(), conversationId);
+        // 4.5 最小收益判断（2026-11-23）：可压区间太小就不值得改一次前缀。
+        //     上界随用户每轮新提问前移，没有这道闸门就会出现「每次只压 2 条消息、
+        //     摘要却重写一遍」的抖动（实测 start=81030/end=81031 只覆盖 2 条）。
+        //     阈值按「当前 Provider 生效上限」折算（5% token ÷ 0.425 字符/token），
+        //     下限 3 万字符 —— 小窗口 Provider 不能套用 1M 窗口的绝对阈值。
+        long pendingChars = 0L;
+        for (ConversationMessage m : pending) {
+            pendingChars += textLen(m.getContent()) + textLen(m.getReasoning());
+        }
+        int guardMaxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
+        long minPendingChars = Math.max(MIN_PENDING_CHARS_FLOOR,
+                (long) (guardMaxTokens * 0.05 / 0.425));
+        if (pending.size() < 2 || pendingChars < minPendingChars) {
+            if (summaryMerged) {
+                // 历史太少不值得压，但「旧摘要归并」这个修复本身必须落库，
+                // 否则巨型摘要会一直留在上下文里。
+                return persistMergedSummaryOnly(conversationId, prevSummary, watermark);
+            }
+            log.debug("压缩跳过：可压区间过小（{} 条 / {} 字符 < {}）, conversationId={}",
+                    pending.size(), pendingChars, minPendingChars, conversationId);
             return null;
         }
 
@@ -572,14 +790,18 @@ public class CompactionService {
             if (next == null || next.isBlank()) {
                 log.warn("压缩中止：第 {}/{} 批失败，本次整体放弃（数据库零变更，下次重试）, conversationId={}",
                         i + 1, batches.size(), conversationId);
+                recordCompactionFailure(conversationId);
                 return null;
             }
-            rolling = next;
+            // 每批产出都过一遍硬上限：避免中间过程就把摘要滚大（最终落库的必须是截断后的版本）
+            rolling = enforceSummaryLimit(next, conversationId);
             newWatermark = batch.get(batch.size() - 1).getId();
         }
 
         // 7. 落库（一次性）
-        int beforeChars = textLen(prevSummary);
+        //    savings 用「原始摘要（state.summary）」作基数，而不是归并后的 prevSummary ——
+        //    归并本身就是为了削掉旧摘要的膨胀部分，用归并值会掩盖真实收益。
+        int beforeChars = textLen(state.summary);
         for (ConversationMessage m : pending) {
             beforeChars += textLen(m.getContent()) + textLen(m.getReasoning());
         }
@@ -591,10 +813,157 @@ public class CompactionService {
                 conversationId, rolling, watermark, newWatermark, savings);
         compactionMapper.insert(record);
         compactionMapper.markSupersededExcept(conversationId, record.getId());
+        recordCompactionSuccess(conversationId);
 
-        log.info("压缩完成（写法B）：conversationId={}, 批数={}, 消息={} 条, 水位线 {} → {}, 摘要 {} 字符",
-                conversationId, batches.size(), pending.size(), watermark, newWatermark, rolling.length());
+        log.info("压缩完成（写法B）：conversationId={}, 批数={}, 消息={} 条, 水位线 {} → {}, 摘要 {} 字符, 节省≈{} tokens",
+                conversationId, batches.size(), pending.size(), watermark, newWatermark, rolling.length(), savings);
         return record;
+    }
+
+    /**
+     * 只落库「归并后的摘要」而不推进水位线。
+     *
+     * <p>用于两种场景：① 历史已经不够压（boundary &lt;= 水位线）；② 可压区间太小、
+     * 尚未达到 {@link #MIN_PENDING_CHARS_TO_COMPACT}。此时压缩本身不划算，
+     * 但旧摘要归并是必须固化的修复 —— 否则下次重建又会把巨型摘要拼回上下文。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param mergedSummary  归并后的精简摘要
+     * @param watermark      当前水位线（保持不变）
+     * @return 新落库的记录
+     */
+    private CompactionRecord persistMergedSummaryOnly(Long conversationId, String mergedSummary, long watermark) {
+        // 再次兜底：本方法不推进水位线，摘要必须严格小于阈值，否则下次请求会再次触发归并。
+        String safeSummary = enforceSummaryLimit(mergedSummary, conversationId);
+        CompactionRecord record = new CompactionRecord(
+                conversationId, safeSummary, watermark, watermark, 0);
+        compactionMapper.insert(record);
+        compactionMapper.markSupersededExcept(conversationId, record.getId());
+        recordCompactionSuccess(conversationId);
+        log.info("旧摘要归并已落库（无可压历史，水位线保持 {}）：conversationId={}, 摘要 {} 字符",
+                watermark, conversationId, safeSummary.length());
+        return record;
+    }
+
+    /**
+     * 把「过大的旧摘要」按 {@link #MAX_BATCH_CHARS} 分块、逐块累进归并成一份精简摘要。
+     *
+     * <p>与历史压缩走同一套 {@link #summarizeOnce}，因此单批请求始终可控，
+     * 不会出现「一次塞 86.7 万字符 → 必然超时」的问题。</p>
+     *
+     * @param prevSummary  超大摘要正文
+     * @param providerCode Provider 编码
+     * @return 归并后的摘要；任一批失败返回 {@code null}（调用方整体放弃）
+     */
+    private String mergeOversizedSummary(String prevSummary, String providerCode) {
+        List<String> chunks = splitTextByChars(prevSummary, MAX_BATCH_CHARS);
+        String rolling = null;
+        for (int i = 0; i < chunks.size(); i++) {
+            List<ConversationMessage> batch = List.of(virtualUserMessage(chunks.get(i)));
+            String next = summarizeOnce(rolling, batch, providerCode);
+            if (next == null || next.isBlank()) {
+                log.warn("旧摘要归并中止：第 {}/{} 批失败，本次整体放弃", i + 1, chunks.size());
+                return null;
+            }
+            rolling = next;
+        }
+        return rolling;
+    }
+
+    /**
+     * 摘要硬上限保护：超过 {@link #MAX_SUMMARY_CHARS} 时截断、只保留「较晚发生的事实」。
+     *
+     * <p><b>为什么必须硬截断（2026-11-23）</b>：累进摘要的输入包含旧摘要，模型输出长度不可控。
+     * 若只做「超过就再归并」，而归并本身<b>不推进水位线</b>，按「水位线之后新增字符」计算的冷却
+     * 就不会生效 —— 结果是每次请求都归并一次、每次都改前缀（比不压更糟）。
+     * 这里用硬上限兜底：保证 {@link #loadState} 读到的摘要一定在阈值内，归并最多发生一次。</p>
+     *
+     * <p>截断保留尾部：累积摘要按时间顺序书写，越靠后的事实越贴近当前任务；
+     * 截断点会向后对齐到最近的换行，避免把一句话劈成两半。</p>
+     *
+     * @param summary        模型产出的摘要
+     * @param conversationId 会话 ID（仅用于日志）
+     * @return 不超过 {@link #MAX_SUMMARY_CHARS} 的摘要
+     */
+    private String enforceSummaryLimit(String summary, Long conversationId) {
+        if (summary == null || summary.length() <= MAX_SUMMARY_CHARS) {
+            return summary;
+        }
+        int cut = summary.length() - MAX_SUMMARY_CHARS;
+        int firstNewline = summary.indexOf('\n', cut);
+        if (firstNewline > 0 && firstNewline < cut + 200) {
+            cut = firstNewline + 1;
+        }
+        String truncated = summary.substring(cut);
+        log.warn("摘要超上限（{} 字符 > {}），已截断保留最近部分：conversationId={}",
+                summary.length(), MAX_SUMMARY_CHARS, conversationId);
+        return truncated;
+    }
+
+    /**
+     * 按字符上限切分长文本（优先在换行处断开，避免把一句话劈成两半）。
+     *
+     * @param text     原文本
+     * @param maxChars 单块字符上限
+     * @return 切分后的文本块（保序）
+     */
+    private List<String> splitTextByChars(String text, int maxChars) {
+        List<String> chunks = new ArrayList<>();
+        if (text == null || text.isEmpty()) {
+            return chunks;
+        }
+        int start = 0;
+        while (start < text.length()) {
+            int end = Math.min(text.length(), start + maxChars);
+            if (end < text.length()) {
+                int lastNewline = text.lastIndexOf('\n', end);
+                if (lastNewline > start + maxChars / 2) {
+                    end = lastNewline + 1;
+                }
+            }
+            chunks.add(text.substring(start, end));
+            start = end;
+        }
+        return chunks;
+    }
+
+    /** 构造一条「仅用于归并摘要」的虚拟 user 消息（不落库；id=0 表示非真实消息） */
+    private ConversationMessage virtualUserMessage(String content) {
+        ConversationMessage m = new ConversationMessage();
+        m.setId(0L);
+        m.setRole(MessageRole.USER);
+        m.setContent(content);
+        return m;
+    }
+
+    /** 记录一次压缩失败；连续失败达到阈值后熔断一段时间，避免每次请求都白等 LLM 超时 */
+    private void recordCompactionFailure(Long conversationId) {
+        int failures = consecutiveFailures.merge(conversationId, 1, Integer::sum);
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+            failureCircuitUntil.put(conversationId, System.currentTimeMillis() + FAILURE_CIRCUIT_MILLIS);
+            consecutiveFailures.remove(conversationId);
+            log.error("压缩连续失败 {} 次，熔断 {} 分钟（熔断期内不再尝试压缩）：conversationId={}",
+                    failures, FAILURE_CIRCUIT_MILLIS / 60_000, conversationId);
+        }
+    }
+
+    /** 压缩成功：清除失败计数与熔断 */
+    private void recordCompactionSuccess(Long conversationId) {
+        consecutiveFailures.remove(conversationId);
+        failureCircuitUntil.remove(conversationId);
+    }
+
+    /** 是否处于「压缩失败熔断期」 */
+    private boolean isCompactionCircuitOpen(Long conversationId) {
+        Long until = failureCircuitUntil.get(conversationId);
+        if (until == null) {
+            return false;
+        }
+        if (System.currentTimeMillis() < until) {
+            return true;
+        }
+        failureCircuitUntil.remove(conversationId);
+        return false;
     }
 
     /**
@@ -695,7 +1064,9 @@ public class CompactionService {
         sb.append("3. 保留关键事实：文件路径、IP、端口、命令、配置值、报错信息、已完成的改动、得出的结论\n");
         sb.append("4. 用简洁要点输出，不要遗漏重要事实\n");
         sb.append("5. 必须使用中文\n");
-        sb.append("6. 只输出记录本身，不要额外解释，不要复述本提示词\n\n");
+        sb.append("6. 只输出记录本身，不要额外解释，不要复述本提示词\n");
+        sb.append("7. 总长度控制在 3000 字以内：宁可概括，也不要堆砌细节"
+                + "（这份记录每次压缩都会累进，过长会拖垮后续请求）\n\n");
         if (prevSummary != null && !prevSummary.isBlank()) {
             sb.append("## 更早的对话记录（需要与本次内容合并成一份完整记录）\n");
             sb.append(prevSummary).append("\n\n");
@@ -823,24 +1194,53 @@ public class CompactionService {
 
     // ==================== 消息格式转换 ====================
 
+    /** 旧签名兼容重载：等价于 balanced（strip=true）/ full（strip=false） */
+    static List<Map<String, Object>> toApiMessages(List<ConversationMessage> messages,
+                                                   boolean stripHistoryReasoning) {
+        return toApiMessages(messages,
+                stripHistoryReasoning ? ContextMode.BALANCED : ContextMode.FULL);
+    }
+
     /**
      * 将 ConversationMessage 列表转为「与真实请求口径一致」的 API 格式消息列表。
      *
-     * <p>用于异步预压缩的 token 估算：TOOL 消息的工具结果存在 {@code reasoning} 字段，
-     * 且<b>不受 stripHistoryReasoning 影响</b>（它存的是工具结果，不是思考链）。
-     * 漏算它会导致估算严重偏低、压缩判断失真。</p>
+     * <p><b>为什么要传 mode（2026-11-23 修复口径漂移）</b>：真实请求的消息由
+     * {@code ContextBuilder#buildMessagesFromHistory} 按会话生效的 {@link ContextMode} 构建：
+     * balanced/compact 会把历史 reasoning 置为空串，compact 还会把「最后一条 user 之前」的
+     * 历史工具结果替换成摘要。估算若不同步这两条规则，就会与真实请求体产生数量级偏差 ——
+     * 高估会让 60% 阈值提前触发（压缩频率、改前缀次数一起上升），低估则压得太晚。</p>
      *
-     * @param messages               已经过排序 + {@link #applyCompactionRecords} 处理的 DB 消息
-     * @param stripHistoryReasoning  是否剔除历史思考链（balanced / compact 模式为 true）
+     * <p>TOOL 消息的工具结果存在 {@code reasoning} 字段（content 通常为 NULL），
+     * 且<b>不受 reasoning 剔除策略影响</b>（它存的是工具结果，不是思考链）。</p>
+     *
+     * @param messages DB 消息（已排序、已应用水位线与摘要）
+     * @param mode     本次会话实际生效的上下文模式（{@code null} 视为默认 balanced）
      * @return API 格式消息列表，与入参逐条对应
      */
-    static List<Map<String, Object>> toApiMessages(List<ConversationMessage> messages,
-                                                   boolean stripHistoryReasoning) {
+    static List<Map<String, Object>> toApiMessages(List<ConversationMessage> messages, ContextMode mode) {
+        ContextMode effectiveMode = mode != null ? mode : ContextMode.DEFAULT;
+        boolean stripReasoning = effectiveMode.shouldStripHistoryReasoning();
+        boolean compactToolResults = effectiveMode.shouldCompactToolResults();
+
         List<Map<String, Object>> result = new ArrayList<>();
         if (messages == null) {
             return result;
         }
-        for (ConversationMessage msg : messages) {
+
+        // compact 模式只摘要「最后一条 user 之前」的工具结果（与 ContextBuilder 同一边界）：
+        // 本轮对话（最后一条 user 及其后）在真实请求里仍是工具结果原文，不能按摘要估算。
+        int lastUserIdx = -1;
+        if (compactToolResults) {
+            for (int i = messages.size() - 1; i >= 0; i--) {
+                if (messages.get(i).getRole() == MessageRole.USER) {
+                    lastUserIdx = i;
+                    break;
+                }
+            }
+        }
+
+        for (int idx = 0; idx < messages.size(); idx++) {
+            ConversationMessage msg = messages.get(idx);
             Map<String, Object> map = new HashMap<>();
             MessageRole role = msg.getRole();
 
@@ -854,10 +1254,15 @@ public class CompactionService {
             map.put("role", role.getValue());
 
             if (role == MessageRole.TOOL) {
-                // 工具结果存在 reasoning 字段（content 通常为 NULL）
                 String content = msg.getReasoning() != null ? msg.getReasoning()
                         : (msg.getContent() != null ? msg.getContent() : "");
-                map.put("content", content);
+                if (compactToolResults && idx < lastUserIdx) {
+                    // 与 ContextBuilder#compactHistoryMessages 的产出同量级（约 40 字符）。
+                    // 估算不需要真的生成摘要文本，只要方向正确（不计原文长度）。
+                    map.put("content", "[工具调用结果已精简]");
+                } else {
+                    map.put("content", content);
+                }
             } else {
                 if (msg.getContent() != null) {
                     map.put("content", msg.getContent());
@@ -866,7 +1271,7 @@ public class CompactionService {
                     if (msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
                         map.put("tool_calls", msg.getToolCalls());
                     }
-                    if (msg.getReasoning() != null && !stripHistoryReasoning) {
+                    if (msg.getReasoning() != null && !stripReasoning) {
                         map.put("reasoning_content", msg.getReasoning());
                     }
                 }

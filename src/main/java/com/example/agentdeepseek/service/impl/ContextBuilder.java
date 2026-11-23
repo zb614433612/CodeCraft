@@ -152,7 +152,9 @@ public class ContextBuilder {
     /**
      * 根据会话ID构建历史消息列表，用于API请求
      * 将数据库中的消息格式转换为DeepSeek API所需的消息格式
-     * 集成三级阈值压缩策略：应用已有压缩记录 → 智能压缩 → 滑动窗口丢弃
+     * 应用已有压缩记录后重建消息；<b>压缩决策不在这里做</b>（2026-11-23 起改由
+     * {@code DeepSeekServiceImpl#enforceContextGuard} 在全部注入完成、tools 构建后统一判断，
+     * 避免用「不含注入与 tools」的口径做压缩决策）
      * @param conversationId 会话ID
      * @return 消息列表，每个元素包含role、content和可选的tool_calls
      */
@@ -186,11 +188,31 @@ public class ContextBuilder {
      */
     public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, ContextMode mode, String providerCode) {
         ContextMode effectiveMode = mode != null ? mode : deepSeekConfig.resolveContextMode();
-        // 1. 加载原始消息
-        List<ConversationMessage> dbMessages = conversationMessageMapper.selectByConversationId(conversationId);
 
-        // 2. 应用已有的压缩记录（将已被压缩的消息替换为摘要）
-        compactionService.applyCompactionRecords(conversationId, dbMessages);
+        /*
+          ★ 2026-11-23 增量重建：只读「SYSTEM + 水位线之后」的消息
+
+          旧实现每次请求都全量加载整个会话（实测长会话 31426 条 / 4412 万字符），
+          再在内存里用 applyCompactionRecords 丢掉已被摘要覆盖的部分 —— 压缩只减小了
+          发给模型的内容，并没有减少 DB 读取量，长会话每个请求都白读几十 MB。
+
+          现在：先读压缩快照（一条 select），有水位线就按 id 增量查询（索引命中
+          idx_conversation_id + 主键），再把摘要插回原位置；没有压缩记录才走全量查询。
+          两条路径产出的消息序列完全一致：system + 摘要 + 水位线之后的对话。
+         */
+        // 1. 压缩快照（水位线 + 累进摘要）
+        CompactionService.CompactState compactionState = compactionService.loadSnapshot(conversationId);
+
+        // 2. 加载消息：有水位线走增量查询，否则全量（首次会话 / 从未压缩过）
+        List<ConversationMessage> dbMessages;
+        if (compactionState.watermark() > 0) {
+            dbMessages = conversationMessageMapper.selectForContext(conversationId, compactionState.watermark());
+            // 2.1 摘要插回「第一条非 SYSTEM 消息之前」（system 归位后会变成 system + 摘要 + 后续对话）
+            compactionService.insertSummaryBefore(conversationId, dbMessages,
+                    compactionState.summary(), compactionState.watermark());
+        } else {
+            dbMessages = conversationMessageMapper.selectByConversationId(conversationId);
+        }
 
         // 3. 将消息转换为 API 格式
         List<Map<String, Object>> result = new ArrayList<>();
@@ -290,80 +312,39 @@ public class ContextBuilder {
             ToolCallSequenceSanitizer.sanitize(result);
         }
 
-        // 4. 三级阈值上下文管理（2026-11-17 改造：只压缩，不裁剪）
-        //    上限按 Provider 解析（火山 1049K / DeepSeek 1M / 中转站可能只有 128K）。
+        // 4. 上下文预算（2026-11-23 重构：构建阶段不再自行压缩）
         //
-        //    【为什么废除裁剪 / 滑动窗口丢弃】
-        //    裁剪（trimToolLoopToBudget / trimToTokenBudget）只会改写**内存** messages，
-        //    无法保证与 DB 中的历史一致：下一轮用户发言时从 DB 重建，tool 消息又变回完整原文，
-        //    而上一轮内存里是「[CC-TRIM][工具…]」摘要 —— 同一条消息两种形态 → 前缀不再是上一次的真前缀
-        //    → 从差异点起全部按未命中重新 prefill（实测 125K 上下文 ≈ 30 秒）。
-        //    实测佐证：llm_token_usage 中 iteration=0 的 cache_hit_tokens 从 45952(98.8%)
-        //    变成全部 0，而同一轮内的 iteration≥1 始终 95%+（同轮复用同一内存列表）。
+        //    【为什么把压缩从这里移走】
+        //    本方法执行时，技能目录 / 附件提示 / 知识库摘要 / 语言指令 / 图像块都还没注入，
+        //    也看不到本次请求的 tools 定义（约 6 万 token 的固定地板）。用它做压缩决策会
+        //    系统性低估真实请求体，造成「压缩器认为没超、真正请求却超限」的口径错位，
+        //    进而出现「刚压完又被守卫判定超限、反复压缩改前缀」。
         //
-        //    【现在唯一手段：压缩并入库】
-        //    compactionService.compact 会把被压缩区间写成 conversation_compaction 记录，
-        //    之后每次 buildMessagesFromHistory 都由 applyCompactionRecords 重建出
-        //    「system + 摘要 + 其后消息」这一**稳定前缀**。历史原文仍完整保留在
-        //    conversation_message 表中（用户可查询聊天记录），只是不再参与上下文重建。
+        //    【现在由谁负责】
+        //    DeepSeekServiceImpl#enforceContextGuard：在 prepareConversationContext 末尾、
+        //    全部注入完成之后、apiRequest 构建之前执行，统计口径 =
+        //    system + 最新摘要 + 水位线之后的对话 + 全部注入 + tools（与真正发出的请求体同源）。
+        //    工具循环每一轮迭代另有同口径守卫（handleToolCallIteration）。
+        //
+        //    【这里保留什么】
+        //    只保留 compaction 被显式关闭时的滑动窗口兜底（此时没有入库摘要可用）。
         int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
-        int estimatedTokens = TokenEstimator.estimateMessages(result, providerCode);
         boolean compactionEnabled = deepSeekConfig.getCompaction().isEnabled();
 
-        if (compactionEnabled
-                && estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getCompactThreshold()) {
-            /*
-              同步压缩会阻塞调用一次 LLM（compact() → callCompactionLlm → blockingChat，最长 60 秒），
-              它直接加在「首 token 之前」的路径上，属于最昂贵的操作，因此必须先过防抖：
-              ① 刚压缩过就跳过：压缩本身要几十秒，而它只把历史摘要化一次；
-              ② 与异步预压缩共用同一个间隔常量，避免两条路径互相踩踏。
-             */
-            if (compactionService.isRecentlyCompacted(conversationId)) {
-                log.debug("跳过同步压缩：距上次压缩不足防抖间隔，直接使用现有上下文。估算 {} tokens, 上限 {}",
-                        estimatedTokens, maxTokens);
-            } else {
-                log.info("历史上下文超限（压缩阈值），尝试智能压缩：估算 {} tokens, 上限 {}",
-                        estimatedTokens, maxTokens);
-                // ★ 必须传 providerCode：压缩内部要用同一 provider 的上限来算收益与目标
-                int afterCompactTokens = compactionService.compact(conversationId, result, providerCode);
-                if (afterCompactTokens > 0) {
-                    estimatedTokens = afterCompactTokens;
-                    log.info("智能压缩完成，压缩后 {} tokens", estimatedTokens);
-                }
-            }
-        }
+        /*
+          ⚠️ 只在「压缩被显式关闭」时才做全量分词估算（2026-11-23）。
 
-        if (compactionEnabled
-                && estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
-            /*
-              压缩后仍越过「丢弃阈值」时的处理（2026-11-17 改造）：
-
-              旧实现走 trimToTokenBudget（滑动窗口丢消息）——丢弃会让上下文与历史彻底错位，
-              且下一轮重建时被丢弃的消息又回来，前缀反复断裂。现改为「再压一次（绕过防抖）」：
-              压缩是幂等且入库的，压完重建出的前缀是稳定的；实在压不动（保护带本身过大）
-              也不丢弃，只告警——宁可让 API 侧偶发 400，也不要每轮都全量 prefill。
-             */
-            log.warn("压缩后仍超限（越过丢弃阈值），尝试强制压缩（不裁剪）：估算 {} tokens, 上限 {}",
-                    estimatedTokens, maxTokens);
-            int afterForceTokens = compactionService.compact(conversationId, result, providerCode);
-            if (afterForceTokens > 0) {
-                estimatedTokens = afterForceTokens;
-            }
+          开启压缩时，请求前守卫会按「含 tools + 全部注入」的口径统一算一次；
+          这里再算一遍纯属重复开销 —— 几十万 token 的 CL100K 分词是百毫秒级，
+          每个请求都算两次没有意义。关闭压缩时没有入库摘要可用，只能在这里判断并裁剪。
+         */
+        if (!compactionEnabled) {
+            int estimatedTokens = TokenEstimator.estimateMessages(result, providerCode);
             if (estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
-                log.warn("强制压缩后仍超限（可能保护带本身过大），保留完整历史不做裁剪："
-                                + "估算 {} tokens, 上限 {}。若后续 API 返回超限错误，请调小 compaction.protect-rounds "
-                                + "或调大 provider 的 max-context-tokens",
+                log.warn("压缩功能已关闭，退回滑动窗口丢弃：估算 {} tokens, 上限 {}",
                         estimatedTokens, maxTokens);
+                trimToTokenBudget(result, maxTokens, providerCode);
             }
-        }
-
-        // 压缩功能被显式关闭时的兜底：此时没有「入库摘要」可用，只能退回丢弃。
-        // （正常配置下 compaction.enabled=true，这条分支不会走到）
-        if (!compactionEnabled
-                && estimatedTokens > maxTokens * deepSeekConfig.getCompaction().getDropThreshold()) {
-            log.warn("压缩功能已关闭，退回滑动窗口丢弃：估算 {} tokens, 上限 {}",
-                    estimatedTokens, maxTokens);
-            trimToTokenBudget(result, maxTokens, providerCode);
         }
 
         // 压缩/裁剪都可能切断 assistant(tool_calls) 与 tool 消息的配对关系，返回前再净化一次（幂等）
