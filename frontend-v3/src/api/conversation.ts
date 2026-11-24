@@ -196,6 +196,12 @@ export function processMessageGroups(messages: MessageResponse[]): any[] {
         }
         continue
       }
+      // 用户中途补充需求（supplement_inject）：已作为 user 消息参与 API 上下文还原
+      // （落库是为保证下一轮重建时前缀连续，否则跨轮首 token 会全量重算），
+      // 但历史里不渲染气泡 —— 否则用户会看到一条系统代他"复读"需求的假气泡。
+      if (msg.messageType === 'supplement_inject') {
+        continue
+      }
       flushAssistantMsg()
       result.push({
         id: msg.id.toString(),

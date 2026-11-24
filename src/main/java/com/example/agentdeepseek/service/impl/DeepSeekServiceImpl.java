@@ -2485,10 +2485,36 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 for (String sup : supplements) {
                     Map<String, Object> supplementMsg = new HashMap<>();
                     supplementMsg.put("role", "user");
-                    supplementMsg.put("content", "【用户中途补充需求】\n" + sup
-                            + "\n\n请注意：以上是用户对当前任务的补充需求，请在现有进度的基础上增量调整，不要重新开始。");
+                    String supplementContent = "【用户中途补充需求】\n" + sup
+                            + "\n\n请注意：以上是用户对当前任务的补充需求，请在现有进度的基础上增量调整，不要重新开始。";
+                    supplementMsg.put("content", supplementContent);
+                    /*
+                      ★ 必须先落库、再注入内存（2026-11-24 修复「每轮第一枪缓存必断」）。
+
+                      旧实现只 messages.add() 不落库，后果分两段：
+                        · 本轮内：位置稳定、前缀连续，缓存正常命中（iteration≥1 命中 93~98.6%）；
+                        · 下一轮：buildMessagesFromHistory 从 DB 重建时这条 user 消失，
+                          其后所有消息整体前移一位 → 从该 index 起全部按未命中重新 prefill。
+
+                      实测（会话 321，同一会话两次复现）：
+                        index=11  role: user → assistant，TTFB 10321ms（cache_hit 74.3%）；
+                        index=77  role: user → assistant，TTFB 10676ms；
+                      而同轮内 iteration≥1 的 TTFB 仅 226~412ms —— 相差 25~47 倍。
+
+                      落库后重建位置固定（id 递增，天然排在已落库历史之后），前缀连续。
+                      注意：落库用 storageConversationId（DB 主键），turnId 用于关联回滚快照。
+                     */
+                    try {
+                        messagePersister.saveSupplementUserMessage(storageConversationId, supplementContent,
+                                (String) initialApiRequest.get("_turnId"));
+                    } catch (Exception e) {
+                        // 落库失败不阻断主链路（补充需求本轮仍要生效），
+                        // 但下一轮会再产生一次前缀断裂，必须留痕便于排查。
+                        log.warn("补充需求落库失败（本轮仍注入，下一轮可能出现前缀断裂）: conversationId={}, err={}",
+                                conversationId, e.getMessage());
+                    }
                     messages.add(supplementMsg);
-                    log.info("补充需求已注入到ToolLoop: conversationId={}, supplement={}", conversationId,
+                    log.info("补充需求已注入到ToolLoop并已落库: conversationId={}, supplement={}", conversationId,
                             sup.length() > 80 ? sup.substring(0, 80) + "..." : sup);
                 }
                 // 发送提示事件告知前端
@@ -3997,6 +4023,29 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
 
         // ===== 性能诊断：记录请求发起时间 =====
         final long requestStartNanos = System.nanoTime();
+        /*
+          ★ TTFB 分段埋点（2026-11-24）：把「本地准备」与「网络+服务端」拆开。
+
+          背景：实测 TTFB 出现 10.3~10.7 秒的固定值（10321 / 10325 / 10352 / 10676ms），
+          而同一时刻 llm_token_usage 显示 cache_hit 达 99.0~99.2%（miss 仅 1.5K~2K）——
+          说明慢的不是 prefill。同时以下环节均已实测排除：
+            DNS 9~563ms、TCP 建连 10~90ms（两个 CDN IP 都通）、无 AAAA 记录（不涉及 IPv6）、
+            hosts 无条目、系统代理 Direct、LLM 路径未挂 ProxyResolver、限流 maxWaitMs=5s 且超时会抛异常。
+          项目里唯一精确等于 10 秒的配置是 CONNECT_TIMEOUT_MILLIS=10000，
+          但仅凭一个 TTFB 总值无法判定「卡在建连」还是「卡在服务端等待」，故加此分段。
+
+          时间点：
+            phaseNanos[0] 动态块重排后
+            phaseNanos[1] 净化 + requestBody.toString() 后（大请求体序列化开销）
+            phaseNanos[2] 前缀指纹计算后（SHA-256 + 逐消息 flatten）
+            phaseNanos[3] reasoning_content 兜底后（可能深拷贝 messages）
+            sendNanos     HTTP 请求被订阅（= 真正开始发送）
+
+          判定：网络段（TTFB - 本地准备）≈10s → 建连/服务端排队；本地段≈10s → 本地处理。
+         */
+        final long[] phaseNanos = new long[4];
+        final java.util.concurrent.atomic.AtomicLong sendNanos =
+                new java.util.concurrent.atomic.AtomicLong(0L);
         // 峰谷计价：请求发起时刻（不是 doFinally 的落库时刻；跨 12:00/18:00 边界时按发起时刻计费）
         final java.time.ZonedDateTime requestStartedAt = java.time.ZonedDateTime.now();
         final AtomicBoolean firstChunkLogged = new AtomicBoolean(false);
@@ -4046,6 +4095,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 // 若改回 get()，该提示会永久驻留并被之后每一轮重复注入
                 // （模型每轮被迫表态「该经验与本任务无关，跳过」，形成复读噪声）。
                 takeLessonHintOnce(conversationId));
+        phaseNanos[0] = System.nanoTime();
 
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);
@@ -4053,7 +4103,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // ★ 每次工具循环迭代的请求出口同样净化（trim/压缩/中断都可能破坏 tool_call 配对，幂等无副作用）
         ToolCallSequenceSanitizer.sanitizeRequestBody(requestBody);
         // 性能诊断：记录请求体大小
+        // ⚠️ requestBody.toString() 对大请求体（实测 673K chars）是一次完整序列化，
+        //    phaseNanos[1] 专门度量这一步（含它前面的净化）的开销。
         int requestBodySize = requestBody.toString().length();
+        phaseNanos[1] = System.nanoTime();
         log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
                 conversationId, iteration, requestBodySize);
         // ★ 校准兜底（2026-11-17）：工具调用参数一收齐，第 3437 行就把 shouldContinue 置 false，
@@ -4077,6 +4130,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 这一档按消息逐条比指纹，直接点名「第一条不一致的 index / role / 长度差」——
         // 跨轮慢一次之后再抓一次日志，就能定位到具体是哪条消息被改写。
         contextFingerprint.checkMessages(conversationId, iteration, messages);
+        phaseNanos[2] = System.nanoTime();
 
         // 使用当前 Provider 的 WebClient（从 _llmClient 提取）
         LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
@@ -4089,6 +4143,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         Map<String, Object> preparedBody = ctxClient != null
                 ? ctxClient.ensureReasoningContent(requestBody)
                 : requestBody;
+        phaseNanos[3] = System.nanoTime();
 
         // ===== 成本可观测：承接本轮请求的 usage 快照 =====
         // Provider 会把完整 usage 挂在最后一帧（data: [DONE] 之前），按官方文档流式请求同样返回，
@@ -4118,12 +4173,31 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .retrieve()
                 .bodyToFlux(String.class)
+                // ★ 订阅即开始发送：此后的耗时才是「网络 + 服务端」，之前的都是本地准备
+                .doOnSubscribe(s -> sendNanos.compareAndSet(0L, System.nanoTime()))
                 .doOnNext(chunk -> {
-                    // 性能诊断：首字节到达时间
+                    // 性能诊断：首字节到达时间 + 分段（本地准备 / 网络+服务端）
                     if (firstChunkLogged.compareAndSet(false, true)) {
-                        long ttfbMs = (System.nanoTime() - requestStartNanos) / 1_000_000;
-                        log.info("[Perf] conversationId={}, iteration={}, LLM首字节到达, TTFB={}ms",
-                                conversationId, iteration, ttfbMs);
+                        long now = System.nanoTime();
+                        long ttfbMs = (now - requestStartNanos) / 1_000_000;
+                        long sendAt = sendNanos.get();
+                        long localMs = sendAt == 0L ? -1L : (sendAt - requestStartNanos) / 1_000_000;
+                        long netMs = localMs < 0 ? -1L : ttfbMs - localMs;
+                        long p0 = phaseNanos[0] == 0L ? -1L : (phaseNanos[0] - requestStartNanos) / 1_000_000;
+                        long p1 = (phaseNanos[0] == 0L || phaseNanos[1] == 0L) ? -1L
+                                : (phaseNanos[1] - phaseNanos[0]) / 1_000_000;
+                        long p2 = (phaseNanos[1] == 0L || phaseNanos[2] == 0L) ? -1L
+                                : (phaseNanos[2] - phaseNanos[1]) / 1_000_000;
+                        long p3 = (phaseNanos[2] == 0L || phaseNanos[3] == 0L) ? -1L
+                                : (phaseNanos[3] - phaseNanos[2]) / 1_000_000;
+                        log.info("[Perf] conversationId={}, iteration={}, LLM首字节到达, TTFB={}ms"
+                                        + " | 本地准备={}ms[动态块={} 净化序列化={} 指纹={} 兜底={}]"
+                                        + " | 网络+服务端={}ms{}",
+                                conversationId, iteration, ttfbMs,
+                                localMs, p0, p1, p2, p3, netMs,
+                                netMs >= 5000
+                                        ? "  ⚠️ 网络段异常(疑似建连超时/服务端排队，对照 CONNECT_TIMEOUT_MILLIS=10000)"
+                                        : "");
                     }
                     // 成本可观测：捕获 usage 帧（OpenAI 一帧完整；Anthropic 需跨帧合并，
                     // 故用 parseFrame 承接上一帧结果，避免输入侧 token 被后到的输出帧冲掉）

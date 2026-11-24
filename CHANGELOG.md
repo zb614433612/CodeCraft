@@ -5,6 +5,85 @@
 
 ---
 
+## [3.4.4] - 2026-11-24
+
+> **跨轮首 token 缓存断裂修复**：用户「中途补充需求」的消息只进内存不落库，
+> 下一轮重建上下文时它消失，导致其后**所有消息整体前移一位**，从该位置起
+> 全部按未命中重新 prefill —— 实测首 token 10.3~10.7 秒，而同轮内后续请求仅
+> 226~412ms。本版改为「落库 + 前端不渲染气泡」，并补上 TTFB 分段埋点。
+> 必须重启后端；**无数据库结构变更**（沿用已有 `message_type` 列）。
+
+### 🔍 问题：一条不落库的 user 消息毁掉跨轮缓存前缀
+
+`/deepseek/supplement`（生成过程中补充需求）的旧实现是：
+
+- `SupplementStore` 入队 → 工具循环下一轮 `poll` 取出；
+- 拼成 `role=user` 的「【用户中途补充需求】…」消息，`messages.add()` **只加进内存**；
+- 本轮内位置稳定，缓存正常（`iteration≥1` 命中 93~98.6%）；
+- 但下一轮 `buildMessagesFromHistory` 从 DB 重建时**这条不存在**，
+  其后所有消息整体前移一位 → 从该 index 起全部失配。
+
+**实测证据**（会话 321，同一会话两次复现）：
+
+| 断裂点 | 命中率 | TTFB |
+|---|---|---|
+| `index=11` `role: user → assistant` | 74.3%（hit 38272 / miss 13194） | **10321ms** |
+| `index=77` `role: user → assistant` | — | **10676ms** |
+| 同轮内 `iteration≥1` | 93~98.6% | 226~412ms |
+
+`index` 从 11 涨到 77，是因为中间跑了一整轮 35 次工具迭代 —— 断裂点始终跟着那条补充需求走。
+
+### 🔧 修复
+
+1. 新增 `MessagePersister.TYPE_SUPPLEMENT_INJECT`（`supplement_inject`）
+   + `saveSupplementUserMessage(conversationId, content, turnId)`：**先落库、再注入内存**；
+2. 落库失败不阻断主链路（补充需求本轮仍生效），仅 WARN 留痕便于排查；
+3. `ConversationMessageMapper.selectNthUserMessageIdFromTail` 分页 SQL 同步排除
+   `supplement_inject` —— 否则补充需求会被当成「一轮的起点」，导致向上翻页出现空轮；
+4. **前端不渲染气泡**（与 `desktop_inject` 同一机制）：
+   `frontend/src/api/conversation.ts` 与 `frontend-v3/src/api/conversation.ts`
+   的 `processMessageGroups` 在 `role === 'user'` 分支提前 `continue`。
+   落库只为「重建时位置固定」，不作为用户发言展示。
+
+### 📊 TTFB 分段埋点
+
+`[Perf]` 日志从单一 TTFB 扩展为分段：
+
+```
+[Perf] conversationId=321, iteration=0, LLM首字节到达, TTFB=10352ms
+  | 本地准备=45ms[动态块=2 净化序列化=18 指纹=12 兜底=13]
+  | 网络+服务端=10307ms  ⚠️ 网络段异常(...)
+```
+
+5 个打点：动态块重排后 / 净化+序列化后 / 前缀指纹后 / reasoning 兜底后 /
+`doOnSubscribe`（真正开始发送）。网络段 ≥5000ms 自动加 ⚠️ 标记，
+用于区分「卡在建连」与「卡在服务端」，避免下次再靠时间间隔反推。
+
+### ⚠️ 一处已定位但本版未调整的问题
+
+10.3 秒 TTFB 还有**第二个独立成因**，与缓存无关：连接池 `maxIdleTime=20s`
+回收连接后需重建，而 `CONNECT_TIMEOUT_MILLIS=10000`。已实测排除
+DNS(9~563ms)、TCP(10~90ms)、IPv6(无 AAAA)、hosts、系统代理、
+限流(5s 且超时会抛异常)、请求体体积(673K 字符仍 308ms)。
+等分段埋点数据确认「建连 vs 服务端」后再调参，本版只观测、不改行为。
+
+### 🔢 版本号同步
+
+- `pom.xml` 项目版本 → 3.4.4（产物 `code-craft-3.4.4.jar`）
+- `frontend/package.json` + `frontend/package-lock.json`
+- `frontend-v3/package.json` + `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `code-craft-3.4.4.jar` 引用）+ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.4
+- README / README_EN 版本徽章、8 个 docs 文件头、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **无数据库结构变更**（沿用 3.4.3 已有的 `message_type` 列）
+- 必须**重启后端**才生效；前端需重新构建（两套前端均有改动）
+- 可覆盖安装；修复后「补充需求那一轮的下一枪」不再全量重算
+
+---
+
 ## [3.4.3] - 2026-11-24
 
 > **踩坑提示重复注入修复**：上一版把提示挪到列表末尾，解决了「前缀断裂」；但缓存只写不删，

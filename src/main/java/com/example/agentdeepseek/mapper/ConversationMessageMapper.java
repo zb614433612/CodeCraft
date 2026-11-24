@@ -90,7 +90,7 @@ public interface ConversationMessageMapper {
      */
     @Select("SELECT id FROM conversation_message "
             + "WHERE conversation_id = #{conversationId} AND role = 'USER' "
-            + "AND (message_type IS NULL OR message_type <> 'desktop_inject') "
+            + "AND (message_type IS NULL OR message_type NOT IN ('desktop_inject', 'supplement_inject')) "
             + "AND id < COALESCE(#{beforeId}, 9223372036854775807) "
             + "ORDER BY id DESC LIMIT 1 OFFSET ${offset}")
     Long selectNthUserMessageIdFromTail(@Param("conversationId") Long conversationId,

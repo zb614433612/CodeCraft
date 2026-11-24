@@ -24,6 +24,18 @@ public class MessagePersister {
      */
     public static final String TYPE_DESKTOP_INJECT = "desktop_inject";
 
+    /**
+     * 消息类型：用户中途补充需求（走 {@code /deepseek/supplement} 通道注入）。
+     * <p>role 仍为 USER —— DeepSeek API 要求补充需求以 user 消息参与上下文还原；
+     * 但前端历史渲染时跳过该条、<b>不生成用户气泡</b>，
+     * 避免把系统拼装的「【用户中途补充需求】…」文案当成用户发言再展示一遍。</p>
+     * <p><b>必须落库</b>：它占用消息序列中的一个槽位。若只进内存不落库，
+     * 下一轮 {@code buildMessagesFromHistory} 从 DB 重建时该条消失，
+     * 其后所有消息整体前移一位 —— 从该位置起全部按未命中重新 prefill
+     * （实测 TTFB 10.3~10.7s，而同轮内 iteration≥1 仅 226~412ms）。</p>
+     */
+    public static final String TYPE_SUPPLEMENT_INJECT = "supplement_inject";
+
     private final ConversationMessageMapper conversationMessageMapper;
 
     public MessagePersister(ConversationMessageMapper conversationMessageMapper) {
@@ -56,6 +68,25 @@ public class MessagePersister {
     public Long saveInjectedUserMessage(Long conversationId, String content) {
         ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
         msg.setMessageType(TYPE_DESKTOP_INJECT);
+        conversationMessageMapper.insert(msg);
+        return msg.getId();
+    }
+
+    /**
+     * 保存「用户中途补充需求」消息（落库但前端不渲染气泡）。
+     * <p>与 {@link #saveUserMessage} 同构，仅多打一个 {@link #TYPE_SUPPLEMENT_INJECT} 标记：
+     * 后端重建上下文时照常按 {@code role=user} 还原（保证前缀连续），
+     * 前端历史渲染时跳过该条（不生成用户气泡）。</p>
+     *
+     * @param conversationId 会话ID
+     * @param content        补充需求正文（已含「【用户中途补充需求】」前缀与说明）
+     * @param turnId         前端生成的 turnId（用于匹配回滚快照，可为 null）
+     * @return 消息ID
+     */
+    public Long saveSupplementUserMessage(Long conversationId, String content, String turnId) {
+        ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
+        msg.setTurnId(turnId);
+        msg.setMessageType(TYPE_SUPPLEMENT_INJECT);
         conversationMessageMapper.insert(msg);
         return msg.getId();
     }

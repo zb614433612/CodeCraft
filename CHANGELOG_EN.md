@@ -5,6 +5,94 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.4] - 2026-11-24
+
+> **Cross-turn first-token cache-break fix**: a user's "mid-task supplement" message was injected into
+> memory only and never persisted, so the next turn's rebuild dropped it — every message after it
+> shifted one position earlier, and everything from that index on was re-prefilled as a cache miss.
+> Measured first-token latency was 10.3–10.7s, while in-turn follow-up requests stayed at 226–412ms.
+> This release persists the message and stops both frontends from rendering a bubble, plus adds
+> segmented TTFB instrumentation. Backend restart required; **no database schema change**
+> (reuses the existing `message_type` column).
+
+### 🔍 Problem: one unpersisted user message breaks the cross-turn prefix
+
+The old `/deepseek/supplement` path:
+
+- `SupplementStore` enqueues → the tool loop polls it on the next iteration;
+- it is turned into a `role=user` message "【用户中途补充需求】…" and added **into memory only**;
+- within the turn its position is stable, so caching works (`iteration≥1` hits 93–98.6%);
+- but on the next turn `buildMessagesFromHistory` rebuilds from the DB, **that message no longer
+  exists**, and every message after it shifts one position earlier → everything from that index on
+  mismatches and is re-prefilled.
+
+**Measured evidence** (conversation 321, reproduced twice in the same conversation):
+
+| Break point | Hit rate | TTFB |
+|---|---|---|
+| `index=11` `role: user → assistant` | 74.3% (hit 38272 / miss 13194) | **10321ms** |
+| `index=77` `role: user → assistant` | — | **10676ms** |
+| in-turn `iteration≥1` | 93–98.6% | 226–412ms |
+
+The `index` moved from 11 to 77 because a full 35-iteration tool loop ran in between — the break
+always follows that supplement message.
+
+### 🔧 Fix
+
+1. New `MessagePersister.TYPE_SUPPLEMENT_INJECT` (`supplement_inject`) +
+   `saveSupplementUserMessage(conversationId, content, turnId)`: **persist first, then inject**;
+2. Persistence failure does not block the main path (the supplement still applies this turn);
+   a WARN is logged for follow-up;
+3. `ConversationMessageMapper.selectNthUserMessageIdFromTail` now excludes `supplement_inject` too —
+   otherwise the supplement would count as a "turn boundary" and empty rounds would appear when
+   paging up;
+4. **No bubble in the frontends** (same mechanism as `desktop_inject`): `processMessageGroups` in
+   both `frontend/src/api/conversation.ts` and `frontend-v3/src/api/conversation.ts` returns early
+   in the `role === 'user'` branch. Persistence exists only to keep the rebuild position stable,
+   not to display the text as user speech.
+
+### 📊 Segmented TTFB instrumentation
+
+The `[Perf]` log now reports segments instead of one total:
+
+```
+[Perf] conversationId=321, iteration=0, first byte received, TTFB=10352ms
+  | local=45ms[dynamicBlock=2 sanitizeSerialize=18 fingerprint=12 reasoningPad=13]
+  | network+server=10307ms  ⚠️ network segment abnormal(...)
+```
+
+Five probes: after dynamic-block reordering / after sanitize + serialization / after prefix
+fingerprinting / after reasoning padding / `doOnSubscribe` (actual send start). A network segment
+≥5000ms gets a ⚠️ marker, separating "stuck in connect" from "stuck on server" so the next
+investigation doesn't have to infer from request intervals.
+
+### ⚠️ One located but intentionally untouched issue
+
+The 10.3s TTFB has a **second, independent cause** unrelated to caching: the connection pool
+recycles connections after `maxIdleTime=20s` and reconnects under `CONNECT_TIMEOUT_MILLIS=10000`.
+Already ruled out by measurement: DNS (9–563ms), TCP (10–90ms), IPv6 (no AAAA record), hosts file,
+system proxy, rate limiting (5s and throws), request body size (673K chars still 308ms).
+Tuning will follow once the segmented data confirms "connect vs server"; this release only observes.
+
+### 🔢 Version bumps
+
+- `pom.xml` project version → 3.4.4 (artifact `code-craft-3.4.4.jar`)
+- `frontend/package.json` + `frontend/package-lock.json`
+- `frontend-v3/package.json` + `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.4.4.jar` reference) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.4
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build command
+  examples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **No database schema change** (reuses the `message_type` column added in 3.4.3)
+- **Backend restart required**; frontends must be rebuilt (both were changed)
+- Overwrite install is fine; after the fix, the turn following a supplement no longer re-prefills
+  everything
+
+---
+
 ## [3.4.3] - 2026-11-24
 
 > **Lesson-hint repeat-injection fix**: the previous release moved the hint to the tail of the message
