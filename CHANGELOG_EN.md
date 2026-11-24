@@ -5,6 +5,62 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.3] - 2026-11-24
+
+> **Lesson-hint repeat-injection fix**: the previous release moved the hint to the tail of the message
+> list and fixed the prefix break — but the cache was write-only, so the same hint was re-attached to
+> **every following request**, forcing the model to declare "this lesson is irrelevant to the current
+> task, skipping" on each turn. This release switches to "consume once + TTL fallback" and softens the
+> wording. Backend restart required; no database schema change.
+
+### 🔍 Problem: one stale hint pollutes every later turn
+
+After v3.4.2 introduced `sessionLessonHintCache` (conversationId → hint text):
+
+- `injectLessonHint` only ever called `put` — **there was no `remove` anywhere**;
+- `placeDynamicBlocksAtTail` called `get()` on every request and appended the text.
+
+So once a tool failure matched lesson X, that hint stayed forever and was carried by
+**every subsequent request**. Its wording — "judge whether it applies, then follow it" —
+acted as a hard instruction: whenever the lesson had nothing to do with the current task,
+the model emitted an explicit "that lesson is about X, irrelevant here, skipping" paragraph,
+repeatedly, on every turn.
+
+### 🔧 Fix
+
+1. Added `sessionLessonHintAt` (conversationId → write timestamp) plus `LESSON_HINT_TTL_MS` (10 min);
+2. Added `takeLessonHintOnce(conversationId)`: **take-and-remove**, stale entries dropped;
+3. The request exit point now calls `takeLessonHintOnce`, so the hint rides only the turn that
+   triggered it;
+4. Softened the wording to "historical reference … ignore it silently when irrelevant, do not
+   mention whether you used it", removing the forced self-report while keeping the
+   `lesson action=feedback` nudge.
+
+### 📊 Prefix cache untouched
+
+Dynamic-block position is unchanged (still appended at the **very end** by
+`placeDynamicBlocksAtTail`). This change only affects *whether* the block is carried and its wording;
+message ordering is untouched, no new prefix break is introduced, and `ContextFingerprint` keeps
+skipping these blocks via the `[动态运行时注入]` marker.
+
+### 🔢 Version sync
+
+- `pom.xml` project version → 3.4.3 (artifact `code-craft-3.4.3.jar`)
+- `frontend/package.json` + `frontend/package-lock.json`
+- `frontend-v3/package.json` + `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.4.3.jar` reference) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.3
+- README / README_EN version badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build examples,
+  FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- Backend injection logic only — **no database schema change**, no API behaviour change
+- **Backend restart required** (a running instance keeps the old cache and wording)
+- In-place upgrade is fine; the stale hint disappears from the first turn after restart
+
+---
+
 ## [3.4.2] - 2026-11-24
 
 > **Lesson-hint injection fix**: the hint injected after a tool failure is no longer inserted into

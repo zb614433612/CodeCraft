@@ -5,6 +5,56 @@
 
 ---
 
+## [3.4.3] - 2026-11-24
+
+> **踩坑提示重复注入修复**：上一版把提示挪到列表末尾，解决了「前缀断裂」；但缓存只写不删，
+> 同一条提示会在**后续每一轮**都被重新拼进请求，模型被迫每轮表态
+> 「该经验与本次任务无关，跳过」，形成明显复读噪声。本版改为
+> 「一次性消费 + TTL 兜底」，并弱化提示措辞。必须重启后端；无数据库结构变更。
+
+### 🔍 问题：一条过时提示污染后续所有轮次
+
+v3.4.2 引入 `sessionLessonHintCache`（conversationId → 提示正文）后：
+
+- `injectLessonHint` 只做 `put`，**全流程没有任何 `remove`**；
+- `placeDynamicBlocksAtTail` 每次请求都 `get()` 并拼到消息末尾。
+
+于是某轮某工具失败命中经验 X 后，这条提示永久驻留，之后**每一轮请求**都携带它。
+而提示原文是「请判断是否适用当前场景后参考执行」——对模型属于强制指令，
+一旦该经验与当前任务无关，模型就会专门输出一段
+「该经验描述的是 X 问题，与本次任务无关，跳过」，纯噪声且逐轮重复。
+
+### 🔧 修复
+
+1. 新增 `sessionLessonHintAt`（conversationId → 写入时间）+ `LESSON_HINT_TTL_MS`（10 分钟）；
+2. 新增 `takeLessonHintOnce(conversationId)`：**取出即删除**，超时条目直接丢弃；
+3. 请求出口改用 `takeLessonHintOnce`，提示只在命中它的那一轮携带；
+4. 措辞弱化为「历史经验参考……无关则直接忽略，不要在回复中说明是否采用」，
+   去掉「请判断是否适用」这类强制表态要求，同时保留 `lesson action=feedback` 引导。
+
+### 📊 不破坏前缀缓存
+
+动态块位置不变（仍由 `placeDynamicBlocksAtTail` 追加到列表**绝对末尾**），
+本次只改变「是否携带」与「措辞」，不触碰历史消息顺序，
+不新增前缀断点；`ContextFingerprint` 继续按 `[动态运行时注入]` 标记跳过。
+
+### 🔢 版本号同步
+
+- `pom.xml` 项目版本 → 3.4.3（产物 `code-craft-3.4.3.jar`）
+- `frontend/package.json` + `frontend/package-lock.json`
+- `frontend-v3/package.json` + `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `code-craft-3.4.3.jar` 引用）+ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.3
+- README / README_EN 版本徽章、8 个 docs 文件头、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- 仅后端注入逻辑改动，**无数据库结构变更**、无 API 行为变化
+- 必须**重启后端**才生效（运行中的实例仍持有旧缓存与旧提示文案）
+- 可覆盖安装；重启后首轮即不再出现无关经验提示
+
+---
+
 ## [3.4.2] - 2026-11-24
 
 > **踩坑提示注入修复版**：工具失败后注入的经验提示，从「插到消息列表中前部」改为

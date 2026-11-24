@@ -2779,14 +2779,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     Map<String, Object> hintMsg = new HashMap<>();
                     hintMsg.put("role", "system");
                     if (LessonService.HINT_TYPE_SOLUTION.equals(hint.type)) {
-                        hintMsg.put("content", "[踩坑经验自动检索] 工具 " + result.getToolName()
-                                + " 执行失败，经验库中存在匹配解法，请判断是否适用当前场景后参考执行：\n" + hint.text
-                                + "\n（若解法有效，可调用 lesson action=feedback 反馈验证；若这是新坑，解决后可调用 lesson action=record 记录）");
+                        // 措辞刻意弱化为「可选参考」：
+                        // 旧文案「请判断是否适用当前场景后参考执行」是对模型的强制指令，
+                        // 一旦这条经验与本轮任务无关，模型就会专门输出一段
+                        // 「该经验描述的是 X 问题，与本次任务无关，跳过」——纯噪声。
+                        // 改为「无关则直接忽略且不要说明」后，模型无需表态。
+                        hintMsg.put("content", "[踩坑经验自动检索] 历史经验参考（上一轮 " + result.getToolName()
+                                + " 曾失败，可能与本轮任务无关）：\n" + hint.text
+                                + "\n无关则直接忽略，不要在回复中说明是否采用；若确实采纳并验证有效，再调用 lesson action=feedback。");
                         // F3 登记：解法注入成功 → 追踪该会话该经验（循环结束时自动验证）
                         trackLessonInjected(conversationId, hint);
                     } else {
-                        hintMsg.put("content", "[踩坑经验自动检索] 工具 " + result.getToolName()
-                                + " 执行失败，经验库中有同坑草稿待补全：\n" + hint.text);
+                        hintMsg.put("content", "[踩坑经验自动检索] 历史经验库中有同坑草稿（可能与本轮任务无关）：\n" + hint.text
+                                + "\n无关则直接忽略，不要在回复中说明。");
                         // HINT 类型不登记追踪（引导≠应用，不自动验证）
                     }
                     // ★ 2026-11-24 修复：不再插入到「system 之后、第一条非 system 之前」。
@@ -2801,8 +2806,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                             && !hintText.isEmpty()) {
                         if (sessionLessonHintCache.size() > 1000) {
                             sessionLessonHintCache.clear();
+                            sessionLessonHintAt.clear();
                         }
                         sessionLessonHintCache.put(conversationId, hintText);
+                        // 记录写入时间：由 takeLessonHintOnce 做「一次性消费 + TTL 兜底」。
+                        // 不记录时间就无法判断僵尸条目，提示会永久驻留并被后续每轮重复注入。
+                        sessionLessonHintAt.put(conversationId, System.currentTimeMillis());
                     }
                     injectedAny = true;
                     log.info("踩坑经验被动注入: conversationId={}, tool={}, lessonId={}, type={}, errorCode={}",
@@ -3123,6 +3132,48 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 位置固定在末尾 → 跨轮与轮内都稳定；提示内容变化（再次踩坑）只影响尾部几百字符。</p>
      */
     private final Map<Long, String> sessionLessonHintCache = new ConcurrentHashMap<>();
+
+    /**
+     * 踩坑提示的写入时间（conversationId → epoch millis），配合一次性消费使用。
+     *
+     * <p><b>为什么需要（2026-11-24 修复）</b>：{@link #sessionLessonHintCache} 旧实现只 put、
+     * 从不 remove —— 某轮某个工具失败命中经验后，这条提示就永久驻留，
+     * {@link #placeDynamicBlocksAtTail} 会在<b>之后每一个请求</b>都重新拼接它。
+     * 模型每轮都看到「工具 xxx 执行失败，请判断是否适用」，被迫每轮表态
+     * 「该经验与本任务无关，跳过」，形成明显的复读噪声。</p>
+     *
+     * <p>现在改为「一次性消费」：提示只在命中它的那一轮请求里携带，取用即清除。</p>
+     */
+    private final Map<Long, Long> sessionLessonHintAt = new ConcurrentHashMap<>();
+
+    /** 踩坑提示的最大存活时间（毫秒）；超时视为僵尸条目直接丢弃，防内存泄漏 */
+    private static final long LESSON_HINT_TTL_MS = 10 * 60 * 1000L;
+
+    /**
+     * 取出并清除本会话的踩坑提示（一次性消费）。
+     *
+     * <p>该提示属于一次性运行时提示：<b>取完必须删</b>。若长期留在缓存里，
+     * 后续每个请求都会被 {@link #placeDynamicBlocksAtTail} 重新拼到末尾，
+     * 导致模型对同一段无关经验反复表态。</p>
+     *
+     * @param conversationId 会话 ID
+     * @return 提示正文；无提示或已超时返回 {@code null}
+     */
+    private String takeLessonHintOnce(Long conversationId) {
+        if (conversationId == null) {
+            return null;
+        }
+        Long writtenAt = sessionLessonHintAt.remove(conversationId);
+        String text = sessionLessonHintCache.remove(conversationId);
+        if (text == null) {
+            return null;
+        }
+        if (writtenAt != null && System.currentTimeMillis() - writtenAt > LESSON_HINT_TTL_MS) {
+            log.debug("踩坑提示已过期，丢弃: conversationId={}", conversationId);
+            return null;
+        }
+        return text;
+    }
 
     /**
      * 取「本会话的知识库摘要」——首次构建后固定，之后永远返回同一份字节。
@@ -3991,7 +4042,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         placeDynamicBlocksAtTail(messages,
                 (String) apiRequest.get("_executionMode"),
                 (String) apiRequest.get("_kbSectionSnapshot"),
-                sessionLessonHintCache.get(conversationId));
+                // 一次性消费：提示只在命中它的这一轮携带，取用后立即清除。
+                // 若改回 get()，该提示会永久驻留并被之后每一轮重复注入
+                // （模型每轮被迫表态「该经验与本任务无关，跳过」，形成复读噪声）。
+                takeLessonHintOnce(conversationId));
 
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);
