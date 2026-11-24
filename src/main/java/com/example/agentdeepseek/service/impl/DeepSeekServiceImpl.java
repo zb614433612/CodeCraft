@@ -2789,18 +2789,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 + " 执行失败，经验库中有同坑草稿待补全：\n" + hint.text);
                         // HINT 类型不登记追踪（引导≠应用，不自动验证）
                     }
-                    // L3 修复：system 消息插入到「所有 system 消息之后、第一条非 system 消息之前」，
-                    // 避免出现在 tool 结果之后（部分 LLM API 对 system 夹在 tool/assistant 之间校验严格）
-                    int insertIdx = 0;
-                    for (int i = 0; i < messages.size(); i++) {
-                        Object role = messages.get(i).get("role");
-                        if (!"system".equals(role)) {
-                            insertIdx = i;
-                            break;
+                    // ★ 2026-11-24 修复：不再插入到「system 之后、第一条非 system 之前」。
+                    //   那个位置跨轮必然漂移 —— 本轮插入会把后面所有消息整体挤后 1 位，
+                    //   而这条提示不落库，下一轮重建时它消失、位置缩回，
+                    //   实测 index=2 role: user → system（长度 11772 → 362），
+                    //   一次工具失败就让后面十几万字符历史全部重新 prefill。
+                    //   现在只写会话级缓存，由请求出口的 placeDynamicBlocksAtTail 统一放到列表绝对末尾。
+                    Object hintContent = hintMsg.get("content");
+                    if (conversationId != null
+                            && hintContent instanceof String hintText
+                            && !hintText.isEmpty()) {
+                        if (sessionLessonHintCache.size() > 1000) {
+                            sessionLessonHintCache.clear();
                         }
-                        insertIdx = i + 1;
+                        sessionLessonHintCache.put(conversationId, hintText);
                     }
-                    messages.add(insertIdx, hintMsg);
                     injectedAny = true;
                     log.info("踩坑经验被动注入: conversationId={}, tool={}, lessonId={}, type={}, errorCode={}",
                             conversationId, result.getToolName(), hint.lessonId, hint.type, nf.errorCode);
@@ -3106,6 +3109,22 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final Map<Long, String> kbSectionSnapshot = new ConcurrentHashMap<>();
 
     /**
+     * 会话级「踩坑经验提示」缓存（conversationId → 提示正文）。
+     *
+     * <p><b>为什么要有这个缓存（2026-11-24 修复）</b>：工具失败后系统会检索经验库并给模型一条提示。
+     * 旧实现把这条 system 消息<b>插入到「所有 system 之后、第一条非 system 之前」</b>——
+     * 那是列表中前部，插入会把后面所有消息整体挤后 1 位；而这条提示<b>不落库</b>，
+     * 下一轮重建时它消失、位置又缩回去，于是从插入点起全部失配。</p>
+     *
+     * <p>实测（会话 550，v3.4.1）：{@code index=2 role: user → system，长度 11772 → 362（差 -11410）}，
+     * 一次工具失败就让后面十几万字符历史全部重新 prefill。</p>
+     *
+     * <p>现在：注入只写缓存，由 {@link #placeDynamicBlocksAtTail} 统一放到消息列表<b>绝对末尾</b>。
+     * 位置固定在末尾 → 跨轮与轮内都稳定；提示内容变化（再次踩坑）只影响尾部几百字符。</p>
+     */
+    private final Map<Long, String> sessionLessonHintCache = new ConcurrentHashMap<>();
+
+    /**
      * 取「本会话的知识库摘要」——首次构建后固定，之后永远返回同一份字节。
      *
      * @param conversationId 会话 ID（为 null 时退化为不缓存，仅本次使用）
@@ -3165,7 +3184,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * @param kbSection 项目知识库摘要快照（可为空）
      */
     private void placeDynamicBlocksAtTail(List<Map<String, Object>> messages,
-                                          String execMode, String kbSection) {
+                                          String execMode, String kbSection, String lessonHint) {
         if (messages == null || messages.isEmpty()) {
             return;
         }
@@ -3183,6 +3202,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
         if (kbSection != null && !kbSection.isEmpty()) {
             messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + kbSection));
+        }
+        // ③ 踩坑经验提示（工具失败后注入；内容随失败类型变化，同样只能放末尾）
+        if (lessonHint != null && !lessonHint.isEmpty()) {
+            messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + lessonHint));
         }
     }
 
@@ -3967,7 +3990,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         //   先移除旧块再追加，保证多轮迭代不会堆积重复块、位置永远是最后一条。
         placeDynamicBlocksAtTail(messages,
                 (String) apiRequest.get("_executionMode"),
-                (String) apiRequest.get("_kbSectionSnapshot"));
+                (String) apiRequest.get("_kbSectionSnapshot"),
+                sessionLessonHintCache.get(conversationId));
 
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);

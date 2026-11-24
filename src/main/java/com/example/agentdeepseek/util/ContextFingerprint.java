@@ -123,24 +123,6 @@ public class ContextFingerprint {
         }
     }
 
-    /**
-     * 检查并记录「逐消息前缀指纹」，定位第一条被改写的消息。
-     *
-     * <p><b>判定语义</b>：以上一次请求的消息序列为基准，逐条比对本次请求的前
-     * {@code min(上次条数, 本次条数)} 条：</p>
-     * <ul>
-     *   <li>全部一致 → 属于正常增长（工具循环追加 / 本轮追加 user 消息），只在消息数缩减时打 DEBUG；</li>
-     *   <li>某条不一致 → WARN 打印该条 index / role / 长度差，它就是缓存断裂点。</li>
-     * </ul>
-     *
-     * <p><b>为什么按「上一次请求」而不是「上一轮开头」比对</b>：工具循环里每次迭代都会走这里，
-     * 相邻两次迭代天然是「前缀 + 追加」关系；一旦跨轮重建把历史改写，第一个撞上的就是
-     * 那条被改写的消息 —— 不需要额外维护「轮次边界」。</p>
-     *
-     * @param conversationId 会话 ID（null 时跳过）
-     * @param iteration      当前工具循环轮次（仅用于日志定位）
-     * @param messages       本次即将发送的完整消息列表
-     */
     /** 动态运行时注入块的标记（与 {@code DeepSeekServiceImpl.DYNAMIC_BLOCK_MARK} 保持一致） */
     private static final String DYNAMIC_BLOCK_MARK = "[动态运行时注入]";
 
@@ -159,6 +141,27 @@ public class ContextFingerprint {
         return content instanceof String s && s.contains(DYNAMIC_BLOCK_MARK);
     }
 
+    /**
+     * 检查并记录「逐消息前缀指纹」，定位第一条被改写的消息。
+     *
+     * <p><b>判定语义</b>：以上一次请求的消息序列为基准，逐条比对本次请求的前
+     * {@code min(上次条数, 本次条数)} 条：</p>
+     * <ul>
+     *   <li>全部一致 → 属于正常增长（工具循环追加 / 本轮追加 user 消息），只在消息数缩减时打 DEBUG；</li>
+     *   <li>某条不一致 → WARN 打印该条 index / role / 长度差，它就是缓存断裂点。</li>
+     * </ul>
+     *
+     * <p><b>为什么按「上一次请求」而不是「上一轮开头」比对</b>：工具循环里每次迭代都会走这里，
+     * 相邻两次迭代天然是「前缀 + 追加」关系；一旦跨轮重建把历史改写，第一个撞上的就是
+     * 那条被改写的消息 —— 不需要额外维护「轮次边界」。</p>
+     *
+     * <p>末尾的 {@code [动态运行时注入]} 块不参与比对（见 {@link #isDynamicRuntimeBlock}），
+     * 否则它按设计"位置每轮后移"会让监控每轮必报，噪音淹没真正的断裂点。</p>
+     *
+     * @param conversationId 会话 ID（null 时跳过）
+     * @param iteration      当前工具循环轮次（仅用于日志定位）
+     * @param messages       本次即将发送的完整消息列表
+     */
     public void checkMessages(Long conversationId, int iteration, List<Map<String, Object>> messages) {
         if (conversationId == null || messages == null || messages.isEmpty()) {
             return;

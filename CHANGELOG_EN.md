@@ -5,6 +5,73 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.2] - 2026-11-24
+
+> **Lesson-hint injection fix**: the hint injected after a tool failure is no longer inserted into
+> the middle of the message list — it is re-placed at the very end before each request.
+> This is the 13th and last known prefix-break source.
+> Backend restart required; no database schema change; no API behaviour change.
+> ⚠️ The first turn after upgrading breaks once (the hint moved); stable afterwards.
+
+### 🔍 Problem: one tool failure cost 100K+ chars of re-prefill
+
+`injectLessonHint` searches the lesson library after a tool failure and injects a system hint.
+Old code:
+
+```java
+int insertIdx = 0;
+for (int i = 0; i < messages.size(); i++) {
+    if (!"system".equals(messages.get(i).get("role"))) { insertIdx = i; break; }
+    insertIdx = i + 1;
+}
+messages.add(insertIdx, hintMsg);   // after all system messages, before the first non-system
+```
+
+Three fatal points:
+
+1. **It inserts instead of appending** — every later message (including the current 11772-char user
+   message) is pushed back by one slot;
+2. **It is not persisted** — on the next turn's rebuild the hint disappears and the slot collapses;
+3. So the "inserted turn" and the "next turn" are completely misaligned at that point.
+
+Measured (conversation 550, v3.4.1):
+
+```
+12:57:17.856  lesson hint injected: tool=file_explorer, lessonId=1731, type=SOLUTION
+12:57:18.256  [cache warning] system prompt prefix changed: 5bdca545 -> 1500fafb
+12:57:18.258  [cache warning] message prefix broken at index=2  role: user -> system,
+              length 11772 -> 362 (delta -11410)
+```
+
+A single failed file read forced everything after index=2 to be re-prefilled.
+
+### 🔧 Fix: fold it into the "dynamic block" mechanism
+
+- New session-level `sessionLessonHintCache` (conversationId → hint text); injection now **only writes
+  the cache** instead of choosing a position itself;
+- `placeDynamicBlocksAtTail` gains a third dynamic block: exec mode → knowledge snippet → lesson hint,
+  **fixed order, always the very last message**;
+- The `[动态运行时注入]` marker is reused, so `ContextFingerprint` skips it automatically (no false alarms);
+- Across turns the same text is read back from the cache, position constant → the prefix is never cut.
+
+### 📊 All non-persisted runtime injections now follow two rules
+
+| Type | Position | Members |
+|---|---|---|
+| Static | appended to the first system message / `add(0)` | compact note, skill catalog, detour hint, language instruction |
+| Dynamic | re-placed at the absolute tail before every request | exec mode, knowledge snippet, lesson hint |
+
+### 🔇 Incidental fix
+
+In v3.4.1 the javadoc of `ContextFingerprint.checkMessages` was pushed onto a new constant, leaving
+the method undocumented. Restored here (comment-only change, no behaviour difference).
+
+### ⬆️ Upgrade notes
+
+- Backend restart required; no database schema change; no API behaviour change.
+- **⚠️ The first turn after upgrading breaks once**: the hint moves from the middle to the tail.
+- Afterwards, a new hint in the same session only affects a few hundred chars at the tail.
+
 ## [3.4.1] - 2026-11-24
 
 > **Injection pipeline fix**: the execution-mode instruction, the compact-mode explanation and the
