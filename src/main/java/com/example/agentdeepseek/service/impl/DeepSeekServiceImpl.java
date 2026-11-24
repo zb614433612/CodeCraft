@@ -3830,6 +3830,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 extractSystemPromptForFingerprint(messages),
                 extractToolsJsonForFingerprint(requestBody));
 
+        // ===== 逐消息前缀指纹（只读观测）=====
+        // 上面那一档只看 system / tools：一旦「头部没变、历史里某条被重建改写」就完全看不见
+        // （典型现象：同一轮内 iteration≥1 命中 95%+，跨轮第一枪只剩 system 那点命中）。
+        // 这一档按消息逐条比指纹，直接点名「第一条不一致的 index / role / 长度差」——
+        // 跨轮慢一次之后再抓一次日志，就能定位到具体是哪条消息被改写。
+        contextFingerprint.checkMessages(conversationId, iteration, messages);
+
         // 使用当前 Provider 的 WebClient（从 _llmClient 提取）
         LLMClient ctxClient = (LLMClient) apiRequest.get("_llmClient");
         WebClient activeWebClient = ctxClient != null ? ctxClient.getWebClient() : webClient;
@@ -4878,16 +4885,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      * 缓存保护：从消息列表中取系统提示词原文（用于前缀指纹）
      */
     private String extractSystemPromptForFingerprint(List<Map<String, Object>> messages) {
-        if (messages == null) {
-            return "";
-        }
-        for (Map<String, Object> msg : messages) {
-            if ("system".equals(msg.get("role"))) {
-                Object content = msg.get("content");
-                return content instanceof String s ? s : "";
-            }
-        }
-        return "";
+        // ★ 修复监控盲区：旧实现「只取第一条 system 就 return」。
+        //   现在拼接「开头连续的所有 system 消息」（遇到第一条非 system 即停）：
+        //   技能目录 / 执行模式指令 / compact 指令都是拼在第一条 system 上的，属于真正的头部内容；
+        //   而末尾追加的语言强制指令、项目知识库摘要属于尾部动态内容 ——
+        //   按「开头连续」取既覆盖了头部，又不会被每轮追加的尾部内容制造假告警。
+        return ContextFingerprint.joinLeadingSystemMessages(messages);
     }
 
     /**

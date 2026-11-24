@@ -5,6 +5,85 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.8] - 2026-11-24
+
+> **Observability release for prompt-cache prefix breaks**: this version **changes no request
+> content** — it only adds monitoring.
+> Symptom being chased: inside one tool loop, `iteration>=1` requests keep a cache hit rate of
+> 95%+, yet the **first request of every new turn** drops to 16.5% (measured 186379 prompt_tokens
+> with only 30720 cached; 155659 tokens re-prefilled from scratch, 18 seconds to first token).
+> The header (system prompt / tool definitions) was verified unchanged, and the existing
+> monitoring was blind to "a historical message was rewritten while rebuilding" —
+> this release adds per-message prefix fingerprints so the log names the exact index, role and
+> length delta.
+> **Backend restart required**; no database schema change; overwrite installation is fine.
+
+### 🔍 Added: per-message prefix fingerprint (locates the rewritten message)
+
+- **Two blind spots of the old monitor**: `extractSystemPromptForFingerprint` returned on the
+  **first** system message; `tools` had its own fingerprint; **history messages took part in no
+  fingerprint at all**. The result: system unchanged, tools unchanged, not a single warning in
+  the log, while the cache broke somewhere in the middle of the history.
+- **How it works**: before every request each message is reduced to `(role, length, hash)` over
+  `role + content + tool_call_id + tool_calls + reasoning_content` and stored in a
+  per-conversation list. The next request compares message by message: a fully matching prefix
+  is treated as normal growth (no log), and the first mismatch raises a WARN with
+  `index / role / length delta / hash`.
+- **Why compare against "the previous request" instead of turn boundaries**: every tool-loop
+  iteration passes through the same point, so two adjacent requests are naturally
+  "prefix + append". As soon as a turn rebuild rewrites history, the very first difference is
+  exactly the rewritten message — no turn-boundary bookkeeping needed, and in-turn breaks are
+  not missed either.
+- **What the warning looks like** (the length delta is the tell):
+  `[缓存告警] 消息前缀断裂 —— 会话=549 轮次=0 首条不一致 index=112（从 0 计）
+  role: tool → tool，长度: 16126 → 16251（差 +125）`.
+- **Cost and bounds**: read-only observation, every exception swallowed so the main path is
+  never affected; at most 4000 messages per conversation and 800 conversations, cleared
+  wholesale on overflow. One comparison over 300 messages costs about 1~2ms — negligible per
+  request.
+
+### 🔧 Fix: system fingerprint covered only the first message → now the whole leading system block
+
+- **Old behaviour**: the extractor returned on the first `role=system` message.
+  Tracing the injection sites showed that the skill catalog, execution-mode instruction and
+  compact instruction are all **appended to the first system message** (the loop breaks on the
+  first system message), while the project knowledge summary and the language directive are
+  **appended to the end of the message list**.
+- **New behaviour**: concatenate every leading system message (stop at the first non-system) as
+  the fingerprint input. This covers the real header without generating a false warning on every
+  tail injection.
+- **Trade-off**: "include every system message" was rejected — it would warn on the tail
+  injection of every single turn and drown the changes that actually matter.
+
+### 📌 Note: no behavioural change in this release
+
+- Everything added here is observability: message content, injection order and request bytes are
+  untouched.
+- Two non-causes were ruled out during the investigation and are recorded here to avoid repeat
+  work: ① working-directory injection (the knowledge summary is appended at the tail, so it can
+  only miss a small trailing segment, milliseconds); ② context compaction (conversation 549 has
+  **zero** rows in `conversation_compaction`, so the request guard never compacted and no
+  summary drifted).
+
+### 🔢 Version sync
+
+- `pom.xml` project version → 3.3.8
+- `frontend/package.json` + `frontend-v3/package.json` + both `package-lock.json` files
+- `electron/package.json` (`version` + `code-craft-3.3.8.jar`) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.3.8
+- README / README_EN badges, 8 docs headers (version + updated date 2026-11-24)
+- DEV_QUICKREF / RELEASE_CHECKLIST build command samples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes; no config-format change).
+- **No database schema change**: no new tables, no new columns, no persisted field changes.
+- **No API behaviour change**: request and response bytes are unchanged; the frontend needs no
+  update.
+- **Overwrite installation is fine**.
+- **Log change**: a new `[缓存告警] 消息前缀断裂` WARN appears on a cross-turn request whose
+  history was rewritten; healthy conversations only log at DEBUG when the message count shrinks.
+
 ## [3.3.7] - 2026-11-23
 
 > **Context compaction guard consolidation**: fixes two problems — "compaction never
