@@ -5,6 +5,82 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.1] - 2026-11-24
+
+> **Injection pipeline fix**: the execution-mode instruction, the compact-mode explanation and the
+> project-knowledge snippet are now actually delivered to the LLM (previously they were only
+> appended to a message list that was never sent). Injections are also split into "static" and
+> "dynamic" with different placements: static ones are appended to the first system message,
+> dynamic ones are moved to the very end of the list before each request.
+> Backend restart required; no database schema change; no API behaviour change; overwrite
+> installation is fine.
+> ⚠️ The first turn after upgrading breaks once (the system header gains mode and knowledge
+> sections); stable afterwards.
+
+### 🔍 Problem: three injections never reached the LLM
+
+During `handleChat`, three blocks were appended to `historyMessages`: the execution-mode
+instruction, the compact-mode explanation, and the project-knowledge snippet (`injectBootstrap`).
+
+That list **never enters `apiRequest`** — the real request is issued by
+`executeSemiStreamingToolCycle`, which rebuilds messages from the DB and injects its own blocks.
+As a result:
+
+- the model did not know whether it was in manual or auto mode;
+- it did not know historical tool results had been summarised, nor that `query_tool_history` exists;
+- it could not see the `.codecraft/INDEX.md` module index.
+
+(`historyMessages` was only used for token estimation.)
+
+### 🔧 Fix: inject on the real request path, split by static / dynamic
+
+**Static blocks (absolutely fixed position, appended to the first system message, fixed order)**
+
+1. compact-mode explanation (contains conversationId, constant within a session)
+2. skill catalog (already made static in v3.3.10)
+3. detour hints (session-level cache persisted to disk, hardened on 2026-11-17)
+4. language instruction (constant, `add(0)` to the head)
+
+**Dynamic blocks (re-placed at the very end of the list before every request)**
+
+1. execution-mode instruction (manual/auto can switch)
+2. project-knowledge snippet (`INDEX.md` is maintained asynchronously by `maintainAfterTask`)
+
+How dynamic blocks are handled:
+
+- new `placeDynamicBlocksAtTail()` runs at the request exit (every iteration): it **removes the old
+  block by marker**, then **appends the new one at the end** in a fixed order;
+- why not insert before the last user message: these blocks are not persisted, so after a cross-turn
+  rebuild they are absent from history; anchoring them in the middle makes their position diverge
+  completely between turns, pushing the break point into the middle of the previous turn
+  (measured on 2026-11-17 with detour hints: the following 14 tool results ≈140K chars were wasted,
+  TTFB 14–25 s);
+- only the "absolute tail" keeps the position stable both across turns and inside a turn: when the
+  content changes, only the "dynamic block + current user message" is re-prefilled;
+- cost: a small extra prefill per request (≈100 chars for mode, 1–3K for the knowledge snippet),
+  far cheaper than an occasional full break.
+
+**Extra session-level snapshot for the knowledge snippet**: `resolveKbSectionSnapshot()` caches the
+first snippet per conversation, because `INDEX.md` is updated asynchronously after each task — any
+change would shift the system header. The snapshot keeps it byte-identical within a session; new
+sessions pick up the latest version naturally.
+
+### 🔇 Monitoring adjustment
+
+`ContextFingerprint.checkMessages` now skips `[动态运行时注入]` blocks: they are fixed at the tail and
+move every turn, so counting them would raise a warning on every request and drown the real break
+points in noise.
+
+### ⬆️ Upgrade notes
+
+- Backend restart required (Java change).
+- No database schema change; no migration.
+- No API behaviour change; the frontend needs no update.
+- **⚠️ The first turn after upgrading breaks once**: the system header gains mode and knowledge
+  sections, shifting the whole prefix; stable afterwards.
+- Knowledge-base refresh policy: within a session the first snapshot is reused; new sessions read
+  the latest version.
+
 ## [3.3.10] - 2026-11-24
 
 > **Static skill catalog release**: removes the changing statistics and the ordering key from the

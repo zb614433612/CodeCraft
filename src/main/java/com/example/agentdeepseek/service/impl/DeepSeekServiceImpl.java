@@ -1004,6 +1004,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
+        /*
+          ⚠️ 注意（2026-11-24）：本方法（handleChat 构建阶段）产出的 historyMessages
+          <b>不会直接发给 LLM</b> —— 它只用于 token 估算；真正发请求的是
+          executeSemiStreamingToolCycle，那边会从 DB 重新构建 messages 并自行注入。
+          因此下面「执行模式 / compact / 技能目录 / 项目知识库 / 语言指令」这几段注入
+          属于<b>估算口径的模拟</b>，不是实际发送内容（此前误以为它们已发送，
+          导致模型长期收不到模式说明与知识库索引）。
+
+          实际注入以 executeSemiStreamingToolCycle 内的「静态提示块」段为准：
+            执行模式 → compact → 技能目录 → 知识库（全部拼第一条 system，顺序固定）
+            语言指令 system add(0) 到头部；语言指令注入全部 user；附件提示到最后一条 user。
+          两处若不一致，只会让 token 估算略有偏差，不影响最终发送。
+         */
         // 注入执行模式指令到系统提示词
         if (executionMode != null && !executionMode.isEmpty()) {
             String modeInstruction;
@@ -2273,29 +2286,36 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        // 注入技能目录到 system 消息（工具循环的 messages 从 DB 重建，不含动态目录，故需重新注入）
+        // ===== 注入「静态提示块」到第一条 system（顺序固定：compact → 技能目录）=====
+        //
+        // ★ 2026-11-24 修复：这些提示此前只拼在 handleChat 主链路的 historyMessages 上，
+        //   而真正发请求的是本方法从 DB 重建的 messages —— 导致「执行模式 / compact 说明 /
+        //   项目知识库摘要」从未发送给 LLM。
+        //
+        // ★ 静态与动态分两类处理（前缀缓存铁律）：
+        //   · 静态块（compact 说明、技能目录、弯路预警、语言指令）→ 拼第一条 system / add(0)，
+        //     位置绝对固定，跨轮与轮内都稳定。
+        //   · 动态块（执行模式、项目知识库摘要）→ 每次请求前放到消息列表<b>绝对末尾</b>
+        //     （见 placeDynamicBlocksAtTail）。它们确实会变（手动/自动切换、INDEX.md 异步维护），
+        //     拼头部一变就全量未命中；放末尾只影响尾部，代价是每次请求多 prefill 这一小段。
+
+        // ① compact 模式说明（文本含 conversationId，会话内恒定）
+        if (loopContextMode.shouldCompactToolResults()) {
+            appendToFirstSystem(messages,
+                    contextBuilder.buildCompactModeInstruction(conversationId), "compact 模式指令");
+        }
+
+        // ② 技能目录（L1 简介段；文本已静态化，见 SkillCatalogBuilder）
         String skillsSection = (String) initialApiRequest.get("_skillsSection");
         if (skillsSection != null) {
-            boolean catalogInjected = false;
-            for (Map<String, Object> msg : messages) {
-                if ("system".equals(msg.get("role"))) {
-                    String existing = (String) msg.get("content");
-                    if (existing == null || existing.isEmpty()) {
-                        msg.put("content", skillsSection);
-                    } else if (!existing.contains(SkillCatalogBuilder.CATALOG_HEADER)) {
-                        msg.put("content", existing + skillsSection);
-                    }
-                    catalogInjected = true;
-                    break;
-                }
-            }
-            if (!catalogInjected) {
-                Map<String, Object> sysMsg = new HashMap<>();
-                sysMsg.put("role", "system");
-                sysMsg.put("content", skillsSection);
-                messages.add(0, sysMsg);
-            }
-            log.info("技能目录注入(toolLoop): 已注入技能目录到 system 消息, 长度={}", skillsSection.length());
+            appendToFirstSystem(messages, skillsSection, "技能目录");
+        }
+
+        // ③ 项目知识库摘要：这里只取「会话级快照」文本，实际插入由请求出口统一放到末尾（动态块）
+        String kbSection = resolveKbSectionSnapshot(conversationId,
+                (String) initialApiRequest.get("_projectRoot"));
+        if (kbSection != null && !kbSection.isEmpty()) {
+            initialApiRequest.put("_kbSectionSnapshot", kbSection);
         }
 
         /*
@@ -3072,6 +3092,141 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     @Autowired
     private DetourHintCacheStore detourHintCacheStore;
 
+    /**
+     * 会话级「项目知识库摘要」快照。
+     *
+     * <p><b>为什么必须快照（2026-11-24）</b>：该摘要拼接在第一条 system 末尾，而
+     * {@code .codecraft/INDEX.md} 会在任务结束后被 {@code maintainAfterTask} 异步维护 ——
+     * 内容一变，整段 system 头就变，从第 1 个 token 起全部未命中（一次全断 = 十几万 token
+     * 按未命中计价）。这里按会话缓存首次取到的文本，同一会话内逐字节恒定；
+     * 代价是该会话看不到后续的知识库更新，新会话会自然取到新版本。</p>
+     *
+     * <p>空串表示「本会话确认没有知识库」，同样缓存，避免每轮重复探测。</p>
+     */
+    private final Map<Long, String> kbSectionSnapshot = new ConcurrentHashMap<>();
+
+    /**
+     * 取「本会话的知识库摘要」——首次构建后固定，之后永远返回同一份字节。
+     *
+     * @param conversationId 会话 ID（为 null 时退化为不缓存，仅本次使用）
+     * @param projectRoot    工作目录
+     * @return 摘要文本；无知识库或构建失败时返回 {@code null}
+     */
+    private String resolveKbSectionSnapshot(Long conversationId, String projectRoot) {
+        if (conversationId == null) {
+            return projectContextProvider.buildBootstrapSection(projectRoot);
+        }
+        String cached = kbSectionSnapshot.get(conversationId);
+        if (cached != null) {
+            return cached.isEmpty() ? null : cached;
+        }
+        String section;
+        try {
+            section = projectContextProvider.buildBootstrapSection(projectRoot);
+        } catch (RuntimeException e) {
+            log.warn("项目知识库摘要构建失败（已跳过）: {}", e.getMessage());
+            section = null;
+        }
+        if (kbSectionSnapshot.size() > 1000) {
+            log.warn("kbSectionSnapshot 大小超过 1000，清理旧条目");
+            kbSectionSnapshot.clear();
+        }
+        kbSectionSnapshot.put(conversationId, section == null ? "" : section);
+        return section;
+    }
+
+    /**
+     * 「动态运行时注入」块的识别标记。
+     *
+     * <p>用于每次请求前<b>先移除旧块再追加到末尾</b>，保证同一列表在多轮迭代中不会堆积重复块，
+     * 同时让块的位置始终是「最后一条」—— 这是动态内容唯一不会破坏前缀缓存的放法：
+     * 它变了，只影响自己及其后的「本轮新 user」，前面所有历史照常命中。</p>
+     */
+    private static final String DYNAMIC_BLOCK_MARK = "[动态运行时注入]";
+
+    /**
+     * 把「运行时动态块」重排到消息列表<b>绝对末尾</b>（每次请求前调用，幂等）。
+     *
+     * <p><b>为什么是末尾而不是头部</b>：这些内容确实会变——执行模式随用户切换手动/自动，
+     * 知识库摘要随 {@code .codecraft/INDEX.md} 被异步维护。拼在头部（第一条 system）时，
+     * 一变就从第 1 个 token 起全部未命中（一次全断 = 十几万 token 按未命中计价）。
+     * 放到列表末尾后，变化只让「动态块 + 本轮新 user」重新 prefill，前面全部命中。</p>
+     *
+     * <p><b>为什么不能插在「最后一条 user 之前」</b>：动态块不落库，跨轮重建后历史里没有它，
+     * 插在中间会让上一轮的块位置与新一次完全错开，断裂点落到上一轮中段
+     * （弯路预警 2026-11-17 实测：其后 14 次工具结果 ≈14 万字符作废，TTFB 14~25 秒）。
+     * 只有「绝对末尾」在跨轮与轮内两种场景下位置都稳定。</p>
+     *
+     * <p><b>代价</b>：每次请求都要重新 prefill 这一小段（模式约 100 字符、知识库摘要通常 1~3K）。
+     * 相比「偶发一次全断」，这个常态成本低一个数量级。</p>
+     *
+     * @param messages  消息列表（就地修改）
+     * @param execMode  执行模式（manual / auto，可为空）
+     * @param kbSection 项目知识库摘要快照（可为空）
+     */
+    private void placeDynamicBlocksAtTail(List<Map<String, Object>> messages,
+                                          String execMode, String kbSection) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
+        // 1) 移除上一次迭代（或上一轮残留）的动态块，保证不重复累积
+        messages.removeIf(m -> "system".equals(m.get("role"))
+                && m.get("content") instanceof String s
+                && s.contains(DYNAMIC_BLOCK_MARK));
+
+        // 2) 按固定顺序追加到末尾：执行模式 → 知识库（顺序恒定，避免无谓重排）
+        if (execMode != null && !execMode.isEmpty()) {
+            String modeInstruction = "manual".equals(execMode)
+                    ? "当前模式：手动。写入文件、修改文件、执行命令等受限操作会自动向用户请求授权。当需求模糊或需要用户决策时，调用 ask_clarification 工具询问用户。"
+                    : "当前模式：自动。直接执行所有任务，无需征求用户同意。行为约束中要求「询问用户」的条款在当前模式下均不适用。";
+            messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + modeInstruction));
+        }
+        if (kbSection != null && !kbSection.isEmpty()) {
+            messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + kbSection));
+        }
+    }
+
+    /** 构造一条动态块 system 消息 */
+    private Map<String, Object> dynamicBlockMessage(String content) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("role", "system");
+        msg.put("content", content);
+        return msg;
+    }
+
+    /**
+     * 把一段文本追加到<b>第一条 system 消息</b>末尾。
+     *
+     * <p><b>为什么统一走这里（2026-11-24 修复）</b>：这些注入项（执行模式指令、compact 说明、
+     * 技能目录、弯路预警、知识库摘要）都不落库，每轮重建后靠内存重新注入。它们的位置必须满足
+     * 「绝对固定」，否则跨轮重建时历史里没有它们，位置错位会让断裂点落到上一轮中段
+     * （弯路预警 2026-11-17 实测：其后 14 次工具结果 ≈14 万字符全部作废，TTFB 14~25 秒）。
+     * 拼到第一条 system 末尾是唯一「位置绝对固定」且「不额外占用消息槽位」的做法。</p>
+     *
+     * <p>同时要求调用方保证<b>文本稳定 + 拼接顺序稳定</b>：一旦某段文本每轮不同（时间戳、
+     * 统计数字、异步刷新的文件内容），这里就会成为全量未命中的起点。</p>
+     *
+     * @param messages 消息列表（就地修改）
+     * @param text     要追加的文本（调用方自行带前导空行）
+     * @param tag      日志标签
+     */
+    private void appendToFirstSystem(List<Map<String, Object>> messages, String text, String tag) {
+        if (messages == null || messages.isEmpty() || text == null || text.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> msg : messages) {
+            if (!"system".equals(msg.get("role"))) {
+                continue;
+            }
+            Object contentObj = msg.get("content");
+            if (contentObj instanceof String existing) {
+                msg.put("content", existing + text);
+                log.info("{}注入(system 段): 长度={}", tag, text.length());
+            }
+            return;
+        }
+    }
+
     private void injectDetourHintAtTaskStart(List<Map<String, Object>> messages,
                                              String projectRoot, Long conversationId) {
         if (lessonService == null || messages == null || messages.isEmpty() || conversationId == null) {
@@ -3805,6 +3960,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         AtomicReference<String> finishReasonRef = new AtomicReference<>();
         // 使用 ConcurrentHashMap：flatMap 默认并发处理多个 chunk，普通 HashMap 并发写有死循环风险
         Map<Integer, ObjectNode> accumulatedToolCalls = new ConcurrentHashMap<>();
+
+        // ★ 动态块重排（每次请求前）：执行模式 / 知识库摘要放到消息列表绝对末尾。
+        //   这两块会变（手动自动切换、.codecraft/INDEX.md 异步维护），拼头部一变就全量未命中；
+        //   放末尾时变化只影响尾部，跨轮断点也落在「本轮新 user」附近。
+        //   先移除旧块再追加，保证多轮迭代不会堆积重复块、位置永远是最后一条。
+        placeDynamicBlocksAtTail(messages,
+                (String) apiRequest.get("_executionMode"),
+                (String) apiRequest.get("_kbSectionSnapshot"));
 
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);

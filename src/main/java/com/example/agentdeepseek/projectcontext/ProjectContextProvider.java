@@ -69,19 +69,44 @@ public class ProjectContextProvider {
         if (alreadyInjected(messages)) {
             return;
         }
-        String snippet = snippetCached(root);
-        if (snippet == null || snippet.isEmpty()) {
-            return;     // 知识库不存在 → 什么都不做（绝不创建）
+        String section = buildBootstrapSection(root);
+        if (section == null || section.isEmpty()) {
+            return;
         }
         Map<String, Object> msg = new HashMap<>();
         msg.put("role", "system");
-        msg.put("content", "【目录知识库】以下是本工作目录的索引（自动维护，可能与实际有偏差，冲突时以文件为准）：\n"
+        msg.put("content", section);
+        messages.add(msg);
+        log.debug("项目知识库已注入: root={}, 摘要长度={}", root, section.length());
+    }
+
+    /**
+     * 只构建知识库摘要文本，不决定注入位置。
+     *
+     * <p><b>为什么需要这个重载（2026-11-24 修复）</b>：工具循环路径（真正发请求的那条）每轮都会
+     * 从 DB 重建消息列表，而知识库摘要不落库 —— 若沿用「追加到末尾」的写法，它每轮落点都不同，
+     * 断裂点会直接落到上一轮中段（弯路预警 2026-11-17 实测：其后 14 次工具结果 ≈14 万字符全部作废，
+     * TTFB 14~25 秒）。因此工具循环改用本方法取文本，再<b>拼到第一条 system 末尾</b>（位置固定）。</p>
+     *
+     * @param root 当前会话的工作目录
+     * @return 摘要文本；开关关闭或知识库不存在时返回 {@code null}
+     */
+    public String buildBootstrapSection(String root) {
+        if (!config.isEnabled() || !config.isInjectBootstrap()) {
+            return null;
+        }
+        if (root == null || root.isBlank()) {
+            return null;
+        }
+        String snippet = snippetCached(root);
+        if (snippet == null || snippet.isEmpty()) {
+            return null;     // 知识库不存在 → 什么都不做（绝不创建）
+        }
+        return "【目录知识库】以下是本工作目录的索引（自动维护，可能与实际有偏差，冲突时以文件为准）：\n"
                 + snippet
                 + "\n查看某项详情：project_map action=read module=<模块名或文件名>；"
                 + "补充职责/摘要：action=annotate；检查是否过期：action=status。\n"
-                + FINGERPRINT_MARK + " -->");
-        messages.add(msg);
-        log.debug("项目知识库已注入: root={}, 摘要长度={}", root, snippet.length());
+                + FINGERPRINT_MARK + " -->";
     }
 
     /**

@@ -141,6 +141,24 @@ public class ContextFingerprint {
      * @param iteration      当前工具循环轮次（仅用于日志定位）
      * @param messages       本次即将发送的完整消息列表
      */
+    /** 动态运行时注入块的标记（与 {@code DeepSeekServiceImpl.DYNAMIC_BLOCK_MARK} 保持一致） */
+    private static final String DYNAMIC_BLOCK_MARK = "[动态运行时注入]";
+
+    /**
+     * 是否为「动态运行时注入」块。
+     *
+     * <p>这类消息（执行模式、项目知识库摘要）按设计<b>固定在消息列表末尾</b>，位置随消息数增长而后移、
+     * 内容也可能变化 —— 这是刻意的取舍（详见 {@code placeDynamicBlocksAtTail}）。
+     * 若把它们计入前缀比对，监控会每轮必报「断裂」，噪音会把真正的断裂点淹没。</p>
+     */
+    private boolean isDynamicRuntimeBlock(Map<String, Object> msg) {
+        if (msg == null || !"system".equals(String.valueOf(msg.get("role")))) {
+            return false;
+        }
+        Object content = msg.get("content");
+        return content instanceof String s && s.contains(DYNAMIC_BLOCK_MARK);
+    }
+
     public void checkMessages(Long conversationId, int iteration, List<Map<String, Object>> messages) {
         if (conversationId == null || messages == null || messages.isEmpty()) {
             return;
@@ -150,6 +168,12 @@ public class ContextFingerprint {
             List<MessageFp> current = new ArrayList<>(size);
             for (int i = 0; i < size; i++) {
                 Map<String, Object> msg = messages.get(i);
+                // 末尾的「动态运行时注入」块（执行模式 / 知识库摘要）不参与比对：
+                // 它按设计每轮位置都变（永远最后一条）、内容也可能变，计入会让监控每轮必报，
+                // 噪音会把真正的断裂点淹没。跳过不影响其余消息的相对顺序判定。
+                if (isDynamicRuntimeBlock(msg)) {
+                    continue;
+                }
                 String role = msg == null ? "?" : String.valueOf(msg.get("role"));
                 String text = flatten(msg);
                 current.add(new MessageFp(role, text.length(), text.hashCode()));
