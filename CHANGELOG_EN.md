@@ -5,6 +5,102 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.6] - 2026-11-25
+
+> **Root-cause fix for the occasional 10-second first-token stall**: the real cause was neither
+> caching, nor context size, nor server-side queueing — it was **dropped TCP SYN packets plus the
+> kernel's SYN retransmission** (Windows backs off 1s→2s→4s→8s, so losing a few packets costs
+> 1–11 seconds), and the connection **eventually succeeds without throwing**, which is why the logs
+> contain no retry records at all. This release adds "healthy IP preference": probe and exclude bad
+> IPs ahead of time so Netty only uses ones that connect in milliseconds.
+> Backend restart required; **no database schema change**.
+
+### 🔍 The problem: why 10 seconds, and why no error in the logs
+
+**Measurement method**: 20 **brand-new** TCP connections to `api.deepseek.com:443`,
+plus 20 pings to the same host.
+
+```
+TCP connect time (ms):
+  48,48,49,49,49,49,49,49,50,50,50,50,50,50,50,51,56   ← 17 normal (~50ms)
+  1057                                                 ← 1 stuck for 1 second
+  11073                                                ← 1 stuck for 11 seconds
+
+ping same host ×20: 0% loss, 7–9ms
+Windows TCP params: Initial RTO = 1000ms, Max SYN Retransmissions = 4
+```
+
+**Findings**:
+- **ICMP never drops, but TCP SYN does** (different queues/priorities on the two paths)
+- Lost SYNs are retransmitted by the **kernel**, backing off `1s → 2s → 4s → 8s` (cumulative 1/3/7/15s)
+- The connection **eventually succeeds**, so no `ConnectTimeoutException` is raised →
+  no application-level retry, no error log
+- The user only sees "first token takes 10 seconds" (this release's instrumentation measured
+  `TTFB=10550ms`, of which **local preparation was only 9ms** and **network+server was 10541ms**)
+
+**Why it happens "occasionally" rather than always**:
+
+```
+DNS returns several CDN IPs for one host and rotates their order (two consecutive lookups
+returned them reversed):
+  103.220.64.100, 171.214.25.232
+  171.214.25.232, 103.220.64.100
+
+Netty's DefaultNameResolver → InetAddress.getByName() → takes only the FIRST IP, no Happy Eyeballs
+```
+
+So whenever DNS happens to put the bad IP first, the full retransmission window is paid;
+when a good IP is first, the connect costs 50ms.
+
+**Already ruled out by measurement** (so future investigations don't repeat them):
+DNS (9–563ms), port exhaustion (16384 ephemeral ports), TIME_WAIT pile-up (only 9 in total),
+IPv6 (no AAAA record), hosts file / system proxy (direct), rate limiting (`maxWaitMs=5s` and it
+throws), request body size (673K chars still 308ms), cache hit rate (the slow ones showed 99.0–99.2%).
+
+### 🔧 Fix: healthy IP preference (no timeout shortening, no hardcoded IPs)
+
+1. **New `LlmEndpointHealthRegistry`**: keeps "all IPs / healthy IPs" per host,
+   healthy ones sorted by **probe latency ascending** (fastest first);
+2. **New `LlmEndpointHealthChecker`**: `@Scheduled` probes **every** IP of every tracked host
+   concurrently every 60 seconds (1.5s per-IP timeout, dedicated `llm-ip-probe-*` pool so Reactor
+   threads are never blocked);
+3. **New `HealthyAddressResolverGroup`**: custom Netty resolver whose `doResolve` prefers healthy IPs;
+   **falls back to default resolution verbatim when no probe data exists** (identical to not having the feature);
+4. **`LLMWebClientManager`**: registers `host:port` when creating a WebClient and installs
+   `.resolver(new HealthyAddressResolverGroup(...))`;
+5. **One-switch rollback**: `llm.resolver.prefer-healthy=false` (takes effect on restart, no code rollback).
+
+### ⚠️ Two parameters deliberately left unchanged (also an important conclusion)
+
+| Parameter | Kept at | Why |
+|---|---|---|
+| `maxIdleTime` | **20s** | Shortening it or widening the recycle window only changes *how often* you hit a bad IP, not *why* it's bad |
+| `CONNECT_TIMEOUT_MILLIS` | **10000** | **Must not be reduced**: the worst case needs 15s (`1+2+4+8`); setting it to 3s **cuts off SYNs that are still being retransmitted**, turning "occasionally slow for 11s" into "usually cannot connect" |
+
+> `CONNECT_TIMEOUT` was briefly set to 3000ms and then reverted — this is documented in code comments
+> so nobody repeats it.
+
+### 🔢 Version bumps
+
+- `pom.xml` project version → 3.4.6 (artifact `code-craft-3.4.6.jar`)
+- `frontend/package.json` + `frontend/package-lock.json`
+- `frontend-v3/package.json` + `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + `code-craft-3.4.6.jar` reference) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.6
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build command examples,
+  FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **No database schema change**; overwrite install is fine
+- **Backend restart required** (the probe task runs its first round 8 seconds after startup, then every 60s)
+- Verify by searching `[LLM-IP]` in the logs:
+  - `host=api.deepseek.com 探测完成：健康 2/2，首选=xxx` → both IPs healthy
+  - `健康 1/2，首选=xxx` → **a bad IP was detected and excluded** (this is exactly the value of this release)
+- If anything looks wrong, set `llm.resolver.prefer-healthy=false` and restart to fall back to default resolution
+
+---
+
 ## [3.4.5] - 2026-11-24
 
 > ⚠️ **v3.4.4 was never released**: the first tag failed CI because the jackspeak dependency in electron/package-lock.json was accidentally rewritten (PowerShell regex overload ambiguity). This release contains the identical functional changes plus the lock fix.

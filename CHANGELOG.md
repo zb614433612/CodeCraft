@@ -5,6 +5,93 @@
 
 ---
 
+## [3.4.6] - 2026-11-25
+
+> **首 token 偶发卡 10 秒的根因修复**：真正原因不是缓存、不是上下文、也不是服务端排队，
+> 而是** TCP SYN 被丢弃 + 内核 SYN 重传**（Windows 退避 1s→2s→4s→8s，丢几个包就是 1~11 秒），
+> 且建连最终成功、不抛异常 —— 所以日志里一条重试记录都没有。
+> 本版新增「IP 健康优选」：提前探活出坏 IP 并排除，让 Netty 只用能秒连的 IP。
+> 必须重启后端；**无数据库结构变更**。
+
+### 🔍 问题：为什么是 10 秒，为什么日志里没有任何报错
+
+**实测方法**：对 `api.deepseek.com:443` 连续做 20 次**全新** TCP 建连，同时 ping 同域名 20 次。
+
+```
+TCP 建连耗时（ms）：
+  48,48,49,49,49,49,49,49,50,50,50,50,50,50,50,51,56   ← 17 次正常（约 50ms）
+  1057                                                 ← 1 次卡 1 秒
+  11073                                                ← 1 次卡 11 秒
+
+ping 同域名 20 次：0% 丢包、7~9ms
+Windows TCP 参数：Initial RTO = 1000ms、Max SYN Retransmissions = 4
+```
+
+**结论**：
+- **ICMP 不丢包，丢的是 TCP SYN**（两条路径的队列/优先级不同）
+- 丢 SYN 后由**内核**重传，退避为 `1s → 2s → 4s → 8s`（累计 1/3/7/15 秒）
+- 建连**最终成功**，不抛 `ConnectTimeoutException` → 应用层不会重试、不会报错
+- 业务侧只看到「首 token 卡 10 秒」（本版埋点实测：`TTFB=10550ms`，
+  其中**本地准备仅 9ms**、**网络+服务端 10541ms**）
+
+**为什么是「偶发」而不是「一直慢」**：
+
+```
+DNS 对同一域名返回多个 CDN IP，且顺序会轮换（实测两次解析顺序相反）：
+  103.220.64.100, 171.214.25.232
+  171.214.25.232, 103.220.64.100
+
+Netty 的 DefaultNameResolver → InetAddress.getByName() → 只取【第一个】IP，无 Happy Eyeballs
+```
+
+于是「DNS 恰好把坏 IP 排第一」时必然卡满重传窗口，「排第一是好 IP」时只要 50ms。
+
+**已被实测排除的怀疑**（避免以后重复排查）：
+DNS（9~563ms）、端口耗尽（动态端口 16384 个）、TIME_WAIT 堆积（全局仅 9 个）、
+IPv6（无 AAAA 记录）、hosts / 系统代理（直连）、限流（`maxWaitMs=5s` 且超时会抛异常）、
+请求体体积（673K 字符仍 308ms）、缓存命中率（慢的那几次 hit 达 99.0~99.2%）。
+
+### 🔧 修复：IP 健康优选（不缩短超时、不硬编码 IP）
+
+1. **新增 `LlmEndpointHealthRegistry`**：按 host 维护「全部 IP / 健康 IP」，
+   健康的按**探活耗时升序**排列（最快的排第一）；
+2. **新增 `LlmEndpointHealthChecker`**：`@Scheduled` 每 60 秒对每个已跟踪 host 的**所有** IP
+   做并发 TCP 探活（单 IP 超时 1.5 秒，独立 `llm-ip-probe-*` 线程池，不占 Reactor 线程）；
+3. **新增 `HealthyAddressResolverGroup`**：自定义 Netty resolver，`doResolve` 优先返回健康 IP；
+   **无探测记录时原样回退默认解析**（行为与未引入时完全一致）；
+4. **`LLMWebClientManager`**：WebClient 创建时登记 `host:port`，并挂载
+   `.resolver(new HealthyAddressResolverGroup(...))`；
+5. **一键回退**：`llm.resolver.prefer-healthy=false`（重启生效，无需回滚代码）。
+
+### ⚠️ 明确不改的两个参数（这也是重要结论）
+
+| 参数 | 保持原值 | 原因 |
+|---|---|---|
+| `maxIdleTime` | **20s** | 缩短超时/改回收窗口都只是改变「撞上坏 IP 的频率」，不解决「为什么坏」 |
+| `CONNECT_TIMEOUT_MILLIS` | **10000** | **不能调小**：建连最坏需要 15 秒（`1+2+4+8`），调到 3 秒会**打断正在重传的 SYN**，把「偶发慢 11 秒」变成「大概率连不上」 |
+
+> 曾短暂把 `CONNECT_TIMEOUT` 调成 3000ms 并已回退 —— 这一点写进代码注释，防止后人重犯。
+
+### 🔢 版本号同步
+
+- `pom.xml` 项目版本 → 3.4.6（产物 `code-craft-3.4.6.jar`）
+- `frontend/package.json` + `frontend/package-lock.json`
+- `frontend-v3/package.json` + `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `code-craft-3.4.6.jar` 引用）+ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.6
+- README / README_EN 版本徽章、8 个 docs 文件头、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **无数据库结构变更**，可覆盖安装
+- 必须**重启后端**才生效（探活任务在启动 8 秒后跑首轮，之后每 60 秒一轮）
+- 启动后可在日志中搜索 `[LLM-IP]` 确认效果：
+  - `host=api.deepseek.com 探测完成：健康 2/2，首选=xxx` → 两个 IP 都健康
+  - `健康 1/2，首选=xxx` → **探测出一个坏 IP 并已排除**（这正是本版的价值）
+- 若出现异常，设 `llm.resolver.prefer-healthy=false` 重启即可回退到默认解析
+
+---
+
 ## [3.4.5] - 2026-11-24
 
 > ⚠️ **v3.4.4 未发布**：首次 tag 因 electron/package-lock.json 中 jackspeak 依赖被误改（PowerShell 正则重载歧义）导致 CI 打包失败；本版为修复后重发，功能内容与 3.4.4 一致。

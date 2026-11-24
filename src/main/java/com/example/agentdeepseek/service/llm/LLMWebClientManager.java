@@ -22,6 +22,7 @@ import reactor.netty.resources.ConnectionProvider;
 import reactor.util.retry.Retry;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
@@ -81,8 +82,22 @@ public class LLMWebClientManager {
     @Value("${llm.retry.network-interval-ms:5000}")
     private long networkIntervalMs = 5000;
 
-    public LLMWebClientManager(ProviderRateLimiter providerRateLimiter) {
+    /** IP 健康注册表：由 LlmEndpointHealthChecker 定时填充探测结果，resolver 读取后择优 */
+    private final LlmEndpointHealthRegistry endpointHealthRegistry;
+
+    /**
+     * 是否启用健康 IP 优选。
+     *
+     * <p>{@code false} = 完全走 Netty 默认解析（行为与未引入该特性时完全一致），
+     * 用于出问题时一键回退：改配置 + 重启即可，无需回滚代码。</p>
+     */
+    @Value("${llm.resolver.prefer-healthy:true}")
+    private boolean preferHealthyIp;
+
+    public LLMWebClientManager(ProviderRateLimiter providerRateLimiter,
+                               LlmEndpointHealthRegistry endpointHealthRegistry) {
         this.providerRateLimiter = providerRateLimiter;
+        this.endpointHealthRegistry = endpointHealthRegistry;
     }
 
     /**
@@ -92,7 +107,36 @@ public class LLMWebClientManager {
      * @return 该 Provider 专用的 WebClient 实例
      */
     public WebClient getOrCreate(ProviderConfig config) {
+        // 登记端点 host:port，供定时探活（幂等：重复调用只更新端口）
+        registerEndpoint(config);
         return clientCache.computeIfAbsent(config.getCode(), code -> buildWebClient(config));
+    }
+
+    /**
+     * 把 Provider 的端点登记到健康注册表，供 {@link LlmEndpointHealthChecker} 定时探活。
+     *
+     * <p>只做 URI 解析、不发任何网络请求；baseUrl 非法时静默跳过，不影响 WebClient 创建。
+     * 端口推导：显式端口优先，否则 HTTPS→443、HTTP→80（覆盖 Ollama 等自定义端口的场景）。</p>
+     */
+    private void registerEndpoint(ProviderConfig config) {
+        if (config == null || config.getBaseUrl() == null || config.getBaseUrl().isBlank()) {
+            return;
+        }
+        try {
+            URI uri = URI.create(config.getBaseUrl().trim());
+            String host = uri.getHost();
+            if (host == null || host.isBlank()) {
+                return;
+            }
+            int port = uri.getPort();
+            if (port <= 0) {
+                port = "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+            }
+            endpointHealthRegistry.trackHost(host, port);
+        } catch (Exception e) {
+            log.warn("[LLM-IP] 无法从 baseUrl 解析端点（跳过登记）: baseUrl={}, err={}",
+                    config.getBaseUrl(), e.getMessage());
+        }
     }
 
     /**
@@ -144,6 +188,28 @@ public class LLMWebClientManager {
                 .build();
 
         HttpClient httpClient = HttpClient.create(connectionProvider)
+                /*
+                  ★ 健康 IP 优选（2026-11-25，解决「首 token 偶发卡 10 秒」）
+
+                  【为什么需要】
+                  Netty 默认解析走 InetAddress.getByName()，只取 DNS 返回的【第一个】IP，
+                  没有 Happy Eyeballs；而 DNS 对同一域名（如 api.deepseek.com）返回多个 CDN IP
+                  且顺序会轮换。本机实测：
+                    · 20 次全新 TCP 建连：17 次约 50ms，1 次 1057ms，1 次 11073ms
+                    · 同一时刻 ping 同一域名 20 次：0% 丢包、7~9ms
+                    · Windows：Initial RTO=1000ms、Max SYN Retransmissions=4
+                  → ICMP 不丢，丢的是 TCP SYN；内核按 1s→2s→4s→8s 重传，且【最终建连成功、不抛异常】，
+                    所以应用层没有任何重试日志，只表现为「首 token 卡 10 秒」
+                    （实测 TTFB=10550ms：本地准备 9ms + 网络段 10541ms）。
+
+                  【本 resolver 做什么】
+                  只返回「探活通过且最快」的 IP（由 LlmEndpointHealthChecker 每 60 秒填充）；
+                  无探测记录时【原样回退默认解析】，行为与未启用时完全一致。
+
+                  【一键回退】
+                  application.yml 设 llm.resolver.prefer-healthy=false 即可（重启生效），无需回滚代码。
+                 */
+                .resolver(new HealthyAddressResolverGroup(endpointHealthRegistry, preferHealthyIp))
                 .protocol(HttpProtocol.H2, HttpProtocol.HTTP11)
                 // responseTimeout 管的是「发出请求 → 收到响应头」这段，不是流式整体时长。
                 // 长上下文（十几万~几十万 token）在共享套餐池（如火山 Coding Plan）里，
