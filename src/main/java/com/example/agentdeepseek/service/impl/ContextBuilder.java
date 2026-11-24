@@ -76,6 +76,25 @@ public class ContextBuilder {
      */
     private static final int PROTECT_RECENT_TOOL_ROUNDS = 8;
 
+    /**
+     * 工具结果「展示包装」的固定头部（与 {@code ToolLoopManager#formatToolResult} 严格一致）。
+     *
+     * <p><b>为什么需要它（跨轮前缀缓存修复）</b>：工具结果在落库前会被
+     * {@code formatToolResult} 包装成「虚线框 + 工具名」的展示文本，并存进
+     * {@code reasoning} 列（TOOL 消息的 {@code content} 恒为 null）；而<b>当轮发给模型的
+     * 是未经包装的原始 content</b>（{@code ToolExecutor#buildToolMessages}）。重建历史时若
+     * 直接取 reasoning，同一条 TOOL 消息就会在「内存态（原始）」与「重建态（包装）」之间
+     * 来回翻转 —— 从该条起后面所有内容前缀全部失效，跨轮第一枪整段重新 prefill。</p>
+     *
+     * <p><b>实测证据</b>（2026-11-24，安装版 v3.3.8，conversation 550）：跨轮首枪
+     * 585017 字符的请求，逐消息指纹报 {@code index=190 role: tool → tool 长度 210 → 336}，
+     * 差值 {@code 126} 正是
+     * {@code "\n\n" + 48*"-" + "工具调用:" + 48*"-" + "\n" + "> **file_explorer**\n" + "\n\n"}
+     * 的长度（113 + 工具名长度）。剥离包装后恢复原始 content，前缀即可跨轮稳定。</p>
+     */
+    private static final String TOOL_RESULT_WRAPPER_PREFIX =
+            "\n\n" + "-".repeat(48) + "工具调用:" + "-".repeat(48) + "\n";
+
     private final ConversationMapper conversationMapper;
     private final ConversationMessageMapper conversationMessageMapper;
     private final CompactionService compactionService;
@@ -282,6 +301,11 @@ public class ContextBuilder {
 
                     String content = msg.getReasoning() != null ? msg.getReasoning() :
                             (msg.getContent() != null ? msg.getContent() : "");
+                    // ★ 前缀缓存关键：还原「当轮发给模型的原始 content」。
+                    //   reasoning 列存的是 formatToolResult 包装后的展示文本（content 列恒为 null），
+                    //   当轮发给模型的却是未包装的原始内容。不剥离 → 同一条 TOOL 消息两种形态，
+                    //   跨轮前缀从第一条 TOOL 起全部失效（实测 index=190 / 长度差 126 即此因）。
+                    content = stripToolResultWrapper(content);
                     messageMap.put("content", content);
 
                     result.add(messageMap);
@@ -417,6 +441,47 @@ public class ContextBuilder {
         messages.addAll(headSystems);
         messages.addAll(middleSystems);
         messages.addAll(others);
+    }
+
+    /**
+     * 剥离工具结果的「展示包装」，还原当轮真正发给模型的原始 content。
+     *
+     * <p><b>包装的由来</b>：{@code ToolLoopManager#formatToolResult} 为了前端展示，在工具结果
+     * 前后加了虚线框、「工具调用:」标题与「&gt; **工具名**」行，并把这整段存进 TOOL 消息的
+     * {@code reasoning} 列；而 {@code ToolExecutor#buildToolMessages} 发给模型的
+     * {@code content} 是<b>未包装</b>的原始内容。两者字节不同 —— 跨轮重建时若直接下发
+     * reasoning，同一条消息就会出现两种形态，前缀从该条起全部失效。</p>
+     *
+     * <p><b>可逆性</b>：包装是「固定头 + 原始内容 + 固定两个换行」的纯拼接，因此按同样规则
+     * 剥回去可以逐字节还原（空结果场景剥完为 {@code ""}）。不以包装头开头的消息
+     * （旧数据 / 非本路径写入）原样返回，绝不误伤。</p>
+     *
+     * @param raw TOOL 消息 reasoning 列的内容
+     * @return 当轮发给模型的原始工具结果
+     */
+    private String stripToolResultWrapper(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return raw == null ? "" : raw;
+        }
+        if (!raw.startsWith(TOOL_RESULT_WRAPPER_PREFIX)) {
+            return raw;
+        }
+        int offset = TOOL_RESULT_WRAPPER_PREFIX.length();
+        // 紧随固定头的是 "> **工具名**\n" 一整行，跳过它
+        if (raw.startsWith("> **", offset)) {
+            int lineEnd = raw.indexOf('\n', offset);
+            if (lineEnd > 0) {
+                offset = lineEnd + 1;
+            }
+        }
+        String body = raw.substring(offset);
+        // formatToolResult 无条件在末尾追加两个换行，这里等量剥回，保证与原始 content 逐字节一致
+        if (body.endsWith("\n\n")) {
+            body = body.substring(0, body.length() - 2);
+        } else if (body.endsWith("\n")) {
+            body = body.substring(0, body.length() - 1);
+        }
+        return body;
     }
 
     /**

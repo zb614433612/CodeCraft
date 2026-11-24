@@ -5,6 +5,82 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.9] - 2026-11-24
+
+> **Cross-turn first-shot cache break fix**: eliminates the prefix invalidation caused by the
+> same TOOL message having two different shapes (in-memory vs rebuilt-from-DB).
+> Measured evidence (conversation 550, installed v3.3.8): the first request of a new turn was
+> 585017 chars, and the per-message fingerprint reported
+> `index=190 role: tool → tool, length 210 → 336 (delta 126)` — exactly the
+> `formatToolResult` wrapper length "113 + tool-name length" (`file_explorer` = 13 → 126).
+> After the fix, rebuilt history sends the same raw tool result that was sent during the turn,
+> so the prefix no longer flips because of a display wrapper.
+> ⚠️ **Every existing conversation will break its prefix once more after upgrading** (the sent
+> bytes change) — a one-off cost. Backend restart required; no database schema change;
+> overwrite installation is fine.
+
+### 🔍 Root cause: one TOOL message, two shapes
+
+- **What the model receives during the turn**: `ToolExecutor#buildToolMessages` writes
+  `content`, which is the **raw tool result** trimmed by `ToolResultBudget` — no wrapper.
+- **What gets persisted**: `DeepSeekServiceImpl#appendToolResultMessages` calls
+  `saveToolMessage(formatToolResult(toolContent, toolName))`, and
+  `MessagePersister#saveToolMessage` stores it in the **reasoning column** (content is always
+  null). `formatToolResult` prepends `\n\n` + 48 × `-` + `工具调用:` + 48 × `-` + `\n` +
+  `> **tool-name**\n` and appends two newlines.
+- **What rebuilding reads**: the TOOL branch in `ContextBuilder` uses
+  `msg.getReasoning() != null ? ...` — i.e. the **wrapped** text.
+- **Consequence**: inside one turn (iteration ≥ 1) messages only ever grow in memory and never
+  pass through the DB, hence a 95%+ hit rate; across turns, rebuilding makes the bytes differ
+  from the first TOOL message added by the previous turn onward, and everything after that point
+  is re-prefilled as cache miss.
+
+### 🔧 Fix: strip the display wrapper while rebuilding (zero DB / frontend changes)
+
+- New constant `TOOL_RESULT_WRAPPER_PREFIX`, byte-for-byte identical to the fixed header of
+  `ToolLoopManager#formatToolResult`.
+- The TOOL branch now calls `stripToolResultWrapper(content)`: skip the fixed header and the
+  whole `> **tool-name**` line, then remove exactly two trailing newlines.
+- **Reversibility**: the wrapper is pure concatenation of "fixed header + raw content + two
+  newlines", so stripping restores the original bytes exactly (an empty result becomes `""`).
+  Messages that do not start with the wrapper header (legacy data, other write paths) are
+  returned untouched — no collateral damage.
+- **Trade-off**: the alternative "persist the raw content instead" was rejected — it requires
+  schema changes, historical data migration and frontend adjustments, far riskier than
+  stripping a string on the rebuild side. The wrapped text stays in the DB, so the frontend
+  tool cards keep their dashed frame and tool name.
+
+### 📊 Measured data (conversation 550)
+
+- Cross-turn first-shot request body: 494041 → 585017 chars (previous turn added ~90K chars)
+- Break point: `index=190` (0-based), i.e. the first TOOL message added by the previous turn
+  (DB `id=91423`, `created_at=11:36:02`)
+- That message: in-memory length 210 (raw content 162 chars) → rebuilt length 336 (reasoning
+  288 chars), delta **126** = `2 + 101 + 1 + (4 + 13 + 3) + 2`
+- The 190 messages before it were byte-identical (all rebuilt from earlier turns' DB rows)
+
+### 🔢 Version sync
+
+- `pom.xml` project version → 3.3.9
+- `frontend/package.json` + `frontend-v3/package.json` + both `package-lock.json` files
+- `electron/package.json` (`version` + `code-craft-3.3.9.jar`) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.3.9
+- README / README_EN badges, 8 docs headers (version → 3.3.9, date stays 2026-11-24)
+- DEV_QUICKREF / RELEASE_CHECKLIST build command samples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes; no config-format change).
+- **No database schema change**: no new tables, no new columns, no persisted field changes;
+  no data migration needed.
+- **No API behaviour change**: response bodies are untouched; the frontend needs no update.
+- **Overwrite installation is fine**.
+- **⚠️ The first request after the first restart is still a cache miss once**: the payload of
+  historical TOOL messages changes from "wrapped" to "raw", shifting the whole prefix; steady
+  hits resume from the second turn.
+- **Monitoring kept**: the `[缓存告警] 消息前缀断裂` warning stays, to catch any future source of
+  prefix flips.
+
 ## [3.3.8] - 2026-11-24
 
 > **Observability release for prompt-cache prefix breaks**: this version **changes no request

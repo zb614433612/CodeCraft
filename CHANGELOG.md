@@ -5,6 +5,72 @@
 
 ---
 
+## [3.3.9] - 2026-11-24
+
+> **跨轮首枪缓存断裂修复版**：修掉「同一条 TOOL 消息在内存态与重建态存在两种形态」导致的
+> 前缀失效。实测证据（会话 550，安装版 v3.3.8）：跨轮第一条请求 585017 字符，
+> 逐消息指纹报 `index=190 role: tool → tool，长度 210 → 336（差 126）`，
+> 与 `formatToolResult` 的包装长度「113 + 工具名长度」完全吻合（`file_explorer` = 13 → 126）。
+> 修复后重建历史下发的就是当轮真正发给模型的原始工具结果，跨轮前缀不再因展示包装而翻转。
+> ⚠️ **上线后所有现存会话的前缀会再断一次**（发送内容变了），属一次性代价；
+> 必须重启后端；无数据库结构变更；可覆盖安装。
+
+### 🔍 根因：同一条 TOOL 消息存在两种形态
+
+- **当轮发给模型的**：`ToolExecutor#buildToolMessages` 写入 `content`，内容是
+  `ToolResultBudget` 裁剪后的**原始工具结果**，不含任何包装。
+- **落库的**：`DeepSeekServiceImpl#appendToolResultMessages` 调用
+  `saveToolMessage(formatToolResult(toolContent, toolName))`，而
+  `MessagePersister#saveToolMessage` 把它写进 **reasoning 列**（content 恒为 null）。
+  `formatToolResult` 会加上 `\n\n` + 48 个 `-` + `工具调用:` + 48 个 `-` + `\n`
+  + `> **工具名**\n` 的头部，以及末尾两个换行。
+- **重建时取的**：`ContextBuilder` 的 TOOL 分支 `msg.getReasoning() != null ? ...`
+  —— 取到的正是**包装版**。
+- **后果**：同一轮内（iteration≥1）消息在内存里自增、从不过 DB，所以命中率 95%+；
+  一旦跨轮重建，从「上一轮新增的第一条 TOOL 消息」开始字节不同，
+  该位置之后全部按未命中重新 prefill。
+
+### 🔧 修复：重建时剥离展示包装（DB 与前端零改动）
+
+- 新增常量 `TOOL_RESULT_WRAPPER_PREFIX`，与 `ToolLoopManager#formatToolResult`
+  的固定头逐字节一致。
+- TOOL 分支重建时调用 `stripToolResultWrapper(content)`：跳过固定头与
+  `> **工具名**` 整行，末尾等量剥回两个换行。
+- **可逆性**：包装是「固定头 + 原始内容 + 固定两个换行」的纯拼接，
+  因此剥离可逐字节还原（空结果场景剥完为 `""`）；不以包装头开头的消息
+  （旧数据 / 非本路径写入）原样返回，绝不误伤。
+- **取舍**：没有采用「落库改存原始内容」方案 —— 那需要改表结构、迁移历史数据、
+  调整前端展示，风险与成本都远高于「只在重建侧剥离一次字符串」。
+  DB 中的包装文本继续保留，前端工具卡片照常显示虚线框与工具名。
+
+### 📊 实测数据（会话 550）
+
+- 跨轮首枪请求体：494041 → 585017 字符（上一轮新增约 9 万字符）
+- 断裂点：`index=190`（从 0 计），即上一轮新增的第一条 TOOL 消息
+  （DB `id=91423`，`created_at=11:36:02`）
+- 该条：内存态长度 210（原始 content 162 字符）→ 重建态长度 336（reasoning 288 字符），
+  差 **126** = `2 + 101 + 1 + (4 + 13 + 3) + 2`
+- 断裂点之前的 190 条消息完全一致（全部来自更早轮次的 DB 重建）
+
+### 🔢 版本号同步
+
+- `pom.xml` 项目版本 → 3.3.9
+- `frontend/package.json` + `frontend-v3/package.json` + 两个 `package-lock.json`
+- `electron/package.json`（`version` + `code-craft-3.3.9.jar`）+ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.3.9
+- README / README_EN 徽章、8 个 docs 文件头（版本 → 3.3.9，日期保持 2026-11-24）
+- DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **必须重启后端**（Java 改动，无配置文件格式变化）。
+- **无数据库结构变更**：不新增表、不新增列、不改任何持久化字段；历史数据无需迁移。
+- **无 API 行为变化**：响应体不变，前端无需改动。
+- **可覆盖安装**：Electron 安装包直接覆盖即可。
+- **⚠️ 首次启动后的第一轮请求仍会未命中一次**：历史 TOOL 消息的下发内容从
+  「包装版」变为「原始版」，前缀整体改变；从第二轮起恢复稳定命中。
+- **保留监控**：`[缓存告警] 消息前缀断裂` 继续保留，用于监测未来任何新的前缀翻转来源。
+
 ## [3.3.8] - 2026-11-24
 
 > **缓存前缀断裂可定位版本**：本版**不改任何发送内容**，只补观测能力。
