@@ -5,7 +5,9 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
-## [3.4.4] - 2026-11-24
+## [3.4.5] - 2026-11-24
+
+> ⚠️ **v3.4.4 was never released**: the first tag failed CI because the jackspeak dependency in electron/package-lock.json was accidentally rewritten (PowerShell regex overload ambiguity). This release contains the identical functional changes plus the lock fix.
 
 > **Cross-turn first-token cache-break fix**: a user's "mid-task supplement" message was injected into
 > memory only and never persisted, so the next turn's rebuild dropped it — every message after it
@@ -76,11 +78,11 @@ Tuning will follow once the segmented data confirms "connect vs server"; this re
 
 ### 🔢 Version bumps
 
-- `pom.xml` project version → 3.4.4 (artifact `code-craft-3.4.4.jar`)
+- `pom.xml` project version → 3.4.5 (artifact `code-craft-3.4.5.jar`)
 - `frontend/package.json` + `frontend/package-lock.json`
 - `frontend-v3/package.json` + `frontend-v3/package-lock.json`
-- `electron/package.json` (`version` + `code-craft-3.4.4.jar` reference) + `electron/package-lock.json`
-- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.4
+- `electron/package.json` (`version` + `code-craft-3.4.5.jar` reference) + `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.5
 - README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build command
   examples, FAQ version sample
 

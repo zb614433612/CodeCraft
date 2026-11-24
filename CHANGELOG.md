@@ -5,7 +5,9 @@
 
 ---
 
-## [3.4.4] - 2026-11-24
+## [3.4.5] - 2026-11-24
+
+> ⚠️ **v3.4.4 未发布**：首次 tag 因 electron/package-lock.json 中 jackspeak 依赖被误改（PowerShell 正则重载歧义）导致 CI 打包失败；本版为修复后重发，功能内容与 3.4.4 一致。
 
 > **跨轮首 token 缓存断裂修复**：用户「中途补充需求」的消息只进内存不落库，
 > 下一轮重建上下文时它消失，导致其后**所有消息整体前移一位**，从该位置起
@@ -69,11 +71,11 @@ DNS(9~563ms)、TCP(10~90ms)、IPv6(无 AAAA)、hosts、系统代理、
 
 ### 🔢 版本号同步
 
-- `pom.xml` 项目版本 → 3.4.4（产物 `code-craft-3.4.4.jar`）
+- `pom.xml` 项目版本 → 3.4.5（产物 `code-craft-3.4.5.jar`）
 - `frontend/package.json` + `frontend/package-lock.json`
 - `frontend-v3/package.json` + `frontend-v3/package-lock.json`
-- `electron/package.json`（`version` + `code-craft-3.4.4.jar` 引用）+ `electron/package-lock.json`
-- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.4
+- `electron/package.json`（`version` + `code-craft-3.4.5.jar` 引用）+ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.5
 - README / README_EN 版本徽章、8 个 docs 文件头、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
 
 ### ⬆️ 升级说明

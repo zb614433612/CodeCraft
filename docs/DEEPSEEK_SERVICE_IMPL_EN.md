@@ -1,7 +1,7 @@
 > 🌐 中文版：[🇨🇳 DEEPSEEK_SERVICE_IMPL](./DEEPSEEK_SERVICE_IMPL.md)
 # DeepSeekServiceImpl Deep Dive: Core Engine Method Call Topology & State Machine
 
-> Version: v3.4.4 | Updated: 2026-11-24 | Audience: Developers / AI Collaborators
+> Version: v3.4.5 | Updated: 2026-11-24 | Audience: Developers / AI Collaborators
 > This document dissects the 187KB DeepSeekServiceImpl, sorting out its internal method call relationships, Tool Loop state machine, SSE event flow, and all safety mechanisms.
 
 ---
