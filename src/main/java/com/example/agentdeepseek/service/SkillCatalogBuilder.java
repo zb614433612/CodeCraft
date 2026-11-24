@@ -12,20 +12,28 @@ import java.util.List;
 /**
  * 技能目录构建器 —— L1「渐进式披露」层。
  *
- * <p>把当前全部活跃技能压缩成一份「目录」（每条仅：名称 / ID / 置信度 / 触发词 / 一句话描述），
+ * <p>把当前全部活跃技能压缩成一份「目录」（每条仅：名称 / ID / 触发词 / 一句话描述），
  * 动态注入到 system prompt，让 LLM 始终拥有全量技能的「全局视野」。</p>
+ *
+ * <p><b>★ 为什么目录必须「完全静态」（2026-11-24 修复）</b>：该目录拼接在<b>第一条 system 末尾</b>，
+ * 位于上下文缓存前缀的最前端。此前的目录行含「置信度 62% | 用 8 次」，且列表<b>按置信度降序</b>排列 ——
+ * 只要本轮调用过一次 {@code skill action=report}，下一轮置信度与使用次数就会变、排序也可能变，
+ * 于是整段 system 头变更 → 从第 1 个 token 起全部未命中（旧版本日志在 2026-11-17 连续出现 20+
+ * 次 {@code [缓存告警] 系统提示词前缀变更}，全部落在轮次=0 的跨轮第一枪）。
+ * 现在：行内不再渲染任何统计数字，列表按 {@code id} 升序排列（确定性），
+ * 目录文本在技能集合不变时逐字节恒定，前缀可长期命中。</p>
  *
  * <p>技能完整的使用说明（instructions）不在目录中，由 LLM 通过
  * {@code skill action=load} 按需加载（L2 层），从而在「不漏技能」与「不爆 token」之间取得平衡。</p>
  *
- * <p>预算控制：目录列表部分受 {@link #MAX_CATALOG_CHARS} 约束，超出后按置信度降序截断，
+ * <p>预算控制：目录列表部分受 {@link #MAX_CATALOG_CHARS} 约束，超出后按 {@code id} 升序截断，
  * 并提示 LLM 可用 {@code skill action=list} 查看其余技能。</p>
  */
 @Slf4j
 @Component
 public class SkillCatalogBuilder {
 
-    /** 技能目录「列表部分」的字符预算（约等于 token 数，中文 1 字符≈1 token）；超出按置信度降序截断 */
+    /** 技能目录「列表部分」的字符预算（约等于 token 数，中文 1 字符≈1 token）；超出按 id 升序截断 */
     private static final int MAX_CATALOG_CHARS = 3500;
 
     /** 单条技能的描述最大字符数（超出截断，防止单条过长挤占预算） */
@@ -54,10 +62,11 @@ public class SkillCatalogBuilder {
             return "";
         }
 
-        // 按置信度降序：预算不足时优先保留高置信度技能
+        // ★ 按 id 升序（确定性排序）：绝不能用置信度排序 —— 置信度随 skill report 变化，
+        //   排序一变整段目录文本就变，system 头部前缀全断。
+        //   稳定性优先于「高置信度优先展示」：技能集合不变时，这里必须逐字节恒定。
         List<Skill> sorted = new ArrayList<>(skills);
-        sorted.sort(Comparator.comparingDouble(
-                (Skill s) -> s.getConfidence() == null ? 0.0 : s.getConfidence()).reversed());
+        sorted.sort(Comparator.comparing(Skill::getId, Comparator.nullsLast(Long::compareTo)));
 
         // 预算控制：逐条累加，超出预算即停止（至少保留 1 条，避免全空）
         StringBuilder list = new StringBuilder();
@@ -87,7 +96,7 @@ public class SkillCatalogBuilder {
         sb.append("\n---\n");
         sb.append(CATALOG_HEADER);
         if (shown < sorted.size()) {
-            sb.append("（共 ").append(sorted.size()).append(" 个，此处按置信度列出前 ").append(shown).append(" 个）\n\n");
+            sb.append("（共 ").append(sorted.size()).append(" 个，此处列出前 ").append(shown).append(" 个）\n\n");
         } else {
             sb.append("（共 ").append(sorted.size()).append(" 个）\n\n");
         }
@@ -102,14 +111,7 @@ public class SkillCatalogBuilder {
     /** 格式化单条技能目录行（一行一条，尽量紧凑） */
     private String formatLine(Skill s) {
         StringBuilder sb = new StringBuilder();
-        sb.append("- 【").append(nullToEmpty(s.getName())).append("】(ID:").append(s.getId());
-        if (s.getConfidence() != null) {
-            sb.append(" | 置信度 ").append(String.format("%.0f%%", s.getConfidence() * 100));
-        }
-        if (s.getUsageCount() != null) {
-            sb.append(" | 用 ").append(s.getUsageCount()).append(" 次");
-        }
-        sb.append(")");
+        sb.append("- 【").append(nullToEmpty(s.getName())).append("】(ID:").append(s.getId()).append(")");
         String tw = formatTriggerWords(s.getTriggerWords());
         if (!tw.isEmpty()) {
             sb.append(" 触发: ").append(tw);

@@ -5,6 +5,58 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.3.10] - 2026-11-24
+
+> **Static skill catalog release**: removes the changing statistics and the ordering key from the
+> skill catalog, making this system-header text **byte-for-byte stable** so the system prefix no
+> longer breaks after a `skill report`.
+> Backend restart required; no database schema change; overwrite installation is fine.
+> ⚠️ The first turn after upgrading still breaks once (the catalog format changed); afterwards it
+> stays stable as long as skills are not added or removed.
+
+### 🔍 Problem: the skill catalog was the only dynamic source in the system header
+
+Each catalog line used to look like:
+
+```
+- 【skill name】(ID:15 | confidence 96% | used 22 times) triggers: ... | ...
+```
+
+and the list was **sorted by confidence descending**. This catalog is appended to the **end of the
+first system message**, i.e. at the very front of the cached prefix:
+
+- one `skill action=report` call changes confidence and usage count for the next turn;
+- a confidence change can also **swap the order of two skills**, reordering the whole catalog text.
+
+Old logs confirm it: on 2026-11-17, conversation 389 emitted the
+`[缓存告警] 系统提示词前缀变更` warning 8 times in a row, all at `iteration=0` (first shot of a new turn).
+
+### 🔧 Fix: render only stable fields + deterministic ordering
+
+- Catalog lines no longer print "confidence xx%" or "used n times"; only name / ID / trigger words / description remain.
+- Ordering changed from "confidence desc" to **id asc** — dropping the numbers alone is not enough:
+  if ordering still depends on confidence, one report can swap two lines and change the whole text.
+- Budget-truncation note changed from "listed top N by confidence" to "listed top N"; comments updated.
+- **Unchanged**: elimination rule (confidence below 10% never enters the catalog), 3500-char budget,
+  and the full `skill action=list` capability.
+
+### 📉 Cost and benefit
+
+- Cost: the model no longer sees "used 22 times, confidence 96%". The marginal value of those
+  statistics for skill selection is far smaller than the cache cost (one full break = 100K+ tokens
+  billed as cache miss).
+- Benefit: with an unchanged skill set, the system header is byte-identical, so the first shot of
+  every turn keeps hitting the cache.
+
+### ⬆️ Upgrade notes
+
+- Backend restart required (Java change; no config-format change).
+- No database schema change; no data migration.
+- No API behaviour change; the skill management page still shows confidence (it reads the DB value).
+- **⚠️ The first turn after upgrading breaks once**: the catalog format changes, shifting the whole
+  system header; stable afterwards.
+- Monitoring kept: `[缓存告警] 系统提示词前缀变更` still guards against any future dynamic source in the header.
+
 ## [3.3.9] - 2026-11-24
 
 > **Cross-turn first-shot cache break fix**: eliminates the prefix invalidation caused by the
