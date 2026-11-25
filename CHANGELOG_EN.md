@@ -5,6 +5,148 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.8] - 2026-11-25
+
+> **Root-cause fix for "the session keeps restating the initial task"**:
+> it was neither context bloat nor compaction failing to trigger —
+> it was **assistant message bodies (content) being persisted as NULL**.
+> Measured on conversation 644: 74 of 252 assistant messages (29%) had an empty body.
+> When history is rebuilt, those messages degenerate to bare `tool_calls`, so the model
+> cannot see what it said in the previous round and restates the task goal every round.
+> This release fixes both the collection timing and the persistence variable, so the
+> reply body survives in all three context modes (full / balanced / compact).
+> Backend restart required; **no database schema change**.
+
+### 🔍 The problem: even a 0-context session repeats itself
+
+The reported symptom was "the session keeps restating the initial task". The first
+hypothesis was context bloat degrading attention, but measurement ruled it out:
+
+- conversation 644 (507 messages / 608K characters of reasoning) repeated visibly;
+- conversation 676 (**brand-new, 0 context**, starting from a single user message) repeated too.
+
+Repeating with zero context means the problem is not accumulated history but
+**what gets assembled into each request**.
+
+Querying the database produced hard evidence:
+
+```
+conversation 644 assistant messages : 252
+of which content is NULL          : 74 (29%)
+reasoning is non-empty for all    → thinking was intact, the body was swallowed
+```
+
+And this is how a content-less message is rebuilt into history:
+
+```java
+String content = msg.getContent();
+if (content != null && !content.isEmpty()) {
+    messageMap.put("content", content);   // NULL → the content field is simply omitted
+}
+```
+
+So the model sees a history of "assistant turns with no body + tool results" and
+**has no idea what it said or how far it got**, so it reorganises its wording and
+restates the task goal every round — exactly the reported repetition.
+
+### 🔧 Fix 1: collect the body before the tool_calls branch
+
+The old order was "check `tool_calls` first, `return` when complete, collect the body after":
+
+```java
+// OLD
+JsonNode toolCalls = delta.path("tool_calls");
+if (complete) { ...save message...; return ...; }              // ← returns here
+String extractedContent = ...; contentCollector.append(...);   // ← never reached
+```
+
+DeepSeek packs **the body and `tool_calls` into the same frame** during parallel tool
+calls, so that frame's body could never reach `contentCollector`.
+
+This release moves collection ahead of the branch:
+
+```java
+// NEW
+String chunkContent = ctxClient.extractContentFromStreamChunk(data);
+if (chunkContent != null && !chunkContent.isEmpty()) {
+    contentCollector.append(chunkContent);
+}
+
+// check tool_calls (only after this point may we return early)
+JsonNode toolCalls = delta.path("tool_calls");
+```
+
+### 🔧 Fix 2: persist the content that was actually computed (the core bug)
+
+The old code computed a `content` value with three levels of fallback, then persisted
+a different variable:
+
+```java
+// OLD: computed, then thrown away
+String content = extracted.get("content");
+if (content == null || content.isEmpty()) {
+    content = contentCollector.toString();
+    if (content.isEmpty()) content = fullResponseSoFar;
+}
+...
+String collectedContent = contentCollector.toString();   // ← this is what got saved
+saveConversationMessage(..., collectedContent, ...);
+```
+
+`contentCollector` only holds frames **without** `tool_calls`, so when the body shares a
+frame with `tool_calls` it is necessarily empty — the body was stored as NULL.
+
+This release changes it to `String collectedContent = content;`, making the fallback
+chain actually effective.
+
+**The `content = fullResponseSoFar` fallback is also removed**: that is raw SSE protocol
+text (`data: {...}` frames concatenated) and would pollute history. When both sources are
+empty it genuinely means the model only called tools without speaking, in which case
+`saveAssistantReasoning` is the correct semantics.
+
+### 🔧 Fix 3: keep the in-memory copy identical to what is persisted
+
+`collectedContentStr` feeds the **in-memory** assistant message for the current round and
+was also read from the bare `contentCollector`:
+
+```java
+// OLD
+String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
+// NEW
+String collectedContentStr = content != null ? content : "";
+```
+
+This matters because within one tool loop `messages` accumulates in memory — if the body is
+missing there, the model loses context on the **very next iteration**, without waiting for
+the next user turn.
+
+### 🔧 Fix 4: remove the duplicated body collection
+
+Once Fix 1 moves collection earlier, the original block must be deleted in the same change,
+otherwise every frame is appended twice and the body is duplicated verbatim.
+
+### 🔢 Version bump
+
+- `pom.xml` (project version → 3.4.8, artifact `code-craft-3.4.8.jar`)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + the `code-craft-3.4.8.jar` path in `extraResources`) / `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.8
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build examples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend changed, restart required** (or repackage and reinstall);
+- **No database schema change**, no migration; overwrite install is fine, existing
+  conversations and settings are untouched;
+- Bodies already stored as NULL in existing conversations are **not backfilled**
+  (the data is simply not there); the new logic only guarantees no further loss;
+- Context mode semantics confirmed in this release: all three modes keep
+  "user message + tool calls + reply body"; they differ only in whether historical
+  reasoning is passed back and whether historical tool results are summarised.
+
+---
+
 ## [3.4.7] - 2026-11-25
 
 > **Root-cause fix for "compaction never fires → context exceeds the 1M window and returns 400"**:

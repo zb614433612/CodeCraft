@@ -5,6 +5,137 @@
 
 ---
 
+## [3.4.8] - 2026-11-25
+
+> **「会话不停复述初始任务」的根因修复**：不是上下文膨胀、也不是压缩没触发，
+> 而是 **assistant 消息的正文（content）被写成了 NULL**。
+> 实测会话 644：252 条 assistant 消息里 74 条（29%）正文为空 ——
+> 重建历史时这些消息只剩 `tool_calls`，模型看不到自己上一轮说过什么，
+> 只能每轮重新陈述任务目标。
+> 本版修正正文收集时机与落库变量，三种上下文模式（full / balanced / compact）
+> 的「回答正文」均不再丢失。必须重启后端；**无数据库结构变更**。
+
+### 🔍 问题：0 上下文新会话也会「复述」，与历史长度无关
+
+用户反馈「会话不停复述初始任务」。最初怀疑是上下文膨胀导致注意力涣散，
+但实测推翻了这一假设：
+
+- 会话 644（507 条消息 / 60.8 万字符 reasoning）复述明显；
+- 会话 676（**全新 0 上下文**，仅 1 条 user 消息起步）同样出现复述。
+
+0 上下文也复述，说明问题不在「历史累积」，而在**每轮请求拼出来的内容本身**。
+
+继续查数据库，找到硬证据：
+
+```
+会话 644 的 assistant 消息：252 条
+其中 content 为 NULL：      74 条（29%）
+对应 reasoning 均有内容    → 思考过程完整，正文却被吞了
+```
+
+而 content 为空的消息在重建历史时是这样处理的：
+
+```java
+String content = msg.getContent();
+if (content != null && !content.isEmpty()) {
+    messageMap.put("content", content);   // NULL → 直接不放 content 字段
+}
+```
+
+于是模型看到的历史是「一串没有正文的 assistant + 工具结果」，
+**完全不知道自己上一轮说了什么、进度到哪**，只能每轮重新组织语言、重新陈述任务目标 ——
+这就是用户侧看到的「不停复述」。
+
+### 🔧 修复一：正文收集提前到 tool_calls 判断之前
+
+旧顺序是「先判 `tool_calls`，完整就 `return`，之后才收集正文」：
+
+```java
+// 旧
+JsonNode toolCalls = delta.path("tool_calls");
+if (完整) { ...保存消息...; return ...; }                 // ← 直接返回
+String extractedContent = ...; contentCollector.append(...);  // ← 永远不执行
+```
+
+DeepSeek 在并行工具调用时会把**正文与 `tool_calls` 放进同一帧**，
+那一帧的正文永远进不了 `contentCollector`。
+
+本版把收集提前：
+
+```java
+// 新
+String chunkContent = ctxClient.extractContentFromStreamChunk(data);
+if (chunkContent != null && !chunkContent.isEmpty()) {
+    contentCollector.append(chunkContent);
+}
+
+// 检查是否有tool_calls（此后才可能提前 return）
+JsonNode toolCalls = delta.path("tool_calls");
+```
+
+### 🔧 修复二：落库改用真正算出的 content（核心 bug）
+
+旧实现算出了带三级兜底的 `content`，落库却用了另一个变量：
+
+```java
+// 旧：算出来又被丢弃
+String content = extracted.get("content");
+if (content == null || content.isEmpty()) {
+    content = contentCollector.toString();
+    if (content.isEmpty()) content = fullResponseSoFar;
+}
+...
+String collectedContent = contentCollector.toString();   // ← 用的却是这个
+saveConversationMessage(..., collectedContent, ...);
+```
+
+`contentCollector` 只装「不含 `tool_calls` 的帧」，正文与 `tool_calls` 同帧时它必然为空
+→ 正文存成 NULL。
+
+本版改为 `String collectedContent = content;`，让兜底真正生效。
+
+**同时去掉 `content = fullResponseSoFar` 这个兜底**：那是原始 SSE 协议文本
+（`data: {...}` 拼接），写进正文会污染历史。两者都为空说明模型本轮确实只调工具没说话，
+走 `saveAssistantReasoning` 才是正确语义。
+
+### 🔧 修复三：内存态与落库同源
+
+`collectedContentStr` 用于**当轮内存**里的 assistant 消息，同样取自裸 `contentCollector`：
+
+```java
+// 旧
+String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
+// 新
+String collectedContentStr = content != null ? content : "";
+```
+
+重要性在于：同一轮工具循环内 `messages` 是内存累积的 ——
+若内存里这条消息缺正文，模型在**下一次迭代立刻**就失忆，不用等到下一轮对话。
+
+### 🔧 修复四：删除重复的正文收集
+
+修复一把收集提前后，原位置那段必须同步删除，否则同一帧会被 `append` 两次、正文直接翻倍。
+
+### 🔢 版本号同步
+
+- `pom.xml`（项目版本 → 3.4.8，产物 `code-craft-3.4.8.jar`）
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `extraResources` 的 `code-craft-3.4.8.jar` 路径）/ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.8
+- README / README_EN 版本徽章、8 个 docs 头部、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **后端有改动，必须重启**（或重新打包安装）；
+- **无数据库结构变更**，无需迁移；可覆盖安装，历史会话与设置不受影响；
+- 历史会话里已经存成 NULL 的正文**不会自动恢复**（库里就是空的），
+  新逻辑只保证从今往后的正文不再丢；
+- 三种上下文模式本次语义确认：三者都保留「用户消息 + 工具调用 + 回答正文」，
+  差异只在「历史思考链是否回传」与「历史工具结果是否摘要化」。
+
+---
+
 ## [3.4.7] - 2026-11-25
 
 > **「压缩永不触发 → 上下文撞 1M 窗口返回 400」的根因修复**：

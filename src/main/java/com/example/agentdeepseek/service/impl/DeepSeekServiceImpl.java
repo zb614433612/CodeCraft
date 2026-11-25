@@ -4279,6 +4279,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 }
                             }
 
+                            /*
+                              ★ 2026-11-25 修复「正文丢失 → 模型反复复述初始任务」
+
+                              正文收集必须放在 tool_calls 判断<b>之前</b>。DeepSeek 在并行工具调用时
+                              会把正文与 tool_calls 放进同一帧；而下方 tool_calls 完整分支会
+                              shouldContinue.set(false) 并直接 return，该帧的 content 就永远进不了
+                              contentCollector → assistant 消息正文落库为 NULL →
+                              重建历史时这条消息只剩 tool_calls → 模型看不到自己上一轮说过什么
+                              → 每轮重新陈述任务目标（用户侧表现为「不停复述初始任务」）。
+                            */
+                            String chunkContent = ctxClient.extractContentFromStreamChunk(data);
+                            if (chunkContent != null && !chunkContent.isEmpty()) {
+                                contentCollector.append(chunkContent);
+                            }
+
                             // 检查是否有tool_calls
                             JsonNode toolCalls = delta.path("tool_calls");
                             if (!toolCalls.isMissingNode() && toolCalls.isArray() && toolCalls.size() > 0) {
@@ -4304,21 +4319,35 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     String content = extracted.get("content");
                                     String reasoning = extracted.get("reasoning");
                                     if (content == null || content.isEmpty()) {
+                                        // 回放解析为空时退回逐帧收集器（两者都是干净正文）
                                         content = contentCollector.toString();
-                                        if (content.isEmpty()) {
-                                            content = fullResponseSoFar;
-                                        }
                                     }
+                                    /*
+                                      ★ 2026-11-25 修复「正文落库为 NULL → 模型反复复述初始任务」
+
+                                      旧实现算出了上面这份带兜底的 content，落库却用
+                                      `String collectedContent = contentCollector.toString();` ——
+                                      算出来的 content 被直接丢弃。而 contentCollector 只装「不含 tool_calls
+                                      的帧」，正文与 tool_calls 同帧时它必然为空 → assistant 正文存成 NULL。
+
+                                      后果链：DB 无正文 → 重建历史时这条消息只剩 tool_calls →
+                                      模型看不到自己上一轮说过什么 → 每轮重新陈述任务目标（即「不停复述」）。
+                                      实测会话 644：252 条 assistant 中 74 条（29%）content 为 NULL。
+
+                                      ⚠️ 不再保留 `content = fullResponseSoFar` 兜底：那是原始 SSE 协议文本，
+                                         写进正文会污染历史（模型会读到 data: {...} 这类垃圾）。
+                                         两者都为空说明模型本轮确实只调工具没说话，走 saveAssistantReasoning 即可。
+                                    */
                                     String toolCallsJson = completeToolCalls.toString();
                                     // 保存工具调用前的助手思考过程和收集到的文本内容
-                                    String collectedContent = contentCollector.toString();
+                                    String collectedContent = content;
                                     if (collectedContent != null && !collectedContent.isEmpty()) {
                                         saveConversationMessage(storageConversationId, MessageRole.ASSISTANT, collectedContent, reasoning, toolCallsJson);
                                         log.debug("保存工具调用前的助手消息（含文本内容），content长度: {}",
                                                 collectedContent.length());
                                     } else {
                                         saveAssistantReasoning(storageConversationId, reasoning, toolCallsJson);
-                                        log.debug("保存工具调用前的助手思考过程，reasoning长度: {}",
+                                        log.debug("保存工具调用前的助手思考过程（本轮无正文），reasoning长度: {}",
                                                 reasoning != null ? reasoning.length() : 0);
                                     }
 
@@ -4361,7 +4390,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     Long userId = (Long) apiRequest.get("_userId");
                                     String currentTurnId = (String) apiRequest.get("_turnId");
                                     Long currentAgentConfigId = (Long) apiRequest.get("_agentConfigId");
-                                    String collectedContentStr = contentCollector != null ? contentCollector.toString() : "";
+                                    // ★ 2026-11-25：正文与落库同源。不能用裸 contentCollector ——
+                                    //   它只收集「不含 tool_calls 的帧」，正文与 tool_calls 同帧时会漏，
+                                    //   导致内存里的 assistant 消息缺正文（模型下一轮看不到自己说过什么）。
+                                    String collectedContentStr = content != null ? content : "";
 
                                     // ===== 权限预检：判断是否需要弹窗审批 =====
                                     // 层面一（manual）：affectsData=true
@@ -4783,11 +4815,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                 }
                             }
 
-                            // 提取文本内容并收集（使用 Provider 适配层解析，兼容 Anthropic/Ollama 等格式）
-                            String extractedContent = ctxClient.extractContentFromStreamChunk(data);
-                            if (extractedContent != null && !extractedContent.isEmpty()) {
-                                contentCollector.append(extractedContent);
-                            }
+                            // ★ 正文收集已在 tool_calls 判断之前完成（见上方 chunkContent）。
+                            //   此处不再重复收集，否则同一帧会被累加两次导致正文重复。
                             // 检查 reasoning_content（使用 Provider 适配层解析，始终实时流式输出，不过审查）
                             String extractedReasoning = ctxClient.extractReasoningFromStreamChunk(data);
                             if (extractedReasoning != null && !extractedReasoning.isEmpty()) {
