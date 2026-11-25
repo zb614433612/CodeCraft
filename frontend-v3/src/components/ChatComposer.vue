@@ -234,9 +234,10 @@ const props = withDefaults(
     /**
      * 整个会话的真实用量（成本 / 缓存命中率 / token）。
      *
-     * <p>与 contextTokens 的区别：contextTokens 是「当前上下文有多大」的前端估算，
-     * 这个来自 {@code llm_token_usage} 表，是「这个会话一路聊下来一共烧了多少」的真实记账，
-     * 含全部历史轮次与工具循环，不会因为分页只加载最近 5 轮而少算。</p>
+     * <p>与 contextTokens 的区别：contextTokens 是「当前这一屏上下文有多大」
+     * （2026-11-25 起由后端透传真实 prompt_tokens，压缩完成后会立刻变小），
+     * 而本字段来自 {@code llm_token_usage} 表，是「这个会话一路聊下来一共烧了多少」的累计记账，
+     * 含全部历史轮次与工具循环 —— 一个是「当前水位」，一个是「累计消耗」。</p>
      */
     usage?: SessionUsage
     placeholder?: string
@@ -367,8 +368,8 @@ const compactMode = computed(() => props.contextMode === 'compact')
 
 const contextTitle = computed(() =>
   compactMode.value
-    ? '按已加载消息估算，精简模式口径：本轮含思考与工具明细，历史轮次只计正文 + 工具摘要（非后端真实用量）'
-    : '按已加载消息估算：正文 + 思考过程 + 工具返回（非后端真实用量）'
+    ? '当前上下文大小（后端口径）：system + 压缩摘要 + 水位线之后的全部消息 + tools 定义，与模型窗口上限同口径；精简模式下历史轮次的思考不参与计算。带 ~ 前缀表示压缩后尚未发新请求的即时估算'
+    : '当前上下文大小（后端口径）：最近一次请求的真实 prompt_tokens（含 tools 定义），与模型窗口上限同口径，压缩完成后会立刻变小。带 ~ 前缀表示压缩后尚未发新请求的即时估算'
 )
 
 const compactTip = '精简模式：历史轮次的思考过程已移除、工具调用只保留摘要，节省上下文'

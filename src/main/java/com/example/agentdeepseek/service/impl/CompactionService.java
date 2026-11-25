@@ -453,7 +453,12 @@ public class CompactionService {
                 List<Map<String, Object>> apiMessages = toApiMessages(dbMessages, mode);
                 // 与真实 prompt_tokens 同口径：messages raw + tools raw，再乘 provider 校准比率。
                 int rawTokens = TokenEstimator.estimateMessagesRaw(apiMessages) + Math.max(0, toolsRawTokens);
-                int estimatedTokens = TokenEstimator.applyRatio(rawTokens, providerCode);
+                // 双口径取 max（2026-11-25）：messages 部分用字符口径（不依赖校准比率）兜底，
+                // tools 沿用调用方传入的 raw token（此处没有 tools 原始对象，无法走字符口径）。
+                // 否则校准比率失真时（实测低估 10.6 倍）异步预压缩也会跟着判「没超」，永不触发。
+                int estimatedTokens = Math.max(
+                        TokenEstimator.applyRatio(rawTokens, providerCode),
+                        TokenEstimator.estimateTotalByChars(apiMessages, null) + Math.max(0, toolsRawTokens));
                 int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
                 double ratio = (double) estimatedTokens / maxTokens;
 

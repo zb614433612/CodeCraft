@@ -62,9 +62,48 @@ public class TokenEstimator {
     /** 滑动平均的新观测权重（0.3 表示单次观测只挪动 30%，抗噪声） */
     private static final double CALIBRATION_ALPHA = 0.3;
 
-    /** 比率合理区间：超出视为解析异常（跨 provider 混用 / usage 帧错乱），丢弃该次观测 */
-    private static final double MIN_RATIO = 0.10;
-    private static final double MAX_RATIO = 2.00;
+    /**
+     * 比率合理区间：单次超出仍视为解析异常（usage 帧错乱 / tools 口径未对齐），丢弃该次观测。
+     *
+     * <p><b>边界值调整（2026-11-25）</b>：原区间 [0.10, 2.00] 已被真实数据从两端撞穿：</p>
+     * <ul>
+     *   <li>中文密集会话（工具结果是中文格式化文本）正确比率低至 <b>0.073</b>，
+     *       被 0.10 下限钳死 → 估算只有真实值的 45%，且永远无法继续下调；</li>
+     *   <li>英文 / 代码密集会话正确比率可达 <b>2.0 以上</b>（实测 raw=540,496 → 真实 1,080,992）。</li>
+     * </ul>
+     * <p>同一个槽位表示不了 0.073~2.0 这种跨 27 倍的形态差异，钳制只会把误差永久固化。</p>
+     */
+    private static final double MIN_RATIO = 0.03;
+    private static final double MAX_RATIO = 3.00;
+
+    /**
+     * 连续「同向」异常观测达到该次数后，判定当前比率已严重失真，
+     * 直接用 {@code ratio_old × observed}（= actual / raw）反推重建，不再丢弃。
+     *
+     * <p><b>为什么必须这样（2026-11-25 会话 612 事故）</b>：比率被污染到下限 0.10 后，
+     * 发送前估算 115,847、真实 1,229,069，观测比率恒为 10.6 —— 旧实现每次都判「异常」丢弃，
+     * 比率永不修正，守卫因此永不触发压缩，请求一路涨到 1,048,576 上限后返回 400。
+     * 「丢弃坏样本」的前提是比率本身还靠谱；比率已经失真时必须反推。</p>
+     */
+    private static final int ABNORMAL_STREAK_TO_RESET = 2;
+
+    /**
+     * 单次「反推重建」允许相对当前比率放大/缩小的最大倍数（2026-11-25 审查新增）。
+     *
+     * <p><b>为什么需要这道保护</b>：反推公式 {@code corrected = oldRatio × observed} 在
+     * usage 帧正常时恒等于 {@code actual/raw}（正确值）；但如果 usage 帧本身错乱
+     * （拿到别次请求的 usage、代理改写、跨 provider 混用），observed 可能是个巨大值，
+     * 会把比率一步顶到 {@link #MAX_RATIO} 上限 —— 之后估算<b>虚高</b> 3 倍，
+     * 守卫反复触发压缩、前缀缓存被反复推翻，比「低估」更难排查。</p>
+     *
+     * <p>取 20 倍：正常失真的量级在 3~10 倍（实测 612 需要 0.10 → 1.06，即 10.6 倍），
+     * 20 倍足够覆盖真实场景，又能挡住明显的帧错乱。</p>
+     */
+    private static final double RESET_MAX_FACTOR = 20.0;
+
+    /** provider → 连续异常观测的方向与次数（正数=估算偏低，负数=估算偏高） */
+    private static final java.util.Map<String, Integer> ABNORMAL_STREAK =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * 估算单段文本的 token 数
@@ -328,29 +367,69 @@ public class TokenEstimator {
             return;
         }
         double observed = (double) actualPromptTokens / (double) finalEstimate;
+        String key = normalizeProviderKey(providerCode);
+        double oldRatio = CALIBRATION.getOrDefault(key, DEFAULT_RATIO);
+
+        // ===== 异常观测：单次当噪声丢弃，连续同向则判定「比率失真」并反推重建 =====
+        //
+        // 【为什么不能一律丢弃（2026-11-25 会话 612 事故）】
+        //   比率被污染到下限 0.10 后，发送前估算 115,847 / 真实 1,229,069，观测比率恒为 10.6。
+        //   旧实现每次都判「异常」丢弃 → 比率永不修正 → 守卫永不触发压缩 → 请求越过窗口上限 400。
+        //   正确比率 = actual / raw = ratio_old × observed，连续异常时必须按它反推。
         if (observed < MIN_RATIO || observed > MAX_RATIO) {
-            log.warn("Token 校准观测异常，已丢弃该次样本: provider={}, 发送前估算={}, 真实={}, 观测比率={}",
-                    providerCode, finalEstimate, actualPromptTokens, String.format("%.3f", observed));
+            int dir = observed > MAX_RATIO ? 1 : -1;
+            Integer prev = ABNORMAL_STREAK.get(key);
+            int prevCount = prev == null ? 0 : Math.abs(prev);
+            int count = (prev != null && Integer.signum(prev) == dir) ? prevCount + 1 : 1;
+
+            if (count >= ABNORMAL_STREAK_TO_RESET) {
+                /*
+                  反推 = oldRatio × observed（等价于 actual/raw），再夹进「当前比率的
+                  ±RESET_MAX_FACTOR 倍」区间：usage 帧错乱时 observed 可能异常巨大，
+                  放任它一步顶到 MAX_RATIO（3.0），会让估算从此虚高 3 倍 →
+                  守卫反复触发压缩 → 前缀缓存被反复推翻，比「低估」更难排查。
+                */
+                double rawCorrected = oldRatio * observed;
+                double upper = oldRatio * RESET_MAX_FACTOR;
+                double lower = oldRatio / RESET_MAX_FACTOR;
+                double corrected = clampRatio(Math.min(upper, Math.max(lower, rawCorrected)));
+                CALIBRATION.put(key, corrected);
+                ABNORMAL_STREAK.remove(key);
+                log.warn("[Token校准-重置] provider={} 连续 {} 次异常观测（观测比率={}），"
+                                + "判定比率失真并按 actual/raw 反推：{} → {}（发送前估算={}, 真实={}, 反推原值={}）",
+                        providerLabel(providerCode), count, String.format("%.3f", observed),
+                        String.format("%.3f", oldRatio), String.format("%.3f", corrected),
+                        finalEstimate, actualPromptTokens, String.format("%.3f", rawCorrected));
+            } else {
+                ABNORMAL_STREAK.put(key, dir * count);
+                log.warn("Token 校准观测异常，已丢弃该次样本: provider={}, 发送前估算={}, 真实={}, "
+                                + "观测比率={}（连续同向异常 {}/{}，达阈值将反推重建比率）",
+                        providerCode, finalEstimate, actualPromptTokens,
+                        String.format("%.3f", observed), count, ABNORMAL_STREAK_TO_RESET);
+            }
             return;
         }
 
-        // ① 按 provider 单独校准
-        String key = normalizeProviderKey(providerCode);
-        double oldRatio = CALIBRATION.getOrDefault(key, DEFAULT_RATIO);
+        // ===== 正常观测：滑动平均向 actual/raw 收敛 =====
+        ABNORMAL_STREAK.remove(key);
         double newRatio = clampRatio(oldRatio * (1 - CALIBRATION_ALPHA + CALIBRATION_ALPHA * observed));
         CALIBRATION.put(key, newRatio);
 
-        // ② 同步全局比率（供不带 provider 的调用点兜底；各 provider 差异大时以分 provider 为准）
-        if (!GLOBAL_RATIO_KEY.equals(key)) {
-            double gOld = CALIBRATION.getOrDefault(GLOBAL_RATIO_KEY, DEFAULT_RATIO);
-            double gNew = clampRatio(gOld * (1 - CALIBRATION_ALPHA + CALIBRATION_ALPHA * observed));
-            CALIBRATION.put(GLOBAL_RATIO_KEY, gNew);
-        }
+        // 【不再同步全局比率（2026-11-25）】
+        // 旧实现把每个 provider 的观测同时写进 GLOBAL_RATIO_KEY，导致「huoshan 校准出的 0.10
+        // 被 deepseek 继承」——不同平台分词效率差异极大（本项目实测 0.073~2.0），互相污染后
+        // 没有样本的 provider 会拿到完全错误的比率（deepseek 正是这样被低估 10.6 倍）。
+        // 全局键只保留给「未带 provider 的调用点」兜底；未观测到时用 DEFAULT_RATIO=1.0（不修正，安全）。
 
         log.info("[Token校准] provider={} 比率 {} → {}（发送前估算={}, 真实={}, 观测={}）",
-                providerCode == null || providerCode.isEmpty() ? "<global>" : providerCode,
+                providerLabel(providerCode),
                 String.format("%.3f", oldRatio), String.format("%.3f", newRatio),
                 finalEstimate, actualPromptTokens, String.format("%.3f", observed));
+    }
+
+    /** 日志用的 provider 展示名 */
+    private static String providerLabel(String providerCode) {
+        return providerCode == null || providerCode.isEmpty() ? "<global>" : providerCode;
     }
 
     /**
@@ -430,6 +509,111 @@ public class TokenEstimator {
         }
         long value = Math.round(requestChars * CHARS_TO_TOKEN_RATIO);
         return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, value));
+    }
+
+    /**
+     * 每条消息的结构开销字符数（{@code role=} / 花括号 / 逗号 / 等号等），
+     * 与 {@code requestBody.toString().length()} 的口径对齐。
+     */
+    private static final int STRUCT_CHARS_PER_MESSAGE = 40;
+
+    /**
+     * 统计 messages 的「内容字符数」（content + reasoning_content + tool_calls + tool_call_id + 结构开销）。
+     *
+     * <p><b>为什么要单独做字符口径</b>：{@link #estimateMessagesRaw} 走 CL100K 分词再乘校准比率，
+     * 比率一旦失真（实测被钳在 0.10 下限导致低估 10.6 倍），守卫就形同虚设 ——
+     * 会话 612 发送前估算 115,847、真实 1,229,069，守卫全程认为「才 11 万，远没到 85%」，
+     * 最终请求越过模型窗口返回 400。字符口径<b>不依赖比率</b>，乘
+     * {@link #CHARS_TO_TOKEN_RATIO}（实测波动 ±0.5%）即可得到与真实 prompt_tokens 同量级的值，
+     * 适合作为守卫的下界。</p>
+     *
+     * @param messages API 格式的消息列表
+     * @return 内容字符数；空列表返回 0
+     */
+    public static long estimateMessagesChars(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return 0;
+        }
+        long total = 0;
+        for (Map<String, Object> msg : messages) {
+            total += contentChars(msg.get("content"));
+            Object reasoning = msg.get("reasoning_content");
+            if (reasoning instanceof String text) {
+                total += text.length();
+            }
+            Object toolCalls = msg.get("tool_calls");
+            if (toolCalls != null) {
+                total += String.valueOf(toolCalls).length();
+            }
+            Object toolCallId = msg.get("tool_call_id");
+            if (toolCallId instanceof String id) {
+                total += id.length();
+            }
+            total += STRUCT_CHARS_PER_MESSAGE;
+        }
+        return total;
+    }
+
+    /**
+     * 统计 tools 定义的字符数（与 {@link #estimateToolsRaw} 的区别：这里返回字符数，不做分词）。
+     *
+     * @param tools 请求体里的 {@code tools} 字段（JsonNode / List / Map / String 均可）
+     * @return 字符数；为空返回 0
+     */
+    public static long estimateToolsChars(Object tools) {
+        if (tools == null) {
+            return 0;
+        }
+        if (tools instanceof com.fasterxml.jackson.databind.JsonNode node) {
+            if (node.isNull() || node.isMissingNode()) {
+                return 0;
+            }
+            return node.toString().length();
+        }
+        return String.valueOf(tools).length();
+    }
+
+    /**
+     * 字符口径的 token 估算（messages + tools，<b>不依赖校准比率</b>）。
+     *
+     * <p>用途：与 {@link #applyRatio(int, String)} 的结果取 {@code max} 作为守卫依据 ——
+     * 校准比率失真时由本方法兜底，避免「估算 11.6 万 / 真实 122.9 万」这种把守卫废掉的偏差。</p>
+     *
+     * <p><b>实测校验</b>（2026-11-25 会话 612）：messages+tools 字符数 2,891,926 × 0.425
+     * = 1,229,069，与 API 返回的真实 {@code prompt_tokens} <b>完全一致</b>。</p>
+     *
+     * @param messages API 格式的消息列表
+     * @param tools    请求体的 tools 字段
+     * @return 估算 token；输入为空返回 0
+     */
+    public static int estimateTotalByChars(List<Map<String, Object>> messages, Object tools) {
+        long chars = estimateMessagesChars(messages) + estimateToolsChars(tools);
+        if (chars <= 0) {
+            return 0;
+        }
+        long value = Math.round(chars * CHARS_TO_TOKEN_RATIO);
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, value));
+    }
+
+    /** content 字段的字符数（兼容 String 与多模态内容块数组） */
+    private static long contentChars(Object content) {
+        if (content == null) {
+            return 0;
+        }
+        if (content instanceof String text) {
+            return text.length();
+        }
+        if (content instanceof List<?> parts) {
+            long sum = 0;
+            for (Object item : parts) {
+                if (item instanceof Map<?, ?> block) {
+                    Object text = block.get("text");
+                    sum += text == null ? 0 : String.valueOf(text).length();
+                }
+            }
+            return sum;
+        }
+        return String.valueOf(content).length();
     }
 
     /** 清空全部校准状态（仅自检程序使用，生产链路不要调用） */

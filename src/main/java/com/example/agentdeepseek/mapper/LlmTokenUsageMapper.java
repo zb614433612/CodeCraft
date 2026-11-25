@@ -84,6 +84,24 @@ public interface LlmTokenUsageMapper {
     TokenUsageSummaryVO summarizeByConversation(@Param("conversationId") Long conversationId);
 
     /**
+     * 查询会话「最近一次」请求的用量记录（用于向前端透传真实上下文大小）。
+     *
+     * <p><b>为什么需要它</b>：前端输入区下方的「上下文 xx」原本是纯前端字符估算，且只统计
+     * 「已分页加载的最近 N 轮」—— 长会话会严重偏小（实测某会话真实 122.9 万 token，
+     * 前端只显示 5.6 万，用户完全无法判断何时会撞窗口）。改为以后端真实
+     * {@code prompt_tokens} 为准，才能反映「这一屏实际要发给模型多少 token」。</p>
+     *
+     * <p>按 {@code id DESC} 排序而不是 {@code created_at}：同一次工具循环可能在同一毫秒
+     * 落多条记录，id 严格递增，顺序稳定。</p>
+     *
+     * @param conversationId 会话 ID
+     * @return 最近一条用量记录；从未请求过返回 {@code null}
+     */
+    @Select("SELECT * FROM llm_token_usage WHERE conversation_id = #{conversationId} "
+            + "ORDER BY id DESC LIMIT 1")
+    LlmTokenUsage selectLatestUsage(@Param("conversationId") Long conversationId);
+
+    /**
      * 时间范围汇总（from 含，to 不含）
      */
     @Select("SELECT COUNT(*) AS request_count, "

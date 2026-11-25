@@ -93,17 +93,46 @@ public class ConversationController {
             @RequestParam(value = "beforeId", required = false) Long beforeId,
             @Parameter(description = "本次加载的轮数，默认 5（一轮=一次用户提问+其后全部回复）")
             @RequestParam(value = "rounds", required = false, defaultValue = "5") Integer rounds,
+            @Parameter(description = "上下文模式：full / balanced / compact；不传则按后端默认解析。"
+                    + "返回的 contextTokens 按该模式计算（三种模式的真实请求体差异巨大）")
+            @RequestParam(value = "contextMode", required = false) String contextMode,
             @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
             @RequestAttribute("userId") Long userId) {
-        log.info("分页查询会话消息请求: conversationId={}, beforeId={}, rounds={}, userId={}",
-                conversationId, beforeId, rounds, userId);
+        log.info("分页查询会话消息请求: conversationId={}, beforeId={}, rounds={}, contextMode={}, userId={}",
+                conversationId, beforeId, rounds, contextMode, userId);
         // 验证会话是否存在且属于当前用户（与全量接口同一权限口径）
         Conversation conversation = conversationMapper.selectById(conversationId).orElse(null);
         if (conversation == null || conversation.getUserId() == null || !conversation.getUserId().equals(userId)) {
             return ApiResponse.error(404, "会话不存在或无权访问");
         }
-        ConversationMessagePageVO page = conversationService.getMessagesPage(conversationId, beforeId, rounds == null ? 5 : rounds);
+        ConversationMessagePageVO page = conversationService.getMessagesPage(
+                conversationId, beforeId, rounds == null ? 5 : rounds, contextMode);
         return ApiResponse.success(page);
+    }
+
+    /**
+     * 查询会话当前上下文大小（按上下文模式区分）——切换模式时的轻量刷新入口。
+     *
+     * <p>为什么单独开一个接口：聊天页切换 full / balanced / compact 时，「上下文 xx」必须立刻跟着变，
+     * 但重新拉一遍分页会重置前端的翻页游标与已加载历史。本接口只算不返消息，成本极低。</p>
+     */
+    @Operation(summary = "查询会话上下文大小", description = "按上下文模式（full/balanced/compact）计算当前会发送的"
+            + "上下文 token 数，用于聊天页切换上下文模式时即时刷新「上下文 xx」，无需重新加载消息列表。需要Authorization头")
+    @GetMapping("/{conversationId}/context-stats")
+    public ApiResponse<ConversationMessagePageVO> getConversationContextStats(
+            @Parameter(description = "会话ID", required = true)
+            @PathVariable Long conversationId,
+            @Parameter(description = "上下文模式：full / balanced / compact；不传则按后端默认解析")
+            @RequestParam(value = "contextMode", required = false) String contextMode,
+            @Parameter(description = "用户ID，由TokenAuthenticationFilter自动注入", hidden = true)
+            @RequestAttribute("userId") Long userId) {
+        log.info("查询会话上下文大小请求: conversationId={}, contextMode={}, userId={}",
+                conversationId, contextMode, userId);
+        Conversation conversation = conversationMapper.selectById(conversationId).orElse(null);
+        if (conversation == null || conversation.getUserId() == null || !conversation.getUserId().equals(userId)) {
+            return ApiResponse.error(404, "会话不存在或无权访问");
+        }
+        return ApiResponse.success(conversationService.getContextStats(conversationId, contextMode));
     }
 
     /**

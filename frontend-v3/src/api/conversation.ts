@@ -87,6 +87,30 @@ export interface MessagePageResponse {
    */
   compactedUpToMessageId?: number | null
   compactedSummaryTokens?: number
+  /**
+   * ── 真实上下文大小（2026-11-25 新增，对应后端 ConversationMessagePageVO）──
+   *
+   * 后端按「这一屏实际要发给模型的请求体」计算，与模型窗口口径完全一致：
+   * · real     = 最近一次请求的 API 真实 usage.prompt_tokens（含 tools 定义）
+   * · estimate = 压缩刚完成、尚未发生新请求时的即时估算（摘要 + 水位线之后的消息）
+   *
+   * 为什么需要：旧实现是纯前端字符估算且只统计「已分页加载的最近 5 轮」，
+   * 长会话会严重偏小（实测真实 122.9 万 token，前端只显示 5.6 万），用户看不出危险。
+   *
+   * 缺省（undefined / 0）时前端回退到自身估算，与改动前行为一致（向后兼容）。
+   */
+  contextTokens?: number
+  contextTokensSource?: 'mode' | 'real' | 'estimate' | string
+  /**
+   * 最近一次<b>真实</b>请求的 `usage.prompt_tokens`（含 tools 定义）。
+   *
+   * 与 contextTokens 是两个口径：contextTokens 是「按当前上下文模式算的」，
+   * 本字段是「上一次实际发出去多少」。切模式后两者必然不一致（预期行为），
+   * 前端放在 tooltip 里对照，不要混成一个数。
+   */
+  lastPromptTokens?: number
+  /** 本次 contextTokens 计算所用的上下文模式（full / balanced / compact） */
+  contextMode?: string
 }
 
 /**
@@ -102,14 +126,43 @@ export interface MessagePageResponse {
 export async function getConversationMessagesPage(
   conversationId: number,
   beforeId?: number | null,
-  rounds = 5
+  rounds = 5,
+  contextMode?: string
 ): Promise<ApiResponse<MessagePageResponse>> {
   const params = new URLSearchParams()
   if (beforeId !== undefined && beforeId !== null) params.set('beforeId', String(beforeId))
   params.set('rounds', String(rounds))
+  /*
+    上下文模式（2026-11-25）：后端按该模式计算 contextTokens。
+    三种模式的真实请求体差异巨大（full 回传思考链 / balanced 置空 / compact 摘要化历史工具结果），
+    不传的话后端只能按默认模式算，切换模式后界面数字不会跟着变。
+  */
+  if (contextMode) params.set('contextMode', contextMode)
   return request<MessagePageResponse>(`/conversation/${conversationId}/messages/page?${params.toString()}`, {
     method: 'GET'
   })
+}
+
+/**
+ * 查询会话当前上下文大小（按上下文模式区分）—— 切换上下文模式时的轻量刷新入口（2026-11-25）。
+ *
+ * <p>只算不返消息：不会重置前端的翻页游标与已加载历史（重新拉分页的副作用）。
+ * 后端复用与分页完全相同的计算逻辑，因此两次调用得到的一定是同一个数。</p>
+ *
+ * @param conversationId 会话 ID
+ * @param contextMode    full / balanced / compact；不传按后端默认
+ */
+export async function getConversationContextStats(
+  conversationId: number,
+  contextMode?: string
+): Promise<ApiResponse<MessagePageResponse>> {
+  const params = new URLSearchParams()
+  if (contextMode) params.set('contextMode', contextMode)
+  const qs = params.toString()
+  return request<MessagePageResponse>(
+    `/conversation/${conversationId}/context-stats${qs ? '?' + qs : ''}`,
+    { method: 'GET' }
+  )
 }
 
 // 将后端响应数据映射到前端格式

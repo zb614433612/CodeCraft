@@ -257,6 +257,7 @@ import {
   getConversationList,
   getConversationMessages,
   getConversationMessagesPage,
+  getConversationContextStats,
   processMessageGroups,
   deleteConversation,
   deleteMessagesFromTurn,
@@ -793,6 +794,9 @@ function dropConversationState(key: string) {
   if (m20) compactedUpToMap.value = m20 as Record<string, number | null>
   const m21 = dropKey(compactedSummaryTokensMap.value)
   if (m21) compactedSummaryTokensMap.value = m21
+  // 真实上下文大小（2026-11-25）：会话 id 被复用时会继承旧会话的数字，必须一起清
+  const m22 = dropKey(realContextTokensMap.value)
+  if (m22) realContextTokensMap.value = m22 as Record<string, RealContextStat>
   streamAborts.delete(key)
   pendingUuidMap.delete(key)
   // 会话都没了，针对它的子Agent轮询也必须停（否则定时器会一直空转）
@@ -870,6 +874,9 @@ function migrateConversationKey(from: string, to: string) {
   if (m20) compactedUpToMap.value = m20 as Record<string, number | null>
   const m21 = move(compactedSummaryTokensMap.value)
   if (m21) compactedSummaryTokensMap.value = m21
+  // 真实上下文大小（2026-11-25）：草稿转正时漏迁 → 新 key 读不到，数字回退成前端估算
+  const m22 = move(realContextTokensMap.value)
+  if (m22) realContextTokensMap.value = m22 as Record<string, RealContextStat>
   // 轮询定时器跟着会话 key 迁移，否则草稿 key 下的定时器会失去归属
   if (subAgentTimers.has(from)) {
     window.clearInterval(subAgentTimers.get(from)!)
@@ -1375,6 +1382,37 @@ const hasMoreMap = ref<Record<string, boolean>>({})
 const compactedUpToMap = ref<Record<string, number | null>>({})
 const compactedSummaryTokensMap = ref<Record<string, number>>({})
 
+/*
+  真实上下文大小（按会话 key 隔离，2026-11-25 新增）。
+
+  【为什么需要】
+  「上下文 xx」原本是纯前端字符估算，而且只统计「已分页加载的最近 5 轮」——
+  长会话会严重偏小：实测某会话后端真实请求体 2,891,302 字符 ≈ 1,229,069 token
+  （已撞 1,048,576 窗口上限并返回 400），前端却只显示 5.6 万，用户完全看不出危险。
+
+  【现在改由后端透传】后端 /messages/page 按「实际要发给模型的请求体」计算：
+    source = real     → 最近一次请求的 API 真实 usage.prompt_tokens（含 tools 定义）
+    source = estimate → 压缩刚完成、尚未发生新请求时的即时估算（摘要 + 水位线之后的消息）
+  压缩完成后本值会立刻变小，用户能直接看到压缩效果；下一次请求落库后再切回 real。
+
+  ⚠️ 与 compactedUpToMap / compactedSummaryTokensMap 一样，必须登记到
+  dropConversationState（删会话）与 migrateConversationKey（草稿转正），
+  否则会串会话、或草稿转正后数字突然跳大。
+*/
+/** 后端透传的上下文统计（按上下文模式区分，2026-11-25） */
+interface RealContextStat {
+  /** 后端按「当前上下文模式」现算的 token 数（含 tools 固定地板） */
+  tokens: number
+  /** 数值来源：mode=按模式现算（新）；real/estimate=旧后端兼容值 */
+  source: string
+  /** 最近一次真实请求的 prompt_tokens（含 tools），0 表示该会话从未请求过 */
+  lastPromptTokens?: number
+  /** 该数字对应的上下文模式（full / balanced / compact），用于校验与当前选择是否一致 */
+  mode?: string
+}
+
+const realContextTokensMap = ref<Record<string, RealContextStat>>({})
+
 /** 当前会话的分页游标：本页最早一条消息 id */
 const chatCursor = computed(() => cursorMap.value[activeConversationId.value] ?? null)
 const chatHasMore = computed(() => hasMoreMap.value[activeConversationId.value] ?? false)
@@ -1618,6 +1656,22 @@ function formatTokens(count: number): string {
 }
 
 /**
+ * 「上下文 xx」的最终展示文本（2026-11-25）。
+ *
+ * <p>数值来源见 realContextTokensMap：优先后端透传的真实口径（= 实际要发送的请求体，
+ * 与模型窗口一致），缺省时回退前端字符估算。</p>
+ *
+ * <p>压缩刚完成、还没发生新请求时，后端返回的是即时估算值（source=estimate）——
+ * 前面加 `~` 明确告诉用户「这是约数，下一次请求落库后会变成精确值」，
+ * 不加的话容易被误当成计费口径。</p>
+ */
+function formatContextTokens(key: string): string {
+  const text = formatTokens(contextTokensMap.value[key] ?? 0)
+  const real = realContextTokensMap.value[key]
+  return real?.source === 'estimate' ? `~${text}` : text
+}
+
+/**
  * 用户在「模型与运行模式」弹层里临时切换的 Provider。
  *
  * <p>与旧版 `CodeAssistantView.onProviderSwitch` 的语义一致：切换后写回 Agent 运行时
@@ -1779,6 +1833,21 @@ function estimateMessageTokens(
 
 function refreshContextTokens(key = activeConversationId.value) {
   if (!key) return
+  /*
+    ★ 后端真实值优先（2026-11-25）
+
+    /messages/page 已回传「这一屏实际要发送的 token 数」，口径是
+    「system + 压缩摘要 + 水位线之后的全部消息 + tools 定义」——
+    不受「分页只加载最近 5 轮」限制，也不会漏算未加载的历史。
+
+    有值时直接采用：用户看到的就是与模型窗口一致的数字，压缩完成后它会立刻变小。
+    缺省（旧后端 / 从未请求过）才走下面原有的前端字符估算，行为与改动前完全一致。
+  */
+  const real = realContextTokensMap.value[key]
+  if (real && real.tokens > 0) {
+    contextTokensMap.value = { ...contextTokensMap.value, [key]: real.tokens }
+    return
+  }
   const list = messagesMap.value[key] ?? []
   const compact = chatContextMode.value === 'compact'
   /*
@@ -1822,6 +1891,53 @@ function refreshContextTokens(key = activeConversationId.value) {
   }
   contextTokensMap.value = { ...contextTokensMap.value, [key]: total }
 }
+
+/**
+ * 切换上下文模式 → 立刻刷新「上下文 xx」（2026-11-25）。
+ *
+ * 三种模式的真实请求体差异巨大：full 回传整段思考链、balanced 置空占位、
+ * compact 再把历史工具结果压成摘要。切换后若不重算，用户会看到
+ * 「切到精简模式数字纹丝不动」—— 比不显示更误导。
+ *
+ * 走专用的 /context-stats 接口（只算不返消息）：不会重置翻页游标与已加载历史。
+ * 下一次发送消息后，真实 usage 落库会让数字进一步校准到精确值。
+ */
+watch(chatContextMode, async (mode) => {
+  const key = activeConversationId.value
+  const convId = Number(key)
+  if (!key || !Number.isFinite(convId) || convId <= 0) return
+  try {
+    const res = await getConversationContextStats(convId, mode)
+    /*
+      ⚠️ 乱序响应保护（2026-11-25）
+      用户快速连续切换模式（full → compact → balanced）时会有多个请求同时在飞，
+      先发出的响应可能后到 —— 若不校验，界面会被覆盖成「旧模式」的数字，
+      而这个数字本身看起来完全正常，极难发现。响应回来时若模式或会话已变，直接丢弃。
+    */
+    if (mode !== chatContextMode.value || key !== activeConversationId.value) return
+    const page = res.data
+    if (!page || !page.contextTokens || page.contextTokens <= 0) {
+      // 会话还没有任何消息：清掉旧值，避免显示上一个模式/上一个会话的残留数字
+      const next = { ...realContextTokensMap.value }
+      delete next[key]
+      realContextTokensMap.value = next
+      refreshContextTokens(key)
+      return
+    }
+    realContextTokensMap.value = {
+      ...realContextTokensMap.value,
+      [key]: {
+        tokens: page.contextTokens,
+        source: page.contextTokensSource || 'mode',
+        lastPromptTokens: page.lastPromptTokens ?? 0,
+        mode: page.contextMode || mode
+      }
+    }
+    refreshContextTokens(key)
+  } catch {
+    // 静默失败：界面沿用上一次的数字，不影响聊天本身
+  }
+})
 
 /* ============================ 真实用量（成本 / 缓存命中 / token） ============================ */
 
@@ -2021,9 +2137,10 @@ const conversation = computed<ConversationDetail>(() => {
           changedFiles: changeStat && changeStat.totalFiles > 0 ? changeStat.totalFiles : undefined,
           added: changeStat && changeStat.totalFiles > 0 ? changeStat.totalLinesAdded : undefined,
           deleted: changeStat && changeStat.totalFiles > 0 ? changeStat.totalLinesDeleted : undefined,
-          // 上下文 = 正文 + 思考 + 工具返回（见 refreshContextTokens）；
-          // 早期只拼 content，会让重工具会话严重低估（实测 7.3K vs 实际十余万）
-          contextTokens: formatTokens(chatContextTokens.value)
+          // 上下文：优先后端透传的真实口径（= 实际要发送的请求体，与模型窗口上限同口径；
+          // 压缩完成后立刻变小），缺省回退前端字符估算。
+          // 详见 formatContextTokens / refreshContextTokens / realContextTokensMap
+          contextTokens: formatContextTokens(activeConversationId.value)
         }
       : undefined
   }
@@ -2092,7 +2209,10 @@ async function loadConversationMessages(conversationId: string, before?: number 
   chatLoading.value = true
   chatLoadError.value = ''
   try {
-    const res = await getConversationMessagesPage(convId, before ?? null, CHAT_PAGE_ROUNDS)
+    // 上下文模式随请求带上（2026-11-25）：后端要按该模式计算 contextTokens。
+    // 三种模式的真实请求体差异巨大（full 回传思考链 / balanced 置空 / compact 摘要化历史工具结果），
+    // 不带的话后端只能按默认模式算，切到精简模式后界面数字不会跟着变。
+    const res = await getConversationMessagesPage(convId, before ?? null, CHAT_PAGE_ROUNDS, chatContextMode.value)
     const page = res.data
     if (!page) return
     // Agent 身份按「会话所属 Agent」反查：否则刷新/切回会话后消息头会从「圆圆」退化成「编码助手」
@@ -2121,6 +2241,24 @@ async function loadConversationMessages(conversationId: string, before?: number 
       ...compactedSummaryTokensMap.value,
       [key]: page.compactedSummaryTokens ?? 0
     }
+    /*
+      真实上下文大小（2026-11-25）：后端 /messages/page 按「实际要发给模型的请求体」算好回传，
+      直接覆盖前端「只统计已加载 5 轮」的估算。
+      缺省（旧后端）时删掉该 key → refreshContextTokens 回退到原有前端估算，行为与改动前一致。
+    */
+    const nextRealCtx = { ...realContextTokensMap.value }
+    if (page.contextTokens && page.contextTokens > 0) {
+      nextRealCtx[key] = {
+        tokens: page.contextTokens,
+        // mode = 后端按「本次请求带的模式」现算（新口径）；real/estimate 为旧后端兼容值
+        source: page.contextTokensSource || 'mode',
+        lastPromptTokens: page.lastPromptTokens ?? 0,
+        mode: page.contextMode || chatContextMode.value
+      }
+    } else {
+      delete nextRealCtx[key]
+    }
+    realContextTokensMap.value = nextRealCtx
     // 任务清单没有独立存储：从刚加载的消息里回溯最近一次 task_manager 输出
     restoreTasksFromMessages(convId, key)
     // 上下文估算随消息变化，加载完重算一次（正文 + 思考 + 工具返回）

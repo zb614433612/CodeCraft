@@ -1317,10 +1317,19 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         //  旧实现在 ContextBuilder 构建阶段判断压缩（注入尚未发生、也看不到 tools 定义），
         //  口径系统性偏低 6 万 token 以上，导致「压缩器认为没超、真正请求却超限」；
         //  一旦估算虚高，又会在压缩后仍判超限、反复压缩改前缀。
-        int preRequestEstimatedTokens = TokenEstimator.applyRatio(
-                TokenEstimator.estimateTotalRaw(historyMessages, toolsList), llmClient.getProviderCode());
+        // ★ 双口径取 max（2026-11-25 会话 612 事故修复）
+        //   applyRatio 依赖在线校准比率，比率一旦失真会系统性低估：实测该会话发送前估算 115,847、
+        //   真实 1,229,069（差 10.6 倍），守卫因此从头到尾都认为「才 11 万 token，远没到 85%」，
+        //   压缩永不触发，上下文一路涨到 1,048,576 上限后返回 400。
+        //   字符口径（messages+tools 字符数 × 0.425）不依赖比率，实测与真实 prompt_tokens 完全吻合，
+        //   作为下界兜住这类失真 —— 宁可多压一次，也绝不能让请求撞窗口。
+        String guardProviderCode = llmClient.getProviderCode();
+        int preRequestEstimatedTokens = Math.max(
+                TokenEstimator.applyRatio(
+                        TokenEstimator.estimateTotalRaw(historyMessages, toolsList), guardProviderCode),
+                TokenEstimator.estimateTotalByChars(historyMessages, toolsList));
         boolean contextGuardNeeded = isContextGuardNeeded(
-                storageConversationId, preRequestEstimatedTokens, llmClient.getProviderCode());
+                storageConversationId, preRequestEstimatedTokens, guardProviderCode);
 
         // ===== 使用 LLMClient 构建标准请求体（模型/消息/温度/思考/工具）=====
         Map<String, Object> apiRequest = new HashMap<>(llmClient.buildRequestBody(
@@ -1455,7 +1464,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                     String providerCode) {
         int maxTokens = deepSeekConfig.resolveMaxContextTokens(providerCode);
         int rawTokens = TokenEstimator.estimateTotalRaw(messages, toolsList);
-        int estimatedTokens = TokenEstimator.applyRatio(rawTokens, providerCode);
+        // 双口径取 max（2026-11-25）：校准比率失真时（实测低估 10.6 倍）由字符口径兜底，
+        // 否则守卫会把 122.9 万真实 token 看成 11.6 万，永远不触发压缩。
+        int estimatedTokens = Math.max(
+                TokenEstimator.applyRatio(rawTokens, providerCode),
+                TokenEstimator.estimateTotalByChars(messages, toolsList));
 
         boolean enabled = deepSeekConfig.getCompaction().isEnabled();
         double compactThreshold = deepSeekConfig.getCompaction().getCompactThreshold();
@@ -1477,7 +1490,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // compact 返回的是「不含 tools」的 messages 估算，这里按含 tools 口径重算，
             // 保证 _estimatedPromptTokens 与真正发送的请求体同源（否则校准会引入系统性偏差）。
             rawTokens = TokenEstimator.estimateTotalRaw(messages, toolsList);
-            estimatedTokens = TokenEstimator.applyRatio(rawTokens, providerCode);
+            estimatedTokens = Math.max(
+                    TokenEstimator.applyRatio(rawTokens, providerCode),
+                    TokenEstimator.estimateTotalByChars(messages, toolsList));
             log.info("请求前守卫压缩完成：压缩服务返回 {} tokens（不含 tools），重估含 tools={} tokens（raw={}）",
                     afterCompact, estimatedTokens, rawTokens);
         } else {
@@ -2578,7 +2593,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             */
             Object loopToolsDef = initialApiRequest.get("tools");
             int loopRawTokens = TokenEstimator.estimateTotalRaw(messages, loopToolsDef);
-            int loopEstimatedTokens = TokenEstimator.applyRatio(loopRawTokens, loopProviderCode);
+            // 双口径取 max（2026-11-25）：工具循环守卫同样不能只信校准比率 —— 比率失真时
+            // 每次迭代都会判「没超」，压缩永不触发，而请求体其实早已顶到窗口上限。
+            int loopEstimatedTokens = Math.max(
+                    TokenEstimator.applyRatio(loopRawTokens, loopProviderCode),
+                    TokenEstimator.estimateTotalByChars(messages, loopToolsDef));
             if (loopEstimatedTokens > toolLoopGuardLimit) {
                 /*
                   ★ 防抖 + 线程保护（2026-11-17，Bug A/B 双修）。
@@ -2608,7 +2627,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                           请求体同源 —— 否则校准会引入系统性偏差。
                          */
                         loopRawTokens = TokenEstimator.estimateTotalRaw(messages, loopToolsDef);
-                        loopEstimatedTokens = TokenEstimator.applyRatio(loopRawTokens, loopProviderCode);
+                        loopEstimatedTokens = Math.max(
+                                TokenEstimator.applyRatio(loopRawTokens, loopProviderCode),
+                                TokenEstimator.estimateTotalByChars(messages, loopToolsDef));
                         log.info("工具循环内压缩完成：压缩服务返回 {} tokens（不含 tools），重估含 tools={} tokens（raw={}）",
                                 afterLoopCompact, loopEstimatedTokens, loopRawTokens);
                     }

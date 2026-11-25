@@ -5,6 +5,127 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.7] - 2026-11-25
+
+> **Root-cause fix for "compaction never fires → context exceeds the 1M window and returns 400"**:
+> for the same request the pre-flight estimate was 115,847 tokens while the API reported
+> 1,229,069 real prompt tokens (**10.6× apart**) — the guard kept believing "only 116K, nowhere
+> near the 85% threshold", so compaction never triggered and the conversation grew until DeepSeek
+> rejected it at 1,048,576. Meanwhile the UI showed "56.3K" because it only counted the 5 rounds
+> loaded by pagination, so users could not see the danger.
+> This release switches the estimate to "max(calibrated, char-based)", breaks the calibration
+> deadlock, and makes the UI show the real backend value per full / balanced / compact mode.
+> Backend restart required; **no database schema change**.
+
+### 🔍 The problem: three contradicting numbers for one conversation
+
+Measured on a real conversation (1,635 messages):
+
+```
+Frontend "context"      56.3K        ← only the 5 rounds loaded so far
+Pre-flight estimate     115,847      ← CL100K tokens × calibration ratio
+Real API prompt_tokens  1,229,069    ← already beyond the 1M limit
+Actual request body     2,891,302 chars
+```
+
+Two consequences:
+
+1. **Compaction never fired**: the guard threshold is 85% of the 1M limit = 850K, while it saw
+   116K — the `conversation_compaction` table stayed **empty for that conversation**;
+2. **Users could not judge the risk**: the UI showed 56K while the real size was 1.23M, until
+   `This model's maximum context length is 1048576 tokens` appeared.
+
+### 🔧 Fix 1: the estimate becomes max(calibrated, char-based)
+
+New char-based estimators that depend on no ratio at all:
+
+```java
+estimateMessagesChars(messages)   // content + reasoning_content + tool_calls + tool_call_id + structure
+estimateToolsChars(tools)         // tools definition chars
+estimateTotalByChars(...)         // (sum above) × 0.425
+```
+
+All five guard sites now use `max(applyRatio(raw), estimateTotalByChars(...))`:
+the pre-flight check, `enforceContextGuard`, the post-compaction re-estimate, the tool-loop guard
+and the tool-loop post-compaction re-estimate; `CompactionService`'s async pre-compaction is
+aligned to the same basis.
+
+Why this does not make normal conversations compact more often:
+
+- Chinese-heavy sessions: CL100K over-estimates by ~3.4×, so `max` keeps the old value — no change;
+- Code-heavy sessions: the two estimates differ by only 0.1% (1,228,000 vs 1,229,069);
+- The char-based path only takes over when calibration is broken — exactly the bug being fixed.
+
+### 🔧 Fix 2: calibration deadlock removed (three stacked defects)
+
+| Defect | Before | After |
+|---|---|---|
+| Abnormal observations dropped | `observed ∉ [0.10, 2.00]` was discarded | a single one is still dropped; **2 consecutive same-direction** → rebuild as `oldRatio × observed` (= actual/raw) |
+| Bounds too narrow | `[0.10, 2.00]` | `[0.03, 3.00]` (real values reach 0.073 and above 2.0) |
+| Cross-provider contamination | every provider's observation was also written to the global key | **no longer synced**, each provider independent |
+
+Observed deadlock: the ratio was pinned at the `0.10` floor → the estimate stayed at 9.4% of
+reality → every observed ratio was 10.6 → discarded as "abnormal" → never corrected. After the
+rebuild, `0.10 × 10.6 = 1.06` (the correct value).
+
+Extra guard: a single rebuild may shift the ratio by at most ±20×, so a corrupted usage frame
+cannot push it to the ceiling and cause the opposite failure (over-estimate → repeated
+compaction → prefix cache repeatedly invalidated).
+
+### 🔧 Fix 3: frontend shows the real context, per context mode
+
+**Backend**: `GET /conversation/{id}/messages/page` accepts an optional `contextMode` and returns
+`contextTokens` (computed for that mode) + `lastPromptTokens` (last real value) + `contextMode`;
+a new lightweight endpoint `GET /conversation/{id}/context-stats` serves mode switching
+(compute only, no messages).
+
+**Per-mode rules** (aligned with the real rebuild):
+
+| Content | full | balanced | compact |
+|---|---|---|---|
+| SYSTEM / USER / ASSISTANT content | ✅ | ✅ | ✅ |
+| ASSISTANT `tool_calls` | ✅ | ✅ | ✅ |
+| ASSISTANT reasoning | ✅ counted | ❌ empty placeholder | ❌ empty placeholder |
+| TOOL results | ✅ full text | ✅ full text | history → 60-char summary, current round → full text |
+
+Plus a 60,000-token tools floor (20–31 tool schemas; cannot be removed or trimmed).
+
+Measured difference on the same conversation: **full ≈ 1.26M / balanced ≈ 920K / compact ≈ 360K**.
+
+**Frontend**: `refreshContextTokens` prefers the backend value and falls back to the old
+char-based estimate (backward compatible); a new `watch(chatContextMode)` refreshes instantly via
+`/context-stats` — no message reload, no paging cursor reset.
+
+### 🔧 Fix 4: three issues found during review
+
+1. **Skip context recomputation when paging**: scrolling up does not change what will be sent,
+   yet every page load re-read the whole conversation (1,635 messages / 2.8MB) — now computed
+   only on the first page;
+2. **Out-of-order response guard when switching modes**: rapid toggling fires concurrent requests
+   and an older response may land last — the result is discarded unless the mode and conversation
+   still match the current ones;
+3. **Calibration rebuild factor guard**: the ±20× limit described in Fix 2.
+
+### 🔢 Version bump
+
+- `pom.xml` (project version)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (including the `code-craft-3.4.7.jar` path in `extraResources`) / `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION`
+- `README` / `README_EN` badges, 8 docs headers (version + updated date),
+  4 packaging command examples (DEV_QUICKREF / RELEASE_CHECKLIST, both languages), FAQ sample
+
+### ⬆️ Upgrade notes
+
+- **Backend changed — restart required** (or reinstall a new build);
+- **No database schema change**, no migration needed;
+- Overwrite installation is fine; existing conversations and settings are preserved;
+- After upgrading, open a long conversation: the "context" number changes from an understated
+  value to the real one (e.g. 56K → 1.23M); switching to "compact" lowers it immediately.
+
+---
+
 ## [3.4.6] - 2026-11-25
 
 > **Root-cause fix for the occasional 10-second first-token stall**: the real cause was neither

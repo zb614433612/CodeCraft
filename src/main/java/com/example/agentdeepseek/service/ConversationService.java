@@ -45,6 +45,47 @@ public interface ConversationService {
     ConversationMessagePageVO getMessagesPage(Long conversationId, Long beforeId, int rounds);
 
     /**
+     * 分页查询会话消息（带上下文模式，2026-11-25）。
+     *
+     * <p>为什么要带 mode：分页接口要回传「当前上下文大小」，而三种模式的真实请求体差异巨大 ——
+     * full 回传整段思考链、balanced 置空占位、compact 再把历史工具结果压成摘要。
+     * 不带 mode 就只能拿到「上一次请求所用模式」的旧值，切换模式后界面数字纹丝不动。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param beforeId       分页游标（首页传 null）
+     * @param rounds         本次加载轮数
+     * @param contextMode    full / balanced / compact；null 时按后端默认解析
+     * @return 分页结果（含按 mode 计算的 contextTokens）
+     */
+    ConversationMessagePageVO getMessagesPage(Long conversationId, Long beforeId, int rounds, String contextMode);
+
+    /**
+     * 按上下文模式计算「当前会发给模型的上下文 token 数」（2026-11-25）。
+     *
+     * <p>口径与真实重建严格对齐：压缩摘要 + 水位线之后的全部消息；
+     * full 计入历史 reasoning，balanced 不计入，compact 额外把历史工具结果按摘要长度计入；
+     * 最后补上 tools 定义的固定地板。供分页接口与「切换模式即时刷新」接口共用。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param contextMode    full / balanced / compact；null 时按后端默认解析
+     * @return 估算 token；无消息返回 0
+     */
+    int computeContextTokens(Long conversationId, String contextMode);
+
+    /**
+     * 只算上下文统计（不返回消息）——聊天页切换上下文模式时的轻量刷新入口（2026-11-25）。
+     *
+     * <p>返回的 {@code ConversationMessagePageVO} 中 {@code messages} 为 {@code null}，
+     * 调用方只读 {@code contextTokens / contextMode / lastPromptTokens}。
+     * 相比重新拉一遍消息分页，它不会重置前端的翻页游标与已加载历史。</p>
+     *
+     * @param conversationId 会话 ID
+     * @param contextMode    full / balanced / compact；null 时按后端默认解析
+     * @return 仅含上下文统计字段的分页 VO
+     */
+    ConversationMessagePageVO getContextStats(Long conversationId, String contextMode);
+
+    /**
      * 从指定轮次起删除消息（含该轮自身）——「重新生成」的前置动作。
      *
      * <p>语义：找到该 turnId 对应的最早一条消息（即那轮的 user 提问），
