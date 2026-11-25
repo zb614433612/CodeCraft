@@ -55,6 +55,7 @@ import com.example.agentdeepseek.tool.desktop.CaptureContextRegistry;
 import com.example.agentdeepseek.util.ProjectRootContext;
 import com.example.agentdeepseek.tool.permission.PathSecurityChecker;
 import com.example.agentdeepseek.tool.permission.ToolPermissionRegistry;
+import com.example.agentdeepseek.util.LlmContextDumper;
 import com.example.agentdeepseek.util.OperationDetailGenerator;
 import com.example.agentdeepseek.util.PromptUtil;
 import com.example.agentdeepseek.util.ReasoningPassback;
@@ -1190,14 +1191,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         // 注入语言强制指令到消息列表末尾（靠近响应位置，优先级最高）
+        // ★ 2026-11-25：不再向 user 消息内容注入语言指令（详见 prepareConversationContext 注释）。
+        //   只保留这一条 system 指令 —— user 消息一律保持 DB 原文，跨轮逐字一致，前缀缓存不再断。
         Map<String, Object> langInstruction = new HashMap<>();
         langInstruction.put("role", "system");
         langInstruction.put("content", contextBuilder.buildLanguageInstruction());
         historyMessages.add(langInstruction);
-
-        // 同时将语言指令注入到最后一条用户消息内容中
-        // （DeepSeek 的 reasoning 对 user 消息中的指令响应更强）
-        contextBuilder.injectLanguageIntoLastUserMessage(historyMessages);
 
         // ===== 解析 LLM Provider + Client =====
         // 优先级：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
@@ -2334,18 +2333,24 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
 
         /*
-          ★ 2026-11-17 修复前缀缓存（第三处断裂源）：语言指令必须「位置固定 + 全文注入」。
+          ★ 2026-11-17 / 2026-11-25 修复前缀缓存（第三处断裂源）：语言指令只保留「唯一一条 system 指令」。
 
-          两处历史写法都在制造跨轮断裂：
+          三处历史写法都在制造跨轮断裂：
             ① messages.add(langInstruction) —— 追加到**末尾**：上一轮它落在
                「历史之后、工具结果之前」，本轮重建后它落在「本轮新增内容之后」，位置每轮都不同；
             ② injectLanguageIntoLastUserMessage —— 只改内存、且只注入「最后一条 user」：
                上一轮实际发出的那条已被改写成「指令 + 原文」，下一轮它退化为中间的历史 user
                而不再被注入，形态回退成 DB 原文（实测 content_len=2）
-               → 断裂点正好落在它之后，其后的 14 次工具结果（≈14 万字符）全部作废。
+               → 断裂点正好落在它之后，其后的 14 次工具结果（≈14 万字符）全部作废；
+            ③ injectLanguageIntoUserMessages（2026-11-25 废弃）—— 改成「全部 user 注入」仍不彻底：
+               工具循环中**动态新增**的 user 消息（中途补充需求 supplement_inject / 桌面注入）
+               错过了注入时机（该注入只在请求准备阶段跑一次），下一轮从 DB 重建时被补注入，
+               于是同一 index 的长度凭空多出 72 字符
+               （实测会话 353：index=59，119→191，其后约 1.4 万 token 全部重算，
+               跨轮首枪命中率仅 83.9%）。
 
-          现在：system 指令插到**头部**（位置恒定），user 指令对**全部 user 消息**注入
-          （指令为常量 + 注入带幂等标记 → DB 重建后与上次发出时逐字一致）。
+          现在：只在**列表头部**插入一条 system 语言指令（位置恒定、内容为常量），
+          user 消息一律保持 DB 原文 —— 内存态与重建态逐字一致，跨轮前缀不再断裂。
 
           注：下方 FileVisionService.injectBlocksIntoLastUserMessage 同样是「只注入最后一条」，
           但本会话无图片块（imageBlocks 为空时不触发），故本次不改，留作已知隐患。
@@ -2354,9 +2359,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         langInstruction.put("role", "system");
         langInstruction.put("content", contextBuilder.buildLanguageInstruction());
         messages.add(0, langInstruction);
-
-        // 语言指令注入到全部用户消息（常量 + 幂等，保证跨轮形态一致）
-        contextBuilder.injectLanguageIntoUserMessages(messages);
 
         // 📝 成长体系 P2：任务启动 DETOUR 弯路预警（新用户消息进入工具循环前，按任务关键词检索弯路经验并注入 system 提示）
         String toolProjectRoot = (String) initialApiRequest.get("_projectRoot");
@@ -4130,6 +4132,12 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         phaseNanos[1] = System.nanoTime();
         log.info("[Perf] conversationId={}, iteration={}, 发起LLM请求, requestBodySize={} chars",
                 conversationId, iteration, requestBodySize);
+        // ★ 上下文转储（排查取证）：把本次「真正出站」的消息落盘，一轮一个文件、只保留最近 3 轮。
+        //   一轮内首次迭代全量输出，后续迭代只输出「新增」与「与上次不同」的消息并标注长度变化，
+        //   用于确认「assistant 正文有没有带上」「上下文有没有断裂」。
+        //   开关：-Dllm.context-dump.enabled=false；目录：<LOG_PATH>/context-dumps。
+        LlmContextDumper.dump(conversationId, (String) apiRequest.get("_turnId"), iteration,
+                requestBody.get("messages"), requestBody.get("tools"), requestBodySize);
         // ★ 校准兜底（2026-11-17）：工具调用参数一收齐，第 3437 行就把 shouldContinue 置 false，
         //   takeWhile 随即取消上游订阅 —— 而 usage 帧位于流末尾（data: [DONE] 之前），
         //   于是「带 tool_calls 的请求」绝大多数拿不到 usage，doFinally 里 snapshot==null 直接早退，

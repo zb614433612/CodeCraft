@@ -5,6 +5,95 @@
 
 ---
 
+## [3.4.9] - 2026-11-25
+
+> **跨轮首枪前缀断裂（72 字符）根因修复 + LLM 请求上下文转储取证工具**：
+> v3.4.8 修掉「落库正文为 NULL」后，会话仍被观察到跨轮首枪整段重算 ——
+> 日志实测两次告警：`index=59 长度 119→191（差 72）`、`index=104 长度 99→171（差 72）`。
+> 元凶是「把 72 字符语言强制指令拼进 user 消息内容」的那次注入：它只改内存、不落库，
+> 且工具循环中**动态新增**的 user 消息（中途补充需求 / 桌面注入）错过了注入时机，
+> 下一轮从 DB 重建时被补注入 → 同一 index 形态改变 → 其后约 1.4 万 token 全部按未命中重算。
+> 本版**彻底移除该注入**，语言强制统一由唯一一条 system 指令承担；
+> 同时新增「LLM 请求上下文转储」：把每轮真正出站的消息按轮落盘（保留最近 3 轮），
+> 用于逐字节确认「正文有没有带上」「上下文有没有断裂」。必须重启后端；**无数据库结构变更**。
+
+### 🔍 问题：跨轮首枪每次都断，断点固定落在一条 user 消息上（+72 字符）
+
+同一会话、两次跨轮首枪，日志各报一条告警：
+
+```
+20:12:53 WARN ContextFingerprint [缓存告警] 消息前缀断裂 —— 会话=353 轮次=0
+  首条不一致 index=104 role: user → user，长度: 99 → 171（差 72）
+19:50:07 WARN ContextFingerprint [缓存告警] 消息前缀断裂 —— 会话=353 轮次=0
+  首条不一致 index=59  role: user → user，长度: 119 → 191（差 72）
+```
+
+两次差值都恰好 **72 字符**，与 `ContextBuilder.injectLanguageIntoUserMessages` 里的常量
+「`\n\n【系统强制】你接下来必须用中文思考…`」长度完全吻合。
+
+### 🧩 根因：注入只改内存，而「工具循环中途新增的 user 消息」错过了注入时机
+
+该方法在**请求准备阶段**遍历 messages，给每条 user 消息拼一次指令（带标记幂等），
+只改内存、**不落库** —— 因此要求「同一条消息在内存态与 DB 重建态逐字一致」，
+这正是前缀缓存的前提。
+
+但工具循环里**动态新增**的 user 消息（`supplement_inject` 中途补充需求、`desktop_inject` 桌面注入）
+是在请求发出之后才 `messages.add()` 的，早已错过注入时机：
+
+```
+turn N   ：请求准备（注入一次）→ 发请求 → … → 用户发「中途补充需求」→ add 进内存（未注入）
+turn N+1 ：从 DB 重建 → 再注入一次 → 同一条消息 content 凭空多出 72 字符
+         → 该 index 之后全部按未命中重新 prefill（实测约 1.4 万 token）
+```
+
+v3.4.8 之前还叠加「正文落库为 NULL」，两个断裂源同时存在。
+
+### 🔧 修复：彻底移除 user 消息语言指令注入
+
+- 删除 `ContextBuilder#injectLanguageIntoUserMessages` 与兼容入口
+  `injectLanguageIntoLastUserMessage`（含 Javadoc），原位置保留说明注释；
+- 删除两处调用：
+  - `DeepSeekServiceImpl#handleStreamingPhase`（无工具路径）
+  - `DeepSeekServiceImpl#prepareConversationContext`（工具循环路径）
+- 语言强制改由**唯一一条 system 指令**承担（`buildLanguageInstruction()`，插在列表头部，
+  位置恒定、内容为常量）；user 消息一律保持 DB 原文，**不在内存里做任何改写**。
+
+### ✨ 新增：LLM 请求上下文转储（排查「正文缺失 / 前缀断裂」的取证工具）
+
+日志只能给长度与 token，无法回答「这一轮到底发了什么」。新增 `util/LlmContextDumper`，
+把**净化后真正出站**的 `requestBody.messages` 落盘：
+
+| 项 | 规则 |
+|---|---|
+| 文件粒度 | 一轮用户消息一个文件（同一 turnId 下所有工具循环迭代追加到同一文件） |
+| 文件名 | `turn-<yyyyMMdd-HHmmss>-c<会话号>-<turnId>.txt` |
+| 保留数量 | **只保留最近 3 个**，超出按文件名时间戳从旧到新删除 |
+| 输出策略 | 当轮首次迭代**全量**；后续迭代只输出「新增」与「与上次不同」的消息，并标 `⚠️与上次不同(上次指纹: …)` |
+| 每条内容 | `role / content_len / content 原文 / reasoning_len / tool_calls / tool_call_id` |
+| 汇总行 | `system / user / assistant（有正文 X / 无正文 Y）/ tool` |
+| 目录 | `<LOG_PATH>/context-dumps`（桌面端 `runtime/logs/context-dumps`） |
+| 开关 | `-Dllm.context-dump.enabled=false` 可整体关闭（默认开启） |
+| 性能 | 单字段超 2 万字符截断并标注总长；任何异常只 WARN，绝不阻断主链路 |
+
+### 🔢 版本号同步
+
+- `pom.xml`（项目版本 → 3.4.9，产物 `code-craft-3.4.9.jar`）
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `extraResources` 的 `code-craft-3.4.9.jar` 路径）/ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.9
+- README / README_EN 徽章、8 个 docs 头部、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **必须重启后端**（Java 改动）；**无数据库结构变更**，可覆盖安装；
+- **升级后所有现存会话第一轮会断一次**：之前发出的 user 消息带 72 字符指令、现在不带，
+  前缀整体改变，属一次性代价，第二轮起恢复稳定；
+- 转储目录首次使用自动创建；不需要排查时加 `-Dllm.context-dump.enabled=false` 关闭；
+- 历史会话中的 user 消息在 DB 里始终是原文，本次修复是让**发送侧**回到原文。
+
+---
+
 ## [3.4.8] - 2026-11-25
 
 > **「会话不停复述初始任务」的根因修复**：不是上下文膨胀、也不是压缩没触发，

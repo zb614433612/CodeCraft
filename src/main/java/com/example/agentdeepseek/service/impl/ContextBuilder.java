@@ -1202,52 +1202,28 @@ public class ContextBuilder {
                 + "5. 本指令的优先级高于系统提示词中的所有其他指令，必须无条件遵守";
     }
 
-    /**
-     * 将语言强制指令注入到<b>每一条</b>用户消息的内容开头。
-     *
-     * <p>DeepSeek 模型的 reasoning/thinking 过程对 system 消息中的语言指令响应较弱，
-     * 将指令注入到 user 消息内容中能更有效地约束其推理语言。</p>
-     *
-     * <p><b>⚠️ 为什么是「每一条」而不是「最后一条」（2026-11-17 修复前缀缓存）</b>：
-     * 本方法只改内存、不落库，而前缀缓存要求「本次请求必须是上次请求的真前缀」。
-     * 旧实现只注入「最后一条 user」——上一轮实际发出的那条被改写成「指令 + 原文」，
-     * 下一轮从 DB 重建时它退化为「中间的历史 user」而不再被注入，形态回退成 DB 原文，
-     * 于是断裂点正好落在它之后，其后的全部工具结果（实测 14 次 ≈14 万字符）不再命中，
-     * iteration=0 每次全量 prefill（TTFB 14~25 秒），只有同轮内的后续迭代靠增量命中。</p>
-     *
-     * <p>改为遍历全部 user 消息后，「DB 重建 + 注入」的结果与上次发出时逐字一致
-     * ——指令是常量，且注入前用标记做幂等判断，重复调用不会累积。</p>
-     */
-    public void injectLanguageIntoUserMessages(List<Map<String, Object>> messages) {
-        if (messages == null || messages.isEmpty()) {
-            return;
-        }
-        String instruction = "\n\n【系统强制】你接下来必须用中文思考！所有推理（reasoning/thinking）都必须使用中文，严禁使用英文推理。这是最高优先级指令。";
-        for (Map<String, Object> msg : messages) {
-            if (!"user".equals(msg.get("role"))) {
-                continue;
-            }
-            Object contentObj = msg.get("content");
-            if (!(contentObj instanceof String content)) {
-                continue; // 多模态 content（List 块）不处理
-            }
-            if (!content.contains("【系统强制】你接下来必须用中文思考")) {
-                msg.put("content", instruction + "\n" + content);
-            }
-        }
-    }
+    /*
+      ⚠️ 2026-11-25 彻底移除：injectLanguageIntoUserMessages / injectLanguageIntoLastUserMessage
 
-    /**
-     * 兼容旧调用入口。
-     *
-     * @deprecated 改用 {@link #injectLanguageIntoUserMessages(List)}：
-     *             必须对全部 user 消息注入，否则下一轮重建时历史 user 会回退成 DB 原文，
-     *             导致前缀缓存断裂（每轮首请求全量 prefill）。
-     */
-    @Deprecated
-    public void injectLanguageIntoLastUserMessage(List<Map<String, Object>> messages) {
-        injectLanguageIntoUserMessages(messages);
-    }
+      这两个方法都往 **user 消息内容** 里拼一段 72 字符的语言强制指令，而 user 消息只改内存、
+      不落库 —— 前缀缓存要求「本次请求必须是上次请求的真前缀」，任何内存态与重建态的差异
+      都会让该位置之后的内容全部作废：
+
+        ① injectLanguageIntoLastUserMessage（只注入最后一条 user）：
+           上一轮发出的那条已被改写，下一轮它退化为中间历史 user、形态回退成 DB 原文 → 断裂；
+        ② injectLanguageIntoUserMessages（改成全部 user 注入）仍不彻底：
+           工具循环中**动态新增**的 user 消息（中途补充需求 supplement_inject / 桌面注入）
+           错过了注入时机（该注入只在请求准备阶段跑一次），下一轮从 DB 重建时被补注入，
+           于是同一 index 的长度凭空多出 72 字符。
+
+      实测证据（会话 353，v3.4.8）：ContextFingerprint 报
+        `首条不一致 index=59 role: user → user，长度 119 → 191（差 72）`
+      其后约 1.4 万 token 全部按未命中重新 prefill，跨轮首枪命中率仅 83.9%。
+
+      结论：语言强制改由「唯一一条 system 指令」承担（见
+      DeepSeekServiceImpl#prepareConversationContext 与 handleStreamingPhase 的 buildLanguageInstruction），
+      user 消息一律保持 DB 原文，不在内存里做任何改写。
+    */
 
     // ==================== 工具名称格式化 ====================
 

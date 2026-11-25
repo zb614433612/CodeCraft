@@ -5,6 +5,105 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.4.9] - 2026-11-25
+
+> **Root-cause fix for the 72-char prefix break on cross-turn first shots + LLM request context dumper**:
+> After v3.4.8 fixed "assistant body persisted as NULL", cross-turn first shots were still being
+> re-prefilled in full. Two warnings were captured in the log:
+> `index=59 length 119→191 (diff 72)` and `index=104 length 99→171 (diff 72)`.
+> The culprit was the injection that prepended a **72-character language directive** into every
+> user message body: it mutates memory only (never persisted), and user messages *dynamically
+> appended during the tool loop* (mid-turn supplement / desktop inject) missed the injection point.
+> On the next turn the DB rebuild re-injected it → the same index changed shape → roughly 14k tokens
+> after that index were recomputed as cache misses.
+> This release **removes that injection entirely** and keeps language enforcement on a single
+> system instruction. It also adds an **LLM request context dumper** that writes the real outbound
+> messages per turn to disk (keeping the latest 3 files) so you can verify byte-by-byte whether the
+> assistant body was included and whether the context broke.
+> Backend restart required; **no database schema change**.
+
+### 🔍 Problem: every cross-turn first shot breaks at a user message (+72 chars)
+
+Two warnings on the same conversation, one per cross-turn first shot:
+
+```
+20:12:53 WARN ContextFingerprint [cache warning] message prefix break — conversation=353 turn=0
+  first mismatch index=104 role: user → user, length: 99 → 171 (diff 72)
+19:50:07 WARN ContextFingerprint [cache warning] message prefix break — conversation=353 turn=0
+  first mismatch index=59  role: user → user, length: 119 → 191 (diff 72)
+```
+
+Both diffs are exactly **72 characters**, matching the constant inside
+`ContextBuilder.injectLanguageIntoUserMessages` (`"\n\n【系统强制】你接下来必须用中文思考…"`).
+
+### 🧩 Root cause: memory-only injection vs. user messages appended mid-tool-loop
+
+The method walked `messages` **at request preparation time** and prepended the directive to every
+user message (idempotent via a marker). It mutates memory only and **never persists**, so the
+prefix-cache precondition is "the same message must be byte-identical between the in-memory state
+and the DB rebuild".
+
+But user messages **appended dynamically during the tool loop** (`supplement_inject`, `desktop_inject`)
+are added *after* the request has been sent — long past the injection point:
+
+```
+turn N   : prepare (inject once) → send → … → user sends "mid-turn supplement" → added to memory (not injected)
+turn N+1 : rebuild from DB → inject again → the same message gains 72 characters
+         → everything after that index is re-prefilled as cache misses (~14k tokens measured)
+```
+
+Before v3.4.8 the "assistant body persisted as NULL" defect was stacked on top of this.
+
+### 🔧 Fix: remove the user-message language injection entirely
+
+- Deleted `ContextBuilder#injectLanguageIntoUserMessages` and the legacy entry
+  `injectLanguageIntoLastUserMessage` (including Javadoc); an explanatory comment is kept in place.
+- Removed both call sites:
+  - `DeepSeekServiceImpl#handleStreamingPhase` (no-tool path)
+  - `DeepSeekServiceImpl#prepareConversationContext` (tool-loop path)
+- Language enforcement now relies on **one single system instruction** (`buildLanguageInstruction()`,
+  inserted at the head of the list: fixed position, constant content). User messages always keep the
+  DB original text — **no in-memory rewriting at all**.
+
+### ✨ New: LLM request context dumper (forensics for "missing body / broken prefix")
+
+Logs only report lengths and tokens; they cannot answer "what exactly was sent this round".
+New `util/LlmContextDumper` writes the **sanitized, actually-outbound** `requestBody.messages` to disk:
+
+| Item | Rule |
+|---|---|
+| File granularity | One file per user turn (all tool-loop iterations of the same turnId append to it) |
+| File name | `turn-<yyyyMMdd-HHmmss>-c<conversationId>-<turnId>.txt` |
+| Retention | **Latest 3 files only**; older files are deleted by filename timestamp |
+| Output strategy | First iteration of a turn is **full**; later iterations only emit "new" and "changed" messages, flagged `⚠️changed (previous fingerprint: …)` |
+| Per-message fields | `role / content_len / content body / reasoning_len / tool_calls / tool_call_id` |
+| Summary line | `system / user / assistant (with body X / without body Y) / tool` |
+| Directory | `<LOG_PATH>/context-dumps` (`runtime/logs/context-dumps` on desktop) |
+| Switch | `-Dllm.context-dump.enabled=false` disables it entirely (enabled by default) |
+| Cost | Fields longer than 20k chars are truncated with the total length noted; any exception is WARN-only and never blocks the main path |
+
+### 🔢 Version sync
+
+- `pom.xml` (project version → 3.4.9, artifact `code-craft-3.4.9.jar`)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + the `code-craft-3.4.9.jar` path in `extraResources`) / `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.4.9
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build examples, FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes); **no database schema change**, overwrite install is fine.
+- **The first turn of every existing conversation will miss the cache once**: previously sent user
+  messages carried the 72-char directive and no longer do, so the prefix changes as a one-time cost;
+  it stabilizes from the second turn on.
+- The dump directory is created automatically on first use; disable it with
+  `-Dllm.context-dump.enabled=false` when you no longer need forensics.
+- User messages in existing conversations were always stored as original text in the DB; this fix
+  makes the **sending side** go back to the original text.
+
+---
+
 ## [3.4.8] - 2026-11-25
 
 > **Root-cause fix for "the session keeps restating the initial task"**:
