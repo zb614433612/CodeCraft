@@ -20,6 +20,10 @@ export interface ChatRequest {
   attachmentIds?: string[]
   /** M4：文件资产ID列表（图片；发送时建立引用并注入 file 内容块） */
   fileAssetIds?: number[]
+  /** App 端 IANA 时区（DeepSeek latest_reminder 定位用；不传由后端回退系统时区） */
+  userTimeZone?: string
+  /** App 端 locale（时区无法映射国家时的语言兜底） */
+  userLocale?: string
 }
 
 // 流式聊天的额外选项
@@ -88,6 +92,13 @@ export async function* streamChat(
   const controller = abortController ?? new AbortController()
 
   const requestBody: ChatRequest = { message }
+  // DeepSeek latest_reminder 的定位/语言来源：App 端时区与 locale（不查代理 IP）
+  try {
+    requestBody.userTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    requestBody.userLocale = navigator.language
+  } catch {
+    // 环境不支持时由后端回退系统时区
+  }
   if (sessionId !== undefined) {
     requestBody.sessionId = sessionId
   }

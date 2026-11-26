@@ -5,6 +5,80 @@
 
 ---
 
+## [3.6.1] - 2026-11-26
+
+> **DeepSeek 用户元信息 + 截图上下文缓存修复**：接入 DeepSeek Chat Completions 的
+> `latest_reminder` 角色，每轮用户消息前注入一条 App 端日期/星期/位置/平台/语言元信息，
+> 并随用户消息入库、历史重建时稳定回传；仅 DeepSeek 适配器下发，其他 Provider 在历史
+> 构建与发送出口双层剔除。同时修复桌面截图注入消息内存态（text+file）与 DB 重建态
+> （纯文本）不一致导致的跨轮前缀断裂。必须重启后端；新增
+> `conversation_message.latest_reminder` 列，启动时自动迁移。
+
+### 🧭 DeepSeek latest_reminder 用户元信息
+
+- 新增 `LatestReminderService`：日期取 App 时区（缺省系统时区）的 `LocalDate.now()`，
+  位置由 IANA 时区映射到国家/地区，语言由位置决定，平台固定 `App`；星期按目标语言本地化；
+- 元信息格式严格按官方 `<date>,<weekday>,<location>,<platform>,<language>`，例如
+  `2026-11-26,星期四,中国,App,中文`；
+- 不做 IP 地理定位，避免把代理出口机房误当成用户真实位置；App 端通过
+  `Intl.DateTimeFormat().resolvedOptions().timeZone` 与 `navigator.language` 上报时区/locale；
+- 旧消息不补写：无法还原当时的位置/语言，升级后新消息开始生效；文档允许历史不回传。
+
+### 🧩 适配器统一入口与双层过滤
+
+- `LLMClient` 新增 `supportsLatestReminder()` 能力开关与 `prepareMessages()` 统一清洗入口；
+- `DeepSeekClient` 仅在 `ProviderRegistry` 判定 adapterType=DEEPSEEK 时打开；未登记模板
+  回退成 DeepSeekClient 时显式关闭，避免非 DeepSeek 网关收到不支持的角色；
+- `ContextBuilder` 在历史构建阶段先解析当前 Provider；不支持则不合成 reminder；
+- 主链路、工具循环发送前再次按适配器能力清洗；`AbstractLLMClient.buildRequestBody()`
+  出口兜底；裁剪/压缩后 reminder 后面不是 user 时自动剔除，避免 DeepSeek 400。
+
+### 🗄️ 入库与历史重建
+
+- `conversation_message` 新增 `latest_reminder` 列（LONGTEXT，可空），启动时
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 自动迁移；
+- 普通用户消息、中途补充需求消息保存时各生成一条 reminder 入库；桌面截图注入不是用户
+  轮次，不生成；
+- `ContextBuilder` 重建时在该 user 消息前合成 `role=latest_reminder` 的独立消息，不新增
+  DB 行、不改变 3.6.0 的注入块顺序与前端气泡聚合；
+- 历史每轮的 reminder 内容随 user 行固定，跨轮前缀稳定，避免每轮变化导致缓存全量失效。
+
+### 🛠️ Provider 解析边界修复
+
+- `entryProviderCode` 对齐主链路优先级：`providerCode` 不可用时按 `providerId` 反查真实
+  Provider，修复仅配置 providerId 的 Agent 在历史构建/压缩选型时回退到第一个 Provider；
+- `DeepSeekClient` 增加 `latestReminderSupported` 构造参数，协议兜底与真实 DeepSeek 平台
+  能力分离。
+
+### 🖼️ 桌面截图上下文前缀修复
+
+- 新增 `FileReferenceMapper.selectAssetIdsByMessageId()`，按注入消息查截图资产；
+- `ContextBuilder` 重建 `desktop_inject` 消息时补回内存态一致的 text+file 块，修复
+  `index=390 role=user 759→671（差 -88）` 的跨轮前缀断裂；
+- 资产缺失/构建失败回退纯文本，不影响主链路；长会话多截图场景仍有重复文件 IO 开销，
+  后续可加 messageId 级缓存。
+
+### 🔢 版本号同步
+
+- `pom.xml`（项目版本 → 3.6.1，产物 `code-craft-3.6.1.jar`）
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `extraResources` 的 `code-craft-3.6.1.jar` 路径）/
+  `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.6.1
+- README / README_EN 徽章、8 个 docs 头部、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、
+  FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **必须重启后端**（Java 改动）；新增 `conversation_message.latest_reminder` 列，启动时
+  自动迁移，可覆盖安装；
+- 旧消息的 `latest_reminder` 为空，不回填；新消息开始写入；
+- 非 DeepSeek Provider 不会收到该角色；切换 Provider 时前缀会按预期重建一次；
+- 若使用未登记模板的第三方网关，仍按既有逻辑回退 DeepSeekClient，但不会下发该角色。
+
+---
+
 ## [3.6.0] - 2026-11-26
 
 > **上下文注入落库与压缩适配**：此前弯路预警、技能目录、执行模式、目录知识库等

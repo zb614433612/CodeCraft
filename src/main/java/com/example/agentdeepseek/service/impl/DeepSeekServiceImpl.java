@@ -34,6 +34,7 @@ import com.example.agentdeepseek.service.SkillCatalogBuilder;
 import com.example.agentdeepseek.service.SkillService;
 import com.example.agentdeepseek.service.SnapshotService;
 import com.example.agentdeepseek.service.ConfigService;
+import com.example.agentdeepseek.service.LatestReminderService;
 import com.example.agentdeepseek.service.AttachmentStore;
 import com.example.agentdeepseek.service.files.FileAssetService;
 import com.example.agentdeepseek.service.files.FileVisionService;
@@ -145,6 +146,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     private final LLMClientManager llmClientManager;
     private final LessonService lessonService;
     private final FailureNormalizer failureNormalizer;
+    /** DeepSeek latest_reminder 用户元信息（日期/位置/平台/语言） */
+    private final LatestReminderService latestReminderService;
 
     /**
      * 连续「空回复」最大重试次数（2026-11-17 修复「任务静默中断」）。
@@ -366,7 +369,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                      @Lazy AgentInvokeService agentInvokeService,
                                      TokenUsageParser tokenUsageParser,
                                      LlmTokenUsageMapper llmTokenUsageMapper,
-                                     ContextFingerprint contextFingerprint) {
+                                     ContextFingerprint contextFingerprint,
+                                     LatestReminderService latestReminderService) {
         this.webClient = deepSeekWebClient;
         this.deepSeekConfig = deepSeekConfig;
         this.conversationMapper = conversationMapper;
@@ -399,6 +403,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         this.tokenUsageParser = tokenUsageParser;
         this.llmTokenUsageMapper = llmTokenUsageMapper;
         this.contextFingerprint = contextFingerprint;
+        this.latestReminderService = latestReminderService;
     }
 
     // ===== 拆分出的组件 =====
@@ -467,6 +472,14 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                 log.debug("添加conversation_message.message_type列成功");
             } catch (Exception e) {
                 log.debug("添加conversation_message.message_type列失败，可能已经存在: {}", e.getMessage());
+            }
+
+            // 添加 latest_reminder 列（DeepSeek 用户元信息；每轮用户消息一条）
+            try {
+                jdbcTemplate.execute("ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS latest_reminder LONGTEXT COMMENT 'DeepSeek latest_reminder 内容（每轮用户消息一条）'");
+                log.debug("添加conversation_message.latest_reminder列成功");
+            } catch (Exception e) {
+                log.debug("添加conversation_message.latest_reminder列失败，可能已经存在: {}", e.getMessage());
             }
 
             // 回填存量注入消息：历史版本未打标记的桌面截图注入消息补 desktop_inject（幂等，只回填 message_type 为空的行）
@@ -733,6 +746,21 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
+     * 构建 latest_reminder，失败不影响用户消息保存（仅少一条元信息）。
+     *
+     * @param userTimeZone App 端 IANA 时区；为空回退系统时区
+     * @param userLocale   App 端 locale；仅用于时区无法映射国家时兜底
+     */
+    private String buildLatestReminderSafely(String userTimeZone, String userLocale) {
+        try {
+            return latestReminderService.buildCurrent(userTimeZone, userLocale);
+        } catch (Exception e) {
+            log.warn("构建 latest_reminder 失败（不阻断用户消息保存）: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 保存助手消息（包含思考过程和内容）
      * @param conversationId 会话ID
      * @param content 消息内容（将作为content字段存储）
@@ -982,7 +1010,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         String userContentToSave = (attachSectionForTurn == null ? "" : attachSectionForTurn)
                 + userMessage
                 + (imageRefMark == null ? "" : imageRefMark);
-        Long userMessageId = messagePersister.saveUserMessage(storageConversationId, userContentToSave, turnIdForInjections);
+        String latestReminder = buildLatestReminderSafely(
+                request.getUserTimeZone(), request.getUserLocale());
+        Long userMessageId = messagePersister.saveUserMessage(storageConversationId, userContentToSave,
+                turnIdForInjections, latestReminder);
 
         // 9) 建立文件引用（当轮新上传 + 历史引用两类；校验 active 与归属，失败不影响发送主链路）
         if (userMessageId != null && request.getFileAssetIds() != null && !request.getFileAssetIds().isEmpty()) {
@@ -1021,9 +1052,26 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (entryProviderCode == null || entryProviderCode.isEmpty()) {
             if (agentConfigId != null) {
                 AgentConfig agentCfgForHistory = agentConfigMapper.selectById(agentConfigId).orElse(null);
-                if (agentCfgForHistory != null && agentCfgForHistory.getProviderCode() != null
-                        && !agentCfgForHistory.getProviderCode().isEmpty()) {
-                    entryProviderCode = agentCfgForHistory.getProviderCode();
+                if (agentCfgForHistory != null) {
+                    /*
+                     * 与下方「LLM 选型」保持同一优先级：
+                     * providerCode（且仍在启用列表中）优先；否则按 providerId 反查真实 Provider。
+                     *
+                     * 旧实现只读 providerCode，agent 仅配 providerId 时 entryProviderCode 为 null，
+                     * 历史构建会回退到第一个 Provider —— 与真正发送用的 Provider 可能不是同一个。
+                     * 这会让 latest_reminder 能力判断偏掉，也影响 Provider 级上下文上限/压缩选型。
+                     */
+                    String agentProviderCode = agentCfgForHistory.getProviderCode();
+                    if (agentProviderCode != null && !agentProviderCode.isEmpty()
+                            && llmClientManager.getProviderConfig(agentProviderCode) != null) {
+                        entryProviderCode = agentProviderCode;
+                    } else if (agentCfgForHistory.getProviderId() != null) {
+                        LLMClient providerIdClient = llmClientManager
+                                .resolveClientByProviderId(agentCfgForHistory.getProviderId());
+                        if (providerIdClient != null) {
+                            entryProviderCode = providerIdClient.getProviderCode();
+                        }
+                    }
                 }
             }
         }
@@ -1140,6 +1188,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         log.debug("使用 LLM Provider: [{}], providerCode={}, agentConfigId={}",
                 llmClient.getProviderCode(), requestProviderCode, agentConfigId);
 
+        // 双保险：ContextBuilder 已按 Provider 能力决定是否合成 latest_reminder；
+        // 这里再按适配器能力清洗一次，防止任何路径把不支持的角色带进请求体。
+        historyMessages = llmClient.prepareMessages(historyMessages);
+
         // ===== 解析最终模型/温度/思考模式（Agent配置 → 前端运行时覆盖 → Provider默认值）=====
         String effectiveModel = request.getModel();
         if (effectiveModel == null || effectiveModel.isEmpty()) {
@@ -1251,6 +1303,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 记录发送前的校准后估算值（与真正请求体同口径）：响应回来后用于在线校准。
         // 工具循环会按每轮迭代覆盖它，两者口径一致（都含 tools）。
         apiRequest.put("_estimatedPromptTokens", preRequestEstimatedTokens);
+        // latest_reminder 的 App 端定位信息：工具循环里中途补充需求时复用（_ 前缀不会发给 API）
+        apiRequest.put("_userTimeZone", request.getUserTimeZone());
+        apiRequest.put("_userLocale", request.getUserLocale());
         // 是否需要「请求前上下文整理」：prepare 阶段只判断，真正压缩在 Flux 首部执行
         // （这样能先给前端推一条「正在整理上下文」事件，避免长时间无反馈）。
         apiRequest.put("_guardNeeded", contextGuardNeeded);
@@ -2190,6 +2245,11 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         ContextMode loopContextMode = ContextMode.from(contextMode, deepSeekConfig.resolveContextMode());
         List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(
                 conversationId, loopContextMode, loopProviderCodeForHistory);
+        // 双保险：工具循环同样按当前适配器能力清洗 latest_reminder
+        LLMClient loopClientForHistory = (LLMClient) initialApiRequest.get("_llmClient");
+        if (loopClientForHistory != null) {
+            historyMessages = loopClientForHistory.prepareMessages(historyMessages);
+        }
         for (Map<String, Object> msg : historyMessages) {
             Map<String, Object> mutableMsg = new HashMap<>(msg);
             messages.add(mutableMsg);
@@ -2404,14 +2464,26 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                       落库后重建位置固定（id 递增，天然排在已落库历史之后），前缀连续。
                       注意：落库用 storageConversationId（DB 主键），turnId 用于关联回滚快照。
                      */
+                    String supplementReminder = buildLatestReminderSafely(
+                            (String) initialApiRequest.get("_userTimeZone"),
+                            (String) initialApiRequest.get("_userLocale"));
                     try {
                         messagePersister.saveSupplementUserMessage(storageConversationId, supplementContent,
-                                (String) initialApiRequest.get("_turnId"));
+                                (String) initialApiRequest.get("_turnId"), supplementReminder);
                     } catch (Exception e) {
                         // 落库失败不阻断主链路（补充需求本轮仍要生效），
                         // 但下一轮会再产生一次前缀断裂，必须留痕便于排查。
                         log.warn("补充需求落库失败（本轮仍注入，下一轮可能出现前缀断裂）: conversationId={}, err={}",
                                 conversationId, e.getMessage());
+                    }
+                    // 仅 DeepSeek 适配器下发 latest_reminder；其他 Provider 连历史里都不应出现该 role。
+                    LLMClient supplementClient = (LLMClient) initialApiRequest.get("_llmClient");
+                    if (supplementReminder != null && supplementClient != null
+                            && supplementClient.supportsLatestReminder()) {
+                        Map<String, Object> reminderMsg = new HashMap<>();
+                        reminderMsg.put("role", LLMClient.LATEST_REMINDER_ROLE);
+                        reminderMsg.put("content", supplementReminder);
+                        messages.add(reminderMsg);
                     }
                     messages.add(supplementMsg);
                     log.info("补充需求已注入到ToolLoop并已落库: conversationId={}, supplement={}", conversationId,

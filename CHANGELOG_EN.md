@@ -5,6 +5,101 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.6.1] - 2026-11-26
+
+> **DeepSeek user metadata + screenshot context-cache fix**: Integrates DeepSeek Chat
+> Completions' `latest_reminder` role, injecting the App-side date/weekday/location/platform/
+> language metadata before each user message. The metadata is persisted with the user message
+> and replayed stably when history is rebuilt. Only the DeepSeek adapter emits it; other
+> providers are filtered both during history construction and at the request egress. This
+> release also fixes the cross-turn prefix break caused by desktop screenshot injection
+> messages having different shapes in memory (text+file) and after DB rebuild (plain text).
+> Backend restart required; adds a `conversation_message.latest_reminder` column that is
+> migrated automatically at startup.
+
+### 🧭 DeepSeek latest_reminder metadata
+
+- Added `LatestReminderService`: the date uses `LocalDate.now()` in the App timezone (falling
+  back to the system timezone), location is derived from the IANA timezone to a country/region,
+  language is determined by location, platform is always `App`, and weekday is localized;
+- The content follows the official `<date>,<weekday>,<location>,<platform>,<language>` format,
+  for example `2026-11-26,星期四,中国,App,中文`;
+- No IP geolocation is performed, so a proxy egress datacenter is never mistaken for the user's
+  real location; the App reports timezone/locale via
+  `Intl.DateTimeFormat().resolvedOptions().timeZone` and `navigator.language`;
+- Old messages are not backfilled because their original location/language cannot be restored;
+  the feature starts with new messages after the upgrade. The official docs allow history to
+  omit older reminders.
+
+### 🧩 Unified adapter entry and two-layer filtering
+
+- `LLMClient` adds the `supportsLatestReminder()` capability switch and the
+  `prepareMessages()` cleanup entry point;
+- `DeepSeekClient` enables it only when `ProviderRegistry` resolves adapterType=DEEPSEEK.
+  When an unregistered template falls back to DeepSeekClient, the capability is explicitly
+  disabled so non-DeepSeek gateways never receive an unsupported role;
+- `ContextBuilder` resolves the active provider before building history; unsupported providers
+  never synthesize reminders;
+- The main chat path and tool loop clean messages again before sending;
+  `AbstractLLMClient.buildRequestBody()` provides an egress fallback. If trimming/compaction
+  leaves a reminder not immediately followed by a user message, it is pruned to avoid a
+  DeepSeek 400.
+
+### 🗄️ Persistence and history rebuild
+
+- Added the nullable `conversation_message.latest_reminder` column (LONGTEXT), migrated at
+  startup with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`;
+- Normal user messages and mid-task supplement messages each generate one reminder on save;
+  desktop screenshot injections are not user turns and do not generate one;
+- During rebuild, `ContextBuilder` synthesizes a standalone `role=latest_reminder` message
+  before the owning user message. It does not add a DB row and does not change the 3.6.0
+  injection-block order or frontend bubble aggregation;
+- Each historical reminder is fixed with its user row, keeping the cross-turn prefix stable
+  instead of changing every turn and invalidating the whole cache prefix.
+
+### 🛠️ Provider resolution edge-case fixes
+
+- `entryProviderCode` now follows the same priority as the main LLM selection: when
+  `providerCode` is unavailable, it resolves the real provider through `providerId`. This fixes
+  history construction/compaction provider selection for Agents configured with providerId only;
+- `DeepSeekClient` gains a `latestReminderSupported` constructor flag, separating protocol
+  fallback from a real DeepSeek platform.
+
+### 🖼️ Desktop screenshot context-prefix fix
+
+- Added `FileReferenceMapper.selectAssetIdsByMessageId()` to load screenshot assets for an
+  injected message;
+- `ContextBuilder` now rebuilds `desktop_inject` messages with the same text+file shape as the
+  in-memory request, fixing the cross-turn prefix break at
+  `index=390 role=user 759→671 (delta -88)`;
+- Missing assets or build failures fall back to plain text without affecting the main path.
+  Long sessions with many screenshots still have repeated file IO; a messageId-level cache can
+  be added later.
+
+### 🔢 Version synchronization
+
+- `pom.xml` (project version → 3.6.1, artifact `code-craft-3.6.1.jar`)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + the `code-craft-3.6.1.jar` path in `extraResources`) /
+  `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.6.1
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST packaging
+  examples, and the FAQ version example
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes); the
+  `conversation_message.latest_reminder` column is migrated automatically at startup and the
+  build supports overwrite installation;
+- Existing messages keep `latest_reminder` empty; new messages start writing it;
+- Non-DeepSeek providers never receive the role; switching providers rebuilds the prefix once
+  as expected;
+- Third-party gateways with unregistered templates still fall back to DeepSeekClient as before,
+  but will not receive this role.
+
+---
+
 ## [3.6.0] - 2026-11-26
 
 > **Context injection persistence and compaction adaptation**: Previously the detour hint,

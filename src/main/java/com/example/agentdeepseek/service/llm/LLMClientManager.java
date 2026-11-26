@@ -469,7 +469,8 @@ public class LLMClientManager {
                             + "若该平台非 DeepSeek 兼容，请求会 400 —— 请在 ProviderRegistry 补一个档案",
                     config.getCode(), template == null || template.isBlank() ? config.getCode() : template);
             var wc = webClientManager.getOrCreate(config);
-            return new DeepSeekClient(wc, objectMapper, config.getCode());
+            // 未登记模板只是「协议兜底」，不能声明支持 DeepSeek 专属的 latest_reminder
+            return new DeepSeekClient(wc, objectMapper, config.getCode(), false);
         }
 
         /*
@@ -485,7 +486,7 @@ public class LLMClientManager {
         return switch (adapterType) {
             case DEEPSEEK -> {
                 var wc = webClientManager.getOrCreate(config);
-                yield new DeepSeekClient(wc, objectMapper, config.getCode());
+                yield new DeepSeekClient(wc, objectMapper, config.getCode(), true);
             }
             case GPT -> {
                 // OpenAI 官方 GPT / o 系列专用：max_completion_tokens + reasoning_effort + stream_options

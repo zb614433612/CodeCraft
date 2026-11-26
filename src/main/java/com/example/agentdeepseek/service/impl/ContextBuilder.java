@@ -4,9 +4,13 @@ import com.example.agentdeepseek.common.enums.ContextMode;
 import com.example.agentdeepseek.config.DeepSeekConfig;
 import com.example.agentdeepseek.mapper.ConversationMapper;
 import com.example.agentdeepseek.mapper.ConversationMessageMapper;
+import com.example.agentdeepseek.mapper.FileReferenceMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
+import com.example.agentdeepseek.service.files.FileVisionService;
+import com.example.agentdeepseek.service.llm.LLMClient;
+import com.example.agentdeepseek.service.llm.LLMClientManager;
 import com.example.agentdeepseek.service.llm.ToolCallSequenceSanitizer;
 import com.example.agentdeepseek.util.ReasoningPassback;
 import com.example.agentdeepseek.util.TokenEstimator;
@@ -101,18 +105,29 @@ public class ContextBuilder {
     private final DeepSeekConfig deepSeekConfig;
     /** 工具结果体积预算（与 ToolExecutor 共用同一份规则，保证截断幂等、前缀稳定） */
     private final ToolResultBudget toolResultBudget;
+    /** 桌面截图消息重建：按消息查 file_reference，再补回与内存一致的 file 块 */
+    private final FileReferenceMapper fileReferenceMapper;
+    private final FileVisionService fileVisionService;
+    /** 当前 Provider 能力解析：latest_reminder 只对 DeepSeek 适配器生成 */
+    private final LLMClientManager llmClientManager;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ContextBuilder(ConversationMapper conversationMapper,
                           ConversationMessageMapper conversationMessageMapper,
                           CompactionService compactionService,
                           DeepSeekConfig deepSeekConfig,
-                          ToolResultBudget toolResultBudget) {
+                          ToolResultBudget toolResultBudget,
+                          FileReferenceMapper fileReferenceMapper,
+                          FileVisionService fileVisionService,
+                          LLMClientManager llmClientManager) {
         this.conversationMapper = conversationMapper;
         this.conversationMessageMapper = conversationMessageMapper;
         this.compactionService = compactionService;
         this.deepSeekConfig = deepSeekConfig;
         this.toolResultBudget = toolResultBudget;
+        this.fileReferenceMapper = fileReferenceMapper;
+        this.fileVisionService = fileVisionService;
+        this.llmClientManager = llmClientManager;
     }
 
     // ==================== Agent 类型解析 ====================
@@ -221,6 +236,23 @@ public class ContextBuilder {
     public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, ContextMode mode, String providerCode) {
         ContextMode effectiveMode = mode != null ? mode : deepSeekConfig.resolveContextMode();
 
+        // latest_reminder 虽是普通消息字段入库，但只有 DeepSeek 适配器能消费；
+        // 历史构建阶段就必须按当前 Provider 能力决定是否合成，不能等发送前再补救。
+        boolean includeLatestReminder = supportsLatestReminder(providerCode);
+
+        // 桌面截图注入消息落库只存纯文本；重建时需按 file_reference 补回 file 块，
+        // 否则内存态（text+file）与重建态（纯文本）不一致，跨轮前缀会从该条起断裂。
+        Long conversationUserId = null;
+        if (conversationId != null && conversationMapper != null) {
+            try {
+                conversationUserId = conversationMapper.selectById(conversationId)
+                        .map(Conversation::getUserId).orElse(null);
+            } catch (Exception e) {
+                log.warn("查询会话用户ID失败（桌面截图消息将回退纯文本）: conversationId={}, err={}",
+                        conversationId, e.getMessage());
+            }
+        }
+
         /*
           ★ 2026-11-23 增量重建：只读「SYSTEM + 水位线之后」的消息
 
@@ -256,8 +288,25 @@ public class ContextBuilder {
             MessageRole role = msg.getRole();
 
             if (role == MessageRole.USER || role == MessageRole.SYSTEM) {
+                /*
+                 * DeepSeek latest_reminder：落库只存在 user 消息的 latest_reminder 字段里，
+                 * 重建时在它所属的 user 消息之前合成一条独立 role 消息。
+                 * 这样 DB 行序不受影响，历史每轮的 reminder 也保持稳定（利于前缀缓存）。
+                 * 非 DeepSeek Provider 会在适配器出口统一过滤。
+                 */
+                if (role == MessageRole.USER
+                        && includeLatestReminder
+                        && msg.getLatestReminder() != null
+                        && !msg.getLatestReminder().isBlank()) {
+                    Map<String, Object> reminderMessage = new HashMap<>();
+                    reminderMessage.put("role", LLMClient.LATEST_REMINDER_ROLE);
+                    reminderMessage.put("content", msg.getLatestReminder());
+                    result.add(reminderMessage);
+                }
                 messageMap.put("role", role.getValue());
-                String content = msg.getContent() != null ? msg.getContent() : "";
+                Object content = role == MessageRole.USER
+                        ? buildHistoryUserContent(msg, conversationUserId, providerCode)
+                        : (msg.getContent() != null ? msg.getContent() : "");
                 messageMap.put("content", content);
                 if (msg.getMessageType() != null) {
                     messageMap.put("_messageType", msg.getMessageType());
@@ -513,6 +562,62 @@ public class ContextBuilder {
     public List<Map<String, Object>> buildMessagesFromHistory(Long conversationId, String contextMode) {
         return buildMessagesFromHistory(conversationId,
                 ContextMode.from(contextMode, deepSeekConfig.resolveContextMode()));
+    }
+
+    /**
+     * 当前 Provider 是否为支持 latest_reminder 的适配器（目前只有 DeepSeekClient）。
+     * 解析失败按不支持处理——宁可少一条元信息，也不能让其他 Provider 收到非法 role。
+     */
+    private boolean supportsLatestReminder(String providerCode) {
+        if (llmClientManager == null) {
+            return false;
+        }
+        try {
+            LLMClient client = llmClientManager.resolveClientByCode(providerCode);
+            return client != null && client.supportsLatestReminder();
+        } catch (Exception e) {
+            log.warn("解析 Provider latest_reminder 能力失败，按不支持处理: providerCode={}, err={}",
+                    providerCode, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 重建 user 消息 content。
+     *
+     * <p>桌面截图注入消息落库时只保存纯文本通知，内存发送时却是「text + file」多模态数组。
+     * 不补回 file 块会让同一消息在内存态与重建态之间长度不同，跨轮前缀从该条起断裂
+     * （实测 index=390，759→671，差 -88）。这里按 file_reference 重新构建同样的块。</p>
+     */
+    private Object buildHistoryUserContent(ConversationMessage msg, Long userId, String providerCode) {
+        String text = msg.getContent() != null ? msg.getContent() : "";
+        if (!MessagePersister.TYPE_DESKTOP_INJECT.equals(msg.getMessageType())
+                || text.isEmpty() || msg.getId() == null || userId == null
+                || fileReferenceMapper == null || fileVisionService == null) {
+            return text;
+        }
+        try {
+            List<Long> assetIds = fileReferenceMapper.selectAssetIdsByMessageId(msg.getId());
+            if (assetIds == null || assetIds.isEmpty()) {
+                return text;
+            }
+            FileVisionService.FileBlocksResult blocksResult =
+                    fileVisionService.buildFileBlocks(assetIds, userId, providerCode);
+            if (blocksResult == null || blocksResult.blocks().isEmpty()) {
+                return text;
+            }
+            List<Object> parts = new ArrayList<>(1 + blocksResult.blocks().size());
+            Map<String, Object> textBlock = new HashMap<>();
+            textBlock.put("type", "text");
+            textBlock.put("text", text);
+            parts.add(textBlock);
+            parts.addAll(blocksResult.blocks());
+            return parts;
+        } catch (Exception e) {
+            log.warn("重建桌面截图多模态消息失败（回退纯文本）: messageId={}, err={}",
+                    msg.getId(), e.getMessage());
+            return text;
+        }
     }
 
     /**

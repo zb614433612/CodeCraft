@@ -71,8 +71,19 @@ public class MessagePersister {
      * @return 消息ID（自增回填；M2 用于建立 file_reference 关联）
      */
     public Long saveUserMessage(Long conversationId, String content, String turnId) {
+        return saveUserMessage(conversationId, content, turnId, null);
+    }
+
+    /**
+     * 保存用户消息（带 DeepSeek latest_reminder 元信息）。
+     *
+     * @param latestReminder 本轮 latest_reminder 内容；null 表示不注入（其他 Provider 或生成失败）
+     * @return 消息ID
+     */
+    public Long saveUserMessage(Long conversationId, String content, String turnId, String latestReminder) {
         ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
         msg.setTurnId(turnId);
+        msg.setLatestReminder(latestReminder);
         conversationMessageMapper.insert(msg);
         return msg.getId();
     }
@@ -105,9 +116,20 @@ public class MessagePersister {
      * @return 消息ID
      */
     public Long saveSupplementUserMessage(Long conversationId, String content, String turnId) {
+        return saveSupplementUserMessage(conversationId, content, turnId, null);
+    }
+
+    /**
+     * 保存「用户中途补充需求」消息（带 latest_reminder 元信息）。
+     *
+     * @param latestReminder 本条补充需求对应的 latest_reminder；null 表示不注入
+     * @return 消息ID
+     */
+    public Long saveSupplementUserMessage(Long conversationId, String content, String turnId, String latestReminder) {
         ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.USER, content, null, null);
         msg.setTurnId(turnId);
         msg.setMessageType(TYPE_SUPPLEMENT_INJECT);
+        msg.setLatestReminder(latestReminder);
         conversationMessageMapper.insert(msg);
         return msg.getId();
     }

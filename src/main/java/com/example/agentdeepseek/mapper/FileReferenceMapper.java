@@ -51,6 +51,15 @@ public interface FileReferenceMapper {
     List<FileReference> selectByAssetId(Long fileAssetId);
 
     /**
+     * 查询某条消息引用的资产ID列表（按引用创建顺序，供重建桌面截图多模态消息）。
+     *
+     * @param messageId 消息ID
+     * @return 资产ID列表；无引用时返回空列表
+     */
+    @Select("SELECT file_asset_id FROM file_reference WHERE message_id = #{messageId} ORDER BY id ASC")
+    List<Long> selectAssetIdsByMessageId(@Param("messageId") Long messageId);
+
+    /**
      * 统计资产被引用次数（级联删除时"引用归零"判定）
      *
      * @param fileAssetId 资产ID

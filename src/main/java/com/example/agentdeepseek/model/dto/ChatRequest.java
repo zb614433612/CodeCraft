@@ -64,4 +64,10 @@ public class ChatRequest {
 
     @Schema(description = "文件资产ID列表（图片→云端 Files API，注入 vision file 内容块；文档→本地存储，注入提示供 chat_attachment(read_by_file_asset) 读取）；发送时建立 file_reference 引用", example = "[1, 2]")
     private List<Long> fileAssetIds;
+
+    @Schema(description = "App端 IANA 时区（可选），用于 DeepSeek latest_reminder 定位；为空回退系统时区（不查代理 IP）", example = "Asia/Shanghai")
+    private String userTimeZone;
+
+    @Schema(description = "App端 BCP-47 locale（可选），时区无法映射国家时用于语言兜底", example = "zh-CN")
+    private String userLocale;
 }

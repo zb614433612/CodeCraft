@@ -37,8 +37,32 @@ import java.util.Map;
 @Slf4j
 public class DeepSeekClient extends AbstractLLMClient {
 
+    /** 是否真正支持 latest_reminder：只有 ProviderRegistry 判定为 DeepSeek 适配器时才为 true */
+    private final boolean latestReminderSupported;
+
     public DeepSeekClient(WebClient webClient, ObjectMapper objectMapper, String providerCode) {
+        this(webClient, objectMapper, providerCode, true);
+    }
+
+    /**
+     * @param latestReminderSupported 是否允许下发 latest_reminder。
+     *                               未登记模板回退到 DeepSeekClient 时必须传 false——
+     *                                那是协议兜底，不代表对方平台真的支持该角色。
+     */
+    public DeepSeekClient(WebClient webClient, ObjectMapper objectMapper, String providerCode,
+                          boolean latestReminderSupported) {
         super(webClient, objectMapper, providerCode);
+        this.latestReminderSupported = latestReminderSupported;
+    }
+
+    /**
+     * DeepSeek 官方 API 支持 {@code role=latest_reminder}（Chat Completions / Messages API）。
+     * 其他 OpenAI 兼容网关多数不接受该角色；未登记模板回退到 {@link DeepSeekClient} 时由
+     * {@code LLMClientManager} 显式传 false。
+     */
+    @Override
+    public boolean supportsLatestReminder() {
+        return latestReminderSupported;
     }
 
     @Override

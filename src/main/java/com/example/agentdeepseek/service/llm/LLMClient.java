@@ -4,6 +4,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -240,6 +241,9 @@ import java.util.Map;
  */
 public interface LLMClient {
 
+    /** DeepSeek 用户元信息消息的 role 名（官方固定值） */
+    String LATEST_REMINDER_ROLE = "latest_reminder";
+
     /**
      * 获取 Provider 编码（如 "deepseek"、"openai"）
      */
@@ -360,6 +364,76 @@ public interface LLMClient {
      */
     default Map<String, String> getRequestHeaders() {
         return Map.of();
+    }
+
+    /**
+     * 是否支持 DeepSeek 的 {@code latest_reminder} 用户元信息消息。
+     *
+     * <p>这是 Provider 能力开关：默认 {@code false}。不支持的适配器会在
+     * {@link #prepareMessages(List)} 中统一剔除历史里的 latest_reminder，
+     * 避免把不支持的角色发给对方（DeepSeek 之外多数 OpenAI 兼容网关会直接 400）。</p>
+     *
+     * <p>目前仅 {@code DeepSeekClient} 覆盖为 {@code true}。未来其他适配器要复用该能力，
+     * 只需覆盖本方法，并自行保证请求体协议接受 {@code role=latest_reminder}。</p>
+     */
+    default boolean supportsLatestReminder() {
+        return false;
+    }
+
+    /**
+     * 请求出口按 Provider 能力清洗消息列表。
+     *
+     * <p>默认实现剔除 {@code role=latest_reminder} 的消息；支持该能力的适配器原样返回。
+     * 主对话链路与工具循环都在发送前调用本方法，{@code AbstractLLMClient.buildRequestBody}
+     * 也会再兜底一次，确保其他 Provider 绝不会收到该角色。</p>
+     *
+     * @param messages 待发送消息列表（可为 null）
+     * @return 清洗后的列表；不支持的 Provider 返回新列表，支持的 Provider 返回原列表
+     */
+    default List<Map<String, Object>> prepareMessages(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return messages;
+        }
+        if (supportsLatestReminder()) {
+            // 裁剪/压缩可能把 user 删掉却留下 reminder；后者必须紧跟 user，否则 DeepSeek 直接 400。
+            return pruneOrphanLatestReminders(messages);
+        }
+        List<Map<String, Object>> filtered = new ArrayList<>(messages.size());
+        for (Map<String, Object> message : messages) {
+            if (message == null) {
+                continue;
+            }
+            if (!LATEST_REMINDER_ROLE.equals(String.valueOf(message.get("role")))) {
+                filtered.add(message);
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * 剔除「后面不是 user」的 latest_reminder（DeepSeek 官方约束：必须紧跟 user）。
+     * 没有孤儿时返回原列表，避免无意义复制。
+     */
+    private List<Map<String, Object>> pruneOrphanLatestReminders(List<Map<String, Object>> messages) {
+        List<Map<String, Object>> result = null;
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> message = messages.get(i);
+            if (message != null && LATEST_REMINDER_ROLE.equals(String.valueOf(message.get("role")))) {
+                Map<String, Object> next = i + 1 < messages.size() ? messages.get(i + 1) : null;
+                boolean followedByUser = next != null
+                        && "user".equals(String.valueOf(next.get("role")));
+                if (!followedByUser) {
+                    if (result == null) {
+                        result = new ArrayList<>(messages.subList(0, i));
+                    }
+                    continue;
+                }
+            }
+            if (result != null) {
+                result.add(message);
+            }
+        }
+        return result == null ? messages : result;
     }
 
     /**

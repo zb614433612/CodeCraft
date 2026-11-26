@@ -300,9 +300,11 @@ public abstract class AbstractLLMClient implements LLMClient {
             boolean stream,
             List<Map<String, Object>> tools) {
 
+        List<Map<String, Object>> effectiveMessages = prepareMessages(messages);
+
         Map<String, Object> request = new HashMap<>();
         request.put("model", model);
-        request.put("messages", messages);
+        request.put("messages", effectiveMessages);
         request.put("stream", stream);
 
         if (temperature != null) {
@@ -322,7 +324,7 @@ public abstract class AbstractLLMClient implements LLMClient {
         }
 
         // 子类可进一步定制
-        customizeRequest(request, messages, model, temperature, thinkingMode, stream, tools);
+        customizeRequest(request, effectiveMessages, model, temperature, thinkingMode, stream, tools);
 
         // ===== 流式用量统计：按 Provider 能力下发 stream_options.include_usage =====
         // 为什么必须「按 Provider」而不是统一加：这是 OpenAI 的扩展字段，
@@ -340,7 +342,7 @@ public abstract class AbstractLLMClient implements LLMClient {
         //   ⚠️ 主链路与工具循环直接用 webClient.bodyValue 发请求、不走本方法，
         //      那两处必须显式调用 LLMClient#ensureReasoningContent（见 DeepSeekServiceImpl）。
         if (requiresReasoningPadding()) {
-            List<Map<String, Object>> padded = padReasoningContent(messages);
+            List<Map<String, Object>> padded = padReasoningContent(effectiveMessages);
             if (padded != messages) {
                 request.put("messages", padded);
                 log.debug("[{}] 请求出口补齐 reasoning_content 字段（空串占位，防 400）", getProviderCode());

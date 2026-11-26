@@ -55,6 +55,13 @@ public class ConversationMessage {
      */
     private String messageType;
 
+    /**
+     * DeepSeek latest_reminder 内容（每轮用户消息一条；仅 DeepSeek 适配器下发，
+     * 其他 Provider 由适配器统一过滤）。重建上下文时会在该 user 消息之前合成
+     * {@code role=latest_reminder} 的消息。
+     */
+    private String latestReminder;
+
 
     /**
      * 创建时间

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS conversation_message (
   tool_calls LONGTEXT COMMENT '工具调用数据块（JSON格式）',
   turn_id VARCHAR(50) COMMENT '前端生成的turnId，用于匹配回滚快照',
   message_type VARCHAR(32) DEFAULT NULL COMMENT '消息类型：NULL=普通消息，desktop_inject=桌面截图自动注入（前端不渲染为用户气泡）',
+  latest_reminder LONGTEXT COMMENT 'DeepSeek latest_reminder 内容（每轮用户消息一条）',
   created_at DATETIME NOT NULL COMMENT '创建时间',
   INDEX idx_conversation_id (conversation_id),
   INDEX idx_created_at (created_at),
@@ -641,6 +642,13 @@ ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS turn_id VARCHAR(50) CO
 -- 存量旧数据回填由 DeepSeekServiceImpl.afterPropertiesSet 幂等执行。
 -- ============================================================
 ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS message_type VARCHAR(32) DEFAULT NULL COMMENT '消息类型：NULL=普通消息，desktop_inject=桌面截图自动注入（前端不渲染为用户气泡）';
+
+-- ============================================================
+-- DeepSeek latest_reminder 用户元信息（每轮 user 消息一条）
+-- 仅 DeepSeek 适配器下发；其他 Provider 在请求出口统一过滤。
+-- 老库由下方 ALTER 迁移（新库 CREATE 定义已同步；重复执行由 continue-on-error 容忍）。
+-- ============================================================
+ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS latest_reminder LONGTEXT COMMENT 'DeepSeek latest_reminder 内容（每轮用户消息一条）';
 
 -- ============================================================
 -- 侧边栏菜单结构整理（2026-09-23）：分组(menu_type)/排序(sort_order)/命名优化
