@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
  * 消息持久化组件
  * <p>
  * 从 DeepSeekServiceImpl 拆分出来，负责会话消息的数据库写入。
- * 包含 5 个 save 方法：用户消息、助手消息、工具消息、助手推理、通用保存。
+ * 包含用户消息、助手消息、工具消息、注入块等保存方法。
  * </p>
  */
 @Slf4j
@@ -35,6 +35,27 @@ public class MessagePersister {
      * （实测 TTFB 10.3~10.7s，而同轮内 iteration≥1 仅 226~412ms）。</p>
      */
     public static final String TYPE_SUPPLEMENT_INJECT = "supplement_inject";
+
+    /**
+     * 消息类型：真实系统提示词（项目固定文本 + 智能体定义的系统提示词 + 角色设定）。
+     * <p>首次会话写入数据库，永不压缩。用于与「以 system 角色注入的上下文」区分。</p>
+     */
+    public static final String TYPE_BASE_SYSTEM = "base_system";
+
+    /** 消息类型：弯路预警注入块（每轮用户消息只注入一次）。 */
+    public static final String TYPE_INJECT_DETOUR = "inject_detour";
+
+    /** 消息类型：技能目录注入块（简介 + 使用规则，每轮用户消息只注入一次）。 */
+    public static final String TYPE_INJECT_SKILL_CATALOG = "inject_skill_catalog";
+
+    /** 消息类型：执行模式注入块（当前模式，每轮用户消息只注入一次）。 */
+    public static final String TYPE_INJECT_EXEC_MODE = "inject_exec_mode";
+
+    /** 消息类型：目录知识库注入块（每轮用户消息只注入一次）。 */
+    public static final String TYPE_INJECT_KB = "inject_kb";
+
+    /** 消息类型：工具失败经验提示注入块（失败后写入，只消费一次）。 */
+    public static final String TYPE_INJECT_LESSON = "inject_lesson";
 
     private final ConversationMessageMapper conversationMessageMapper;
 
@@ -90,6 +111,45 @@ public class MessagePersister {
         conversationMessageMapper.insert(msg);
         return msg.getId();
     }
+
+    /**
+     * 保存 SYSTEM 注入块（弯路预警、技能目录、执行模式、目录知识库、工具失败经验提示）。
+     *
+     * <p>与真实系统提示词（{@link #TYPE_BASE_SYSTEM}）区分：注入块带 message_type，
+     * 压缩时可被水位线覆盖；真实系统提示词永不压缩。</p>
+     *
+     * @param conversationId 会话ID
+     * @param messageType    注入类型（{@link #TYPE_INJECT_DETOUR} 等）
+     * @param content        注入内容
+     * @param turnId         所属轮次编号（工具失败提示等非轮次级注入可为 null）
+     * @return 消息ID
+     */
+    public Long saveSystemInjection(Long conversationId, String messageType, String content, String turnId) {
+        ConversationMessage msg = new ConversationMessage(conversationId, MessageRole.SYSTEM, content, null, null);
+        msg.setMessageType(messageType);
+        msg.setTurnId(turnId);
+        conversationMessageMapper.insert(msg);
+        log.debug("保存SYSTEM注入块: conversationId={}, type={}, turnId={}, contentLength={}",
+                conversationId, messageType, turnId, content != null ? content.length() : 0);
+        return msg.getId();
+    }
+
+    /**
+     * 判断某轮某类型的注入块是否已存在（重连/重试幂等）。
+     *
+     * @param conversationId 会话ID
+     * @param messageType    注入类型
+     * @param turnId         轮次编号
+     * @return 已存在返回 true；参数缺失返回 false
+     */
+    public boolean existsSystemInjection(Long conversationId, String messageType, String turnId) {
+        if (conversationId == null || messageType == null || turnId == null) {
+            return false;
+        }
+        return conversationMessageMapper.countByTurnIdAndMessageType(conversationId, turnId, messageType) > 0;
+    }
+
+    // existsSystemInjectionByContent 已移除：无 turnId 时改为每轮落库并记录告警，不再按内容跳过。
 
     /**
      * 保存助手消息（包含思考过程和内容）

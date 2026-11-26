@@ -918,10 +918,73 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         conversationId = conversation.getId();
         storageConversationId = conversationId;
 
-        // 保存用户消息（M2：捕获 messageId，用于建立文件引用）
-        Long userMessageId = messagePersister.saveUserMessage(storageConversationId, userMessage, request.getTurnId());
+        // ===== 阶段 C：本轮注入内容先构建并落库（在用户消息之前） =====
+        // 顺序：弯路预警 → 技能目录 → 执行模式 → 目录知识库 → 用户消息（附件提示 + 原文 + 图片引用占位）。
+        // 注入块带 message_type 与 turn_id，重连/重试按「轮次 + 类型」幂等。
+        String turnIdForInjections = request.getTurnId();
 
-        // M2：建立文件引用（当轮新上传 + 历史引用两类；校验 active 与归属，失败不影响发送主链路）
+        // 1) 执行模式文本
+        String execModeInjection = null;
+        if (executionMode != null && !executionMode.isEmpty()) {
+            execModeInjection = "manual".equals(executionMode)
+                    ? "当前模式：手动。写入文件、修改文件、执行命令等受限操作会自动向用户请求授权。当需求模糊或需要用户决策时，调用 ask_clarification 工具询问用户。"
+                    : "当前模式：自动。直接执行所有任务，无需征求用户同意。行为约束中要求「询问用户」的条款在当前模式下均不适用。";
+        }
+
+        // 2) 技能目录文本（构建提前；工具合并逻辑与原逻辑一致）
+        String skillCatalogForTurn = null;
+        List<String> filteredToolNamesForTurn = new ArrayList<>(normalizeToolNames(toolNames));
+        if (userId != null) {
+            try {
+                List<Skill> activeSkillsForTurn = agentConfigId != null
+                        ? skillService.listActiveByAgentConfigId(agentConfigId)
+                        : skillService.listActiveSkills(userId, agentType);
+                if (!activeSkillsForTurn.isEmpty()) {
+                    for (Skill skill : activeSkillsForTurn) {
+                        try {
+                            List<String> skillTools = objectMapper.readValue(skill.getToolNames(), List.class);
+                            for (String toolName : skillTools) {
+                                if (toolNames.contains(toolName) && !filteredToolNamesForTurn.contains(toolName)) {
+                                    filteredToolNamesForTurn.add(toolName);
+                                }
+                            }
+                        } catch (Exception e) {
+                            log.warn("解析技能 {} 的工具列表失败", skill.getId(), e);
+                        }
+                    }
+                    skillCatalogForTurn = skillCatalogBuilder.buildCatalogSection(activeSkillsForTurn);
+                }
+            } catch (Exception e) {
+                log.warn("提前构建技能目录失败（已跳过）: {}", e.getMessage());
+            }
+        }
+
+        // 3) 附件提示文本 + 图片资产 ID
+        List<Long> imageAssetIdsForTurn = new ArrayList<>();
+        String attachSectionForTurn = buildAttachmentSectionForTurn(request, userId, imageAssetIdsForTurn);
+
+        // 4) 目录知识库摘要（会话级快照）
+        String kbSectionForTurn = resolveKbSectionSnapshot(conversationId, ProjectRootContext.get());
+
+        // 5) 弯路预警（会话级缓存）
+        String detourHintForTurn = buildDetourHintForTurn(conversationId, userMessage, ProjectRootContext.get());
+
+        // 6) 按方案顺序落库：弯路预警 → 技能目录 → 执行模式 → 目录知识库
+        persistTurnInjection(conversationId, MessagePersister.TYPE_INJECT_DETOUR, detourHintForTurn, turnIdForInjections);
+        persistTurnInjection(conversationId, MessagePersister.TYPE_INJECT_SKILL_CATALOG, skillCatalogForTurn, turnIdForInjections);
+        persistTurnInjection(conversationId, MessagePersister.TYPE_INJECT_EXEC_MODE, execModeInjection, turnIdForInjections);
+        persistTurnInjection(conversationId, MessagePersister.TYPE_INJECT_KB, kbSectionForTurn, turnIdForInjections);
+
+        // 7) 图片引用占位（不保存图片二进制）
+        String imageRefMark = buildImageRefMark(imageAssetIdsForTurn);
+
+        // 8) 保存用户消息（附件提示开头 + 原文 + 图片引用占位）
+        String userContentToSave = (attachSectionForTurn == null ? "" : attachSectionForTurn)
+                + userMessage
+                + (imageRefMark == null ? "" : imageRefMark);
+        Long userMessageId = messagePersister.saveUserMessage(storageConversationId, userContentToSave, turnIdForInjections);
+
+        // 9) 建立文件引用（当轮新上传 + 历史引用两类；校验 active 与归属，失败不影响发送主链路）
         if (userMessageId != null && request.getFileAssetIds() != null && !request.getFileAssetIds().isEmpty()) {
             try {
                 fileAssetService.linkToMessage(request.getFileAssetIds(), userId, storageConversationId, userMessageId);
@@ -969,9 +1032,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         List<Map<String, Object>> historyMessages = contextBuilder.buildMessagesFromHistory(
                 conversationId, contextMode, entryProviderCode);
 
-        // 检查是否为首次会话（是否已存在SYSTEM消息）
-        boolean hasSystemMessage = historyMessages.stream()
-                .anyMatch(msg -> "system".equals(msg.get("role")));
+        // 检查是否为首次会话（只认真实系统提示词；注入块也是 SYSTEM，不能算）
+        boolean hasSystemMessage = contextBuilder.hasRealSystemMessage(conversationId);
 
         // 如果是首次会话且没有SYSTEM消息，添加系统提示词
         if (!hasSystemMessage) {
@@ -1018,23 +1080,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             语言指令 system add(0) 到头部；语言指令注入全部 user；附件提示到最后一条 user。
           两处若不一致，只会让 token 估算略有偏差，不影响最终发送。
          */
-        // 注入执行模式指令到系统提示词
-        if (executionMode != null && !executionMode.isEmpty()) {
-            String modeInstruction;
-            if ("manual".equals(executionMode)) {
-                modeInstruction = "\n\n当前模式：手动。写入文件、修改文件、执行命令等受限操作会自动向用户请求授权。当需求模糊或需要用户决策时，调用 ask_clarification 工具询问用户。";
-            } else {
-                modeInstruction = "\n\n当前模式：自动。直接执行所有任务，无需征求用户同意。行为约束中要求「询问用户」的条款在当前模式下均不适用。";
-            }
-            // 追加模式指令到已有的系统提示词
-            for (Map<String, Object> msg : historyMessages) {
-                if ("system".equals(msg.get("role"))) {
-                    String existing = (String) msg.get("content");
-                    msg.put("content", existing + modeInstruction);
-                    break;
-                }
-            }
-        }
+        // 执行模式已随本轮注入块落库，重建时直接从数据库读取，不再重复拼接。
 
         // 注入 compact 模式指令到系统提示词
         if (contextMode.shouldCompactToolResults()) {
@@ -1048,155 +1094,17 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             }
         }
 
-        // 工具名归一化：把已合并的历史工具名映射到新工具
-        // （早期 AgentConfig.toolNames 落库的是 git_query/git_submit/... 六个独立名字，
-        //   合并成 git 后若不做映射，这些旧配置会"看不到任何 Git 能力"）
-        List<String> filteredToolNames = new ArrayList<>(normalizeToolNames(toolNames));
-        String skillCatalogSection = null;  // 技能目录文本（供工具循环复用）
+        // 技能目录已随本轮注入块落库，重建时直接从数据库读取，不再重复构建。
+        // filteredToolNames 复用阶段 C 已合并技能工具后的结果。
+        List<String> filteredToolNames = filteredToolNamesForTurn;
 
-        // 注入技能目录（L1 渐进式披露）：把【全部活跃技能】压成「简介目录」动态注入 system prompt；
-        // 技能完整「使用说明」由 LLM 通过 skill action=load 按需加载（L2），兼顾「不漏技能」与「不爆 token」
-        if (userId != null) {
-            try {
-                List<Skill> activeSkills;
-                if (agentConfigId != null) {
-                    // 按 Agent 配置过滤技能 + 全局技能
-                    activeSkills = skillService.listActiveByAgentConfigId(agentConfigId);
-                    log.info("技能目录注入(Agent{}): agentConfigId={}, 活跃技能数={}", agentConfigId, agentConfigId, activeSkills.size());
-                } else {
-                    activeSkills = skillService.listActiveSkills(userId, agentType);
-                    log.info("技能目录注入: userId={}, agentType={}, 活跃技能数={}",
-                            userId, agentType, activeSkills.size());
-                }
-                if (!activeSkills.isEmpty()) {
-                    // ★ 合并技能所需工具必须过「授权闸门」——仅追加 Agent 授权列表（toolNames）内的工具；
-                    //   技能引用但未授权的工具跳过注入，防止技能绕过 tool_names 授权把授权外工具带给 LLM。
-                    for (Skill skill : activeSkills) {
-                        try {
-                            List<String> skillTools = objectMapper.readValue(skill.getToolNames(), List.class);
-                            for (String toolName : skillTools) {
-                                if (!toolNames.contains(toolName)) {
-                                    log.info("技能 {} 需要的工具 [{}] 不在 Agent 授权列表内，跳过注入", skill.getId(), toolName);
-                                    continue;
-                                }
-                                if (!filteredToolNames.contains(toolName)) {
-                                    filteredToolNames.add(toolName);
-                                }
-                            }
-                        } catch (Exception e) {
-                            log.warn("解析技能 {} 的工具列表失败", skill.getId(), e);
-                        }
-                    }
+        // 附件提示已随用户消息落库，重建时直接从数据库读取，不再重复构建。
+        // imageAssetIds 复用阶段 C 已收集的图片资产 ID，供后续图片块构建使用。
+        List<Long> imageAssetIds = imageAssetIdsForTurn;
 
-                    // 构建技能目录文本（含使用规则 + 预算控制）
-                    skillCatalogSection = skillCatalogBuilder.buildCatalogSection(activeSkills);
+        // 目录知识库已随本轮注入块落库，重建时直接从数据库读取，不再重复拼接。
 
-                    // 动态注入到 system prompt（从 DB 重建的历史 system 消息不含目录，故每次请求都注入）
-                    boolean catalogInjected = false;
-                    for (Map<String, Object> msg : historyMessages) {
-                        if ("system".equals(msg.get("role"))) {
-                            String existing = (String) msg.get("content");
-                            if (existing == null || existing.isEmpty()) {
-                                msg.put("content", skillCatalogSection);
-                            } else if (!existing.contains(SkillCatalogBuilder.CATALOG_HEADER)) {
-                                msg.put("content", existing + skillCatalogSection);
-                            }
-                            catalogInjected = true;
-                            break;
-                        }
-                    }
-                    if (!catalogInjected) {
-                        Map<String, Object> sysMsg = new HashMap<>();
-                        sysMsg.put("role", "system");
-                        sysMsg.put("content", skillCatalogSection);
-                        historyMessages.add(0, sysMsg);
-                    }
-                    log.info("技能目录注入: 已注入 {} 个技能目录到 system prompt, 目录长度={}",
-                            activeSkills.size(), skillCatalogSection.length());
-                } else {
-                    log.info("技能注入: 该用户/助手组合无活跃技能");
-                }
-            } catch (Exception e) {
-                log.warn("加载技能失败", e);
-            }
-        }
-
-        // 注入附件提示：告知 LLM 用户上传了哪些附件，可按需调用 chat_attachment 工具读取
-        // M7：统一构建"附件提示段"（旧 attachmentIds 段 + 文档资产段），供主流程注入与 toolLoop 复用
-        List<String> attachmentIds = request.getAttachmentIds();
-        log.info("【附件诊断】request.attachmentIds = {}", attachmentIds);
-        StringBuilder attachSection = new StringBuilder();
-        if (attachmentIds != null && !attachmentIds.isEmpty()) {
-            attachSection.append("\n\n---\n");
-            attachSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
-            for (String attId : attachmentIds) {
-                AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attId);
-                if (meta != null) {
-                    attachSection.append("- attachment_id: ").append(attId)
-                            .append(", 文件名: ").append(meta.getFileName())
-                            .append(", 类型: ").append(meta.getType())
-                            .append(", 大小: ").append(formatFileSize(meta.getSize())).append("\n");
-                }
-            }
-            attachSection.append("---\n");
-        }
-
-        // M7：文件资产（fileAssetIds）分流——图片 → vision 内容块（下方 M3 块）；文档 → 文档附件提示段
-        // （提示 LLM 用 chat_attachment 工具 read_by_file_asset 读取 file_asset 本地副本）
-        List<Long> imageAssetIds = new ArrayList<>();
-        List<Long> allFileAssetIds = request.getFileAssetIds();
-        if (allFileAssetIds != null && !allFileAssetIds.isEmpty()) {
-            List<FileAsset> fileAssets = fileAssetService.getOwnedAssets(allFileAssetIds, userId);
-            StringBuilder docLines = new StringBuilder();
-            for (FileAsset fa : fileAssets) {
-                if (fa.getMimeType() != null && fa.getMimeType().startsWith("image/")) {
-                    imageAssetIds.add(fa.getId());
-                } else {
-                    docLines.append("- file_asset_id: ").append(fa.getId())
-                            .append(", 文件名: ").append(fa.getFilename())
-                            .append(", 类型: ").append(fa.getMimeType())
-                            .append(", 大小: ").append(formatFileSize(fa.getSize())).append("\n");
-                }
-            }
-            if (docLines.length() > 0) {
-                attachSection.append("\n\n---\n");
-                attachSection.append("[系统提示] 用户上传了以下文档附件（本地存储），如需读取内容请调用 chat_attachment 工具（action=read_by_file_asset）：\n");
-                attachSection.append(docLines);
-                attachSection.append("---\n");
-            }
-            log.info("【文件资产诊断】fileAssetIds={}, 图片数={}, 文档提示={}",
-                    allFileAssetIds.size(), imageAssetIds.size(), docLines.length() > 0 ? "有" : "无");
-        }
-
-        // 注入附件提示（旧附件段 + M7 文档段）到最后一条用户消息内容开头
-        if (attachSection.length() > 0) {
-            String attachText = attachSection.toString();
-            for (int i = historyMessages.size() - 1; i >= 0; i--) {
-                Map<String, Object> msg = historyMessages.get(i);
-                if ("user".equals(msg.get("role"))) {
-                    String existing = (String) msg.get("content");
-                    msg.put("content", attachText + existing);
-                    log.info("附件提示注入: 段长度={}", attachText.length());
-                    break;
-                }
-            }
-        }
-
-        // 注入项目知识库摘要（.codecraft/INDEX.md，只读；目录不存在时什么都不做）
-        // 放在语言指令之前：语言指令优先级最高，必须保持最靠近响应位置
-        try {
-            projectContextProvider.injectBootstrap(historyMessages, ProjectRootContext.get());
-        } catch (RuntimeException e) {
-            log.warn("项目知识库注入失败（已跳过，不影响主链路）: {}", e.getMessage());
-        }
-
-        // 注入语言强制指令到消息列表末尾（靠近响应位置，优先级最高）
-        // ★ 2026-11-25：不再向 user 消息内容注入语言指令（详见 prepareConversationContext 注释）。
-        //   只保留这一条 system 指令 —— user 消息一律保持 DB 原文，跨轮逐字一致，前缀缓存不再断。
-        Map<String, Object> langInstruction = new HashMap<>();
-        langInstruction.put("role", "system");
-        langInstruction.put("content", contextBuilder.buildLanguageInstruction());
-        historyMessages.add(langInstruction);
+        // 语言强制指令已取消（模型成熟后会按用户语言习惯回复），不再注入。
 
         // ===== 解析 LLM Provider + Client =====
         // 优先级：前端动态 providerCode > Agent 配置 providerId > 第一个可用 Provider
@@ -1378,10 +1286,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         if (turnId != null && !turnId.isEmpty()) {
             apiRequest.put("_turnId", turnId);
         }
-        // 保存附件提示到 API 请求中（内部使用，供后续 toolLoop 重建消息时复用；含旧附件段 + M7 文档资产段）
-        if (attachSection.length() > 0) {
-            apiRequest.put("_attachmentSection", attachSection.toString());
-        }
         // M3：保存图像块到 API 请求中（内部使用，供工具循环重建消息时复用；防重复 IO/编码）
         if (!visionBlocks.isEmpty()) {
             apiRequest.put("_imageBlocks", visionBlocks);
@@ -1389,10 +1293,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 保存上下文模式到 API 请求中（内部使用，供工具循环复用）
         apiRequest.put("_contextMode", contextMode.getValue());
 
-        // 将技能目录（L1 简介段）存入隐藏字段，供工具循环路径复用
-        if (skillCatalogSection != null) {
-            apiRequest.put("_skillsSection", skillCatalogSection);
-        }
         // ★ 修复（P0 工具授权）：将「最终允许的工具集」存入隐藏字段，供工具执行前的授权白名单校验使用
         //   （修复后技能工具必须 ⊆ 授权列表，因此该集合等效于 Agent 授权列表 tool_names）
         apiRequest.put("_allowedToolNames", new ArrayList<>(filteredToolNames));
@@ -1685,6 +1585,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             // 创建主Flux处理API响应（移除内部字段后发送）
             Map<String, Object> requestBody = new HashMap<>(apiRequest);
             requestBody.keySet().removeIf(k -> k.startsWith("_"));
+            stripInternalMessageFields(requestBody);
             // ★ 请求出口统一净化：把「工具已下发但结果缺失」的历史脏序列修复为合法序列，
             //   避免一次中断导致该会话之后的所有请求都 400（详见 ToolCallSequenceSanitizer）
             ToolCallSequenceSanitizer.sanitizeRequestBody(requestBody);
@@ -2294,21 +2195,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             messages.add(mutableMsg);
         }
 
-        // 注入附件提示到用户消息（工具循环中同样需要，因为从DB重建的消息不含临时注入的附件提示）
-        String attachmentSection = (String) initialApiRequest.get("_attachmentSection");
-        if (attachmentSection != null) {
-            for (int i = messages.size() - 1; i >= 0; i--) {
-                Map<String, Object> msg = messages.get(i);
-                if ("user".equals(msg.get("role"))) {
-                    String existing = (String) msg.get("content");
-                    if (!existing.contains("[系统提示] 用户上传了以下")) {
-                        msg.put("content", attachmentSection + existing);
-                        log.info("附件提示注入(toolLoop): 已注入附件提示到用户消息");
-                    }
-                    break;
-                }
-            }
-        }
+        // 附件提示已随用户消息落库，重建时直接从数据库读取，不再重复拼接。
 
         // ===== 注入「静态提示块」到第一条 system（顺序固定：compact → 技能目录）=====
         //
@@ -2329,18 +2216,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     contextBuilder.buildCompactModeInstruction(conversationId), "compact 模式指令");
         }
 
-        // ② 技能目录（L1 简介段；文本已静态化，见 SkillCatalogBuilder）
-        String skillsSection = (String) initialApiRequest.get("_skillsSection");
-        if (skillsSection != null) {
-            appendToFirstSystem(messages, skillsSection, "技能目录");
-        }
-
-        // ③ 项目知识库摘要：这里只取「会话级快照」文本，实际插入由请求出口统一放到末尾（动态块）
-        String kbSection = resolveKbSectionSnapshot(conversationId,
-                (String) initialApiRequest.get("_projectRoot"));
-        if (kbSection != null && !kbSection.isEmpty()) {
-            initialApiRequest.put("_kbSectionSnapshot", kbSection);
-        }
+        // 技能目录、目录知识库已随本轮注入块落库，重建时直接从数据库读取，不再重复拼接。
 
         /*
           ★ 2026-11-17 / 2026-11-25 修复前缀缓存（第三处断裂源）：语言指令只保留「唯一一条 system 指令」。
@@ -2365,14 +2241,9 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
           注：下方 FileVisionService.injectBlocksIntoLastUserMessage 同样是「只注入最后一条」，
           但本会话无图片块（imageBlocks 为空时不触发），故本次不改，留作已知隐患。
         */
-        Map<String, Object> langInstruction = new HashMap<>();
-        langInstruction.put("role", "system");
-        langInstruction.put("content", contextBuilder.buildLanguageInstruction());
-        messages.add(0, langInstruction);
+        // 语言强制指令已取消，不再注入。
 
-        // 📝 成长体系 P2：任务启动 DETOUR 弯路预警（新用户消息进入工具循环前，按任务关键词检索弯路经验并注入 system 提示）
-        String toolProjectRoot = (String) initialApiRequest.get("_projectRoot");
-        injectDetourHintAtTaskStart(messages, toolProjectRoot, storageConversationId);
+        // 弯路预警已随本轮注入块落库，重建时直接从数据库读取，不再重复注入。
 
         // M3：图像块注入（工具循环从 DB 重建消息后需重新注入；幂等：content 已含图片块则跳过）
         List<Map<String, Object>> imageBlocks = extractImageBlocks(initialApiRequest);
@@ -2431,7 +2302,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                         // 📚 项目知识库自动维护：子 Agent 拥有独立会话 ID，其写盘不会置位本会话脏标记，
                         // 收集过子 Agent 的任务强制维护一次（异步增量，幂等）
                         projectContextProvider.markConversationDirty(storageConversationId);
-                        projectContextProvider.maintainAfterTask(storageConversationId, toolProjectRoot);
+                        projectContextProvider.maintainAfterTask(storageConversationId,
+                                (String) initialApiRequest.get("_projectRoot"));
 
                         return notifyEvent.concatWith(handleToolCallIteration(
                                 conversationId, storageConversationId, initialApiRequest,
@@ -2441,7 +2313,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     // 📚 项目知识库自动维护（v3.1）：本轮对话有写盘（file_writer / execute_sql）→
                     // 任务结束后异步增量 bootstrap——.codecraft/ 不存在则自动创建，已存在则只更新变化模块。
                     // 幂等且不阻塞响应；开关 codecraft.project-context.auto-maintain=false 可关闭
-                    projectContextProvider.maintainAfterTask(storageConversationId, toolProjectRoot);
+                    projectContextProvider.maintainAfterTask(storageConversationId,
+                            (String) initialApiRequest.get("_projectRoot"));
 
                     return Flux.empty();
                 }));
@@ -2802,7 +2675,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                   List<ToolExecutor.ToolCallResult> toolResults,
                                   JsonNode completeToolCalls,
                                   String projectRoot,
-                                  Long conversationId) {
+                                  Long conversationId,
+                                  String turnId) {
         if (lessonService == null || failureNormalizer == null) {
             return;
         }
@@ -2837,6 +2711,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     }
                     Map<String, Object> hintMsg = new HashMap<>();
                     hintMsg.put("role", "system");
+                    // 标记注入类型：压缩时据此识别并丢弃旧提示，避免与 DB 水位线覆盖后的重建态不一致
+                    hintMsg.put("_messageType", MessagePersister.TYPE_INJECT_LESSON);
                     if (LessonService.HINT_TYPE_SOLUTION.equals(hint.type)) {
                         // 措辞刻意弱化为「可选参考」：
                         // 旧文案「请判断是否适用当前场景后参考执行」是对模型的强制指令，
@@ -2863,14 +2739,10 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                     if (conversationId != null
                             && hintContent instanceof String hintText
                             && !hintText.isEmpty()) {
-                        if (sessionLessonHintCache.size() > 1000) {
-                            sessionLessonHintCache.clear();
-                            sessionLessonHintAt.clear();
-                        }
-                        sessionLessonHintCache.put(conversationId, hintText);
-                        // 记录写入时间：由 takeLessonHintOnce 做「一次性消费 + TTL 兜底」。
-                        // 不记录时间就无法判断僵尸条目，提示会永久驻留并被后续每轮重复注入。
-                        sessionLessonHintAt.put(conversationId, System.currentTimeMillis());
+                        // 工具失败经验提示同步落库，并直接追加到当前消息列表末尾；
+                        // 落库位置与内存位置一致，后续迭代不再重排。
+                        persistTurnInjection(conversationId, MessagePersister.TYPE_INJECT_LESSON, hintText, turnId);
+                        messages.add(hintMsg);
                     }
                     injectedAny = true;
                     log.info("踩坑经验被动注入: conversationId={}, tool={}, lessonId={}, type={}, errorCode={}",
@@ -3176,63 +3048,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      */
     private final Map<Long, String> kbSectionSnapshot = new ConcurrentHashMap<>();
 
-    /**
-     * 会话级「踩坑经验提示」缓存（conversationId → 提示正文）。
-     *
-     * <p><b>为什么要有这个缓存（2026-11-24 修复）</b>：工具失败后系统会检索经验库并给模型一条提示。
-     * 旧实现把这条 system 消息<b>插入到「所有 system 之后、第一条非 system 之前」</b>——
-     * 那是列表中前部，插入会把后面所有消息整体挤后 1 位；而这条提示<b>不落库</b>，
-     * 下一轮重建时它消失、位置又缩回去，于是从插入点起全部失配。</p>
-     *
-     * <p>实测（会话 550，v3.4.1）：{@code index=2 role: user → system，长度 11772 → 362（差 -11410）}，
-     * 一次工具失败就让后面十几万字符历史全部重新 prefill。</p>
-     *
-     * <p>现在：注入只写缓存，由 {@link #placeDynamicBlocksAtTail} 统一放到消息列表<b>绝对末尾</b>。
-     * 位置固定在末尾 → 跨轮与轮内都稳定；提示内容变化（再次踩坑）只影响尾部几百字符。</p>
-     */
-    private final Map<Long, String> sessionLessonHintCache = new ConcurrentHashMap<>();
-
-    /**
-     * 踩坑提示的写入时间（conversationId → epoch millis），配合一次性消费使用。
-     *
-     * <p><b>为什么需要（2026-11-24 修复）</b>：{@link #sessionLessonHintCache} 旧实现只 put、
-     * 从不 remove —— 某轮某个工具失败命中经验后，这条提示就永久驻留，
-     * {@link #placeDynamicBlocksAtTail} 会在<b>之后每一个请求</b>都重新拼接它。
-     * 模型每轮都看到「工具 xxx 执行失败，请判断是否适用」，被迫每轮表态
-     * 「该经验与本任务无关，跳过」，形成明显的复读噪声。</p>
-     *
-     * <p>现在改为「一次性消费」：提示只在命中它的那一轮请求里携带，取用即清除。</p>
-     */
-    private final Map<Long, Long> sessionLessonHintAt = new ConcurrentHashMap<>();
-
-    /** 踩坑提示的最大存活时间（毫秒）；超时视为僵尸条目直接丢弃，防内存泄漏 */
-    private static final long LESSON_HINT_TTL_MS = 10 * 60 * 1000L;
-
-    /**
-     * 取出并清除本会话的踩坑提示（一次性消费）。
-     *
-     * <p>该提示属于一次性运行时提示：<b>取完必须删</b>。若长期留在缓存里，
-     * 后续每个请求都会被 {@link #placeDynamicBlocksAtTail} 重新拼到末尾，
-     * 导致模型对同一段无关经验反复表态。</p>
-     *
-     * @param conversationId 会话 ID
-     * @return 提示正文；无提示或已超时返回 {@code null}
-     */
-    private String takeLessonHintOnce(Long conversationId) {
-        if (conversationId == null) {
-            return null;
-        }
-        Long writtenAt = sessionLessonHintAt.remove(conversationId);
-        String text = sessionLessonHintCache.remove(conversationId);
-        if (text == null) {
-            return null;
-        }
-        if (writtenAt != null && System.currentTimeMillis() - writtenAt > LESSON_HINT_TTL_MS) {
-            log.debug("踩坑提示已过期，丢弃: conversationId={}", conversationId);
-            return null;
-        }
-        return text;
-    }
+    // sessionLessonHintCache / takeLessonHintOnce 已移除：工具失败提示改为落库 + 直接追加到消息列表。
 
     /**
      * 取「本会话的知识库摘要」——首次构建后固定，之后永远返回同一份字节。
@@ -3265,67 +3081,171 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
     }
 
     /**
-     * 「动态运行时注入」块的识别标记。
+     * 移除请求体中消息内部的 {@code _} 前缀字段（如 {@code _messageType}），避免发给 LLM。
      *
-     * <p>用于每次请求前<b>先移除旧块再追加到末尾</b>，保证同一列表在多轮迭代中不会堆积重复块，
-     * 同时让块的位置始终是「最后一条」—— 这是动态内容唯一不会破坏前缀缓存的放法：
-     * 它变了，只影响自己及其后的「本轮新 user」，前面所有历史照常命中。</p>
+     * <p>顶层 {@code _} 字段由调用方移除；这里只处理 messages 列表，深拷贝后替换，
+     * 不修改原始消息列表，保证后续迭代的指纹与重建态仍能识别注入块。</p>
      */
-    private static final String DYNAMIC_BLOCK_MARK = "[动态运行时注入]";
-
-    /**
-     * 把「运行时动态块」重排到消息列表<b>绝对末尾</b>（每次请求前调用，幂等）。
-     *
-     * <p><b>为什么是末尾而不是头部</b>：这些内容确实会变——执行模式随用户切换手动/自动，
-     * 知识库摘要随 {@code .codecraft/INDEX.md} 被异步维护。拼在头部（第一条 system）时，
-     * 一变就从第 1 个 token 起全部未命中（一次全断 = 十几万 token 按未命中计价）。
-     * 放到列表末尾后，变化只让「动态块 + 本轮新 user」重新 prefill，前面全部命中。</p>
-     *
-     * <p><b>为什么不能插在「最后一条 user 之前」</b>：动态块不落库，跨轮重建后历史里没有它，
-     * 插在中间会让上一轮的块位置与新一次完全错开，断裂点落到上一轮中段
-     * （弯路预警 2026-11-17 实测：其后 14 次工具结果 ≈14 万字符作废，TTFB 14~25 秒）。
-     * 只有「绝对末尾」在跨轮与轮内两种场景下位置都稳定。</p>
-     *
-     * <p><b>代价</b>：每次请求都要重新 prefill 这一小段（模式约 100 字符、知识库摘要通常 1~3K）。
-     * 相比「偶发一次全断」，这个常态成本低一个数量级。</p>
-     *
-     * @param messages  消息列表（就地修改）
-     * @param execMode  执行模式（manual / auto，可为空）
-     * @param kbSection 项目知识库摘要快照（可为空）
-     */
-    private void placeDynamicBlocksAtTail(List<Map<String, Object>> messages,
-                                          String execMode, String kbSection, String lessonHint) {
-        if (messages == null || messages.isEmpty()) {
+    @SuppressWarnings("unchecked")
+    private void stripInternalMessageFields(Map<String, Object> requestBody) {
+        if (requestBody == null) {
             return;
         }
-        // 1) 移除上一次迭代（或上一轮残留）的动态块，保证不重复累积
-        messages.removeIf(m -> "system".equals(m.get("role"))
-                && m.get("content") instanceof String s
-                && s.contains(DYNAMIC_BLOCK_MARK));
+        Object messagesObj = requestBody.get("messages");
+        if (!(messagesObj instanceof List<?> messageList)) {
+            return;
+        }
+        List<Map<String, Object>> cleanedMessages = new ArrayList<>(messageList.size());
+        for (Object item : messageList) {
+            if (item instanceof Map<?, ?> messageMap) {
+                boolean hasInternalField = false;
+                for (Object key : messageMap.keySet()) {
+                    if (key instanceof String k && k.startsWith("_")) {
+                        hasInternalField = true;
+                        break;
+                    }
+                }
+                if (!hasInternalField) {
+                    cleanedMessages.add((Map<String, Object>) messageMap);
+                    continue;
+                }
+                Map<String, Object> cleaned = new HashMap<>();
+                for (Map.Entry<?, ?> entry : messageMap.entrySet()) {
+                    if (entry.getKey() instanceof String key && !key.startsWith("_")) {
+                        cleaned.put(key, entry.getValue());
+                    }
+                }
+                cleanedMessages.add(cleaned);
+            }
+        }
+        requestBody.put("messages", cleanedMessages);
+    }
 
-        // 2) 按固定顺序追加到末尾：执行模式 → 知识库（顺序恒定，避免无谓重排）
-        if (execMode != null && !execMode.isEmpty()) {
-            String modeInstruction = "manual".equals(execMode)
-                    ? "当前模式：手动。写入文件、修改文件、执行命令等受限操作会自动向用户请求授权。当需求模糊或需要用户决策时，调用 ask_clarification 工具询问用户。"
-                    : "当前模式：自动。直接执行所有任务，无需征求用户同意。行为约束中要求「询问用户」的条款在当前模式下均不适用。";
-            messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + modeInstruction));
+    /**
+     * 保存本轮 SYSTEM 注入块（幂等，失败不影响主流程）。
+     *
+     * @param conversationId 会话ID（数据库主键）
+     * @param messageType    注入类型（MessagePersister.TYPE_INJECT_*）
+     * @param content        注入内容
+     * @param turnId         轮次编号（可为 null）
+     */
+    private void persistTurnInjection(Long conversationId, String messageType, String content, String turnId) {
+        if (conversationId == null || messageType == null || content == null || content.isEmpty()) {
+            return;
         }
-        if (kbSection != null && !kbSection.isEmpty()) {
-            messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + kbSection));
-        }
-        // ③ 踩坑经验提示（工具失败后注入；内容随失败类型变化，同样只能放末尾）
-        if (lessonHint != null && !lessonHint.isEmpty()) {
-            messages.add(dynamicBlockMessage(DYNAMIC_BLOCK_MARK + "\n" + lessonHint));
+        try {
+            if (turnId != null && messagePersister.existsSystemInjection(conversationId, messageType, turnId)) {
+                log.debug("本轮注入块已存在，跳过: type={}, turnId={}", messageType, turnId);
+                return;
+            }
+            if (turnId == null) {
+                log.warn("注入块缺少 turnId，无法按轮次幂等，按每轮落库处理: type={}, conversationId={}",
+                        messageType, conversationId);
+            }
+            messagePersister.saveSystemInjection(conversationId, messageType, content, turnId);
+            log.info("SYSTEM注入块已落库: type={}, turnId={}, length={}", messageType, turnId, content.length());
+        } catch (Exception e) {
+            log.warn("SYSTEM注入块落库失败（不影响主流程）: type={}, turnId={}, err={}",
+                    messageType, turnId, e.getMessage());
         }
     }
 
-    /** 构造一条动态块 system 消息 */
-    private Map<String, Object> dynamicBlockMessage(String content) {
-        Map<String, Object> msg = new HashMap<>();
-        msg.put("role", "system");
-        msg.put("content", content);
-        return msg;
+    /**
+     * 构建本轮弯路预警文本（复用会话级缓存，落库后再注入）。
+     */
+    private String buildDetourHintForTurn(Long conversationId, String userText, String projectRoot) {
+        if (lessonService == null || conversationId == null || userText == null || userText.isBlank()) {
+            return null;
+        }
+        try {
+            String hintText = detourHintCacheStore.get(conversationId);
+            if (hintText == null) {
+                String keyword = userText.length() > 300 ? userText.substring(0, 300) : userText;
+                String projectKey = failureNormalizer.extractProjectKey(projectRoot);
+                String result = lessonService.searchLessons(projectKey, null, null, keyword, null, Lesson.TYPE_DETOUR);
+                if (result == null || !result.startsWith("📚")) {
+                    detourHintCacheStore.put(conversationId, "");
+                    return null;
+                }
+                hintText = result;
+                detourHintCacheStore.put(conversationId, hintText);
+            }
+            if (hintText.isEmpty()) {
+                return null;
+            }
+            return DETOUR_HINT_MARK + hintText;
+        } catch (Exception e) {
+            log.warn("弯路预警构建失败（已跳过）: {}", e.getMessage());
+            return null;
+        }
     }
+
+    /**
+     * 构建本轮附件提示文本（旧附件段 + 文档资产段），并把图片资产 ID 收集到 imageAssetIdsOut。
+     */
+    private String buildAttachmentSectionForTurn(ChatRequest request, Long userId, List<Long> imageAssetIdsOut) {
+        StringBuilder attachSection = new StringBuilder();
+        List<String> attachmentIds = request.getAttachmentIds();
+        if (attachmentIds != null && !attachmentIds.isEmpty()) {
+            attachSection.append("\n\n---\n");
+            attachSection.append("[系统提示] 用户上传了以下附件，如需读取内容请调用 chat_attachment 工具（action=read_by_attachment）：\n");
+            for (String attId : attachmentIds) {
+                AttachmentStore.AttachmentMeta meta = attachmentStore.getMeta(attId);
+                if (meta != null) {
+                    attachSection.append("- attachment_id: ").append(attId)
+                            .append(", 文件名: ").append(meta.getFileName())
+                            .append(", 类型: ").append(meta.getType())
+                            .append(", 大小: ").append(formatFileSize(meta.getSize())).append("\n");
+                }
+            }
+            attachSection.append("---\n");
+        }
+        List<Long> allFileAssetIds = request.getFileAssetIds();
+        if (allFileAssetIds != null && !allFileAssetIds.isEmpty()) {
+            List<FileAsset> fileAssets = fileAssetService.getOwnedAssets(allFileAssetIds, userId);
+            StringBuilder docLines = new StringBuilder();
+            for (FileAsset fa : fileAssets) {
+                if (fa.getMimeType() != null && fa.getMimeType().startsWith("image/")) {
+                    if (imageAssetIdsOut != null) {
+                        imageAssetIdsOut.add(fa.getId());
+                    }
+                } else {
+                    docLines.append("- file_asset_id: ").append(fa.getId())
+                            .append(", 文件名: ").append(fa.getFilename())
+                            .append(", 类型: ").append(fa.getMimeType())
+                            .append(", 大小: ").append(formatFileSize(fa.getSize())).append("\n");
+                }
+            }
+            if (docLines.length() > 0) {
+                attachSection.append("\n\n---\n");
+                attachSection.append("[系统提示] 用户上传了以下文档附件（本地存储），如需读取内容请调用 chat_attachment 工具（action=read_by_file_asset）：\n");
+                attachSection.append(docLines);
+                attachSection.append("---\n");
+            }
+        }
+        return attachSection.length() == 0 ? null : attachSection.toString();
+    }
+
+    /**
+     * 构建图片引用占位文本：只标记「本轮曾有图片」，不保存图片二进制。
+     */
+    private String buildImageRefMark(List<Long> imageAssetIds) {
+        if (imageAssetIds == null || imageAssetIds.isEmpty()) {
+            return null;
+        }
+        StringBuilder ids = new StringBuilder();
+        for (Long id : imageAssetIds) {
+            if (ids.length() > 0) {
+                ids.append(",");
+            }
+            ids.append(id);
+        }
+        return "\n\n[图片引用] 本轮用户消息包含 " + imageAssetIds.size()
+                + " 张图片（file_asset_id=" + ids + "），图片内容由独立图像通道传输，此处仅保留引用标记。";
+    }
+
+    // DYNAMIC_BLOCK_MARK / placeDynamicBlocksAtTail / dynamicBlockMessage 已移除：
+    // 执行模式、目录知识库、工具失败提示均改为落库，按数据库 id 顺序固定，不再每次请求前重排。
 
     /**
      * 把一段文本追加到<b>第一条 system 消息</b>末尾。
@@ -3360,88 +3280,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         }
     }
 
-    private void injectDetourHintAtTaskStart(List<Map<String, Object>> messages,
-                                             String projectRoot, Long conversationId) {
-        if (lessonService == null || messages == null || messages.isEmpty() || conversationId == null) {
-            return;
-        }
-        try {
-            /*
-              ★ 2026-11-17 二次修复：弯路预警必须「文本稳定 + 位置固定」。
-
-              上一版（把预警追加到「最后一条 user 消息」）看似不移动历史，实际仍是每轮漂移：
-                · 位置不稳定：本轮新 user 在列表末尾，上一轮的 user 在列表中段；
-                · 文本不稳定：会话级去重（isDetourHintInjected）让「上轮注入 / 本轮跳过」交替发生，
-                  而 DB 里那条 user 消息始终只有原文（实测 content_len=2），
-                  于是重建出的 user 消息与上次实际发出的（74 字符）不一致。
-              实测后果：断裂点正好落在倒数第二条 user 消息之后，那里往后的 14 次工具结果
-              （≈14 万字符）全部不再是上次的真前缀 —— iteration=0 每次全量 prefill
-              （TTFB 14~25 秒），iteration>=1 才靠同轮内存一致命中。
-
-              现在改成两条铁律：
-                ① 文本稳定：按会话缓存 hint 文本，同进程内每轮注入完全相同的字节；
-                ② 位置固定：注入到第一条 system 消息（hoist 之后 system 恒在最前），不再碰 user 消息。
-              代价：首次注入会让 system 段变化一次（该轮本就需要 prefill）；此后恒稳定。
-            */
-            String hintText = detourHintCacheStore.get(conversationId);
-            if (hintText == null) {
-                // 首次：按本轮任务关键词检索一次，结果缓存供后续所有轮次复用
-                String userText = null;
-                for (int i = messages.size() - 1; i >= 0; i--) {
-                    if ("user".equals(messages.get(i).get("role"))) {
-                        String text = contentToPlainText(messages.get(i).get("content"));
-                        if (text != null && !text.isBlank()) {
-                            userText = text;
-                            break;
-                        }
-                    }
-                }
-                if (userText == null) {
-                    return;
-                }
-                // P0-3：整段交给检索端拆词器（中文 2-gram + ASCII 分词，多词 OR 匹配 goal/keywords）
-                String keyword = userText.length() > 300 ? userText.substring(0, 300) : userText;
-                String projectKey = failureNormalizer.extractProjectKey(projectRoot);
-                String result = lessonService.searchLessons(projectKey, null, null, keyword, null, Lesson.TYPE_DETOUR);
-                if (result == null || !result.startsWith("📚")) {
-                    // 无命中：缓存空串，既避免后续每轮重复检索，也保证「不注入」这件事本身是稳定的
-                    detourHintCacheStore.put(conversationId, "");
-                    log.debug("任务启动弯路预警：本会话无命中，后续轮次不再检索（conversationId={}）", conversationId);
-                    return;
-                }
-                hintText = result;
-                // 容量淘汰（超 1000 条时按落盘时间淘汰最旧 1/4）由 DetourHintCacheStore 内部处理
-                detourHintCacheStore.put(conversationId, hintText);
-                log.info("任务启动弯路预警检索完成(会话级缓存): conversationId={}, project={}, userLen={}, hintLen={}",
-                        conversationId, projectKey, userText.length(), hintText.length());
-            }
-            if (hintText.isEmpty()) {
-                return;
-            }
-
-            // 位置固定：注入第一条 system 消息（内容固定 + 位置固定 = 前缀稳定）
-            for (Map<String, Object> msg : messages) {
-                if (!"system".equals(msg.get("role"))) {
-                    continue;
-                }
-                Object contentObj = msg.get("content");
-                if (!(contentObj instanceof String existingContent)) {
-                    // 多模态 system：弯路预警是增强项，跳过无害
-                    log.debug("跳过弯路预警注入：system 消息为多模态内容");
-                    return;
-                }
-                if (existingContent.contains(DETOUR_HINT_MARK)) {
-                    return; // 幂等：本轮已拼过
-                }
-                msg.put("content", existingContent + "\n\n" + DETOUR_HINT_MARK + hintText);
-                log.info("任务启动弯路预警注入(system 段): conversationId={}, hintLen={}",
-                        conversationId, hintText.length());
-                return;
-            }
-        } catch (Exception e) {
-            log.warn("任务启动弯路预警注入失败（不影响主流程）: {}", e.getMessage());
-        }
-    }
+    // injectDetourHintAtTaskStart 已移除：弯路预警改为 buildDetourHintForTurn 落库注入。
 
     /** 弯路预警前缀标记：用于幂等判断（同一消息重复拼接会让内容每轮漂移） */
     private static final String DETOUR_HINT_MARK = "[踩坑经验-弯路预警]";
@@ -4142,22 +3981,13 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 使用 ConcurrentHashMap：flatMap 默认并发处理多个 chunk，普通 HashMap 并发写有死循环风险
         Map<Integer, ObjectNode> accumulatedToolCalls = new ConcurrentHashMap<>();
 
-        // ★ 动态块重排（每次请求前）：执行模式 / 知识库摘要放到消息列表绝对末尾。
-        //   这两块会变（手动自动切换、.codecraft/INDEX.md 异步维护），拼头部一变就全量未命中；
-        //   放末尾时变化只影响尾部，跨轮断点也落在「本轮新 user」附近。
-        //   先移除旧块再追加，保证多轮迭代不会堆积重复块、位置永远是最后一条。
-        placeDynamicBlocksAtTail(messages,
-                (String) apiRequest.get("_executionMode"),
-                (String) apiRequest.get("_kbSectionSnapshot"),
-                // 一次性消费：提示只在命中它的这一轮携带，取用后立即清除。
-                // 若改回 get()，该提示会永久驻留并被之后每一轮重复注入
-                // （模型每轮被迫表态「该经验与本任务无关，跳过」，形成复读噪声）。
-                takeLessonHintOnce(conversationId));
+        // 执行模式、目录知识库、工具失败经验提示均已落库，按数据库 id 顺序固定，不再每次请求前重排。
         phaseNanos[0] = System.nanoTime();
 
         // 移除内部 _ 前缀字段后发送
         Map<String, Object> requestBody = new HashMap<>(apiRequest);
         requestBody.keySet().removeIf(k -> k.startsWith("_"));
+        stripInternalMessageFields(requestBody);
         // ★ 每次工具循环迭代的请求出口同样净化（trim/压缩/中断都可能破坏 tool_call 配对，幂等无副作用）
         ToolCallSequenceSanitizer.sanitizeRequestBody(requestBody);
         // 性能诊断：记录请求体大小
@@ -4723,7 +4553,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                                             drainSearchHitsToTrack(conversationId, storageConversationId);
 
                                                             // 📝 成长体系：工具失败后被动注入相关经验提示（手动授权路径同样生效，会话级去重）
-                                                            injectLessonHint(messages, innerResults, completeToolCalls, currentProjectRoot, storageConversationId);
+                                                            injectLessonHint(messages, innerResults, completeToolCalls, currentProjectRoot, storageConversationId, (String) apiRequest.get("_turnId"));
 
                                                             // 创建工具结果事件流（先发 resume 恢复前端流）
                                                             List<String> resultEvents = new ArrayList<>();
@@ -4838,7 +4668,7 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
                                         drainSearchHitsToTrack(conversationId, storageConversationId);
 
                                         // 📝 成长体系：工具失败后被动注入相关经验提示（仅失败轮、仅 Top-1、会话级去重、零常驻成本）
-                                        injectLessonHint(messages, toolResults, completeToolCalls, currentProjectRoot, storageConversationId);
+                                        injectLessonHint(messages, toolResults, completeToolCalls, currentProjectRoot, storageConversationId, (String) apiRequest.get("_turnId"));
 
                                         // 工具结果事件 + 下一轮迭代
                                         Flux<String> resultFlux = Flux.fromIterable(toolResultEvents);

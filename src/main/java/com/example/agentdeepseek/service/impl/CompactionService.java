@@ -625,7 +625,12 @@ public class CompactionService {
         ConversationMessage summaryMsg = buildSummaryMessage(conversationId, summary, watermark);
         int insertAt = messages.size();
         for (int i = 0; i < messages.size(); i++) {
-            if (messages.get(i).getRole() != MessageRole.SYSTEM) {
+            ConversationMessage m = messages.get(i);
+            boolean legacyDynamicBlock = m.getContent() != null && m.getContent().contains("[动态运行时注入]");
+            boolean realSystem = m.getRole() == MessageRole.SYSTEM
+                    && !legacyDynamicBlock
+                    && (m.getMessageType() == null || "base_system".equals(m.getMessageType()));
+            if (!realSystem) {
                 insertAt = i;
                 break;
             }
@@ -664,7 +669,10 @@ public class CompactionService {
         boolean placed = false;
         for (ConversationMessage m : dbMessages) {
             Long id = m.getId();
-            boolean realSystem = m.getRole() == MessageRole.SYSTEM && id != null && id > 0;
+            boolean legacyDynamicBlock = m.getContent() != null && m.getContent().contains("[动态运行时注入]");
+            boolean realSystem = m.getRole() == MessageRole.SYSTEM && id != null && id > 0
+                    && !legacyDynamicBlock
+                    && (m.getMessageType() == null || "base_system".equals(m.getMessageType()));
             boolean covered = id != null && id > 0 && id <= watermark;
             if (covered && !realSystem) {
                 if (!placed) {
@@ -1248,7 +1256,14 @@ public class CompactionService {
         for (int i = 0; i < messages.size(); i++) {
             Map<String, Object> m = messages.get(i);
             boolean isSystem = "system".equals(m.get("role"));
-            if (i < cut && !isSystem) {
+            /*
+              压缩区间内只保留「真实系统提示词」；inject_* 注入块与旧动态块随水位线一起被覆盖。
+              若把注入块也保留，当前请求仍带旧块，而下一轮从 DB 重建时它们已消失，
+              会造成「压缩后估算不降、前后两轮请求体不一致」。本轮保护带（i >= cut）里的
+              注入块仍会保留，模型不会丢失本轮注入信息。
+             */
+            boolean isInjectedSystem = isSystem && isInjectedContextBlock(m);
+            if (i < cut && (!isSystem || isInjectedSystem)) {
                 if (!placed) {
                     kept.add(summaryMsg);
                     placed = true;
@@ -1258,10 +1273,35 @@ public class CompactionService {
             kept.add(m);
         }
         if (!placed) {
-            kept.add(0, summaryMsg);
+            // 压缩区间只有真实系统提示词时，摘要必须插在它之后，不能顶到最前面
+            int insertAt = 0;
+            for (int i = 0; i < kept.size(); i++) {
+                Map<String, Object> m = kept.get(i);
+                if (!"system".equals(m.get("role")) || isInjectedContextBlock(m)) {
+                    insertAt = i;
+                    break;
+                }
+                insertAt = i + 1;
+            }
+            kept.add(insertAt, summaryMsg);
         }
         messages.clear();
         messages.addAll(kept);
+    }
+
+    /**
+     * 判断一条 SYSTEM 消息是否是「上下文注入块」（inject_* 或旧动态块）。
+     *
+     * <p>这些块随压缩水位线被覆盖，不能像真实系统提示词一样在压缩后永久保留；
+     * 本轮保护带里的注入块（i >= cut）仍会保留，下一轮也会重新注入。</p>
+     */
+    private boolean isInjectedContextBlock(Map<String, Object> message) {
+        Object messageType = message.get("_messageType");
+        if (messageType instanceof String type && type.startsWith("inject_")) {
+            return true;
+        }
+        Object content = message.get("content");
+        return content instanceof String text && text.contains("[动态运行时注入]");
     }
 
     /**

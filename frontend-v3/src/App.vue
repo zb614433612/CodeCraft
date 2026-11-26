@@ -726,6 +726,8 @@ async function pollCompactionStatus(key: string) {
   if (misses >= 3) {
     stopCompactionPoll(key)
     setCompactionState(key, { running: false, elapsedSec: 0 })
+    // 异步压缩已结束：真实上下文大小可能刚变小，拉一次后端口径覆盖旧值
+    void refreshRealContextTokens(key)
   }
 }
 
@@ -1990,6 +1992,37 @@ function refreshContextTokens(key = activeConversationId.value) {
     total += compactedSummaryTokens
   }
   contextTokensMap.value = { ...contextTokensMap.value, [key]: total }
+}
+
+/**
+ * 重新拉取后端真实上下文大小（轻量接口，不重置翻页游标）。
+ *
+ * <p>用于「每轮完成/中止/报错」与「压缩守卫/异步压缩完成」后的刷新：
+ * refreshContextTokens 只是前端重算，realContextTokensMap 有值时不会更新，
+ * 必须走 /context-stats 才能拿到压缩后的新值。</p>
+ */
+async function refreshRealContextTokens(key = activeConversationId.value) {
+  const convId = Number(key)
+  if (!key || !Number.isFinite(convId) || convId <= 0) return
+  try {
+    const res = await getConversationContextStats(convId, chatContextMode.value)
+    const page = res.data
+    const next = { ...realContextTokensMap.value }
+    if (!page || !page.contextTokens || page.contextTokens <= 0) {
+      delete next[key]
+    } else {
+      next[key] = {
+        tokens: page.contextTokens,
+        source: page.contextTokensSource || 'mode',
+        lastPromptTokens: page.lastPromptTokens ?? 0,
+        mode: page.contextMode || chatContextMode.value
+      }
+    }
+    realContextTokensMap.value = next
+    refreshContextTokens(key)
+  } catch {
+    // 静默失败：界面沿用上一次的数字，不影响聊天
+  }
 }
 
 /**
@@ -3503,6 +3536,8 @@ async function consumeChatStream(
         })
         if (status.status !== 'running') {
           startCompactionPoll(key)
+          // 守卫压缩已完成：先刷新一次；异步预压缩若仍在跑，轮询结束会再刷新一次
+          void refreshRealContextTokens(key)
         }
         continue
       }
@@ -3711,6 +3746,8 @@ async function onSend(text: string) {
     }
     // 本轮正文 / 思考 / 工具返回都已落定，重算上下文估算（流式期间刻意不逐帧算）
     refreshContextTokens(finalKey)
+    // 再拉一次后端真实口径：覆盖完成 / 用户中止 / 报错中止三种收尾
+    void refreshRealContextTokens(finalKey)
     /*
       ★ 兜底清理失效的待回执卡片（2026-11-16 修复）。
 

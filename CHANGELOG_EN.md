@@ -5,6 +5,110 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.6.0] - 2026-11-26
+
+> **Context injection persistence and compaction adaptation**: Previously the detour hint,
+> skill catalog, execution mode and project knowledge base were injected as transient SYSTEM
+> messages. They were never persisted, their position drifted across tool iterations, and
+> compaction could not distinguish them from the real system prompt. This release persists
+> these blocks per turn, fixes their order before the current user message, stores the real
+> system prompt separately on first use, and lets the compaction watermark cover old blocks.
+> It also fixes the first-turn system-prompt misdetection, stale injected blocks after
+> compaction, and the frontend context-size display not refreshing. Backend restart required;
+> reuses the existing `message_type` column, **no database schema change**.
+
+### 🧩 Context injection persistence (real system prompt vs injected blocks)
+
+- Added injection types: `base_system` / `inject_detour` / `inject_skill_catalog` /
+  `inject_exec_mode` / `inject_kb` / `inject_lesson`, reusing
+  `conversation_message.message_type` with no new column;
+- First-turn detection now uses `countRealSystemMessages` and only counts the real system
+  prompt; injected blocks are no longer mistaken for an existing system prompt, fixing the
+  P0 where the real system prompt was never persisted;
+- `hoistSystemMessages` now hoists only the real system prompt; detour hint, skill catalog,
+  execution mode and project knowledge base keep their database id order, fixed before the
+  current user message;
+- The real system prompt is saved on the first turn and never compacted; injected blocks are
+  covered by the compaction watermark, with legacy dynamic blocks kept compatible.
+
+### 📌 Fixed per-turn injection order
+
+- Order: detour hint → skill catalog → execution mode → project knowledge base → user message
+  (attachment notice + original text + image reference placeholder);
+- Injected blocks are persisted before the user message and deduplicated by
+  `turnId + message_type`; when `turnId` is absent, each turn is persisted with a WARN instead
+  of being skipped by content equality;
+- The tool-failure hint is now persisted as `inject_lesson`, appended after the failure and
+  consumed once; the in-memory message carries `_messageType` so compaction can identify it;
+- Attachment notice and image reference placeholder are persisted with the user message; the
+  image binary still travels through the separate image channel and is not written into context;
+- Tool definitions still live in the request-level `tools` field, not persisted or injected
+  as messages.
+
+### 🗜️ Compaction adaptation
+
+- `selectForContext` keeps only the real system prompt plus messages after the watermark;
+  old injected blocks and legacy dynamic blocks are covered by the watermark;
+- `applyCompactionRecords` / `insertSummaryBefore` use `message_type` to distinguish the real
+  system prompt from injected blocks; the summary is inserted after the real system prompt and
+  before injected blocks;
+- `replaceInMemory` now drops old `inject_*` blocks and legacy dynamic blocks inside the
+  compacted range, keeping the real system prompt and the current protect-band injected blocks;
+  this fixes the mismatch where the current request still carried old blocks while the next
+  rebuild no longer had them, causing the estimate not to drop and the request body to differ;
+- Compaction input still sends only user bodies and assistant bodies; injected blocks and tool
+  results do not enter the summary.
+
+### 🖥️ Frontend rendering and context-size refresh
+
+- Both frontends skip `inject_` blocks: they are not rendered as chat messages and do not break
+  assistant message grouping;
+- User bubbles strip the attachment notice and image reference placeholder; token counts are
+  estimated from the stripped body, so hint text no longer inflates the context display;
+- The new frontend adds `refreshRealContextTokens`, which calls
+  `/conversation/{id}/context-stats` after each turn (done / user abort / error abort), after a
+  guard compaction completes, and after async compaction finishes, so the number drops
+  immediately after compaction;
+- The classic frontend still uses the frontend character estimate and does not call the real
+  context API.
+
+### 🧹 Legacy cleanup and P2 fixes
+
+- Removed the language-enforcement instruction and its two injection sites; the model now
+  follows the user's language naturally;
+- Removed unused legacy code: `sessionLessonHintCache`, `takeLessonHintOnce`,
+  `placeDynamicBlocksAtTail`, `dynamicBlockMessage`, `injectDetourHintAtTaskStart`, and the
+  content-based deduplication method;
+- `stripInternalMessageFields` now copies only messages containing internal `_` fields and
+  reuses the rest, reducing memory/CPU overhead at the request exit for long conversations;
+- Fixed the issue where content-based deduplication skipped later turns when `turnId` was
+  absent; each turn is now persisted with a WARN.
+
+### 🔢 Version sync
+
+- `pom.xml` (project version → 3.6.0, artifact `code-craft-3.6.0.jar`)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + the `code-craft-3.6.0.jar` path in `extraResources`) /
+  `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.6.0
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build examples,
+  FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes); reuses the existing `message_type` column,
+  **no database schema change**, overwrite installation is fine;
+- After upgrading an old conversation, the real system prompt is re-evaluated and backfilled
+  using the "real system prompt only" rule;
+- Legacy dynamic blocks (`[动态运行时注入]`) remain compatible and are covered by the
+  compaction watermark;
+- Persisted injected blocks add SYSTEM messages to history; both frontends filter them, so they
+  never appear as user/assistant bubbles;
+- Port 8084 keeps running the old code until the app is normally exited and restarted.
+
+---
+
 ## [3.5.0] - 2026-11-26
 
 > **Context compaction: input slimming + visible status**. The compaction request used to pack

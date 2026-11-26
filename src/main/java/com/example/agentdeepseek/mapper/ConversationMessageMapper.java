@@ -29,11 +29,11 @@ public interface ConversationMessageMapper {
     int insert(ConversationMessage message);
 
     /**
-     * 根据会话ID查询消息列表（按创建时间正序）
+     * 根据会话ID查询消息列表（按 id 正序，保证同秒多条消息顺序稳定）
      * @param conversationId 会话ID
      * @return 消息列表
      */
-    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at FROM conversation_message WHERE conversation_id = #{conversationId} ORDER BY created_at ASC")
+    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at FROM conversation_message WHERE conversation_id = #{conversationId} ORDER BY id ASC")
     @Results(id = "ConversationMessageResultMap", value = {
         @Result(property = "id", column = "id"),
         @Result(property = "conversationId", column = "conversation_id"),
@@ -48,6 +48,50 @@ public interface ConversationMessageMapper {
     List<ConversationMessage> selectByConversationId(Long conversationId);
 
     /**
+     * 统计会话中真实系统提示词的数量。
+     *
+     * <p>真实系统提示词：role=SYSTEM，message_type 为空或 base_system，
+     * 且内容不含旧的 [动态运行时注入] 标记。弯路预警/技能目录/执行模式/目录知识库
+     * 等注入块不计入。</p>
+     */
+    @Select("SELECT COUNT(1) FROM conversation_message WHERE conversation_id = #{conversationId} "
+            + "AND role = 'SYSTEM' AND (message_type IS NULL OR message_type = 'base_system') "
+            + "AND (content IS NULL OR content NOT LIKE '%[动态运行时注入]%')")
+    long countRealSystemMessages(@Param("conversationId") Long conversationId);
+
+    /**
+     * 统计某轮某类型的消息数量（注入块幂等去重）。
+     *
+     * @param conversationId 会话ID
+     * @param turnId         轮次编号
+     * @param messageType    消息类型（inject_detour / inject_skill_catalog 等）
+     * @return 命中数量
+     */
+    @Select("SELECT COUNT(1) FROM conversation_message "
+            + "WHERE conversation_id = #{conversationId} AND turn_id = #{turnId} AND message_type = #{messageType}")
+    long countByTurnIdAndMessageType(@Param("conversationId") Long conversationId,
+                                     @Param("turnId") String turnId,
+                                     @Param("messageType") String messageType);
+
+    // countByConversationTypeAndContent 已移除：无 turnId 时改为每轮落库并记录告警。
+
+    /**
+     * 按轮次编号 + 消息类型查询消息（注入块重建/校验）。
+     *
+     * @param conversationId 会话ID
+     * @param turnId         轮次编号
+     * @param messageType    消息类型
+     * @return 消息列表（按 id 升序）
+     */
+    @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at "
+            + "FROM conversation_message WHERE conversation_id = #{conversationId} "
+            + "AND turn_id = #{turnId} AND message_type = #{messageType} ORDER BY id ASC")
+    @ResultMap("ConversationMessageResultMap")
+    List<ConversationMessage> selectByTurnIdAndMessageType(@Param("conversationId") Long conversationId,
+                                                           @Param("turnId") String turnId,
+                                                           @Param("messageType") String messageType);
+
+    /**
      * 按压缩水位线增量查询「构建上下文所需」的消息（2026-11-23）。
      *
      * <p><b>为什么需要它</b>：{@link #selectByConversationId} 会全量加载整个会话
@@ -55,9 +99,10 @@ public interface ConversationMessageMapper {
      * 加载后在内存里又被 {@code applyCompactionRecords} 丢掉 —— 等于每次请求都白白
      * 读几十 MB。压缩只减少了发给模型的内容，并没有减少 DB 读取量。</p>
      *
-     * <p><b>过滤规则</b>：保留全部 SYSTEM（系统提示词永不参与压缩）+ {@code id > afterId}
-     * （水位线之后仍需参与上下文的消息）。索引可直接命中
-     * {@code idx_conversation_id(conversation_id)} + 主键 id。</p>
+     * <p><b>过滤规则</b>：只保留真实系统提示词（{@code message_type} 为空或
+     * {@code base_system}）+ {@code id > afterId}（水位线之后仍需参与上下文的消息）。
+     * 弯路预警/技能目录/执行模式/目录知识库等注入块随水位线一起被压缩覆盖。
+     * 索引可直接命中 {@code idx_conversation_id(conversation_id)} + 主键 id。</p>
      *
      * @param conversationId 会话 ID
      * @param afterId        压缩水位线（{@code conversation_compaction.end_message_id}）；
@@ -66,7 +111,9 @@ public interface ConversationMessageMapper {
      */
     @Select("SELECT id, conversation_id, role, content, reasoning, tool_calls, turn_id, message_type, created_at "
             + "FROM conversation_message WHERE conversation_id = #{conversationId} "
-            + "AND (role = 'SYSTEM' OR id > #{afterId}) ORDER BY id ASC")
+            + "AND ((role = 'SYSTEM' AND (message_type IS NULL OR message_type = 'base_system') "
+            + "AND (content IS NULL OR content NOT LIKE '%[动态运行时注入]%')) OR id > #{afterId}) "
+            + "ORDER BY id ASC")
     @ResultMap("ConversationMessageResultMap")
     List<ConversationMessage> selectForContext(@Param("conversationId") Long conversationId,
                                                @Param("afterId") long afterId);

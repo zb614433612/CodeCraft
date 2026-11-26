@@ -5,6 +5,88 @@
 
 ---
 
+## [3.6.0] - 2026-11-26
+
+> **上下文注入落库与压缩适配**：此前弯路预警、技能目录、执行模式、目录知识库等
+> 以 SYSTEM 消息临时拼在请求里，不落库、位置随工具迭代漂移，压缩时又无法与真实
+> 系统提示词区分。本版把这些注入块按「轮次 + 类型」落库，顺序固定在本轮用户消息
+> 之前；真实系统提示词单独标记、首次会话写入、永不压缩；压缩水位线可覆盖旧注入块。
+> 同时修复首次会话系统提示词误判、压缩后旧注入块残留、前端上下文大小不刷新等问题。
+> 必须重启后端；复用现有 `message_type` 字段，**无数据库结构变更**。
+
+### 🧩 上下文注入落库（真实系统提示词与注入块分离）
+
+- 新增注入类型：`base_system` / `inject_detour` / `inject_skill_catalog` /
+  `inject_exec_mode` / `inject_kb` / `inject_lesson`，复用
+  `conversation_message.message_type`，不需要新增字段；
+- 首次会话判断改为 `countRealSystemMessages`，只认真实系统提示词；注入块不再被误判为
+  「已有系统提示词」，修复真实系统提示词永远不落库的 P0；
+- `hoistSystemMessages` 只把真实系统提示词提到最前；弯路预警/技能目录/执行模式/
+  目录知识库保留数据库 id 顺序，固定在本轮用户消息之前；
+- 真实系统提示词首次会话保存，永不压缩；注入块随压缩水位线覆盖，旧动态块保留兼容。
+
+### 📌 每轮注入顺序固定
+
+- 顺序：弯路预警 → 技能目录 → 执行模式 → 目录知识库 → 用户消息
+  （附件提示 + 原文 + 图片引用占位）；
+- 注入块先于用户消息落库，按 `turnId + message_type` 幂等；无 turnId 时每轮落库并
+  记录 WARN，避免内容相同被误跳过；
+- 工具失败经验提示改为落库 `inject_lesson`，失败后追加、只消费一次；内存消息补
+  `_messageType`，压缩时能识别为注入块；
+- 附件提示、图片引用占位随用户消息落库；图片二进制仍走独立通道，不写入上下文；
+- 工具定义继续走请求体 `tools` 字段，不落库、不按消息注入。
+
+### 🗜️ 压缩规则适配
+
+- `selectForContext` 只保留真实系统提示词 + 水位线之后的消息；旧注入块和旧动态块
+  随水位线被覆盖；
+- `applyCompactionRecords` / `insertSummaryBefore` 用 `message_type` 区分真实系统提示词
+  与注入块；摘要插在真实系统提示词之后、注入块之前；
+- `replaceInMemory` 压缩区间内丢弃旧 `inject_*` 注入块与旧动态块，保留真实系统提示词
+  和本轮保护带注入块；修复「压缩后当前请求还带旧注入块、下一轮重建却消失」导致的
+  估值不降、前后请求体不一致；
+- 压缩输入仍只发送用户正文与助手正文，注入块和工具结果不进摘要。
+
+### 🖥️ 前端展示与上下文大小刷新
+
+- 两套前端跳过 `inject_` 注入块，不渲染为聊天消息，也不打断助手消息聚合；
+- 用户气泡剥离附件提示和图片引用占位；token 按剥离后的正文估算，不再把提示文本
+  算进上下文显示；
+- 新前端新增 `refreshRealContextTokens`，在每轮完成/用户中止/报错中止、守卫压缩完成、
+  异步压缩完成后调用 `/conversation/{id}/context-stats`，压缩后数字会立刻下降；
+- 经典版前端仍是前端字符估算，未接后端真实上下文接口。
+
+### 🧹 遗留清理与 P2 修复
+
+- 删除语言强制指令及其两处调用，模型按用户语言习惯回复；
+- 删除 `sessionLessonHintCache`、`takeLessonHintOnce`、`placeDynamicBlocksAtTail`、
+  `dynamicBlockMessage`、`injectDetourHintAtTaskStart`、按内容去重等不再使用的遗留代码；
+- `stripInternalMessageFields` 只复制含内部 `_` 字段的消息，其余原样引用，降低长会话
+  请求出口的内存/CPU 开销；
+- 修复无 turnId 时按内容去重导致后续轮次不落库的问题，改为每轮落库 + WARN。
+
+### 🔢 版本号同步
+
+- `pom.xml`（项目版本 → 3.6.0，产物 `code-craft-3.6.0.jar`）
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `extraResources` 的 `code-craft-3.6.0.jar` 路径）/
+  `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.6.0
+- README / README_EN 徽章、8 个 docs 头部、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、
+  FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **必须重启后端**（Java 改动）；复用现有 `message_type` 字段，**无数据库结构变更**，
+  可覆盖安装；
+- 旧会话首次升级后，真实系统提示词会按「只认真实系统提示词」重新判定并补存；
+- 旧动态块（`[动态运行时注入]`）保留兼容，压缩时随水位线覆盖；
+- 注入块落库后历史会多出 SYSTEM 消息，前端已过滤，不会显示为用户/助手气泡；
+- 8084 端口需正常退出/重启软件后新代码才生效。
+
+---
+
 ## [3.5.0] - 2026-11-26
 
 > **上下文压缩「输入瘦身 + 状态可见」**：压缩请求此前会把 reasoning、tool 结果、system

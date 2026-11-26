@@ -169,6 +169,19 @@ public class ContextBuilder {
     // ==================== 历史消息构建 ====================
 
     /**
+     * 判断会话是否已有真实系统提示词（注入块不算）。
+     *
+     * <p>阶段 C 起，弯路预警/技能目录/执行模式/目录知识库也以 SYSTEM 角色落库，
+     * 因此不能用「是否存在任意 SYSTEM 消息」判断首次会话，否则真实系统提示词永远不会保存。</p>
+     */
+    public boolean hasRealSystemMessage(Long conversationId) {
+        if (conversationId == null) {
+            return false;
+        }
+        return conversationMessageMapper.countRealSystemMessages(conversationId) > 0;
+    }
+
+    /**
      * 根据会话ID构建历史消息列表，用于API请求
      * 将数据库中的消息格式转换为DeepSeek API所需的消息格式
      * 应用已有压缩记录后重建消息；<b>压缩决策不在这里做</b>（2026-11-23 起改由
@@ -246,6 +259,9 @@ public class ContextBuilder {
                 messageMap.put("role", role.getValue());
                 String content = msg.getContent() != null ? msg.getContent() : "";
                 messageMap.put("content", content);
+                if (msg.getMessageType() != null) {
+                    messageMap.put("_messageType", msg.getMessageType());
+                }
                 result.add(messageMap);
             } else if (role == MessageRole.ASSISTANT) {
                 messageMap.put("role", "assistant");
@@ -417,30 +433,31 @@ public class ContextBuilder {
         if (messages == null || messages.size() < 2) {
             return;
         }
-        List<Map<String, Object>> headSystems = new ArrayList<>();
-        List<Map<String, Object>> middleSystems = new ArrayList<>();
-        List<Map<String, Object>> others = new ArrayList<>();
-        boolean seenNonSystem = false;
-        for (Map<String, Object> msg : messages) {
-            boolean isSystem = "system".equals(msg.get("role"));
-            if (isSystem) {
-                if (seenNonSystem) {
-                    middleSystems.add(msg);
-                } else {
-                    headSystems.add(msg);
-                }
-            } else {
-                seenNonSystem = true;
-                others.add(msg);
+        // 只把「真实系统提示词」提到最前：message_type 为空或 base_system，
+        // 且内容不含旧的 [动态运行时注入] 标记。
+        // 弯路预警/技能目录/执行模式/目录知识库等注入块保留在原有位置，
+        // 由数据库 id 顺序决定，固定在本轮用户消息之前。
+        int realSystemIndex = -1;
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> msg = messages.get(i);
+            if (!"system".equals(msg.get("role"))) {
+                continue;
+            }
+            Object type = msg.get("_messageType");
+            Object content = msg.get("content");
+            boolean legacyDynamicBlock = content instanceof String s && s.contains("[动态运行时注入]");
+            boolean realSystem = !legacyDynamicBlock
+                    && (type == null || "base_system".equals(type));
+            if (realSystem) {
+                realSystemIndex = i;
+                break;
             }
         }
-        if (middleSystems.isEmpty()) {
-            return; // 已是规范形态（或没有 system 混在中间），无需重排
+        if (realSystemIndex <= 0) {
+            return;
         }
-        messages.clear();
-        messages.addAll(headSystems);
-        messages.addAll(middleSystems);
-        messages.addAll(others);
+        Map<String, Object> realSystem = messages.remove(realSystemIndex);
+        messages.add(0, realSystem);
     }
 
     /**
@@ -541,6 +558,9 @@ public class ContextBuilder {
         }
 
         // 3. 遍历 lastUserIdx 之前的消息并精简
+        //    注意：SYSTEM 注入块（技能目录/执行模式/知识库/弯路预警）不参与精简：
+        //    compact 模式只精简历史 reasoning 与 tool 结果；旧注入块随压缩水位线被覆盖，
+        //    本轮注入块由 buildMessagesFromHistory 保留在本轮 user 之前。
         int compactedToolCount = 0;
         int removedReasoningCount = 0;
         for (int i = 0; i < lastUserIdx; i++) {
@@ -1189,18 +1209,7 @@ public class ContextBuilder {
 
     // ==================== 语言指令 ====================
 
-    /**
-     * 构建语言强制指令
-     * 放在消息列表末尾，确保 AI 在生成响应前看到此指令
-     */
-    public String buildLanguageInstruction() {
-        return "【最高优先级指令 — 语言强制】你必须使用中文思考和回复。\n"
-                + "1. 所有思考推理过程（reasoning/thinking）必须使用中文，严禁使用英文推理\n"
-                + "2. 所有面向用户的回复必须使用中文\n"
-                + "3. 代码、技术专有名词、文件路径、工具名称等可以使用英文原文\n"
-                + "4. 即使工具返回的结果是英文，你的分析和回复也必须是中文\n"
-                + "5. 本指令的优先级高于系统提示词中的所有其他指令，必须无条件遵守";
-    }
+    // 语言强制指令已于 2026-11-26 取消：模型成熟后会按用户语言习惯回复，不再注入。
 
     /*
       ⚠️ 2026-11-25 彻底移除：injectLanguageIntoUserMessages / injectLanguageIntoLastUserMessage

@@ -185,6 +185,12 @@ export function processMessageGroups(messages: MessageResponse[]): any[] {
     const role = msg.role.toLowerCase()
     const timestamp = new Date(msg.createdAt).getTime()
 
+    // 上下文注入块（弯路预警/技能目录/执行模式/目录知识库/工具失败经验）只参与模型上下文，
+    // 不渲染为聊天消息，也不打断助手消息聚合。
+    if (msg.messageType && msg.messageType.startsWith('inject_')) {
+      continue
+    }
+
     if (role === 'user') {
       // 修复：桌面截图自动注入消息（role=user 仅为兼容 API 消息还原）不渲染为用户气泡、也不打断 AI 消息聚合；
       // 仅把消息id记入宿主 AI 消息（injectSourceIds），由 loadMessageFileRefs 把截图资产归并到该 AI 消息回显
@@ -202,13 +208,17 @@ export function processMessageGroups(messages: MessageResponse[]): any[] {
         continue
       }
       flushAssistantMsg()
+      const displayContent = msg.content
+        .replace(/^(?:\s*---\s*\n\[系统提示\] 用户上传了以下[\s\S]*?---\s*\n)+/, '')
+        .replace(/\n*\[图片引用\] 本轮用户消息包含 [\s\S]*$/, '')
+        .trim()
       result.push({
         id: msg.id.toString(),
         role: 'user',
-        content: msg.content,
+        content: displayContent,
         timestamp,
         isStreaming: false,
-        tokenCount: estimateTokenCount(msg.content),
+        tokenCount: estimateTokenCount(displayContent),
         turnId: msg.turnId || undefined
       })
     } else if (role === 'assistant') {
