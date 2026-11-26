@@ -5,6 +5,76 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.5.0] - 2026-11-26
+
+> **Context compaction: input slimming + visible status**. The compaction request used to pack
+> reasoning, tool results and system messages into the prompt. A large share of each 150k-char
+> batch was thinking chains and tool output that the real request had already stripped, which
+> both slowed compaction down and made the 45-second timeout easy to hit. This release sends
+> only "user question body + assistant reply body" to the compaction model, skips the LLM call
+> for batches with no body text, and adds a `compaction_status` event plus an async compaction
+> status API. The frontend can now show compaction progress and lock the conversation input.
+> The 15-second guard heartbeat also moved from the reasoning stream (which accumulates) to a
+> latest-state-wins event. Backend restart required; **no database schema change**.
+
+### 🔧 Compaction input slimming (shared by async and guard paths)
+
+- `formatMessagesForCompaction` now emits only USER / ASSISTANT `content`;
+  `reasoning`, `TOOL` and `SYSTEM` messages are skipped entirely;
+- If a batch has no body text after filtering, **the LLM is not called at all**
+  (no empty prompt waiting for a timeout): the previous summary is returned and the
+  watermark still advances;
+- Added an `EMPTY_BATCH_SUMMARY` placeholder so an empty batch never returns `null`
+  and aborts the whole compaction run;
+- The compaction prompt now states that tool calls and thinking traces were omitted
+  and must not be invented.
+
+### ✨ Compaction status visibility (`compaction_status`)
+
+- Guard compaction emits a new `compaction_status` SSE event: `running` at start,
+  `running` every 15 seconds (with increasing `elapsedSec`), and `done` at the end;
+  the heartbeat no longer goes through `reasoning_content`;
+- The frontend keeps only the latest status per conversation, so "15s / 30s elapsed"
+  replaces the previous line instead of accumulating;
+- New endpoint `GET /api/deepseek/compaction/status` returning
+  `compacting / elapsedSec / phase` (`guard` = guard compaction, `async` = async pre-compaction);
+- Async pre-compaction starts after the request ends, when the SSE stream is already closed;
+  the frontend polls this endpoint instead (every 2 seconds, unlocking after 3 consecutive
+  false results to cover the window where the stream ended but the backend task has not
+  acquired its lock yet).
+
+### ⏸️ Conversation input locked during compaction
+
+- New frontend: `ChatComposer` gains `compactionRunning / compactionElapsed`, shows a status
+  bar, and disables the textarea, attachments, prompt optimization and send button;
+- Classic frontend: reuses the `stream-indicator` bar, adds `isCompacting` to the textarea,
+  attachment and optimize buttons, and adds a second guard in `sendMessage`;
+- Both frontends resume polling in the request `finally`, on page refresh and on conversation
+  switch (`checkChatActiveTask` / `checkAndReconnect`);
+- Deleting a conversation and promoting a draft key now also clear / migrate the compaction
+  state and polling timers, avoiding stale locks and idle timers.
+
+### 🔢 Version sync
+
+- `pom.xml` (project version → 3.5.0, artifact `code-craft-3.5.0.jar`)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + the `code-craft-3.5.0.jar` path in `extraResources`) / `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.5.0
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST build examples, FAQ version example
+
+### ⬆️ Upgrade notes
+
+- **Backend restart required** (Java changes); **no database schema change**, overwrite install is fine;
+- Compaction summaries no longer contain tool results (errors, file paths, command output),
+  so historical fidelity may drop. If this causes more "amnesia", the next step is
+  "tool-result folding" (keep key lines) instead of excluding them entirely;
+- The conversation input is locked while async compaction runs and unlocks automatically when it
+  finishes. A failed status query is treated as "not compacting" so input never stays locked forever;
+- Existing summaries are preserved; the new behavior applies from the next compaction run.
+
+---
+
 ## [3.4.9] - 2026-11-25
 
 > **Root-cause fix for the 72-char prefix break on cross-turn first shots + LLM request context dumper**:

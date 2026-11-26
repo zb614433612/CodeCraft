@@ -29,6 +29,21 @@ export interface DelegateProgressData {
   elapsedSec?: number
 }
 
+/**
+ * 上下文压缩状态事件（后端 compaction_status JSON 事件，2026-11-26）。
+ *
+ * <p>守卫压缩期间后端每 15s 推一条 running（elapsedSec 递增），结束时推 done。
+ * 前端按会话只保留「最新一条」，用它顶掉旧状态 —— 不要再走 thinking 通道累加，
+ * 否则会显示成「已用 15 秒 / 已用 30 秒…」一长串。</p>
+ */
+export interface CompactionStatusData {
+  conversationId?: number
+  /** running = 正在压缩；done = 已结束；failed = 失败（本次放弃，按原上下文继续） */
+  status: 'running' | 'done' | 'failed'
+  elapsedSec?: number
+  message?: string
+}
+
 /** 任务错误事件数据（后端 task_error JSON事件）：LLM 接口错误的用户友好反馈
  *  任务因错误停止（非人为停止、非正常完成）时由后端下发：
  *  前端在聊天区展示错误详情（标题+原因+解决建议），并在输入区提供「一键继续」任务恢复入口。
@@ -67,6 +82,10 @@ export type StreamChatEvent = {
 } | {
   type: 'delegate_progress'
   data: DelegateProgressData
+  sessionId?: number
+} | {
+  type: 'compaction_status'
+  data: CompactionStatusData
   sessionId?: number
 } | {
   type: 'task_error'
@@ -136,6 +155,20 @@ export class SseParser {
             targetAgent: parsed.targetAgent,
             status: parsed.status,
             elapsedSec: parsed.elapsedSec
+          },
+          sessionId: this.sessionId
+        }
+      }
+      // 上下文压缩状态（2026-11-26）：running 每 15s 一条（elapsedSec 递增），done 收尾。
+      // 前端按会话只存最新一条 → 新状态天然顶掉旧状态，不再像 thinking 那样累加。
+      if (parsed.event === 'compaction_status') {
+        return {
+          type: 'compaction_status',
+          data: {
+            conversationId: parsed.conversationId,
+            status: parsed.status === 'done' || parsed.status === 'failed' ? parsed.status : 'running',
+            elapsedSec: typeof parsed.elapsedSec === 'number' ? parsed.elapsedSec : 0,
+            message: parsed.message || ''
           },
           sessionId: this.sessionId
         }

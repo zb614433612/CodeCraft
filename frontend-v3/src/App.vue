@@ -250,7 +250,8 @@ import {
   cancelTask,
   uploadAttachment,
   optimizePrompt,
-  supplementRequest
+  supplementRequest,
+  getCompactionStatus
 } from './api/chat'
 import type { StreamChatEvent } from './api/chat'
 import {
@@ -659,6 +660,84 @@ const DRAFT_PREFIX = 'draft-'
 
 /** 每个会话的消息数组（key 见上） */
 const messagesMap = ref<Record<string, ChatMessageModel[]>>({})
+
+/**
+ * 会话 → 上下文压缩运行状态。
+ *
+ * <p>两个来源：</p>
+ * <ul>
+ *   <li>守卫压缩：请求内 SSE {@code compaction_status} 事件，每 15s 一条 running；</li>
+ *   <li>异步预压缩：请求结束后才开始，SSE 已关闭，只能轮询 {@code /compaction/status}。</li>
+ * </ul>
+ *
+ * <p>同一个会话只保留「最新一条」——新状态直接覆盖旧状态，
+ * 不会再像 reasoning 通道那样把「已用 15s / 已用 30s…」累加成一串。</p>
+ */
+const compactionMap = ref<Record<string, { running: boolean; elapsedSec: number; phase?: string; message?: string }>>({})
+
+/** 当前会话的压缩状态（ChatView / ChatComposer 据此显示状态条并锁定输入） */
+const chatCompaction = computed(() => {
+  const key = activeConversationId.value
+  return key ? compactionMap.value[key] : undefined
+})
+
+/** 会话 → 压缩状态轮询定时器 */
+const compactionPollTimers = new Map<string, ReturnType<typeof setInterval>>()
+/** 连续探测到「未压缩」的次数：异步任务在请求结束后才提交，前两次 false 不能立刻停 */
+const compactionPollMisses = new Map<string, number>()
+
+function setCompactionState(
+  key: string,
+  state: { running: boolean; elapsedSec: number; phase?: string; message?: string }
+) {
+  compactionMap.value = { ...compactionMap.value, [key]: state }
+}
+
+function stopCompactionPoll(key: string) {
+  const timer = compactionPollTimers.get(key)
+  if (timer !== undefined) {
+    clearInterval(timer)
+    compactionPollTimers.delete(key)
+  }
+  compactionPollMisses.delete(key)
+}
+
+async function pollCompactionStatus(key: string) {
+  const conversationId = Number(key)
+  if (!Number.isFinite(conversationId) || conversationId <= 0) {
+    stopCompactionPoll(key)
+    return
+  }
+  const status = await getCompactionStatus(conversationId)
+  if (status.compacting) {
+    compactionPollMisses.set(key, 0)
+    setCompactionState(key, {
+      running: true,
+      elapsedSec: status.elapsedSec || 0,
+      phase: status.phase,
+      message: '正在整理历史上下文…'
+    })
+    return
+  }
+  const misses = (compactionPollMisses.get(key) || 0) + 1
+  compactionPollMisses.set(key, misses)
+  // 连续 3 次 false（约 6s）才认定结束：异步压缩在流 doOnComplete 后才提交，
+  // 前端 finally 可能先于后端挂锁，第一次探测几乎必然读到 false。
+  if (misses >= 3) {
+    stopCompactionPoll(key)
+    setCompactionState(key, { running: false, elapsedSec: 0 })
+  }
+}
+
+/** 开始轮询某会话的异步压缩状态（请求流结束后调用；已有轮询则复用） */
+function startCompactionPoll(key: string) {
+  if (compactionPollTimers.has(key)) return
+  compactionPollMisses.set(key, 0)
+  void pollCompactionStatus(key)
+  const timer = setInterval(() => void pollCompactionStatus(key), 2000)
+  compactionPollTimers.set(key, timer)
+}
+
 /** 当前会话的消息（模板与 ChatView 只关心这个派生值） */
 const messages = computed<ChatMessageModel[]>(() => messagesMap.value[activeConversationId.value] ?? [])
 
@@ -801,6 +880,16 @@ function dropConversationState(key: string) {
   pendingUuidMap.delete(key)
   // 会话都没了，针对它的子Agent轮询也必须停（否则定时器会一直空转）
   stopSubAgentPolling(key)
+  /*
+    上下文压缩状态（2026-11-26 新增，遵循本函数注释里的约定：新增分片 ref 必须登记）。
+    不清的后果：
+      · compactionMap 残留 → 会话 id 被复用（草稿 key 会复用）时，新会话继承旧会话的
+        「正在整理上下文」锁定状态，输入框莫名其妙被锁；
+      · 轮询定时器继续按已删除的会话 id 打后端。
+  */
+  const m23 = dropKey(compactionMap.value)
+  if (m23) compactionMap.value = m23 as Record<string, { running: boolean; elapsedSec: number; phase?: string; message?: string }>
+  stopCompactionPoll(key)
 }
 
 /**
@@ -877,6 +966,17 @@ function migrateConversationKey(from: string, to: string) {
   // 真实上下文大小（2026-11-25）：草稿转正时漏迁 → 新 key 读不到，数字回退成前端估算
   const m22 = move(realContextTokensMap.value)
   if (m22) realContextTokensMap.value = m22 as Record<string, RealContextStat>
+  /*
+    上下文压缩状态随会话 key 一起迁移（2026-11-26 新增，遵循本函数注释里的约定）。
+    草稿转正时若漏迁，新 key 读不到「正在整理上下文」状态 → 输入框提前解锁；
+    轮询定时器也要跟着换 key，否则草稿 key 下的定时器会一直查不到会话、空转到停止。
+  */
+  const m23 = move(compactionMap.value)
+  if (m23) compactionMap.value = m23 as Record<string, { running: boolean; elapsedSec: number; phase?: string; message?: string }>
+  if (compactionPollTimers.has(from)) {
+    stopCompactionPoll(from)
+    startCompactionPoll(to)
+  }
   // 轮询定时器跟着会话 key 迁移，否则草稿 key 下的定时器会失去归属
   if (subAgentTimers.has(from)) {
     window.clearInterval(subAgentTimers.get(from)!)
@@ -3388,6 +3488,25 @@ async function consumeChatStream(
         noteDelegateProgress(key, event.data)
         continue
       }
+
+      /*
+       * 上下文压缩状态（2026-11-26）：守卫压缩期间每 15s 一条 running。
+       * 按会话只存最新一条 → 状态条是「顶掉」而不是累加；done 后立刻转轮询，
+       * 因为请求结束后后端还会触发异步预压缩，那段没有 SSE 事件。
+       */
+      if (event.type === 'compaction_status') {
+        const status = event.data
+        setCompactionState(key, {
+          running: status.status === 'running',
+          elapsedSec: status.elapsedSec || 0,
+          message: status.message || ''
+        })
+        if (status.status !== 'running') {
+          startCompactionPoll(key)
+        }
+        continue
+      }
+
       // complete / resume / agent_event：agent_event 后端从不下发（见 utils/agent-event.ts 注释），忽略
     }
   } catch (err: any) {
@@ -3423,6 +3542,11 @@ async function consumeChatStream(
      * 这里补拉一次让最新的 running/completed 落到位；若仍有 running，loadSubAgents 内部会继续轮询。
      */
     void loadSubAgents(key)
+    /*
+     * 异步预压缩感知：后端在流 doOnComplete 之后才提交压缩任务，
+     * 这里开始轮询该会话的压缩状态；running 期间 ChatComposer 会锁定输入。
+     */
+    startCompactionPoll(key)
   }
   return key
 }
@@ -3864,6 +3988,8 @@ onBeforeUnmount(() => {
   stopDelegateClock()
   for (const key of subAgentTimers.keys()) stopSubAgentPolling(key)
   stopBrowserPoll()
+  // 压缩状态轮询（2s/会话）：HMR 会反复重建根组件，不清理会累积多个 interval 打后端
+  for (const key of compactionPollTimers.keys()) stopCompactionPoll(key)
 })
 watch(
   () => route.path,
@@ -4330,6 +4456,11 @@ async function checkChatActiveTask(conversationId: number) {
   try {
     const task = await checkActiveTask(conversationId)
     if (!task?.active) {
+      /*
+       * 压缩感知（2026-11-26）：进入会话 / 刷新页面时，异步压缩可能仍在后台进行，
+       * 但没有任何 SSE 会让前端知道。这里启动一次轮询，恢复「整理中」状态与输入锁定。
+       */
+      startCompactionPoll(key)
       /*
        * 任务已结束：若上次是异常中断（非正常完成），把原因告诉用户。
        * 典型场景：浏览器关掉/刷新后回来，用户只看到「AI 没回复完」，不知道发生了什么。
@@ -6906,6 +7037,8 @@ const pageView = computed((): PageBinding => {
           approval,
           attachments,
           isStreaming,
+          // 上下文压缩状态（2026-11-26）：running 时 ChatView 显示状态条并锁定输入
+          compaction: chatCompaction,
           // 消息里的本地路径（相对路径）以当前 Agent 工作目录为基准解析
           projectRoot: chatProjectRoot,
           // 「补充需求」的发送态（真实请求在 onChatSupplement 里，组件只负责展示）

@@ -163,6 +163,8 @@
         :attachments="attachments"
         :rows="3"
         :context-mode="conversation.contextMode"
+        :compaction-running="compaction?.running ?? false"
+        :compaction-elapsed="compaction?.elapsedSec ?? 0"
         placeholder="例如：帮我梳理这个项目的登录链路，并指出风险点"
         @send="onSend"
         @attach="$emit('attach')"
@@ -549,6 +551,8 @@
       :model="conversation.model"
       :attachments="attachments"
       :running="isStreaming"
+      :compaction-running="compaction?.running ?? false"
+      :compaction-elapsed="compaction?.elapsedSec ?? 0"
       :context-tokens="conversation.stats?.contextTokens"
       :context-mode="conversation.contextMode"
       :balance="conversation.balance"
@@ -707,6 +711,13 @@ const props = withDefaults(
     attachments?: Attachment[]
     /** 是否生成中（由 SSE 状态决定） */
     isStreaming?: boolean
+    /**
+     * 上下文压缩状态（2026-11-26）。
+     *
+     * <p>running 时输入区展示「正在整理历史上下文…」状态条并锁定发送；
+     * elapsedSec 由后端/轮询给出，前端只展示最新值，不做累加。</p>
+     */
+    compaction?: { running: boolean; elapsedSec: number; phase?: string; message?: string }
     /** 当前 Agent 工作目录（解析消息里的相对路径用） */
     projectRoot?: string
     /**

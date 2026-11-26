@@ -5,6 +5,68 @@
 
 ---
 
+## [3.5.0] - 2026-11-26
+
+> **上下文压缩「输入瘦身 + 状态可见」**：压缩请求此前会把 reasoning、tool 结果、system
+> 全部拼进 prompt，单批 15 万字符里很大一部分是真实请求早已剥离的思考链与工具输出，
+> 既拖慢压缩又容易撞 45 秒超时。本版压缩只发送「用户提问正文 + 助手正文回复」，
+> 空批直接跳过 LLM 调用；同时新增 `compaction_status` 事件与异步压缩状态接口，
+> 前端可以感知压缩进度并锁定会话输入，守卫压缩的 15 秒心跳也从 reasoning 累加
+> 改为「最新状态覆盖」。必须重启后端；**无数据库结构变更**。
+
+### 🔧 压缩输入瘦身（异步 + 守卫共用同一路径）
+
+- `formatMessagesForCompaction` 只输出 USER / ASSISTANT 的 `content`；
+  `reasoning`、`TOOL`、`SYSTEM` 全部跳过，不再进入压缩 prompt；
+- 某批过滤后没有正文 → **不再调用 LLM**（避免发空 prompt 白等超时），
+  直接返回上一版摘要并继续推进水位线；
+- 新增 `EMPTY_BATCH_SUMMARY` 占位摘要，避免空批返回 `null` 被上层判定失败、
+  导致整次压缩放弃、水位线不动；
+- 压缩 prompt 增加硬约束：只整理用户提问与助手正文，工具过程与思考过程已省略，
+  不要臆测、不要编造。
+
+### ✨ 压缩状态可见（compaction_status）
+
+- 守卫压缩新增 `compaction_status` SSE 事件：起始 `running`、每 15 秒 `running`
+  （`elapsedSec` 递增）、结束 `done`；不再把心跳塞进 `reasoning_content` 通道；
+- 前端按会话只保留最新一条状态 →「已用 15s / 已用 30s」不再累加，
+  新状态直接顶掉旧状态；
+- 新增 `GET /api/deepseek/compaction/status`，返回 `compacting / elapsedSec / phase`
+  （`guard` = 守卫压缩，`async` = 异步预压缩）；
+- 异步预压缩在请求结束之后才开始，SSE 已经关闭；前端改为轮询该接口
+  （2 秒/次，连续 3 次 false 才解锁，覆盖「流刚结束、后端任务还没挂锁」的窗口）。
+
+### ⏸️ 压缩期间会话输入锁定
+
+- 新前端：`ChatComposer` 新增 `compactionRunning / compactionElapsed`，
+  输入区展示状态条，`textarea`、附件、优化、发送全部禁用；
+- 旧前端：复用 `stream-indicator` 状态条，输入框 / 附件 / 优化按钮加 `isCompacting`，
+  `sendMessage` 增加双保险；
+- 两套前端均在请求 `finally`、页面刷新 / 切换会话（`checkChatActiveTask` /
+  `checkAndReconnect`）时恢复轮询；
+- 删除会话、草稿 key 转正时同步清理 / 迁移压缩状态与轮询定时器，
+  避免状态残留、提前解锁和定时器空转。
+
+### 🔢 版本号同步
+
+- `pom.xml`（项目版本 → 3.5.0，产物 `code-craft-3.5.0.jar`）
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `extraResources` 的 `code-craft-3.5.0.jar` 路径）/ `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.5.0
+- README / README_EN 徽章、8 个 docs 头部、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- **必须重启后端**（Java 改动）；**无数据库结构变更**，可覆盖安装；
+- 压缩摘要不再包含工具结果（报错、文件路径、命令输出），历史还原度可能下降；
+  若发现「失忆」变多，后续可改为「工具结果折叠摘要」（保留关键行）而不是完全排除；
+- 异步压缩期间该会话输入框会锁定，压缩结束自动解锁；状态查询失败按「未压缩」处理，
+  不会把输入永久锁死；
+- 首次升级后历史会话的旧摘要仍然保留，新口径从下一次压缩触发开始生效。
+
+---
+
 ## [3.4.9] - 2026-11-25
 
 > **跨轮首枪前缀断裂（72 字符）根因修复 + LLM 请求上下文转储取证工具**：

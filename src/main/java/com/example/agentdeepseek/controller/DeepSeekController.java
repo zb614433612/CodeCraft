@@ -8,6 +8,7 @@ import com.example.agentdeepseek.service.AttachmentStore;
 import com.example.agentdeepseek.service.DeepSeekService;
 import com.example.agentdeepseek.service.PendingQuestionStore;
 import com.example.agentdeepseek.service.SupplementStore;
+import com.example.agentdeepseek.service.impl.CompactionService;
 import com.example.agentdeepseek.util.SseBatchUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -39,17 +40,20 @@ public class DeepSeekController {
     private final AttachmentReaderService attachmentReaderService;
     private final AttachmentStore attachmentStore;
     private final SupplementStore supplementStore;
+    private final CompactionService compactionService;
 
     public DeepSeekController(DeepSeekService deepSeekService,
                                PendingQuestionStore pendingQuestionStore,
                                AttachmentReaderService attachmentReaderService,
                                AttachmentStore attachmentStore,
-                               SupplementStore supplementStore) {
+                               SupplementStore supplementStore,
+                               CompactionService compactionService) {
         this.deepSeekService = deepSeekService;
         this.pendingQuestionStore = pendingQuestionStore;
         this.attachmentReaderService = attachmentReaderService;
         this.attachmentStore = attachmentStore;
         this.supplementStore = supplementStore;
+        this.compactionService = compactionService;
     }
 
     /**
@@ -163,6 +167,26 @@ public class DeepSeekController {
         supplementStore.offer(conversationId, message.trim());
         log.info("用户补充需求: conversationId={}, message={}", conversationId, message);
         return Map.of("success", true, "message", "补充需求已发送，AI 将在下一轮处理中收到");
+    }
+
+    // ===== 上下文压缩状态 =====
+
+    /**
+     * 查询会话的上下文压缩状态。
+     *
+     * <p>异步预压缩发生在一次请求结束之后，SSE 已关闭，前端无法收到事件；
+     * 通过轮询该接口感知「压缩仍在进行」，并在此期间锁定该会话输入，
+     * 避免用户在压缩中途继续发任务、与压缩并发改写同一段前缀。</p>
+     */
+    @Operation(summary = "查询压缩状态", description = "前端轮询异步压缩是否仍在进行，用于锁定会话输入")
+    @GetMapping("/compaction/status")
+    public Map<String, Object> getCompactionStatus(@RequestParam Long conversationId) {
+        CompactionService.CompactionRuntimeStatus status = compactionService.getRuntimeStatus(conversationId);
+        Map<String, Object> result = new HashMap<>();
+        result.put("compacting", status.compacting());
+        result.put("elapsedSec", status.elapsedSeconds());
+        result.put("phase", status.phase() != null ? status.phase() : "");
+        return result;
     }
 
     // ===== 后台任务管理 =====

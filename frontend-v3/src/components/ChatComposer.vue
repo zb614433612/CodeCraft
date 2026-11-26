@@ -61,6 +61,17 @@
         </template>
       </div>
 
+      <!-- 上下文压缩状态条：守卫压缩（SSE 事件）与异步压缩（轮询）共用同一位置。
+           只展示「最新状态」（elapsed 是后端给的绝对值），新状态直接顶掉旧状态，绝不累加；
+           running 时整框禁用，压缩结束自动解锁。 -->
+      <div v-if="compactionRunning" class="cc-opt-bar cc-compact-bar">
+        <span class="cc-opt-spinner" aria-hidden="true" />
+        <span class="cc-opt-bar__text">
+          🧹 正在整理历史上下文<template v-if="compactionElapsed > 0"> · 已用 {{ compactionElapsed }}s</template>
+        </span>
+        <span class="cc-opt-bar__tip">完成后自动解锁</span>
+      </div>
+
       <!-- 输入框：任务运行中整框禁用（与旧版 hasRunningTask 行为一致）。
            只禁发送不禁输入会让用户白打一段字，最后发现发不出去；要追加需求走上方「💡 补充需求」。 -->
       <div class="cc-composer__box">
@@ -69,7 +80,7 @@
           :value="modelValue"
           :rows="rows"
           :placeholder="effectivePlaceholder"
-          :disabled="disabled || running"
+          :disabled="disabled || running || compactionRunning"
           :readonly="optimizing"
           @input="onInput"
           @keydown.enter.exact.prevent="onEnter"
@@ -82,7 +93,7 @@
             <button
               class="cc-round-btn"
               title="添加附件"
-              :disabled="disabled || running"
+              :disabled="disabled || running || compactionRunning"
               @click.stop="attachMenuOpen = !attachMenuOpen"
             >
               <svg class="cc-i cc-i--sm"><use href="#i-plus" /></svg>
@@ -104,7 +115,7 @@
             :title="optimizing ? 'AI 正在优化提示词，请稍候…' : 'AI 优化提示词'"
             :aria-label="optimizing ? 'AI 正在优化提示词' : 'AI 优化提示词'"
             :aria-busy="optimizing ? 'true' : 'false'"
-            :disabled="disabled || running || optimizing"
+            :disabled="disabled || running || optimizing || compactionRunning"
             @click="$emit('optimize')"
           >
             <span v-if="optimizing" class="cc-opt-spinner" aria-hidden="true" />
@@ -221,6 +232,15 @@ const props = withDefaults(
     running?: boolean
     disabled?: boolean
     /**
+     * 上下文压缩进行中（守卫压缩的 SSE 状态 / 异步压缩的轮询结果）。
+     *
+     * <p>为 true 时输入区展示「正在整理历史上下文…」状态条并锁定发送，
+     * 直到压缩结束（避免用户在压缩中途继续发任务、和压缩并发改写同一段前缀）。</p>
+     */
+    compactionRunning?: boolean
+    /** 压缩已耗时（秒）：后端/轮询给的绝对值，直接展示——不做前端累加 */
+    compactionElapsed?: number
+    /**
      * 提示词优化进行中：✨ 按钮换成旋转图标、整框 readonly、
      * 输入框上方出现「AI 正在优化…」状态条（含已等待秒数）。
      */
@@ -250,6 +270,8 @@ const props = withDefaults(
     attachments: () => [],
     running: false,
     disabled: false,
+    compactionRunning: false,
+    compactionElapsed: 0,
     optimizing: false,
     undoAvailable: false,
     contextTokens: '',
@@ -323,7 +345,7 @@ onBeforeUnmount(() => {
 })
 
 const canSend = computed(() => {
-  if (props.running || props.disabled) return false
+  if (props.running || props.disabled || props.compactionRunning) return false
   // 优化中禁止发送：此刻草稿马上会被回填，发出去的就是将被替换的旧文案
   if (props.optimizing) return false
   return props.modelValue.trim().length > 0 || props.attachments.length > 0
@@ -426,6 +448,7 @@ const usageTitle = computed(() => {
  */
 const effectivePlaceholder = computed(() => {
   if (props.running) return '当前会话正在执行任务：如需追加要求点上方「💡 补充需求」，或先停止生成'
+  if (props.compactionRunning) return '正在整理历史上下文，完成后自动解锁…'
   if (props.disabled) return '当前不可输入'
   if (props.optimizing) return 'AI 正在优化提示词，完成后会自动回填…'
   return props.placeholder

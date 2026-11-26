@@ -1563,19 +1563,31 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
         // 压缩完成信号：正常/异常/取消都会触发，保证心跳一定能停
         Sinks.Empty<Void> finished = Sinks.empty();
 
+        Long conversationId = context.conversationId();
+
+        // 起始状态：用独立事件类型下发（前端「覆盖」显示），不再走 reasoning 累加通道
+        Flux<String> start = Flux.just(createCompactionStatusEvent(
+                conversationId, "running", 0, "正在整理历史上下文…"));
+
         // 压缩本体：阻塞操作放到 boundedElastic，避免占住 reactor 调度线程
         Flux<String> work = Mono.fromRunnable(() -> applyDeferredContextGuard(context))
                 .subscribeOn(Schedulers.boundedElastic())
                 .thenMany(Flux.<String>empty())
                 .doFinally(signal -> finished.tryEmitEmpty());
 
-        // 心跳：每 15 秒一条；压缩结束即终止（takeUntilOther），不会留下常驻定时器
+        // 心跳：每 15 秒一条「最新状态」（elapsedSec 递增）；前端同类型事件覆盖上一条，绝不累加
         Flux<String> heartbeat = Flux.interval(GUARD_HEARTBEAT_INTERVAL)
-                .map(seq -> createReasoningSSEEvent(
-                        "⏳ 仍在整理上下文…（已用 " + (seq + 1) * GUARD_HEARTBEAT_INTERVAL.toSeconds() + " 秒）"))
+                .map(seq -> createCompactionStatusEvent(
+                        conversationId, "running",
+                        (int) ((seq + 1) * GUARD_HEARTBEAT_INTERVAL.toSeconds()),
+                        "仍在整理历史上下文…"))
                 .takeUntilOther(finished.asMono());
 
-        return Flux.merge(work, heartbeat);
+        // 结束状态：无论成功/失败都发 done（applyDeferredContextGuard 内部已吞异常，按原上下文继续）
+        Flux<String> done = finished.asMono().thenMany(Flux.just(
+                createCompactionStatusEvent(conversationId, "done", 0, "上下文整理完成")));
+
+        return Flux.concat(start, Flux.merge(work, heartbeat), done);
     }
 
     @Override
@@ -1649,10 +1661,8 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
          */
         boolean guardNeeded = Boolean.TRUE.equals(apiRequest.get("_guardNeeded"));
         Flux<String> guardPrelude = guardNeeded
-                ? Flux.concat(
-                        Flux.just(createReasoningSSEEvent("🧹 上下文接近上限，正在整理历史上下文…")),
-                        // 压缩本体 + 每 15 秒心跳（长压缩时防止 SSE 被网关按空闲连接断开）
-                        buildGuardWorkWithHeartbeat(context))
+                // 压缩本体 + 起始/每 15 秒状态事件（长压缩时防止 SSE 被网关按空闲连接断开）
+                ? buildGuardWorkWithHeartbeat(context)
                 : Flux.<String>empty();
 
         if (hasTools) {
@@ -3969,6 +3979,31 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
      */
     private String createReasoningSSEEvent(String reasoningContent) {
         return toolLoopManager.createReasoningSSEEvent(reasoningContent);
+    }
+
+    /**
+     * 创建压缩状态事件（compaction_status）。
+     *
+     * <p><b>为什么独立成一个事件类型</b>：前端把 reasoning 当「思考增量」逐条累加，
+     * 每 15 秒的心跳会变成「已用 15 秒 / 已用 30 秒…」一串历史。
+     * 独立事件携带 status + elapsedSec，前端按会话只保留最新一条，天然「顶掉」旧状态。</p>
+     *
+     * @param conversationId 会话 ID（可为 null，仅新会话首次请求时）
+     * @param status         running / done / failed
+     * @param elapsedSeconds 已耗时秒数（running 时有效）
+     * @param message        展示文案
+     */
+    private String createCompactionStatusEvent(Long conversationId, String status,
+                                               int elapsedSeconds, String message) {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("event", "compaction_status");
+        if (conversationId != null) {
+            root.put("conversationId", conversationId);
+        }
+        root.put("status", status);
+        root.put("elapsedSec", elapsedSeconds);
+        root.put("message", message != null ? message : "");
+        return root.toString();
     }
 
     /**

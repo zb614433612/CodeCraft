@@ -155,6 +155,15 @@ public class CompactionService {
      */
     private static final int MAX_SUMMARY_CHARS = 30_000;
 
+    /**
+     * 输入瘦身后，整批都没有「用户正文 / 助手正文」时的占位摘要。
+     *
+     * <p>不能返回 {@code null} —— null 会被上层判定为「本批失败」，导致整次压缩放弃、
+     * 水位线不推进、下次请求继续重压同一段。这里用一句客观占位，让流程继续把该批覆盖掉。</p>
+     */
+    private static final String EMPTY_BATCH_SUMMARY =
+            "（该段历史只包含工具调用与思考过程，没有需要整理的用户/助手正文）";
+
     /** 连续压缩失败达到该次数后进入熔断，避免每次请求都白等一次 LLM 超时 */
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
 
@@ -209,6 +218,12 @@ public class CompactionService {
 
     /** 会话是否正在预压缩中（防止同一会话并发压缩） */
     private final Set<Long> precompressingConversations = ConcurrentHashMap.newKeySet();
+
+    /** 会话 → 压缩开始时间戳（毫秒）：供前端轮询「异步压缩是否仍在进行」 */
+    private final Map<Long, Long> compactingStartedAt = new ConcurrentHashMap<>();
+
+    /** 会话 → 压缩阶段（guard = 请求前守卫 / async = 请求后异步预压缩） */
+    private final Map<Long, String> compactingPhase = new ConcurrentHashMap<>();
 
     /** 会话 → 连续压缩失败次数（一次成功即清零） */
     private final Map<Long, Integer> consecutiveFailures = new ConcurrentHashMap<>();
@@ -345,6 +360,7 @@ public class CompactionService {
             log.debug("会话已有压缩在进行中，跳过本次同步压缩：conversationId={}", conversationId);
             return -1;
         }
+        markCompacting(conversationId, "guard");
         try {
             CompactionRecord record = doCompact(conversationId, providerCode, true);
             if (record == null) {
@@ -358,6 +374,7 @@ public class CompactionService {
             return TokenEstimator.estimateMessages(messages, providerCode);
         } finally {
             precompressingConversations.remove(conversationId);
+            clearCompacting(conversationId);
         }
     }
 
@@ -427,6 +444,7 @@ public class CompactionService {
             // 该会话已在压缩中
             return;
         }
+        markCompacting(conversationId, "async");
 
         CompletableFuture.runAsync(() -> {
             try {
@@ -482,6 +500,7 @@ public class CompactionService {
                 log.warn("异步预压缩失败: conversationId={}, error={}", conversationId, e.getMessage());
             } finally {
                 precompressingConversations.remove(conversationId);
+                clearCompacting(conversationId);
             }
         }, precompressExecutor);
     }
@@ -971,6 +990,57 @@ public class CompactionService {
         return false;
     }
 
+    // ==================== 压缩运行状态（前端感知异步压缩） ====================
+
+    /**
+     * 压缩运行状态快照（面向前端轮询）。
+     *
+     * @param compacting     是否正在压缩
+     * @param elapsedSeconds 已耗时（秒）
+     * @param phase          guard = 请求前守卫压缩；async = 请求后异步预压缩
+     */
+    public record CompactionRuntimeStatus(boolean compacting, long elapsedSeconds, String phase) {
+        public static CompactionRuntimeStatus idle() {
+            return new CompactionRuntimeStatus(false, 0, null);
+        }
+    }
+
+    /**
+     * 查询会话当前的压缩运行状态。
+     *
+     * <p><b>为什么需要（2026-11-26）</b>：异步预压缩发生在请求结束之后，SSE 已经关闭，
+     * 前端无法通过事件感知。这里提供可轮询的运行态，前端据此显示「正在整理上下文」
+     * 并锁定该会话的输入，直到 {@code compacting=false} 再解锁——
+     * 避免用户在压缩中途继续发任务、与压缩并发改写同一段前缀。</p>
+     */
+    public CompactionRuntimeStatus getRuntimeStatus(Long conversationId) {
+        if (conversationId == null || !precompressingConversations.contains(conversationId)) {
+            return CompactionRuntimeStatus.idle();
+        }
+        Long startedAt = compactingStartedAt.get(conversationId);
+        long elapsed = startedAt != null
+                ? Math.max(0, (System.currentTimeMillis() - startedAt) / 1000)
+                : 0;
+        return new CompactionRuntimeStatus(true, elapsed, compactingPhase.get(conversationId));
+    }
+
+    /** 会话是否正在压缩（供请求入口做并发兜底校验） */
+    public boolean isCompacting(Long conversationId) {
+        return conversationId != null && precompressingConversations.contains(conversationId);
+    }
+
+    /** 登记压缩开始：只在实际拿到会话锁之后调用 */
+    private void markCompacting(Long conversationId, String phase) {
+        compactingStartedAt.put(conversationId, System.currentTimeMillis());
+        compactingPhase.put(conversationId, phase);
+    }
+
+    /** 清理压缩运行状态 */
+    private void clearCompacting(Long conversationId) {
+        compactingStartedAt.remove(conversationId);
+        compactingPhase.remove(conversationId);
+    }
+
     /**
      * 按「字符预算 + 轮数」切批。
      *
@@ -1036,6 +1106,12 @@ public class CompactionService {
         }
 
         String historyText = formatMessagesForCompaction(batch);
+        if (historyText.isBlank()) {
+            // 瘦身后本批只剩工具/思考/系统消息 → 不调用 LLM（否则会发一个空 prompt 白等超时）。
+            // 直接视为「无新增事实」：返回上一版摘要，水位线照常推进，把这段历史覆盖掉。
+            log.debug("压缩批次无可发送正文，跳过 LLM 调用（本批 {} 条）", batch.size());
+            return prevSummary != null && !prevSummary.isBlank() ? prevSummary : EMPTY_BATCH_SUMMARY;
+        }
         String prompt = buildCompactionPrompt(prevSummary, historyText);
 
         List<Map<String, Object>> msgs = new ArrayList<>(1);
@@ -1071,7 +1147,9 @@ public class CompactionService {
         sb.append("5. 必须使用中文\n");
         sb.append("6. 只输出记录本身，不要额外解释，不要复述本提示词\n");
         sb.append("7. 总长度控制在 3000 字以内：宁可概括，也不要堆砌细节"
-                + "（这份记录每次压缩都会累进，过长会拖垮后续请求）\n\n");
+                + "（这份记录每次压缩都会累进，过长会拖垮后续请求）\n");
+        sb.append("8. 下面只包含用户提问与助手正文；工具调用过程、工具结果与模型思考过程已被省略，"
+                + "不要臆测、不要编造这些内容\n\n");
         if (prevSummary != null && !prevSummary.isBlank()) {
             sb.append("## 更早的对话记录（需要与本次内容合并成一份完整记录）\n");
             sb.append(prevSummary).append("\n\n");
@@ -1084,19 +1162,33 @@ public class CompactionService {
 
     /**
      * 把一批消息格式化为纯文本，供压缩 LLM 使用。
+     *
+     * <p><b>压缩输入瘦身（2026-11-26）</b>：只发送「用户消息正文 + 助手正文回复」。
+     * 以下内容一律<b>不</b>进入压缩请求：</p>
+     * <ul>
+     *   <li>{@code reasoning}（思考过程）—— 真实请求链路本来就按 ContextMode 剥离，
+     *       再塞进压缩 prompt 等于让摘要模型处理一份「已经被丢弃的副本」，纯属放大 token；</li>
+     *   <li>{@code tool} 消息（工具结果）—— 体积最大、重复度最高，且不进正文摘要；</li>
+     *   <li>{@code system} 消息 —— 身份/工具规范，绝不应被摘要改写。</li>
+     * </ul>
+     *
+     * <p>工具消息虽然不发送，但它仍会被水位线覆盖（压缩收益照常计算），
+     * 即「压缩掉它、但不让摘要模型读它」——这是本次瘦身的核心取舍。</p>
      */
     private String formatMessagesForCompaction(List<ConversationMessage> messages) {
         StringBuilder sb = new StringBuilder();
         for (ConversationMessage msg : messages) {
-            String role = msg.getRole() != null ? msg.getRole().getValue() : "unknown";
-            sb.append("【").append(role.toUpperCase()).append("】\n");
-            if (msg.getContent() != null && !msg.getContent().isEmpty()) {
-                sb.append(msg.getContent()).append("\n");
+            MessageRole role = msg.getRole();
+            // 只保留 USER 提问与 ASSISTANT 正文；SYSTEM / TOOL / 其他角色全部跳过
+            if (role != MessageRole.USER && role != MessageRole.ASSISTANT) {
+                continue;
             }
-            if (msg.getReasoning() != null && !msg.getReasoning().isEmpty()) {
-                sb.append("【思考过程/工具结果】\n").append(msg.getReasoning()).append("\n");
+            String content = msg.getContent();
+            if (content == null || content.isEmpty()) {
+                continue;
             }
-            sb.append("\n");
+            sb.append("【").append(role.getValue().toUpperCase()).append("】\n");
+            sb.append(content).append("\n\n");
         }
         return sb.toString();
     }

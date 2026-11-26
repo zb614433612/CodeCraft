@@ -221,6 +221,34 @@ export async function cancelTask(conversationId: number): Promise<boolean> {
   }
 }
 
+/**
+ * 查询会话的上下文压缩状态。
+ *
+ * <p>异步预压缩发生在一次请求结束之后，SSE 已关闭，前端收不到事件；
+ * 只能轮询该接口感知「压缩仍在进行」，并在此期间锁定该会话输入，
+ * 直到 {@code compacting=false} 再解锁。</p>
+ */
+export async function getCompactionStatus(conversationId: number): Promise<{
+  compacting: boolean
+  elapsedSec: number
+  phase?: string
+}> {
+  try {
+    const res = await authFetch(`/api/deepseek/compaction/status?conversationId=${conversationId}`)
+    if (!res.ok) return { compacting: false, elapsedSec: 0 }
+    const data = await res.json()
+    return {
+      compacting: Boolean(data?.compacting),
+      elapsedSec: Number(data?.elapsedSec) || 0,
+      phase: typeof data?.phase === 'string' ? data.phase : ''
+    }
+  } catch (e) {
+    // 查询失败按「未压缩」处理：不能让一个可选的可观测性接口把输入永久锁死
+    console.warn('查询压缩状态失败:', e)
+    return { compacting: false, elapsedSec: 0 }
+  }
+}
+
 // ===== 附件上传 =====
 
 export interface FileUploadResult {

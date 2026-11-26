@@ -427,11 +427,14 @@
         </a-spin>
       </a-modal>
 
-      <!-- 流式加载指示器（hasRunningTask：前台流式/后台任务/重连恢复都显示，让「后台输出中...」在切回时可见） -->
-      <div v-if="hasRunningTask &amp;&amp; streamStatus" class="stream-indicator">
+      <!-- 流式加载指示器（hasRunningTask：前台流式/后台任务/重连恢复都显示，让「后台输出中...」在切回时可见）。
+           上下文压缩（守卫/异步）也复用这条状态条：isCompacting 时只显示后端给的最新 elapsed。 -->
+      <div v-if="(hasRunningTask || isCompacting) &amp;&amp; streamStatus" class="stream-indicator">
         <span class="stream-pulse-dot"></span>
         <span class="stream-indicator-text">{{ streamStatus }}</span>
-        <span class="stream-elapsed" v-if="elapsedTime > 0">{{ formatElapsed(elapsedTime) }}</span>
+        <span class="stream-elapsed" v-if="isCompacting ? compactionElapsed > 0 : elapsedTime > 0">
+          {{ formatElapsed(isCompacting ? compactionElapsed : elapsedTime) }}
+        </span>
       </div>
 
       <!-- 补充需求面板：只要该会话「有任务在执行」就显示（前台流式 / 切走后的后台流 / 切回后的重连恢复）。
@@ -741,10 +744,10 @@
           </template>
         </div>
         <div class="input-wrapper">
-          <a-dropdown :trigger="['click']" placement="topLeft" :disabled="hasRunningTask">
+          <a-dropdown :trigger="['click']" placement="topLeft" :disabled="hasRunningTask || isCompacting">
             <a-button
               class="attach-btn"
-              :disabled="hasRunningTask"
+              :disabled="hasRunningTask || isCompacting"
               title="添加附件"
             >
               <PaperClipOutlined />
@@ -766,7 +769,7 @@
             v-model:value="inputMessage"
             placeholder="描述你的编码需求...（Shift+Enter换行，Enter发送，Ctrl+V粘贴截图）"
             :auto-size="{ minRows: 1, maxRows: 8 }"
-            :disabled="hasRunningTask || isOptimizing"
+            :disabled="hasRunningTask || isOptimizing || isCompacting"
             @keydown.enter.exact.prevent="sendMessage()"
             @keydown.shift.enter="handleShiftEnter"
             @paste="handlePasteImage"
@@ -774,7 +777,7 @@
           <a-button
             class="optimize-btn"
             @click="optimizeMessage"
-            :disabled="!inputMessage.trim() || isOptimizing"
+            :disabled="!inputMessage.trim() || isOptimizing || isCompacting"
             title="AI 优化提示词"
           >
             <template v-if="!isOptimizing">✨</template>
@@ -1099,7 +1102,7 @@ import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/store/user'
 import { getConversationList, mapConversationResponseToConversation, getConversationMessages, getConversationMessagesPage, processMessageGroups, deleteConversation as deleteConversationApi, updateConversationName } from '@/api/conversation'
-import { streamChat, checkActiveTask, taskStream, cancelTask, supplementRequest, optimizePrompt } from '@/api/chat'
+import { streamChat, checkActiveTask, taskStream, cancelTask, supplementRequest, optimizePrompt, getCompactionStatus } from '@/api/chat'
 /* AI 浏览器：窗口状态可视化（后端实时问 Electron bridge，不落库；与 v3 共用同一组接口） */
 import { getBrowserSessions, showBrowserSession, closeBrowserSession } from '@/api/browser'
 import type { BrowserTab } from '@/api/browser'
@@ -3326,6 +3329,85 @@ const hasRunningTask = computed(() => {
   return false
 })
 
+// ===== 上下文压缩状态（2026-11-26）=====
+/**
+ * 会话 → 压缩运行状态。
+ *
+ * <p>两个来源：守卫压缩（请求内 SSE {@code compaction_status} 事件，每 15s 一条 running）；
+ * 异步预压缩（请求结束后才开始，SSE 已关闭，只能轮询 {@code /compaction/status}）。
+ * 同一会话只保留最新一条 → 新状态直接顶掉旧状态，不做累加。</p>
+ */
+const compactionStates = reactive(new Map<string, { running: boolean; elapsedSec: number; message: string }>())
+
+/** 当前会话是否正在压缩（输入框锁定依据之一） */
+const isCompacting = computed(() => {
+  const convId = currentConversationId.value
+  return convId ? (compactionStates.get(convId)?.running ?? false) : false
+})
+
+/** 当前会话压缩已耗时（秒）：后端/轮询给的绝对值，前端只展示最新值 */
+const compactionElapsed = computed(() => {
+  const convId = currentConversationId.value
+  return convId ? (compactionStates.get(convId)?.elapsedSec ?? 0) : 0
+})
+
+/** 会话 → 压缩状态轮询定时器 */
+const compactionPollTimers = new Map<string, ReturnType<typeof setInterval>>()
+/** 连续探测到「未压缩」的次数：异步任务在请求结束后才提交，前两次 false 不能立刻停 */
+const compactionPollMisses = new Map<string, number>()
+
+const setCompactionState = (convId: string | null | undefined, running: boolean, elapsedSec = 0, message = '') => {
+  if (!convId) return
+  if (running) compactionStates.set(convId, { running: true, elapsedSec, message })
+  else compactionStates.delete(convId)
+}
+
+const stopCompactionPoll = (convId: string) => {
+  const timer = compactionPollTimers.get(convId)
+  if (timer !== undefined) {
+    clearInterval(timer)
+    compactionPollTimers.delete(convId)
+  }
+  compactionPollMisses.delete(convId)
+}
+
+const pollCompactionStatus = async (convId: string) => {
+  const conversationId = Number(convId)
+  if (!Number.isFinite(conversationId) || conversationId <= 0) {
+    stopCompactionPoll(convId)
+    return
+  }
+  const status = await getCompactionStatus(conversationId)
+  if (status.compacting) {
+    compactionPollMisses.set(convId, 0)
+    setCompactionState(convId, true, status.elapsedSec || 0, '正在整理历史上下文...')
+    setStreamStatus(convId, '正在整理历史上下文...')
+    return
+  }
+  const misses = (compactionPollMisses.get(convId) || 0) + 1
+  compactionPollMisses.set(convId, misses)
+  // 连续 3 次 false（约 6s）才认定结束：异步压缩在流 doOnComplete 后才提交，
+  // 前端 finally 可能先于后端挂锁，第一次探测几乎必然读到 false。
+  if (misses >= 3) {
+    stopCompactionPoll(convId)
+    setCompactionState(convId, false)
+    // 只清掉压缩置入的状态文字，不要误清别的任务状态
+    if (streamStatusMap.get(convId) === '正在整理历史上下文...') {
+      setStreamStatus(convId, '')
+    }
+  }
+}
+
+/** 请求流结束后调用：轮询该会话的异步压缩状态（已有轮询则复用） */
+const startCompactionPoll = (convId: string) => {
+  if (!convId || convId.startsWith('local-')) return
+  if (compactionPollTimers.has(convId)) return
+  compactionPollMisses.set(convId, 0)
+  void pollCompactionStatus(convId)
+  const timer = setInterval(() => void pollCompactionStatus(convId), 2000)
+  compactionPollTimers.set(convId, timer)
+}
+
 // ===== 任务中断状态（LLM 接口错误停止 → 错误反馈 + 一键继续） =====
 
 /** 任务异常中断信息（按会话维度） */
@@ -5305,7 +5387,8 @@ const sendMessage = async (textOverride?: string) => {
   const text = (overrideText || inputMessage.value).trim()
   // ★ 2026-08-14：守卫改用 hasRunningTask——输入框 disabled 后 Enter 等路径虽不会触发，
   //   双保险防止「切回智能体后任务仍在后台执行」时误发新消息造成同会话双流冲突
-  if (hasRunningTask.value) return
+  // ★ 2026-11-26：上下文压缩期间同样禁止发送（异步压缩可能正在改写同一段前缀）
+  if (hasRunningTask.value || isCompacting.value) return
   // M4：支持"仅图片无文字"发送（粘贴截图后直接发）；两者皆无则忽略
   if (!text && attachedFiles.value.length === 0) return
   // M4：图片上传未完成时阻止发送（避免静默丢图）
@@ -5566,6 +5649,21 @@ const sendMessage = async (textOverride?: string) => {
         if (updateAgentInvokePending(assistantMsg, event.data as DelegateProgressData)) {
           scheduleMessageUpdate(convId, assistantMsg.id)
         }
+      } else if (event.type === 'compaction_status') {
+        /*
+         * 上下文压缩状态（2026-11-26）：守卫压缩期间每 15s 一条 running。
+         * 按会话只保留最新一条 → 状态条「顶掉」而不是累加；done 后转轮询，
+         * 因为请求结束后后端还会触发异步预压缩，那段没有 SSE 事件。
+         */
+        const status = event.data
+        setCompactionState(convId, status.status === 'running', status.elapsedSec || 0, status.message || '')
+        if (status.status === 'running') {
+          setStreamStatus(convId, status.message || '正在整理历史上下文...')
+        } else {
+          // 守卫压缩结束：不清空状态文字（压缩前已设置「正在连接...」），
+          // 交给后续流式事件或 finally 覆盖，避免状态条闪空
+          startCompactionPoll(convId)
+        }
       } else if (event.type === 'content') {
         setStreamStatus(convId, '正在生成回答...')
         // 实时更新消息内容
@@ -5796,6 +5894,11 @@ const sendMessage = async (textOverride?: string) => {
       （后端在 Flux 的 doFinally 里写库，见 refreshUsageAfterTurn）。
     */
     refreshUsageAfterTurn(convId)
+    /*
+     * 异步预压缩感知：后端在流 doOnComplete 之后才提交压缩任务，
+     * 这里开始轮询该会话的压缩状态；running 期间输入框会锁定（isCompacting）。
+     */
+    startCompactionPoll(convId)
   }
 }
 
@@ -5944,6 +6047,16 @@ const reconnectToTaskStream = async (convId: number, cursor = 0) => {
         if (targetMsg && updateAgentInvokePending(targetMsg, event.data as DelegateProgressData)) {
           scheduleMessageUpdate(stringConvId, targetMsg.id)
         }
+      } else if (event.type === 'compaction_status') {
+        // 重连场景同样按「最新一条覆盖」处理压缩状态（不发 thinking 累加）
+        const status = event.data
+        setCompactionState(stringConvId, status.status === 'running', status.elapsedSec || 0, status.message || '')
+        if (status.status === 'running') {
+          setStreamStatus(stringConvId, status.message || '正在整理历史上下文...')
+        } else {
+          // 重连场景同理：结束时不清空状态文字，交给后续流式事件或 finally 覆盖
+          startCompactionPoll(stringConvId)
+        }
       } else if (event.type === 'task_error') {
         // ★ 重连场景：后台任务因 LLM 接口错误停止——记录错误详情 + 恢复「一键继续」入口
         const errData = event.data as TaskErrorData
@@ -6043,6 +6156,11 @@ const checkAndReconnect = async (convId: string) => {
         title: '上次任务执行失败',
         message: task.lastTask.errorMessage || '任务因错误中断，可点击「继续任务」重试。'
       }
+    }
+    // 压缩感知（2026-11-26）：任务已结束 → 后端可能刚提交异步预压缩（SSE 已关闭）。
+    // 启动轮询恢复「整理中」状态与输入锁定；若没有压缩，6 秒内自动停止。
+    if (!task.active) {
+      startCompactionPoll(convId)
     }
   } catch (e) {
     // 网络抖动/后端不可达：不抛未处理异常，仅记录（重连失败不阻断 UI）
@@ -7200,6 +7318,8 @@ onUnmounted(() => {
   disposeLogXterm()
   // 清理浏览器标签轮询（组件卸载后继续轮询会持续请求后端，切到别的页面也不停）
   stopBrowserPoll()
+  // 清理压缩状态轮询（2s/会话）：组件卸载后不清理会持续打后端
+  for (const key of compactionPollTimers.keys()) stopCompactionPoll(key)
   // 清理拖拽事件
   document.removeEventListener('mousemove', onGlobalDragMove)
   document.removeEventListener('mouseup', onGlobalDragUp)
