@@ -5,6 +5,64 @@
 
 ---
 
+## [3.6.2] - 2026-11-26
+
+> **修复 3.6.1 安装版发送消息 400（unknown language）**：安装包内置 JRE 由 jlink 裁剪，
+> 模块清单缺少 `jdk.localedata`，除英文外的语言名全部回退英文名（`zh → Chinese`），
+> 被 DeepSeek `latest_reminder` 的 language 枚举校验拒绝。现改为内置官方白名单，
+> 彻底不依赖运行时 locale 数据；历史落库的非法值在重建上下文时自动丢弃。
+
+### 🔧 latest_reminder 语言值改为官方白名单
+
+- **真因**：3.6.1 用 `Locale.getDisplayLanguage()` 现算语言名。开发机是完整 JDK（返回
+  `中文`），安装包内置 JRE 缺 `jdk.localedata`（返回 `Chinese`）；而 DeepSeek 要求
+  `language` 必须是「用该语言自身书写」的官方值，枚举校验不通过直接 400：
+  `Invalid 'messages[x].content': unknown language 'Chinese'`；
+- `LatestReminderService` 新增 `LANGUAGE_LABELS` 白名单映射（严格照抄官方 69 个值），
+  中文按地区细分 `中文` / `中文繁體` / `中文香港`，不在白名单的语言统一回退 `English`；
+- `weekday` 改为内置中英文星期表，避免裁剪 JRE 下出现 `language=中文` 却配 `Thu` 的错配；
+- 新增 `sanitizeForSend()`：对历史落库值做段数、日期与 language 白名单校验，非法值丢弃；
+- `ContextBuilder` 合成 reminder 前调用该校验——官方允许省略历史 reminder（仅降低
+  上下文缓存命中率），绝不再把脏值发给 API。
+
+### 📦 打包流程补 jdk.localedata（治本）
+
+- `.github/workflows/release.yml`（Windows / macOS / Linux 三处）、`scripts/build.bat`、
+  `scripts/build.sh`：jlink `--add-modules` 追加 `jdk.localedata`，并增加
+  `--include-locales=zh,en` 控制产物体积；
+- `BUILD_AND_RUN.md`、`docs/RELEASE_CHECKLIST.md` / `RELEASE_CHECKLIST_EN.md` 同步更新
+  jlink 命令；
+- 构建脚本检测到 `electron/jre` 已存在会跳过裁剪，升级后必须删除该目录重新裁剪。
+
+### ✅ 验证
+
+- 同一段 Locale 代码实测：完整 JDK 输出 `中文 / 中国 / 星期四`，jlink 裁剪 JRE（无
+  `jdk.localedata`）输出 `Chinese / China / Thu`，与线上报错完全一致；
+- `LatestReminderServiceCheck` 22/22 PASS（中文三变体、德语、挪威语回退 English、
+  `Chinese` / `Korean` 脏值拦截）；`ContextBuilderTrimTest` 5/5 PASS；
+  `mvn -DskipTests test-compile` 通过。
+
+### 🔢 版本号同步
+
+- `pom.xml`（项目版本 → 3.6.2，产物 `code-craft-3.6.2.jar`）
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json`（`version` + `extraResources` 的 `code-craft-3.6.2.jar` 路径）/
+  `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.6.2
+- README / README_EN 徽章、8 个 docs 头部、DEV_QUICKREF / RELEASE_CHECKLIST 打包命令示例、
+  FAQ 版本示例
+
+### ⬆️ 升级说明
+
+- 无数据库结构变更，无需迁移；覆盖安装即可；
+- 必须重启后端；
+- 3.6.1 期间产生的历史会话里 `latest_reminder` 是脏值（`...,App,Chinese`），升级后重建
+  上下文时会被自动丢弃，请勿手动改库；
+- 自行打包时务必先删除 `electron/jre` 再裁剪，否则脚本跳过裁剪、旧 JRE 仍然缺 locale 数据。
+
+---
+
 ## [3.6.1] - 2026-11-26
 
 > **DeepSeek 用户元信息 + 截图上下文缓存修复**：接入 DeepSeek Chat Completions 的

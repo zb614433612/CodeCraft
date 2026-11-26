@@ -8,6 +8,7 @@ import com.example.agentdeepseek.mapper.FileReferenceMapper;
 import com.example.agentdeepseek.model.entity.Conversation;
 import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.MessageRole;
+import com.example.agentdeepseek.service.LatestReminderService;
 import com.example.agentdeepseek.service.files.FileVisionService;
 import com.example.agentdeepseek.service.llm.LLMClient;
 import com.example.agentdeepseek.service.llm.LLMClientManager;
@@ -110,6 +111,8 @@ public class ContextBuilder {
     private final FileVisionService fileVisionService;
     /** 当前 Provider 能力解析：latest_reminder 只对 DeepSeek 适配器生成 */
     private final LLMClientManager llmClientManager;
+    /** latest_reminder 历史值校验：旧版本（裁剪 JRE）落库的非法 language 会让 DeepSeek 直接 400 */
+    private final LatestReminderService latestReminderService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ContextBuilder(ConversationMapper conversationMapper,
@@ -119,7 +122,8 @@ public class ContextBuilder {
                           ToolResultBudget toolResultBudget,
                           FileReferenceMapper fileReferenceMapper,
                           FileVisionService fileVisionService,
-                          LLMClientManager llmClientManager) {
+                          LLMClientManager llmClientManager,
+                          LatestReminderService latestReminderService) {
         this.conversationMapper = conversationMapper;
         this.conversationMessageMapper = conversationMessageMapper;
         this.compactionService = compactionService;
@@ -128,6 +132,7 @@ public class ContextBuilder {
         this.fileReferenceMapper = fileReferenceMapper;
         this.fileVisionService = fileVisionService;
         this.llmClientManager = llmClientManager;
+        this.latestReminderService = latestReminderService;
     }
 
     // ==================== Agent 类型解析 ====================
@@ -294,14 +299,21 @@ public class ContextBuilder {
                  * 这样 DB 行序不受影响，历史每轮的 reminder 也保持稳定（利于前缀缓存）。
                  * 非 DeepSeek Provider 会在适配器出口统一过滤。
                  */
-                if (role == MessageRole.USER
-                        && includeLatestReminder
-                        && msg.getLatestReminder() != null
-                        && !msg.getLatestReminder().isBlank()) {
-                    Map<String, Object> reminderMessage = new HashMap<>();
-                    reminderMessage.put("role", LLMClient.LATEST_REMINDER_ROLE);
-                    reminderMessage.put("content", msg.getLatestReminder());
-                    result.add(reminderMessage);
+                if (role == MessageRole.USER && includeLatestReminder) {
+                    /*
+                     * 历史落库值可能是旧版本产出的非法内容（v3.6.1 安装包裁剪 JRE 缺 locale 数据，
+                     * language 落成英文名 Chinese，DeepSeek 直接 400 unknown language）。
+                     * 官方允许省略历史 reminder（仅降低上下文缓存命中率），因此非法值一律丢弃。
+                     */
+                    String reminder = latestReminderService == null
+                            ? null
+                            : latestReminderService.sanitizeForSend(msg.getLatestReminder());
+                    if (reminder != null) {
+                        Map<String, Object> reminderMessage = new HashMap<>();
+                        reminderMessage.put("role", LLMClient.LATEST_REMINDER_ROLE);
+                        reminderMessage.put("content", reminder);
+                        result.add(reminderMessage);
+                    }
                 }
                 messageMap.put("role", role.getValue());
                 Object content = role == MessageRole.USER

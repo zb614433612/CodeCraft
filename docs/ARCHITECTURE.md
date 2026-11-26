@@ -1,7 +1,7 @@
 ﻿﻿﻿﻿> 🌐 English Version：[🇬🇧 ARCHITECTURE_EN](./ARCHITECTURE_EN.md)
 # CodeCraft 架构全景图
 
-> 版本：v3.6.1 | 更新：2026-11-26 | 受众：开发者 / AI 协作伙伴
+> 版本：v3.6.2 | 更新：2026-11-26 | 受众：开发者 / AI 协作伙伴
 > 本文档旨在让新加入的开发者（包括 AI Agent）在 5 分钟内建立对项目的完整认知地图。
 
 ---

@@ -155,7 +155,8 @@ mvn clean package -DskipTests -DskipFrontend=true
 
    :: 用 jlink 裁剪最小化 JRE（约 43MB）
    "%JAVA_HOME%\bin\jlink" ^
-     --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
+     --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata ^
+     --include-locales=zh,en ^
      --strip-debug --compress 2 --no-header-files --no-man-pages ^
      --output jre
    ```
@@ -246,7 +247,8 @@ electron/release/
    export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 
    "$JAVA_HOME/bin/jlink" \
-     --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+     --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata \
+     --include-locales=zh,en \
      --strip-debug --compress 2 --no-header-files --no-man-pages \
      --output jre
    ```
@@ -360,7 +362,8 @@ cd electron
 rm -rf jre
 export JAVA_HOME=/path/to/linux-jdk-17
 "$JAVA_HOME/bin/jlink" \
-  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata \
+  --include-locales=zh,en \
   --strip-debug --compress 2 --no-header-files --no-man-pages \
   --output jre
 
@@ -392,7 +395,7 @@ mvn clean package -DskipTests
 
 # 2. 裁剪 Windows 内置 JRE（仅首次或 JDK 变更时）
 cd electron
-"%JAVA_HOME%\bin\jlink" --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi --strip-debug --compress 2 --no-header-files --no-man-pages --output jre
+"%JAVA_HOME%\bin\jlink" --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata --include-locales=zh,en --strip-debug --compress 2 --no-header-files --no-man-pages --output jre
 
 # 3. 打包
 npm install
@@ -415,7 +418,8 @@ cd electron
 rm -rf jre
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 "$JAVA_HOME/bin/jlink" \
-  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata \
+  --include-locales=zh,en \
   --strip-debug --compress 2 --no-header-files --no-man-pages \
   --output jre
 

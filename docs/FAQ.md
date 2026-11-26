@@ -99,6 +99,33 @@ CodeCraft 内置了 `FileEncodingDetector`（基于 juniversalchardet，支持 3
 
 ---
 
+### Q8：3.6.1 发送消息报错 `unknown language 'Chinese'`
+
+**现象**：升级到 3.6.1 后发送消息失败，提示
+
+```
+请求体格式错误：Invalid 'messages[5].content': unknown language 'Chinese'.
+Expected '<date>,<weekday>,<location>,<platform>,<language>'
+```
+
+**原因**：3.6.1 接入了 DeepSeek 的 `latest_reminder` 用户元信息（格式
+`<date>,<weekday>,<location>,<platform>,<language>`），其中 `language` 必须是
+**用该语言自身书写**的官方语言名（中文只能写 `中文`，不能写 `Chinese`），DeepSeek 会做枚举校验。
+
+安装包的内置 JRE 由 `jlink` 裁剪，模块清单里没有 `jdk.localedata`，导致
+`Locale.getDisplayLanguage()` 除英文外全部回退成英文名（`zh → Chinese`）。
+**用 IDEA / 完整 JDK 跑同样的代码不会复现**，只有安装版必现——这就是「3.6.0 正常、3.6.1 报错」的根本差异
+（3.6.0 没有该功能，不发送 `latest_reminder`）。
+
+**解决**：
+- 升级到修复版本：语言名与星期名改为内置的官方白名单表，不再依赖 JRE 的 locale 数据；
+- 旧版本落库的历史 `latest_reminder` 会在重建上下文时校验，非法值自动丢弃
+  （官方允许省略历史 reminder，仅降低上下文缓存命中率，不影响对话）；
+- 自行打包时请把 `jdk.localedata` 加进 jlink 的 `--add-modules`，并追加 `--include-locales=zh,en`
+  （`BUILD_AND_RUN.md` / `docs/RELEASE_CHECKLIST.md` 已更新），随后删除 `electron/jre` 重新裁剪。
+
+---
+
 ## P2P 连接
 
 ### Q8：P2P 连不上 / 扫码没反应
@@ -240,7 +267,7 @@ npm install
 1. **桌面客户端**：左下角头像 → 个人信息上方菜单，或「设置 → 版本与更新」（路由 `/about`）；
 2. **浏览器**：打开 `http://localhost:8084/v3/#/about`（经典版在「系统设置」）；
 3. **命令行**：`GET /api/system/version`（登录后）返回
-   `{"name":"CodeCraft","version":"3.6.1","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
+   `{"name":"CodeCraft","version":"3.6.2","buildTime":"...","javaVersion":"17.0.0.1","osName":"Windows 10","osArch":"amd64","pid":45800}`。
 
 **为什么有两个版本号**：
 | 显示项 | 来源 | 什么时候会不一致 |

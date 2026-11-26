@@ -8,8 +8,8 @@
 ## 发布前检查
 
 > 🚀 **推荐方式**：使用一键构建脚本，自动完成下面 Step 1~3：
-> - Windows：`scripts\build.bat v3.6.1`
-> - Mac/Linux：`./scripts/build.sh v3.6.1`
+> - Windows：`scripts\build.bat v3.6.2`
+> - Mac/Linux：`./scripts/build.sh v3.6.2`
 >
 > 以下为手动步骤，供需要精细控制的场景参考。
 
@@ -52,7 +52,8 @@ cd electron
 
 # Windows
 "%JAVA_HOME%\bin\jlink" ^
-  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi ^
+  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata ^
+  --include-locales=zh,en ^
   --strip-debug --compress 2 --no-header-files --no-man-pages ^
   --output jre
 
@@ -60,7 +61,8 @@ cd electron
 rm -rf jre
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 "$JAVA_HOME/bin/jlink" \
-  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi \
+  --add-modules java.base,java.logging,java.sql,java.xml,java.naming,jdk.naming.dns,java.management,java.instrument,java.security.jgss,java.net.http,jdk.unsupported,java.scripting,java.compiler,java.desktop,jdk.crypto.cryptoki,jdk.security.auth,java.transaction.xa,java.rmi,java.management.rmi,jdk.localedata \
+  --include-locales=zh,en \
   --strip-debug --compress 2 --no-header-files --no-man-pages \
   --output jre
 ```

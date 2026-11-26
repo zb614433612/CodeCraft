@@ -5,6 +5,74 @@ This document records all important version changes of the CodeCraft project.
 
 ---
 
+## [3.6.2] - 2026-11-26
+
+> **Fixes the 400 (unknown language) error when sending messages in the 3.6.1 installer build**:
+> the bundled JRE is trimmed by jlink and its module list omitted `jdk.localedata`, so every
+> non-English language name fell back to its English form (`zh → Chinese`), which DeepSeek's
+> `latest_reminder` language enumeration rejects. Language names now come from a built-in
+> official whitelist and no longer depend on runtime locale data; illegal values already stored
+> in history are dropped when the context is rebuilt.
+
+### 🔧 latest_reminder language value now uses the official whitelist
+
+- **Root cause**: 3.6.1 computed the language name with `Locale.getDisplayLanguage()`. A full JDK
+  (dev machines) returns `中文`, but the bundled JRE lacking `jdk.localedata` returns `Chinese`.
+  DeepSeek requires `language` to be the name written in that language and validates it against
+  an enumeration, so the request fails with 400:
+  `Invalid 'messages[x].content': unknown language 'Chinese'`;
+- `LatestReminderService` adds a `LANGUAGE_LABELS` whitelist map (the 69 official values copied
+  verbatim). Chinese is split by region into `中文` / `中文繁體` / `中文香港`; languages outside
+  the whitelist fall back to `English`;
+- `weekday` now uses built-in Chinese/English weekday tables, preventing a mismatch such as
+  `language=中文` paired with `Thu` under a trimmed JRE;
+- Added `sanitizeForSend()`: validates stored values (field count, date, language whitelist) and
+  discards illegal ones;
+- `ContextBuilder` calls that validation before synthesizing a reminder — the official docs allow
+  omitting historical reminders (only lowering context cache hits), so dirty values are never
+  sent to the API again.
+
+### 📦 Packaging now includes jdk.localedata (root fix)
+
+- `.github/workflows/release.yml` (Windows / macOS / Linux), `scripts/build.bat` and
+  `scripts/build.sh`: `jdk.localedata` is appended to the jlink `--add-modules` list, together
+  with `--include-locales=zh,en` to keep the artifact size in check;
+- `BUILD_AND_RUN.md`, `docs/RELEASE_CHECKLIST.md` and `RELEASE_CHECKLIST_EN.md` are updated
+  accordingly;
+- Build scripts skip trimming when `electron/jre` already exists, so that directory must be
+  deleted before rebuilding after this upgrade.
+
+### ✅ Verification
+
+- Measured with the same Locale snippet: a full JDK prints `中文 / 中国 / 星期四`, while a jlink
+  JRE without `jdk.localedata` prints `Chinese / China / Thu`, matching the production error;
+- `LatestReminderServiceCheck` 22/22 PASS (three Chinese variants, German, Norwegian falling back
+  to English, `Chinese` / `Korean` dirty values rejected); `ContextBuilderTrimTest` 5/5 PASS;
+  `mvn -DskipTests test-compile` passes.
+
+### 🔢 Version sync
+
+- `pom.xml` (project version → 3.6.2, artifact `code-craft-3.6.2.jar`)
+- `frontend/package.json` / `frontend/package-lock.json`
+- `frontend-v3/package.json` / `frontend-v3/package-lock.json`
+- `electron/package.json` (`version` + the `code-craft-3.6.2.jar` path in `extraResources`) /
+  `electron/package-lock.json`
+- `CodeCraftMcpServer.SERVER_VERSION` → 3.6.2
+- README / README_EN badges, 8 docs headers, DEV_QUICKREF / RELEASE_CHECKLIST packaging examples,
+  FAQ version sample
+
+### ⬆️ Upgrade notes
+
+- No database schema migration is required; a normal over-the-top install works;
+- Restarting the backend is required;
+- Sessions created while 3.6.1 was installed contain dirty `latest_reminder` values
+  (`...,App,Chinese`). They are dropped automatically when the context is rebuilt — do not edit
+  the database by hand;
+- When packaging yourself, delete `electron/jre` before trimming; otherwise the build script
+  skips trimming and the old JRE still lacks locale data.
+
+---
+
 ## [3.6.1] - 2026-11-26
 
 > **DeepSeek user metadata + screenshot context-cache fix**: Integrates DeepSeek Chat

@@ -42,7 +42,7 @@ public class ContextBuilderTrimTest {
         // 除配置外其余依赖在 trimToTokenBudget 路径上都不使用，传 null 即可
         DeepSeekConfig config = new DeepSeekConfig();
         config.getCompaction().setProtectRounds(2);
-        ContextBuilder builder = new ContextBuilder(null, null, null, config, null, null, null, null);
+        ContextBuilder builder = new ContextBuilder(null, null, null, config, null, null, null, null, null);
 
         testMultiUserRoundsAreTrimmed(builder);
         testTwoUserRoundsStillTrimmed(builder);
@@ -144,7 +144,7 @@ public class ContextBuilderTrimTest {
         // trimToolLoopToBudget 依赖 ToolResultBudget（截断规则），需真实实例
         ToolResultBudget budget = new ToolResultBudget(new ToolResultBudgetConfig());
         DeepSeekConfig config = new DeepSeekConfig();
-        ContextBuilder builder = new ContextBuilder(null, null, null, config, budget, null, null, null);
+        ContextBuilder builder = new ContextBuilder(null, null, null, config, budget, null, null, null, null);
 
         List<Map<String, Object>> messages = buildSingleUserToolLoop(30, 20_000);
         int before = TokenEstimator.estimateMessages(messages);
