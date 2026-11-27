@@ -10,8 +10,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -518,15 +516,6 @@ public class TaskManagerTool implements Tool {
         return tasks;
     }
 
-    /**
-     * 按优先级排序（HIGH → MEDIUM → LOW），同优先级按 ID 排序
-     */
-    private List<TaskItem> sortByPriority(List<TaskItem> tasks) {
-        return tasks.stream()
-                .sorted(Comparator.comparingInt((TaskItem t) -> t.priority.ordinal())
-                        .thenComparing(t -> t.id))
-                .collect(Collectors.toList());
-    }
 
     private String getProgressSummary(List<TaskItem> tasks) {
         long completed = tasks.stream().filter(t -> t.status == TaskStatus.COMPLETED).count();

@@ -238,8 +238,6 @@ const providerCapabilityCache = new Map<string, RemoteCapability>()
  */
 const templateCapabilityCache = new Map<string, RemoteCapability>()
 
-/** 缓存是否已预热（未预热时 deriveCapabilities 会静默走本地兜底，不报错） */
-let cachePrimed = false
 
 /**
  * 把后端能力档案写入缓存。
@@ -282,9 +280,6 @@ export function primeCapabilities(
       templateCapabilityCache.set(template, item)
     }
   }
-  if (items.length > 0) {
-    cachePrimed = true
-  }
 }
 
 /**
@@ -310,10 +305,6 @@ export async function refreshCapabilities(): Promise<void> {
   }
 }
 
-/** 缓存是否已就绪（可用于诊断「为什么界面显示的是旧结论」） */
-export function isCapabilityCachePrimed(): boolean {
-  return cachePrimed
-}
 
 /**
  * 按 code 或 template 取后端能力档案（未命中返回 null）。
@@ -362,30 +353,6 @@ export function capabilityHintOf(
   return hint && hint.trim() ? hint : null
 }
 
-/** 取某个能力的徽章短文案（后端已按平台差异定制过，如「联网搜索·通用抓取」） */
-export function capabilityLabelOf(
-  key: string | undefined | null,
-  field: CapabilityField
-): string | null {
-  const detail = capabilityDetailOf(key)
-  if (!detail) return null
-  const label = detail[field]?.label
-  return label && label.trim() ? label : null
-}
-
-/** 取某个能力缺失的凭证字段名（仅后端能精确知道，如 ['secretKey']） */
-export function capabilityMissingKeys(
-  key: string | undefined | null,
-  field: CapabilityField
-): string[] {
-  const detail = capabilityDetailOf(key)
-  return detail?.[field]?.missingKeys ?? []
-}
-
-/** 取后端判定的计费模式（QUOTA=套餐次数制不估价 / FREE=本地免费 / TOKEN=按 token 估价） */
-export function pricingModeOf(key?: string | null): 'TOKEN' | 'QUOTA' | 'FREE' | null {
-  return capabilityDetailOf(key)?.pricingMode ?? null
-}
 
 /**
  * 规整后端下发的 state 字符串。

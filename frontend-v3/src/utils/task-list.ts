@@ -117,7 +117,3 @@ export function taskStats(items: TaskItem[]): TaskStats {
   return { total: items.length, done, blocked, failed }
 }
 
-/** 当前进行中的任务（浮层头部提示 / 折叠态摘要用） */
-export function currentTask(items: TaskItem[]): TaskItem | undefined {
-  return items.find(t => t.status === 'doing') || undefined
-}

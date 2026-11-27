@@ -22,14 +22,6 @@ export const UI_VERSION_KEY = 'cc.uiVersion'
 
 export type UiVersion = 'v2' | 'v3'
 
-/** 读取当前偏好；未设置或读取失败一律按新版处理（默认启动新版） */
-export function getUiVersion(): UiVersion {
-  try {
-    return localStorage.getItem(UI_VERSION_KEY) === 'v2' ? 'v2' : 'v3'
-  } catch {
-    return 'v3'
-  }
-}
 
 /** 写入偏好（localStorage 不可用时静默失败，跳转照常进行） */
 export function setUiVersion(version: UiVersion): void {

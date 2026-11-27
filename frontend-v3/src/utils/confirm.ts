@@ -132,15 +132,6 @@ export function confirmDelete(
   })
 }
 
-/** 供 <ConfirmHost /> 内部使用：清空队列与当前弹窗（如路由切换兜底） */
-export function resetConfirm(): void {
-  const pending = queue.splice(0, queue.length)
-  pending.forEach(entry => entry.resolve(false))
-  const current = confirmState.current
-  confirmState.current = null
-  confirmState.loading = false
-  current?.resolve(false)
-}
 
 // 开发期手测入口：控制台执行 __ccConfirm({ title: 'hi' })
 if (import.meta.env.DEV && typeof window !== 'undefined') {

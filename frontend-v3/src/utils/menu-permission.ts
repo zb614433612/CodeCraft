@@ -30,12 +30,6 @@ export function menuTypeTone(type: string): string {
   return String(type || 'setting').toLowerCase()
 }
 
-/** 菜单类型 → 中文标题 */
-export function menuTypeTitle(type: string): string {
-  const hit = MENU_TYPE_META.find(meta => meta.type === type)
-  return hit ? hit.title : type
-}
-
 /** 按类型分组（组内按 sortOrder 升序，组间按 MENU_TYPE_META 顺序） */
 export function groupMenusByType<T extends { menuType: string; sortOrder?: number }>(
   menus: T[]

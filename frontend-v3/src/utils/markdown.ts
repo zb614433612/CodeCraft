@@ -586,8 +586,5 @@ export function renderMarkdownLight(content: string): string {
   }
 }
 
-/** 暴露实例与能力判断，便于调试 / 后续按需扩展（测试脚本也会用到） */
-export const markdownUtils = {
-  hasLanguage: (lang: string) => !!hljs.getLanguage(lang),
-  registeredLanguages: () => hljs.listLanguages()
-}
+
+

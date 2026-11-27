@@ -337,10 +337,6 @@ export function hunkPatch(hunk: DiffHunk): string {
   return `${hunk.header}\n${body}\n`
 }
 
-/** 多个 hunk 拼成一段 patch（一次撤销多块时用） */
-export function hunksPatch(hunks: DiffHunk[]): string {
-  return hunks.map(hunkPatch).join('')
-}
 
 /**
  * 只保留 hunk 中某一行变更的 patch（「撤销此行」）。
@@ -393,13 +389,6 @@ export function summarize(hunks: DiffHunk[]): DiffStats {
   return { added, removed, hunks: hunks.length }
 }
 
-/**
- * 从 hunk 推断变更所在的「新文件行号区间」（用于双栏视图定位与折叠提示）。
- */
-export function newRangeOf(hunk: DiffHunk): [number, number] {
-  const start = hunk.newStart
-  return [start, start + Math.max(hunk.newCount, 1) - 1]
-}
 
 /**
  * 双栏视图的数据源：把一个 hunk 内的行拆成左右两列。

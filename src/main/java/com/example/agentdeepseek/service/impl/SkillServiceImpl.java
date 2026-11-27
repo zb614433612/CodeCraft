@@ -3,7 +3,6 @@ package com.example.agentdeepseek.service.impl;
 import com.example.agentdeepseek.mapper.SkillMapper;
 import com.example.agentdeepseek.model.entity.Skill;
 import com.example.agentdeepseek.service.SkillService;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -11,7 +10,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 
 /**

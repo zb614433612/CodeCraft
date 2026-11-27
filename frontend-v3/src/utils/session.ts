@@ -41,20 +41,7 @@ export function peekIdentity(): UserInfo | null {
   return info && info.role ? info : null
 }
 
-/** 当前是否管理员（基于快照，同步；快照未就绪时返回 false） */
-export function isAdminNow(): boolean {
-  return useUserStore().isAdmin
-}
 
-/**
- * 是否可访问某类页面。
- *
- * @param adminOnly 页面是否仅管理员可访问（false / undefined 时任何人可访问）
- */
-export function canAccess(adminOnly?: boolean): boolean {
-  if (!adminOnly) return true
-  return isAdminNow()
-}
 
 /**
  * 补齐展示字段（昵称 / 头像 / 邮箱 / 手机号）。
@@ -159,10 +146,6 @@ export function resetIdentity(clearCache = true): void {
   if (clearCache) useUserStore().setUserInfo(null)
 }
 
-/** 是否处于「身份拉取失败」的冷却期（供 UI 展示「后端未连接」提示） */
-export function inIdentityCooldown(): boolean {
-  return Date.now() < cooldownUntil
-}
 
 /**
  * 彻底清空会话：token + 身份快照 + 冷却计时。

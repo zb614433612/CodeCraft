@@ -65,13 +65,6 @@ export function settlePrompt(value: string | null): void {
   entry.resolve(value === null ? null : value.trim())
 }
 
-/** 清空队列与当前弹窗（路由切换等兜底场景） */
-export function resetPrompt(): void {
-  const entry = promptState.current
-  promptState.current = null
-  entry?.resolve(null)
-}
-
 // 开发期手测入口：控制台执行 __ccPrompt({ title: 'hi' })
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   const scope = window as unknown as Record<string, unknown>

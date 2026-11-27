@@ -1,6 +1,5 @@
 package com.example.agentdeepseek.mapper;
 
-import com.example.agentdeepseek.model.entity.RoleMenu;
 import org.apache.ibatis.annotations.*;
 import org.springframework.stereotype.Repository;
 

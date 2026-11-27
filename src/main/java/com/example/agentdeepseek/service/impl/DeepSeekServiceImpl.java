@@ -20,7 +20,6 @@ import com.example.agentdeepseek.model.dto.ChatRequest;
 import com.example.agentdeepseek.model.entity.AgentTask;
 import com.example.agentdeepseek.model.entity.AgentConfig;
 import com.example.agentdeepseek.model.entity.Conversation;
-import com.example.agentdeepseek.model.entity.ConversationMessage;
 import com.example.agentdeepseek.model.entity.FileAsset;
 import com.example.agentdeepseek.model.entity.MessageRole;
 import com.example.agentdeepseek.model.entity.ProviderConfig;
@@ -64,24 +63,17 @@ import com.example.agentdeepseek.util.TaskContext;
 import com.example.agentdeepseek.util.TaskContextRegistry;
 import com.example.agentdeepseek.util.ToolContext;
 import com.example.agentdeepseek.model.SubAgentResult;
-import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.http.MediaType;
-import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.BodyInserters;
-import org.springframework.web.reactive.function.client.ClientResponse;
-import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.Disposable;
@@ -91,8 +83,6 @@ import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
-import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -100,14 +90,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -3377,26 +3364,6 @@ public class DeepSeekServiceImpl implements DeepSeekService, InitializingBean {
             "⚠️ 模型本次未产出正文（思考完直接结束，常见于超长上下文）。"
                     + "可以直接重发一次，或降低思考档位 / 缩短上下文后重试。";
 
-    /** 把 content（String 或多模态块列表）转成纯文本；无可用文本时返回 null */
-    private static String contentToPlainText(Object content) {
-        if (content instanceof String text) {
-            return text;
-        }
-        if (content instanceof List<?> parts) {
-            StringBuilder sb = new StringBuilder();
-            for (Object item : parts) {
-                if (item instanceof Map<?, ?> block && "text".equals(block.get("type"))) {
-                    Object text = block.get("text");
-                    if (text != null) {
-                        sb.append(text);
-                    }
-                    sb.append('\n');
-                }
-            }
-            return sb.length() == 0 ? null : sb.toString();
-        }
-        return content == null ? null : String.valueOf(content);
-    }
 
     /** P2 会话级去重：同会话是否已注入过任务启动弯路预警 */
     private boolean isDetourHintInjected(Long conversationId) {

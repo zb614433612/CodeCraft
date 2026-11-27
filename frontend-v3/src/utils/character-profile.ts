@@ -94,10 +94,6 @@ export const CHARACTER_FIELDS: CharacterFieldMeta[] = [
   { key: 'style', label: '说话风格', placeholder: '如：说话温柔，喜欢用表情符号', type: 'textarea', wide: true, rows: 2, maxLength: 500 }
 ]
 
-/** 空性格对象（新建抽屉的初始值） */
-export function createEmptyCharacterProfile(): CharacterProfile {
-  return {}
-}
 
 /**
  * 编辑表单用的性格状态
@@ -210,12 +206,5 @@ export function hasCharacterProfile(raw?: string | null): boolean {
   return Object.keys(parseCharacterProfile(raw)).length > 0
 }
 
-/**
- * 一行摘要（卡片 / 提示文案用）
- *
- * <p>只取最能体现角色的 3 项：姓名、物种、性格，避免卡片被长文本撑高。</p>
- */
-export function characterSummary(profile: CharacterProfile): string {
-  const parts = [profile.name, profile.species, profile.personality].filter(Boolean) as string[]
-  return parts.join(' · ')
-}
+
+

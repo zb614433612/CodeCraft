@@ -16,7 +16,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.function.Consumer;
 
 /**
  * P2P 连接管理器

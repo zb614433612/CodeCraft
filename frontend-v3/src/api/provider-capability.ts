@@ -70,14 +70,5 @@ export function getAllProviderCapabilities() {
   return fetchData<Record<string, RemoteCapability>>('/llm-providers/capabilities')
 }
 
-/**
- * 单个 Provider 的能力（结合其真实凭证）。
- *
- * 注意：后端读的是 DB 原始值，因此能精确判断「凭证是否成对齐全」并返回 missingKeys；
- * 返回值本身不含任何密钥，可安全下发。
- */
-export function getProviderCapability(code: string) {
-  return fetchData<RemoteCapability>(
-    `/llm-providers/${encodeURIComponent(code)}/capabilities`
-  )
-}
+
+

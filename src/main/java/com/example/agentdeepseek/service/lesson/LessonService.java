@@ -3,7 +3,6 @@ package com.example.agentdeepseek.service.lesson;
 import com.example.agentdeepseek.mapper.LessonMapper;
 import com.example.agentdeepseek.mapper.LessonRuleMapper;
 import com.example.agentdeepseek.model.entity.Lesson;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;

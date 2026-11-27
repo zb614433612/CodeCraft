@@ -41,11 +41,6 @@ export interface LoginResult {
   expire: number
 }
 
-/** 自动登录凭据 */
-export interface AutoLoginCredential {
-  username: string
-  password: string
-}
 
 /** API 前缀（后端所有 REST 接口均以 /api 开头） */
 const API_BASE = '/api'
@@ -81,17 +76,10 @@ const TOKEN_REVOKED_KEY = 'codecraft.token.revoked'
  */
 const LEGACY_USER_KEY = 'user'
 
-/** localStorage：自动登录凭据覆盖键 */
-const CREDENTIAL_KEY = 'codecraft.auto-login'
-
-/** 默认自动登录账号（后端初始化种子：admin / 123456） */
-const DEFAULT_CREDENTIAL: AutoLoginCredential = { username: 'admin', password: '123456' }
 
 /** 内存 token（优先于 localStorage，减少读写） */
 let memoryToken = ''
 
-/** 进行中的登录任务（并发去重） */
-let loginTask: Promise<string> | null = null
 
 /** 登录相关路径：不参与 401 自动重登（避免死循环） */
 function isAuthPath(url: string): boolean {
@@ -268,31 +256,7 @@ export function clearAuthToken(): void {
   }
 }
 
-/** 读取自动登录凭据（localStorage 可覆盖默认值） */
-export function readCredential(): AutoLoginCredential {
-  try {
-    const raw = localStorage.getItem(CREDENTIAL_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<AutoLoginCredential>
-      if (parsed?.username && parsed?.password) {
-        return { username: parsed.username, password: parsed.password }
-      }
-    }
-  } catch {
-    // 非法 JSON 忽略，回退默认账号
-  }
-  return { ...DEFAULT_CREDENTIAL }
-}
 
-/** 覆盖自动登录凭据（写入 localStorage，传 null 恢复默认） */
-export function saveCredential(credential: AutoLoginCredential | null): void {
-  try {
-    if (credential) localStorage.setItem(CREDENTIAL_KEY, JSON.stringify(credential))
-    else localStorage.removeItem(CREDENTIAL_KEY)
-  } catch {
-    // 忽略存储失败
-  }
-}
 
 // ==================== 底层 fetch ====================
 
@@ -540,33 +504,7 @@ export async function performLogin(username: string, password: string): Promise<
   return loginBody.data
 }
 
-/**
- * 用 localStorage 里保存的凭据静默登录（可选能力，登录页不走这条路径）。
- *
- * <p>保留它是为「自动登录」这类后续增强：把账号密码存到
- * {@code codecraft.auto-login} 后，可在启动时无感换 token。</p>
- */
-export function loginSilently(): Promise<string> {
-  if (loginTask) return loginTask
-  const credential = readCredential()
-  loginTask = performLogin(credential.username, credential.password)
-    .then(result => result.token)
-    .finally(() => {
-      loginTask = null
-    })
-  return loginTask
-}
 
-/**
- * 确保拿到可用 token：本地没有 token 时直接报错（有登录页后不再静默登录）。
- *
- * <p>调用方通常是「必须登录才能继续」的初始化流程（如 session.ensureIdentity）。</p>
- */
-export async function ensureToken(): Promise<string> {
-  const token = getStoredToken()
-  if (!token) throw new Error('未登录，请先登录')
-  return token
-}
 
 
 /** 是否为网络/中断类错误（用于给出更友好的提示） */
