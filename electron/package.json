@@ -91,9 +91,7 @@
   },
   "dependencies": {
     "cross-env": "^7.0.3",
-    "node-pty": "^1.1.0",
-    "png-to-ico": "^3.0.1",
-    "sharp": "^0.34.5"
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "electron": "^33.0.0",

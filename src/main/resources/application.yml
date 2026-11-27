@@ -75,11 +75,7 @@ spring:
     scheduling:
       pool:
         size: 3
-  # 缓存配置（使用 Caffeine 本地缓存）
-  cache:
-    type: caffeine
-    caffeine:
-      spec: maximumSize=500,expireAfterWrite=1h
+
   # 文件上传（multipart）配置
   # 注意：这里是**全局限额**，各业务接口另有更严格的类型/体积校验（头像 5MB、背景图 10MB、文件资产 64MB 等），
   # 全局限额只需覆盖最大的那一个场景即可。当前最大场景 = 数据管理页「导入备份」（500MB）。
@@ -117,16 +113,6 @@ springdoc:
     disabled: true
   # 是否显示Actuator端点
   show-actuator: false
-
-# Milvus向量数据库配置
-milvus:
-  host: localhost # Milvus服务器主机地址
-  port: 19530 # Milvus服务器端口
-  database: milvusds # Milvus数据库名称
-  token: # Milvus认证token（可选）
-  secure: false # 是否使用TLS安全连接
-  connect-timeout: 10000 # 连接超时时间（毫秒）
-  keep-alive-timeout: 30000 # 连接保活时间（毫秒）
 
 # ==================== 命令执行：长耗时命令后台化 ====================
 # 背景：编译 / 装依赖 / 下载 这类命令耗时不可预测（几十秒到十几分钟）。
@@ -176,8 +162,9 @@ delete-file:
     - target
     - build
     - .idea
-  # 目录删除前警告阈值，超过此文件数会要求用户二次确认
-  directory-deletion-warning-threshold: 20
+  # 目录删除前警告阈值（键名对应 DeleteFileConfig.deleteWarningThreshold，宽松绑定）
+  # 注意：旧键名 directory-deletion-warning-threshold 与字段名对不上，一直没生效（实际恒为代码默认 50）
+  delete-warning-threshold: 20
 
 # 编辑文件工具后处理配置（EditFileTool）
 edit-file:
@@ -272,16 +259,6 @@ network-tool:
     verify-egress: true                       # 端口探测通过后，是否再验证代理真能出网（识别"端口在监听但代理已失效"）
     egress-check-url: "https://www.google.com/generate_204"   # 出网验证目标（应为必须经代理才能访问的轻量地址）
     egress-timeout-ms: 6000                   # 出网验证超时（ms）；需覆盖经代理建隧道+TLS 握手首次开销（实测冷启动约 2~3s）
-
-# 网页读取工具配置
-# ⚠️ 已废弃：web-fetch.proxy 不生效（WebFetchConfig 未被任何组件使用）。
-#    所有网络工具（web_search / web_fetch / http_request / check_network）的代理统一由上方 network-tool.proxy 管理。
-#    保留此段仅为兼容历史配置文件，修改此处不会影响行为。
-web-fetch:
-  proxy:
-    enabled: false # 已废弃，不生效；请改用 network-tool.proxy
-    host: 127.0.0.1
-    port: 7890
 
 # 桌面自动化配置（screen_capture 桌面截图 / desktop_control 键盘鼠标模拟）
 desktop:

@@ -41,7 +41,5 @@
     <logger name="org.springframework" level="WARN"/>
     <logger name="org.mybatis" level="WARN"/>
     <logger name="com.zaxxer.hikari" level="WARN"/>
-    <logger name="io.lettuce" level="WARN"/>
     <logger name="reactor" level="WARN"/>
-    <logger name="io.milvus" level="WARN"/>
 </configuration>
