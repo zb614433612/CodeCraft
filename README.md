@@ -253,6 +253,7 @@ codecraft/
 | [工具系统](docs/TOOL_SYSTEM.md) | 开发者 | 如何新增一个 AI Tool |
 | [LLM Provider 系统](docs/LLM_PROVIDER_SYSTEM.md) | 开发者 | 多 LLM 平台支持、Provider 路由、扩展指南 |
 | [核心引擎](docs/DEEPSEEK_SERVICE_IMPL.md) | 资深开发者 | Tool Loop 状态机 + 方法调用拓扑 |
+| [上下文系统](docs/CONTEXT_SYSTEM.md) | 开发者 | 注入落库、消息重建、压缩规则与前缀缓存取舍 |
 | [P2P 协作](docs/P2P_SYSTEM.md) | 开发者 | 远程 Agent 调用全链路 |
 | [快照系统](docs/SNAPSHOT_SYSTEM.md) | 开发者 | 代码备份与回滚机制 |
 | [开发速查](docs/DEV_QUICKREF.md) | 日常开发 | 常用命令 / 端口 / 账号 |
